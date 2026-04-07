@@ -92,8 +92,13 @@ export function TranscriptPanel({ entries, interimText, isRecording, onManualSen
           placeholder="Ask a follow-up…"
           disabled={isStreaming}
           onKeyDown={handleKey}
-          style={{ WebkitUserSelect: 'text', color: '#f3f4f6' } as React.CSSProperties}
-          className="flex-1 border border-white/15 rounded-lg px-3 py-1.5 text-xs placeholder-gray-600 outline-none focus:border-blue-500/60 disabled:opacity-40 transition-colors"
+          style={{
+            WebkitUserSelect: 'text',
+            background: 'rgba(255,255,255,0.08)',
+            color: '#ffffff',
+            caretColor: '#60a5fa',
+          } as React.CSSProperties}
+          className="flex-1 border border-white/15 rounded-lg px-3 py-1.5 text-xs placeholder-gray-500 outline-none focus:border-blue-500/60 disabled:opacity-40 transition-colors"
         />
         <button
           disabled={isStreaming}
