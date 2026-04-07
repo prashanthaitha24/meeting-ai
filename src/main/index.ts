@@ -294,7 +294,7 @@ ipcMain.handle('read-screen', async (_event, transcript: string) => {
   const groq = new OpenAI({ apiKey, baseURL: 'https://api.groq.com/openai/v1' })
 
   const stream = await groq.chat.completions.create({
-    model: 'llama-3.2-11b-vision-preview',
+    model: 'meta-llama/llama-4-scout-17b-16e-instruct',
     max_tokens: 1024,
     stream: true,
     messages: [
