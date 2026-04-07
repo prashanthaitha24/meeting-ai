@@ -5,6 +5,8 @@ export interface AudioCaptureOptions {
   onChunk: (blob: Blob) => void
   /** Duration of each chunk in ms. Default: 15000 */
   chunkDuration?: number
+  /** Skip microphone capture (use when Web Speech API already handles mic) */
+  skipMic?: boolean
 }
 
 export class AudioCapture {
@@ -18,10 +20,12 @@ export class AudioCapture {
   private isRecording = false
   private onChunk: (blob: Blob) => void
   private chunkDuration: number
+  private skipMic: boolean
 
-  constructor({ onChunk, chunkDuration = 15000 }: AudioCaptureOptions) {
+  constructor({ onChunk, chunkDuration = 15000, skipMic = false }: AudioCaptureOptions) {
     this.onChunk = onChunk
     this.chunkDuration = chunkDuration
+    this.skipMic = skipMic
   }
 
   /**
@@ -33,8 +37,8 @@ export class AudioCapture {
     const destination = this.audioContext.createMediaStreamDestination()
     let hasAnySource = false
 
-    // Microphone
-    try {
+    // Microphone (skip if Web Speech API is already handling it)
+    if (!this.skipMic) try {
       this.micStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,

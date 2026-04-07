@@ -58,10 +58,14 @@ export class SpeechTranscriber {
     }
 
     r.onerror = (event: SpeechRecognitionErrorEvent) => {
+      console.error('[SpeechRecognition] error:', event.error)
       if (!this.active || event.error === 'aborted') return
       // Auto-restart on recoverable errors
-      if (['network', 'service-not-allowed', 'audio-capture'].includes(event.error)) {
+      if (['network', 'audio-capture', 'no-speech'].includes(event.error)) {
         setTimeout(() => this._startRecognition(SR), 1500)
+      } else if (event.error === 'service-not-allowed' || event.error === 'not-allowed') {
+        console.error('[SpeechRecognition] Mic permission denied or service blocked')
+        this.onStatusChange('stopped')
       }
     }
 

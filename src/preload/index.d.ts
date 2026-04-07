@@ -29,6 +29,8 @@ interface MeetingAPI {
   onChatChunk(callback: (chunk: { text: string; done: boolean }) => void): () => void
 
   // Window
+  readScreen(transcript: string): Promise<boolean>
+  onTriggerScreenRead(callback: () => void): () => void
   hideWindow(): void
   closeWindow(): void
   setWindowHeight(height: number): void

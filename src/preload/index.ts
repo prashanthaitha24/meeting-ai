@@ -37,6 +37,16 @@ const api = {
     return () => ipcRenderer.removeListener('chat-chunk', handler)
   },
 
+  // ── Screen read (Cmd+Shift+Enter) ─────────────────────────────────────────
+  readScreen: (transcript: string): Promise<boolean> =>
+    ipcRenderer.invoke('read-screen', transcript),
+
+  onTriggerScreenRead: (callback: () => void): (() => void) => {
+    const handler = () => callback()
+    ipcRenderer.on('trigger-screen-read', handler)
+    return () => ipcRenderer.removeListener('trigger-screen-read', handler)
+  },
+
   // ── Window controls ───────────────────────────────────────────────────────
   hideWindow: (): void => ipcRenderer.send('hide-window'),
   closeWindow: (): void => ipcRenderer.send('close-window'),

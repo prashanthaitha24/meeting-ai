@@ -6,6 +6,7 @@ import {
   ipcMain,
   desktopCapturer,
   session,
+  systemPreferences,
 } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
@@ -20,6 +21,10 @@ import { emailSignIn, emailSignUp } from './email-auth'
 import { googleSignIn } from './google-oauth'
 
 dotenv.config({ path: is.dev ? '.env' : path.join(process.resourcesPath, '.env') })
+
+// Enable Web Speech API in Electron's Chromium
+app.commandLine.appendSwitch('enable-features', 'WebSpeechAPI')
+app.commandLine.appendSwitch('enable-speech-dispatcher')
 
 let mainWindow: BrowserWindow | null = null
 
@@ -91,8 +96,20 @@ function createWindow(): void {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   electronApp.setAppUserModelId('com.meeting-ai')
+
+  // Request macOS microphone permission upfront
+  if (process.platform === 'darwin') {
+    const micAccess = await systemPreferences.askForMediaAccess('microphone')
+    if (!micAccess) console.warn('[Permissions] Microphone access denied by user')
+  }
+
+  // Allow microphone access for Web Speech API and getUserMedia
+  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
+    const allowed = ['media', 'audioCapture', 'microphone']
+    callback(allowed.includes(permission))
+  })
 
   session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
     desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
@@ -110,6 +127,14 @@ app.whenReady().then(() => {
     if (!mainWindow) return
     if (mainWindow.isVisible()) mainWindow.hide()
     else { mainWindow.show(); mainWindow.focus() }
+  })
+
+  // Cmd+Shift+Enter — capture screen and answer whatever is visible
+  globalShortcut.register('CommandOrControl+Shift+Return', async () => {
+    if (!mainWindow) return
+    mainWindow.show()
+    mainWindow.focus()
+    mainWindow.webContents.send('trigger-screen-read')
   })
 
   app.on('activate', () => {
@@ -164,23 +189,35 @@ ipcMain.handle('get-desktop-sources', async () => {
   return sources.map((s) => ({ id: s.id, name: s.name }))
 })
 
-// ── IPC: Transcribe audio via Whisper (system audio fallback) ─────────────
+// ── IPC: Transcribe audio via Groq Whisper (free tier, native fetch) ─────────
 ipcMain.handle('transcribe-audio', async (_event, audioData: ArrayBuffer) => {
-  const apiKey = process.env.OPENAI_API_KEY
-  if (!apiKey) throw new Error('OPENAI_API_KEY not set in .env')
+  const apiKey = process.env.GROQ_API_KEY
+  if (!apiKey) return ''
 
-  const openai = new OpenAI({ apiKey })
-  const tmpFile = path.join(os.tmpdir(), `meeting-ai-${Date.now()}.webm`)
+  const audioBuffer = Buffer.from(audioData)
+  if (audioBuffer.length < 1000) return ''
+
   try {
-    fs.writeFileSync(tmpFile, Buffer.from(audioData))
-    const transcription = await openai.audio.transcriptions.create({
-      file: fs.createReadStream(tmpFile),
-      model: 'whisper-1',
-      response_format: 'text',
+    const formData = new FormData()
+    formData.append('file', new Blob([audioBuffer], { type: 'audio/webm' }), 'audio.webm')
+    formData.append('model', 'whisper-large-v3-turbo')
+    formData.append('response_format', 'text')
+    formData.append('language', 'en')
+
+    const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: formData,
     })
-    return transcription as unknown as string
-  } finally {
-    if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile)
+
+    if (!response.ok) {
+      console.warn('[Groq Whisper] error:', response.status, await response.text())
+      return ''
+    }
+    return (await response.text()).trim()
+  } catch (e) {
+    console.warn('[Groq Whisper] failed:', (e as Error).message)
+    return ''
   }
 })
 
@@ -198,24 +235,26 @@ ipcMain.handle(
       return true
     }
 
-    // Cloud LLM path
-    const apiKey = process.env.OPENAI_API_KEY
-    if (!apiKey) throw new Error('OPENAI_API_KEY not set in .env')
-    const openai = new OpenAI({ apiKey })
+    // Cloud LLM path — Groq (free tier, fast)
+    const apiKey = process.env.GROQ_API_KEY
+    if (!apiKey) throw new Error('GROQ_API_KEY not set in .env — get a free key at console.groq.com')
+    const groq = new OpenAI({ apiKey, baseURL: 'https://api.groq.com/openai/v1' })
 
-    const systemPrompt = `You are an intelligent real-time meeting assistant. You listen to meetings and help the user understand discussions, answer questions, summarize points, and provide insights.
+    const systemPrompt = `You are a real-time AI interview assistant. You listen to interview questions and instantly provide strong, concise answers the candidate can speak naturally.
 
-Live meeting transcript so far:
-${transcript || '(Recording just started — nothing transcribed yet)'}
+Live transcript so far:
+${transcript || '(Listening...)'}
 
-Guidelines:
-- Be concise and direct
-- Reference specific parts of the transcript when relevant
-- If asked to summarize, highlight key decisions and action items
-- If the transcript is empty, say the recording just started`
+When answering interview questions:
+- Give a direct, confident answer the candidate can say out loud
+- For behavioural questions use the STAR format briefly
+- For technical questions be precise and use examples
+- Keep answers to 3-5 sentences unless deep detail is needed
+- Never say "As an AI..." — respond as if you are the candidate
+- If the question is unclear from context, give the most likely intended answer`
 
-    const stream = await openai.chat.completions.create({
-      model: 'gpt-4o',
+    const stream = await groq.chat.completions.create({
+      model: 'llama-3.3-70b-versatile',
       max_tokens: 1024,
       stream: true,
       messages: [
@@ -232,6 +271,57 @@ Guidelines:
     return true
   }
 )
+
+// ── IPC: Screen capture → Groq vision → answer ───────────────────────────
+ipcMain.handle('read-screen', async (_event, transcript: string) => {
+  const apiKey = process.env.GROQ_API_KEY
+  if (!apiKey) throw new Error('GROQ_API_KEY not set')
+
+  // Temporarily disable content protection so the screenshot includes everything
+  mainWindow?.setContentProtection(false)
+  await new Promise((r) => setTimeout(r, 80))
+
+  const sources = await desktopCapturer.getSources({
+    types: ['screen'],
+    thumbnailSize: { width: 1920, height: 1080 },
+  })
+
+  mainWindow?.setContentProtection(true)
+
+  const base64 = sources[0]?.thumbnail.toPNG().toString('base64')
+  if (!base64) throw new Error('Could not capture screen')
+
+  const groq = new OpenAI({ apiKey, baseURL: 'https://api.groq.com/openai/v1' })
+
+  const stream = await groq.chat.completions.create({
+    model: 'llama-3.2-11b-vision-preview',
+    max_tokens: 1024,
+    stream: true,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'image_url', image_url: { url: `data:image/png;base64,${base64}` } },
+          {
+            type: 'text',
+            text: `You are a real-time AI interview assistant. Look at this screenshot carefully.
+Identify any interview question, coding problem, or task visible on the screen and provide a strong, concise answer the candidate can use immediately.
+
+${transcript ? `Meeting transcript so far:\n${transcript}\n` : ''}
+Be direct and answer as if you are the candidate. If it's a coding problem, provide working code with a brief explanation.`,
+          },
+        ],
+      },
+    ],
+  })
+
+  for await (const chunk of stream) {
+    const text = chunk.choices[0]?.delta?.content ?? ''
+    if (text) mainWindow?.webContents.send('chat-chunk', { text, done: false })
+  }
+  mainWindow?.webContents.send('chat-chunk', { text: '', done: true })
+  return true
+})
 
 // ── IPC: Window sizing (collapse / expand) ────────────────────────────────
 ipcMain.on('set-window-height', (_event, height: number) => {
