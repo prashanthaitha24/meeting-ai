@@ -22,10 +22,11 @@ type StreamTarget =
   | { kind: 'tab'; tab: Exclude<Tab, 'assist'> }
 
 function looksLikeQuestion(text: string): boolean {
-  const t = text.trim()
+  // Strip common filler words Whisper prepends (So, And, Well, Now, Okay…)
+  const t = text.trim().replace(/^(so|and|but|well|now|okay|ok|right|alright|um+|uh+|like)[,.]?\s+/i, '').trim()
   if (t.split(' ').length < 4) return false
   if (t.includes('?')) return true
-  return /^(what|how|why|when|where|who|which|can you|could you|would you|tell me|explain|describe|walk me through|talk about|give me an example|have you|do you|did you|are you|were you|what's your|what are your)/i.test(t)
+  return /^(what|how|why|when|where|who|which|can you|could you|would you|tell me|explain|describe|walk me|talk about|give me|have you|do you|did you|are you|were you|what's|what are)/i.test(t)
 }
 
 function uid() { return Math.random().toString(36).slice(2) }
@@ -151,6 +152,13 @@ export default function App(): JSX.Element {
   const captureRef        = useRef<{ stop: () => void } | null>(null)
   const speechRef         = useRef<SpeechTranscriber | null>(null)
 
+  // ── Stable refs so recorder closures always see latest values ────────────
+  // (recorder.onstop is set up once; without refs it captures stale state)
+  const isStreamingRef  = useRef(false)
+  const entriesRef      = useRef<TranscriptEntry[]>([])
+  isStreamingRef.current = isStreaming
+  entriesRef.current     = entries
+
   // ── Screen read ─────────────────────────────────────────────────────────────
   const triggerScreenRead = useCallback(() => {
     if (isStreaming) return
@@ -255,9 +263,10 @@ export default function App(): JSX.Element {
   }, [isRecording])
 
   // ── Send question to Assist tab ─────────────────────────────────────────────
-  // skipDedup=true for manual input (user typed it), false for auto speech detection
+  // Uses refs for isStreaming/entries so recorder closures are never stale.
+  // skipDedup=true for manual typed questions; false for auto speech detection.
   const sendQuestion = useCallback((question: string, skipDedup = false) => {
-    if (isStreaming) return
+    if (isStreamingRef.current) return
     if (!skipDedup && question === lastQuestionRef.current) return
     lastQuestionRef.current = question
 
@@ -265,9 +274,11 @@ export default function App(): JSX.Element {
     streamTargetRef.current = { kind: 'entry', id }
     streamingTextRef.current = ''
     setIsStreaming(true)
+    setActiveTab('assist') // always show the answer when auto-detected
     setEntries((prev) => [...prev, { id, type: 'qa', question, answer: '', streaming: true }])
 
-    const messages = entries
+    // Use entriesRef so we always have the latest conversation history
+    const messages = entriesRef.current
       .filter((e): e is Extract<TranscriptEntry, { type: 'qa' }> => e.type === 'qa' && !!e.answer)
       .flatMap((e) => [
         { role: 'user', content: e.question },
@@ -283,7 +294,7 @@ export default function App(): JSX.Element {
           : e
       ))
     })
-  }, [isStreaming, entries])
+  }, []) // stable — all live values come from refs
 
   // ── Generate tab content ────────────────────────────────────────────────────
   const generateTabContent = useCallback((tab: Exclude<Tab, 'assist'>) => {
@@ -332,6 +343,10 @@ export default function App(): JSX.Element {
     if (looksLikeQuestion(text)) sendQuestion(text)
   }, [sendQuestion])
 
+  // Stable ref so the recorder closure always calls the latest appendSpeech
+  const appendSpeechRef = useRef(appendSpeech)
+  appendSpeechRef.current = appendSpeech
+
   // ── Recording ───────────────────────────────────────────────────────────────
   const startRecording = async () => {
     setStatus('Initializing…')
@@ -362,7 +377,7 @@ export default function App(): JSX.Element {
         chunks = []
         blob.arrayBuffer()
           .then((ab) => window.api.transcribeAudio(ab))
-          .then((text) => { if (text) { setInterimText(''); appendSpeech(text) } })
+          .then((text) => { if (text) { setInterimText(''); appendSpeechRef.current(text) } })
           .catch(() => {})
       }
 
