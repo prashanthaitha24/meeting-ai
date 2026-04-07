@@ -62,8 +62,8 @@ function tryLocalInsight(question: string, transcript: string): string | null {
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
-    width: 420,
-    height: 680,
+    width: 440,
+    height: 760,
     minWidth: 320,
     minHeight: 40,
     frame: false,
@@ -333,3 +333,23 @@ ipcMain.on('set-window-height', (_event, height: number) => {
 
 ipcMain.on('hide-window', () => mainWindow?.hide())
 ipcMain.on('close-window', () => mainWindow?.close())
+
+// ── IPC: Open external URL (for mailto:, etc.) ────────────────────────────
+ipcMain.handle('open-external', (_event, url: string) => shell.openExternal(url))
+
+// ── IPC: Save notes as PDF via save dialog ────────────────────────────────
+ipcMain.handle('save-notes', async (_event, content: string) => {
+  const { dialog } = await import('electron')
+  const result = await dialog.showSaveDialog({
+    defaultPath: `meeting-notes-${new Date().toISOString().slice(0, 10)}.txt`,
+    filters: [
+      { name: 'Text Files', extensions: ['txt'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+  })
+  if (!result.canceled && result.filePath) {
+    fs.writeFileSync(result.filePath, content, 'utf8')
+    return true
+  }
+  return false
+})

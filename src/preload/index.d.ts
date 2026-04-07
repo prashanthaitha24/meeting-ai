@@ -34,6 +34,10 @@ interface MeetingAPI {
   hideWindow(): void
   closeWindow(): void
   setWindowHeight(height: number): void
+
+  // Utilities
+  openExternal(url: string): Promise<void>
+  saveNotes(content: string): Promise<boolean>
 }
 
 declare global {

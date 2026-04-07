@@ -51,6 +51,10 @@ const api = {
   hideWindow: (): void => ipcRenderer.send('hide-window'),
   closeWindow: (): void => ipcRenderer.send('close-window'),
   setWindowHeight: (height: number): void => ipcRenderer.send('set-window-height', height),
+
+  // ── Utilities ─────────────────────────────────────────────────────────────
+  openExternal: (url: string): Promise<void> => ipcRenderer.invoke('open-external', url),
+  saveNotes: (content: string): Promise<boolean> => ipcRenderer.invoke('save-notes', content),
 }
 
 if (process.contextIsolated) {
