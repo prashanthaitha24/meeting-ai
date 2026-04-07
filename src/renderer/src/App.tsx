@@ -4,8 +4,10 @@ import { SpeechTranscriber } from './lib/speech'
 import { TranscriptPanel, TranscriptEntry } from './components/TranscriptPanel'
 import { AuthScreen } from './components/AuthScreen'
 
-const EXPANDED_HEIGHT = 760
-const COLLAPSED_HEIGHT = 40
+const EXPANDED_WIDTH   = 440
+const EXPANDED_HEIGHT  = 760
+const COLLAPSED_WIDTH  = 210
+const COLLAPSED_HEIGHT = 30
 
 // VAD settings
 const SILENCE_RMS_THRESHOLD = 0.01
@@ -31,8 +33,8 @@ function uid() { return Math.random().toString(36).slice(2) }
 // ── Auth shell ────────────────────────────────────────────────────────────────
 function AuthShell({ onLogin }: { onLogin: (s: Session) => void }) {
   return (
-    <div className="flex flex-col select-none overflow-hidden rounded-xl border border-white/15"
-      style={{ background: 'rgba(15,15,15,0.95)', backdropFilter: 'blur(16px)', height: EXPANDED_HEIGHT }}>
+    <div className="flex flex-col select-none overflow-hidden rounded-2xl border border-white/15"
+      style={{ background: 'rgba(15,15,15,0.95)', backdropFilter: 'blur(16px)', height: EXPANDED_HEIGHT, width: EXPANDED_WIDTH }}>
       <div className="flex items-center justify-between px-3 border-b border-white/10 flex-shrink-0"
         style={{ height: COLLAPSED_HEIGHT, WebkitAppRegion: 'drag' } as React.CSSProperties}>
         <div className="flex items-center gap-2">
@@ -223,7 +225,11 @@ export default function App(): JSX.Element {
   const toggleCollapse = useCallback(() => {
     setIsCollapsed((prev) => {
       const next = !prev
-      window.api.setWindowHeight(next ? COLLAPSED_HEIGHT : EXPANDED_HEIGHT)
+      if (next) {
+        window.api.setWindowSize(COLLAPSED_WIDTH, COLLAPSED_HEIGHT)
+      } else {
+        window.api.setWindowSize(EXPANDED_WIDTH, EXPANDED_HEIGHT)
+      }
       return next
     })
   }, [])
@@ -466,9 +472,9 @@ export default function App(): JSX.Element {
   // ── Loading ─────────────────────────────────────────────────────────────────
   if (session === 'loading') {
     return (
-      <div className="flex items-center justify-center rounded-xl border border-white/10"
-        style={{ background: 'rgba(15,15,15,0.9)', height: COLLAPSED_HEIGHT }}>
-        <span className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+      <div className="flex items-center justify-center border border-white/10"
+        style={{ background: 'rgba(15,15,15,0.9)', height: COLLAPSED_HEIGHT, width: COLLAPSED_WIDTH, borderRadius: 999 }}>
+        <span className="w-3 h-3 border-2 border-white/20 border-t-white rounded-full animate-spin" />
       </div>
     )
   }
@@ -477,50 +483,83 @@ export default function App(): JSX.Element {
 
   // ── Main app ────────────────────────────────────────────────────────────────
   return (
-    <div className="flex flex-col overflow-hidden rounded-xl border border-white/15"
-      style={{ background: 'rgba(18,18,18,0.82)', backdropFilter: 'blur(14px)', height: isCollapsed ? COLLAPSED_HEIGHT : EXPANDED_HEIGHT }}>
+    <div
+      className="flex flex-col overflow-hidden border border-white/15"
+      style={{
+        background: isCollapsed ? 'rgba(14,14,14,0.92)' : 'rgba(18,18,18,0.82)',
+        backdropFilter: 'blur(20px)',
+        borderRadius: isCollapsed ? 999 : 14,
+        height: isCollapsed ? COLLAPSED_HEIGHT : EXPANDED_HEIGHT,
+        width: isCollapsed ? COLLAPSED_WIDTH : EXPANDED_WIDTH,
+        transition: 'border-radius 0.25s ease',
+        boxShadow: isCollapsed
+          ? '0 4px 24px rgba(0,0,0,0.5)'
+          : '0 8px 32px rgba(0,0,0,0.4)',
+      }}>
 
-      {/* ── Header ── */}
-      <div className="flex items-center justify-between px-3 border-b border-white/10 flex-shrink-0"
-        style={{ height: COLLAPSED_HEIGHT, background: 'rgba(8,8,8,0.6)', WebkitAppRegion: 'drag' } as React.CSSProperties}>
-        <div className="flex items-center gap-2 min-w-0">
-          <span className={`w-2 h-2 rounded-full flex-shrink-0 transition-colors ${isRecording ? 'bg-red-500 animate-pulse' : 'bg-gray-600'}`} />
-          <span className="text-xs font-semibold text-gray-200 tracking-wide">Meeting AI</span>
-          {!isCollapsed && (
+      {/* ── Header / collapsed pill ── */}
+      {isCollapsed ? (
+        /* Pill view — minimal, clean */
+        <div
+          className="flex items-center justify-between flex-1 px-3"
+          style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
+          <div className="flex items-center gap-2 min-w-0">
+            <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${isRecording ? 'bg-red-500 animate-pulse' : 'bg-gray-600'}`} />
+            <span className="text-[11px] font-semibold text-gray-300 tracking-wide truncate">Meeting AI</span>
+            {isStreaming && <span className="text-[9px] text-emerald-400 animate-pulse">●</span>}
+          </div>
+          <div className="flex items-center gap-1 flex-shrink-0" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+            <button
+              onClick={toggleCollapse}
+              title="Expand"
+              className="w-5 h-5 rounded-full flex items-center justify-center text-gray-600 hover:text-gray-300 hover:bg-white/10 transition-colors">
+              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      ) : (
+        /* Full header */
+        <div
+          className="flex items-center justify-between px-3 border-b border-white/10 flex-shrink-0"
+          style={{ height: 40, background: 'rgba(8,8,8,0.5)', WebkitAppRegion: 'drag', borderRadius: '14px 14px 0 0' } as React.CSSProperties}>
+          <div className="flex items-center gap-2 min-w-0">
+            <span className={`w-2 h-2 rounded-full flex-shrink-0 transition-colors ${isRecording ? 'bg-red-500 animate-pulse' : 'bg-gray-600'}`} />
+            <span className="text-xs font-semibold text-gray-200 tracking-wide">Meeting AI</span>
             <span className="text-[10px] text-gray-600 truncate ml-0.5">
               {isStreaming ? '• answering…' : status}
             </span>
-          )}
-        </div>
+          </div>
 
-        <div className="flex items-center gap-1 flex-shrink-0" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-          <button onClick={toggleCollapse} title={isCollapsed ? 'Expand' : 'Collapse'}
-            className="w-6 h-6 rounded flex items-center justify-center text-gray-500 hover:text-gray-200 hover:bg-white/10 transition-colors">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-              style={{ transform: isCollapsed ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }}>
-              <polyline points="18 15 12 9 6 15" />
-            </svg>
-          </button>
-          <button onClick={handleLogout} title={`${session.email} — click to sign out`}
-            className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-semibold bg-blue-600/40 text-blue-300 hover:bg-red-600/40 hover:text-red-300 transition-colors overflow-hidden">
-            {session.avatarUrl
-              ? <img src={session.avatarUrl} alt="" className="w-full h-full object-cover rounded-full" />
-              : (session.name ?? session.email)[0].toUpperCase()}
-          </button>
-          <button onClick={() => window.api.hideWindow()}
-            className="w-6 h-6 rounded flex items-center justify-center text-gray-500 hover:text-gray-200 hover:bg-white/10 transition-colors">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <line x1="5" y1="12" x2="19" y2="12" />
-            </svg>
-          </button>
-          <button onClick={() => window.api.closeWindow()}
-            className="w-6 h-6 rounded flex items-center justify-center text-gray-500 hover:text-red-400 hover:bg-white/10 transition-colors">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-            </svg>
-          </button>
+          <div className="flex items-center gap-1 flex-shrink-0" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+            <button onClick={toggleCollapse} title="Collapse to pill"
+              className="w-6 h-6 rounded flex items-center justify-center text-gray-500 hover:text-gray-200 hover:bg-white/10 transition-colors">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <polyline points="18 15 12 9 6 15" />
+              </svg>
+            </button>
+            <button onClick={handleLogout} title={`${session.email} — click to sign out`}
+              className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-semibold bg-blue-600/40 text-blue-300 hover:bg-red-600/40 hover:text-red-300 transition-colors overflow-hidden">
+              {session.avatarUrl
+                ? <img src={session.avatarUrl} alt="" className="w-full h-full object-cover rounded-full" />
+                : (session.name ?? session.email)[0].toUpperCase()}
+            </button>
+            <button onClick={() => window.api.hideWindow()}
+              className="w-6 h-6 rounded flex items-center justify-center text-gray-500 hover:text-gray-200 hover:bg-white/10 transition-colors">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+            </button>
+            <button onClick={() => window.api.closeWindow()}
+              className="w-6 h-6 rounded flex items-center justify-center text-gray-500 hover:text-red-400 hover:bg-white/10 transition-colors">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
         </div>
-      </div>
+      )}
 
       {!isCollapsed && (
         <>

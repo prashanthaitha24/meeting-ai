@@ -317,7 +317,13 @@ Be direct and answer as if you are the candidate. If it's a coding problem, prov
 ipcMain.on('set-window-height', (_event, height: number) => {
   if (!mainWindow) return
   const [width] = mainWindow.getSize()
-  mainWindow.setMinimumSize(320, 40)
+  mainWindow.setMinimumSize(100, 28)
+  mainWindow.setSize(width, height, true)
+})
+
+ipcMain.on('set-window-size', (_event, width: number, height: number) => {
+  if (!mainWindow) return
+  mainWindow.setMinimumSize(100, 28)
   mainWindow.setSize(width, height, true)
 })
 

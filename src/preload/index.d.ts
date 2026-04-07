@@ -34,6 +34,7 @@ interface MeetingAPI {
   hideWindow(): void
   closeWindow(): void
   setWindowHeight(height: number): void
+  setWindowSize(width: number, height: number): void
 
   // Utilities
   openExternal(url: string): Promise<void>
