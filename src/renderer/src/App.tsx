@@ -195,6 +195,8 @@ export default function App(): JSX.Element {
           setEntries((prev) => prev.map((e) =>
             e.id === id && e.type === 'qa' ? { ...e, answer: finalText, streaming: false } : e
           ))
+          // Clear Say This so it auto-refreshes for the next question
+          setTabContent((prev) => ({ ...prev, say: '' }))
         } else {
           const t = target.tab
           setTabContent((prev) => ({ ...prev, [t]: finalText }))
@@ -225,6 +227,26 @@ export default function App(): JSX.Element {
       return next
     })
   }, [])
+
+  // Focus the follow-up input (used when switching to Ask Mode)
+  const focusInput = () => {
+    setTimeout(() => {
+      document.querySelector<HTMLInputElement>('input[placeholder="Ask a follow-up…"]')?.focus()
+    }, 100)
+  }
+
+  const switchToAskMode = useCallback(() => {
+    if (isRecording) {
+      speechRef.current?.stop(); speechRef.current = null
+      captureRef.current?.stop(); captureRef.current = null
+      setInterimText('')
+      setIsRecording(false)
+      setStatus('Stopped')
+    }
+    setActiveMode('ask')
+    setActiveTab('assist')
+    focusInput()
+  }, [isRecording])
 
   // ── Send question to Assist tab ─────────────────────────────────────────────
   // skipDedup=true for manual input (user typed it), false for auto speech detection
@@ -264,9 +286,9 @@ export default function App(): JSX.Element {
     if (!transcript.trim()) return
 
     const prompts: Record<Exclude<Tab, 'assist'>, string> = {
-      say: 'Based on the meeting/interview transcript, what are 3-5 concise, confident talking points the candidate should raise or say next? Format as a numbered list with brief explanations.',
-      followup: 'Based on the meeting/interview transcript, generate 5 sharp and relevant follow-up questions the candidate or interviewer should ask next. Format as a numbered list.',
-      recap: 'Provide a structured recap of this meeting/interview so far: key topics discussed, important decisions or answers, and any action items. Keep it concise and formatted with sections.',
+      say: 'Review the transcript and give 3-5 short, confident statements the candidate can say out loud right now. Number each one. Be direct — no fluff.',
+      followup: 'Review the transcript and write 5 smart questions the candidate or interviewer should raise next. Number each one. Be specific to what was discussed.',
+      recap: 'Write a structured summary of the conversation so far. Include: (1) Key topics covered, (2) Important points made, (3) Decisions or outcomes, (4) What to expect next. Keep each section to 2-3 bullet points.',
     }
 
     streamTargetRef.current = { kind: 'tab', tab }
@@ -392,6 +414,8 @@ export default function App(): JSX.Element {
     setIsRecording(false)
     setStatus('Stopped')
     setActiveMode('ask')
+    setActiveTab('assist')
+    focusInput()
   }
 
   // ── Export helpers ──────────────────────────────────────────────────────────
@@ -516,7 +540,7 @@ export default function App(): JSX.Element {
                 Listening
               </button>
               <button
-                onClick={() => setActiveMode('ask')}
+                onClick={switchToAskMode}
                 className={`flex-1 py-1 rounded-md text-[11px] font-medium transition-all flex items-center justify-center gap-1.5 ${
                   activeMode === 'ask'
                     ? 'bg-blue-600/90 text-white shadow-sm'

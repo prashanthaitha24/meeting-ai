@@ -225,16 +225,6 @@ ipcMain.handle('transcribe-audio', async (_event, audioData: ArrayBuffer) => {
 ipcMain.handle(
   'chat-with-claude',
   async (_event, messages: Array<{ role: string; content: string }>, transcript: string) => {
-    const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user')?.content ?? ''
-
-    // Try answering locally before spending API credits
-    const localAnswer = tryLocalInsight(lastUserMsg, transcript)
-    if (localAnswer) {
-      mainWindow?.webContents.send('chat-chunk', { text: localAnswer, done: false })
-      mainWindow?.webContents.send('chat-chunk', { text: '', done: true })
-      return true
-    }
-
     // Cloud LLM path — Groq (free tier, fast)
     const apiKey = process.env.GROQ_API_KEY
     if (!apiKey) throw new Error('GROQ_API_KEY not set in .env — get a free key at console.groq.com')
