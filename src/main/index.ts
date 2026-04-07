@@ -129,8 +129,8 @@ app.whenReady().then(async () => {
     else { mainWindow.show(); mainWindow.focus() }
   })
 
-  // Cmd+Shift+Enter — capture screen and answer whatever is visible
-  globalShortcut.register('CommandOrControl+Shift+Return', async () => {
+  // Cmd+Enter — capture screen and answer whatever is visible
+  globalShortcut.register('CommandOrControl+Return', async () => {
     if (!mainWindow) return
     mainWindow.show()
     mainWindow.focus()

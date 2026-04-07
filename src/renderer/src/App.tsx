@@ -82,7 +82,7 @@ export default function App(): JSX.Element {
     const unsubGlobal = window.api.onTriggerScreenRead(() => triggerScreenRead())
     // From keyboard while app is focused
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'Enter') {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key === 'Enter') {
         e.preventDefault()
         triggerScreenRead()
       }
@@ -323,6 +323,9 @@ export default function App(): JSX.Element {
           <span className="text-xs font-semibold text-gray-200 tracking-wide">Meeting AI</span>
           {!isCollapsed && <span className="text-xs text-gray-500 truncate">{status}</span>}
           {!isCollapsed && isStreaming && <span className="text-[10px] text-emerald-400 animate-pulse">answering…</span>}
+          {!isCollapsed && !isStreaming && (
+            <span className="text-[10px] text-gray-700 ml-1">⌘↵ screen read</span>
+          )}
         </div>
 
         <div className="flex items-center gap-1 flex-shrink-0" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
