@@ -227,9 +227,10 @@ export default function App(): JSX.Element {
   }, [])
 
   // ── Send question to Assist tab ─────────────────────────────────────────────
-  const sendQuestion = useCallback((question: string) => {
+  // skipDedup=true for manual input (user typed it), false for auto speech detection
+  const sendQuestion = useCallback((question: string, skipDedup = false) => {
     if (isStreaming) return
-    if (question === lastQuestionRef.current) return
+    if (!skipDedup && question === lastQuestionRef.current) return
     lastQuestionRef.current = question
 
     const id = uid()
@@ -452,7 +453,7 @@ export default function App(): JSX.Element {
 
   // ── Main app ────────────────────────────────────────────────────────────────
   return (
-    <div className="flex flex-col select-none overflow-hidden rounded-xl border border-white/15"
+    <div className="flex flex-col overflow-hidden rounded-xl border border-white/15"
       style={{ background: 'rgba(18,18,18,0.82)', backdropFilter: 'blur(14px)', height: isCollapsed ? COLLAPSED_HEIGHT : EXPANDED_HEIGHT }}>
 
       {/* ── Header ── */}
@@ -561,7 +562,7 @@ export default function App(): JSX.Element {
                 interimText={interimText}
                 isRecording={isRecording}
                 isStreaming={isStreaming}
-                onManualSend={sendQuestion}
+                onManualSend={(q) => sendQuestion(q, true)}
               />
             )}
 

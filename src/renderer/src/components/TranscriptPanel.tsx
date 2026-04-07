@@ -82,15 +82,18 @@ export function TranscriptPanel({ entries, interimText, isRecording, onManualSen
       </div>
 
       {/* Follow-up input */}
-      <div className="border-t border-white/10 px-3 py-2 flex gap-2 items-center flex-shrink-0"
-        style={{ background: 'rgba(8,8,8,0.4)' }}>
+      <div
+        className="border-t border-white/10 px-3 py-2 flex gap-2 items-center flex-shrink-0"
+        style={{ background: 'rgba(8,8,8,0.4)', WebkitAppRegion: 'no-drag', WebkitUserSelect: 'text' } as React.CSSProperties}
+      >
         <input
           ref={inputRef}
           type="text"
           placeholder="Ask a follow-up…"
           disabled={isStreaming}
           onKeyDown={handleKey}
-          className="flex-1 bg-white/8 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-gray-100 placeholder-gray-600 outline-none focus:border-blue-500/50 disabled:opacity-40 transition-colors"
+          style={{ WebkitUserSelect: 'text', color: '#f3f4f6' } as React.CSSProperties}
+          className="flex-1 border border-white/15 rounded-lg px-3 py-1.5 text-xs placeholder-gray-600 outline-none focus:border-blue-500/60 disabled:opacity-40 transition-colors"
         />
         <button
           disabled={isStreaming}
@@ -98,7 +101,7 @@ export function TranscriptPanel({ entries, interimText, isRecording, onManualSen
             const val = inputRef.current?.value.trim()
             if (val && !isStreaming) { onManualSend(val); if (inputRef.current) inputRef.current.value = '' }
           }}
-          className="w-7 h-7 rounded-lg bg-blue-600/80 hover:bg-blue-500 disabled:opacity-40 flex items-center justify-center transition-colors"
+          className="w-7 h-7 rounded-lg bg-blue-600/80 hover:bg-blue-500 disabled:opacity-40 flex items-center justify-center transition-colors flex-shrink-0"
         >
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
             <line x1="22" y1="2" x2="11" y2="13" />
