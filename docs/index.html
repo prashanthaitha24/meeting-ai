@@ -1,0 +1,858 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Meeting AI — Your AI co-pilot for every interview and meeting</title>
+  <meta name="description" content="Real-time AI assistant that listens, transcribes, and answers interview questions instantly. Stay on top of every meeting." />
+  <meta property="og:title" content="Meeting AI — AI co-pilot for interviews & meetings" />
+  <meta property="og:description" content="Real-time transcription, instant AI answers, and smart summaries — all in a tiny floating overlay on your Mac." />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://prashanthaitha24.github.io/meeting-ai/" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #05050a;
+      --surface: rgba(255,255,255,0.04);
+      --border: rgba(255,255,255,0.08);
+      --border-hover: rgba(255,255,255,0.15);
+      --blue: #3b82f6;
+      --blue-dark: #2563eb;
+      --blue-glow: rgba(59,130,246,0.15);
+      --emerald: #10b981;
+      --text: #f1f5f9;
+      --text-muted: #64748b;
+      --text-dim: #334155;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: 'Inter', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+
+    /* ── Noise texture overlay ── */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── Background glow blobs ── */
+    .blob {
+      position: fixed;
+      border-radius: 50%;
+      filter: blur(120px);
+      pointer-events: none;
+      z-index: 0;
+      opacity: 0.35;
+    }
+    .blob-1 { width: 600px; height: 600px; background: #1d4ed8; top: -200px; left: -200px; }
+    .blob-2 { width: 500px; height: 500px; background: #065f46; bottom: -150px; right: -150px; }
+    .blob-3 { width: 400px; height: 400px; background: #1e3a8a; top: 40%; left: 50%; transform: translateX(-50%); opacity: 0.2; }
+
+    /* ── Utility ── */
+    .container { max-width: 1100px; margin: 0 auto; padding: 0 24px; position: relative; z-index: 1; }
+    .gradient-text {
+      background: linear-gradient(135deg, #fff 0%, #93c5fd 50%, #6ee7b7 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      border-radius: 99px;
+      border: 1px solid rgba(59,130,246,0.3);
+      background: rgba(59,130,246,0.08);
+      font-size: 12px;
+      font-weight: 500;
+      color: #93c5fd;
+    }
+    .badge-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--emerald); animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.4;} }
+
+    /* ── Nav ── */
+    nav {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 100;
+      padding: 16px 0;
+      transition: background 0.3s, border-color 0.3s;
+      border-bottom: 1px solid transparent;
+    }
+    nav.scrolled {
+      background: rgba(5,5,10,0.85);
+      backdrop-filter: blur(20px);
+      border-color: var(--border);
+    }
+    .nav-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      text-decoration: none;
+      color: var(--text);
+    }
+    .logo-icon {
+      width: 32px; height: 32px;
+      background: linear-gradient(135deg, #2563eb, #0891b2);
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+    }
+    .logo-text { font-size: 15px; font-weight: 700; letter-spacing: -0.3px; }
+    .nav-links { display: flex; align-items: center; gap: 8px; }
+    .nav-link {
+      padding: 6px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-muted);
+      text-decoration: none;
+      transition: color 0.2s, background 0.2s;
+    }
+    .nav-link:hover { color: var(--text); background: var(--surface); }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 18px;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      text-decoration: none;
+      transition: all 0.2s;
+      border: none;
+    }
+    .btn-primary {
+      background: var(--blue);
+      color: #fff;
+    }
+    .btn-primary:hover { background: #2563eb; transform: translateY(-1px); box-shadow: 0 8px 20px rgba(59,130,246,0.3); }
+    .btn-secondary {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn-secondary:hover { background: rgba(255,255,255,0.08); border-color: var(--border-hover); }
+    .btn-lg { padding: 13px 28px; font-size: 15px; border-radius: 12px; }
+
+    /* ── Hero ── */
+    .hero {
+      padding: 160px 0 100px;
+      text-align: center;
+      position: relative;
+    }
+    .hero-badge { margin-bottom: 24px; }
+    .hero h1 {
+      font-size: clamp(40px, 6vw, 72px);
+      font-weight: 800;
+      line-height: 1.1;
+      letter-spacing: -2px;
+      margin-bottom: 20px;
+    }
+    .hero p {
+      font-size: clamp(16px, 2vw, 20px);
+      color: var(--text-muted);
+      max-width: 560px;
+      margin: 0 auto 36px;
+    }
+    .hero-ctas { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+    .hero-note { margin-top: 16px; font-size: 12px; color: var(--text-dim); }
+    .hero-note a { color: var(--text-muted); }
+
+    /* ── App mockup ── */
+    .mockup-wrapper {
+      margin-top: 72px;
+      position: relative;
+      display: flex;
+      justify-content: center;
+    }
+    .mockup-glow {
+      position: absolute;
+      inset: -60px;
+      background: radial-gradient(ellipse at 50% 40%, rgba(59,130,246,0.15) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    .mockup {
+      width: 420px;
+      background: rgba(18,18,28,0.9);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 16px;
+      overflow: hidden;
+      backdrop-filter: blur(20px);
+      box-shadow: 0 32px 80px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.05);
+      animation: float 6s ease-in-out infinite;
+    }
+    @keyframes float { 0%,100%{transform:translateY(0);} 50%{transform:translateY(-10px);} }
+    .mockup-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      background: rgba(0,0,0,0.4);
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+    }
+    .mockup-dot { width: 8px; height: 8px; border-radius: 50%; }
+    .mockup-title { font-size: 11px; font-weight: 600; color: #e2e8f0; letter-spacing: 0.3px; }
+    .mockup-tabs {
+      display: flex;
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+    }
+    .mockup-tab {
+      flex: 1;
+      text-align: center;
+      padding: 8px 0;
+      font-size: 10px;
+      color: #475569;
+      font-weight: 500;
+    }
+    .mockup-tab.active { color: #60a5fa; border-bottom: 2px solid #3b82f6; }
+    .mockup-body { padding: 12px; }
+    .mockup-speech {
+      font-size: 11px;
+      color: #94a3b8;
+      line-height: 1.5;
+      margin-bottom: 10px;
+    }
+    .mockup-qa {
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 10px;
+      overflow: hidden;
+      margin-bottom: 8px;
+    }
+    .mockup-q {
+      padding: 8px 10px;
+      background: rgba(59,130,246,0.1);
+    }
+    .mockup-q-label { font-size: 9px; color: #60a5fa; font-weight: 600; margin-bottom: 2px; }
+    .mockup-q-text { font-size: 10px; color: #93c5fd; }
+    .mockup-a {
+      padding: 8px 10px;
+      background: rgba(255,255,255,0.03);
+    }
+    .mockup-a-label { font-size: 9px; color: #34d399; font-weight: 600; margin-bottom: 2px; }
+    .mockup-a-text { font-size: 10px; color: #e2e8f0; line-height: 1.5; }
+    .mockup-cursor {
+      display: inline-block;
+      width: 5px;
+      height: 10px;
+      background: #34d399;
+      margin-left: 2px;
+      vertical-align: middle;
+      animation: blink 1s step-end infinite;
+      border-radius: 1px;
+    }
+    @keyframes blink { 0%,100%{opacity:1;} 50%{opacity:0;} }
+    .mockup-footer {
+      display: flex;
+      gap: 6px;
+      padding: 8px 12px;
+      border-top: 1px solid rgba(255,255,255,0.07);
+      background: rgba(0,0,0,0.3);
+    }
+    .mockup-btn-start {
+      flex: 1;
+      padding: 5px;
+      border-radius: 7px;
+      background: rgba(239,68,68,0.8);
+      font-size: 9px;
+      font-weight: 600;
+      color: #fff;
+      text-align: center;
+    }
+    .mockup-btn-icon {
+      width: 24px;
+      background: rgba(255,255,255,0.07);
+      border-radius: 7px;
+      display: flex; align-items: center; justify-content: center;
+    }
+
+    /* ── Section base ── */
+    section { padding: 96px 0; position: relative; z-index: 1; }
+    .section-label { font-size: 12px; font-weight: 600; color: var(--blue); letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 12px; }
+    .section-title { font-size: clamp(28px, 4vw, 44px); font-weight: 800; letter-spacing: -1px; margin-bottom: 16px; }
+    .section-sub { font-size: 17px; color: var(--text-muted); max-width: 520px; }
+
+    /* ── Features ── */
+    #features { border-top: 1px solid var(--border); }
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 20px;
+      margin-top: 56px;
+    }
+    .feature-card {
+      padding: 28px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
+    }
+    .feature-card:hover {
+      border-color: var(--border-hover);
+      transform: translateY(-2px);
+      box-shadow: 0 12px 32px rgba(0,0,0,0.3);
+    }
+    .feature-icon {
+      width: 44px; height: 44px;
+      border-radius: 12px;
+      display: flex; align-items: center; justify-content: center;
+      margin-bottom: 16px;
+      font-size: 20px;
+    }
+    .feature-card h3 { font-size: 16px; font-weight: 700; margin-bottom: 8px; }
+    .feature-card p { font-size: 14px; color: var(--text-muted); line-height: 1.6; }
+
+    /* ── How it works ── */
+    #how { background: rgba(255,255,255,0.015); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+    .steps {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 40px;
+      margin-top: 56px;
+      position: relative;
+    }
+    .step { text-align: center; }
+    .step-num {
+      width: 52px; height: 52px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--blue), #0891b2);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 20px; font-weight: 800; color: #fff;
+      margin: 0 auto 20px;
+      box-shadow: 0 0 0 8px rgba(59,130,246,0.08);
+    }
+    .step h3 { font-size: 18px; font-weight: 700; margin-bottom: 8px; }
+    .step p { font-size: 14px; color: var(--text-muted); }
+
+    /* ── Pricing ── */
+    #pricing { border-top: 1px solid var(--border); }
+    .pricing-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 24px;
+      margin-top: 56px;
+      max-width: 720px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    .pricing-card {
+      padding: 32px;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      position: relative;
+    }
+    .pricing-card.featured {
+      border-color: rgba(59,130,246,0.4);
+      background: rgba(59,130,246,0.06);
+      box-shadow: 0 0 0 1px rgba(59,130,246,0.15), 0 24px 48px rgba(59,130,246,0.1);
+    }
+    .featured-badge {
+      position: absolute;
+      top: -12px;
+      left: 50%; transform: translateX(-50%);
+      padding: 4px 14px;
+      background: var(--blue);
+      color: #fff;
+      font-size: 11px;
+      font-weight: 700;
+      border-radius: 99px;
+      letter-spacing: 0.5px;
+      white-space: nowrap;
+    }
+    .plan-name { font-size: 14px; font-weight: 600; color: var(--text-muted); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 1px; }
+    .plan-price { font-size: 48px; font-weight: 800; letter-spacing: -2px; line-height: 1; margin-bottom: 4px; }
+    .plan-price span { font-size: 16px; font-weight: 400; color: var(--text-muted); letter-spacing: 0; }
+    .plan-desc { font-size: 13px; color: var(--text-muted); margin-bottom: 28px; }
+    .plan-features { list-style: none; display: flex; flex-direction: column; gap: 12px; margin-bottom: 28px; }
+    .plan-features li { display: flex; align-items: flex-start; gap: 10px; font-size: 14px; }
+    .check { width: 18px; height: 18px; border-radius: 50%; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 1px; }
+    .check-yes { background: rgba(16,185,129,0.15); }
+    .check-no { background: rgba(255,255,255,0.05); }
+    .plan-features li.dim { color: var(--text-muted); }
+
+    /* ── Download ── */
+    #download { border-top: 1px solid var(--border); text-align: center; }
+    .download-card {
+      max-width: 560px;
+      margin: 56px auto 0;
+      padding: 48px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 24px;
+    }
+    .download-os { font-size: 12px; color: var(--text-muted); margin-bottom: 20px; letter-spacing: 0.5px; }
+    .download-btns { display: flex; flex-direction: column; gap: 10px; }
+    .download-btn {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 20px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: rgba(255,255,255,0.03);
+      color: var(--text);
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 500;
+      transition: all 0.2s;
+    }
+    .download-btn:hover { border-color: var(--border-hover); background: rgba(255,255,255,0.06); transform: translateY(-1px); }
+    .download-btn-left { display: flex; align-items: center; gap: 10px; }
+    .download-chip { font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(59,130,246,0.15); color: #93c5fd; font-weight: 600; }
+    .download-note { margin-top: 16px; font-size: 12px; color: var(--text-dim); }
+    .download-note a { color: var(--text-muted); text-decoration: underline; }
+    .system-req { margin-top: 12px; font-size: 12px; color: var(--text-dim); }
+
+    /* ── Footer ── */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 40px 0;
+      position: relative;
+      z-index: 1;
+    }
+    .footer-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 20px;
+    }
+    .footer-left { display: flex; flex-direction: column; gap: 4px; }
+    .footer-copy { font-size: 13px; color: var(--text-muted); }
+    .footer-company { font-size: 12px; color: var(--text-dim); }
+    .footer-links { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+    .footer-link { font-size: 13px; color: var(--text-muted); text-decoration: none; transition: color 0.2s; }
+    .footer-link:hover { color: var(--text); }
+
+    /* ── Fade in ── */
+    .fade-in { opacity: 0; transform: translateY(20px); transition: opacity 0.6s ease, transform 0.6s ease; }
+    .fade-in.visible { opacity: 1; transform: none; }
+
+    /* ── Mobile ── */
+    @media (max-width: 640px) {
+      .nav-links .nav-link { display: none; }
+      .mockup { width: 90vw; }
+      .hero { padding: 120px 0 60px; }
+      .download-card { padding: 28px 20px; }
+      .footer-inner { flex-direction: column; align-items: flex-start; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Background blobs -->
+<div class="blob blob-1"></div>
+<div class="blob blob-2"></div>
+<div class="blob blob-3"></div>
+
+<!-- ── Nav ── -->
+<nav id="nav">
+  <div class="container nav-inner">
+    <a href="#" class="logo">
+      <div class="logo-icon">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round">
+          <path d="M12 2a3 3 0 0 1 3 3v7a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3z"/>
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+          <line x1="12" y1="19" x2="12" y2="22"/>
+        </svg>
+      </div>
+      <span class="logo-text">Meeting AI</span>
+    </a>
+    <div class="nav-links">
+      <a href="#features" class="nav-link">Features</a>
+      <a href="#pricing" class="nav-link">Pricing</a>
+      <a href="#download" class="nav-link">Download</a>
+      <a href="#download" class="btn btn-primary" style="padding: 7px 16px; font-size: 13px;">
+        Download Free
+      </a>
+    </div>
+  </div>
+</nav>
+
+<!-- ── Hero ── -->
+<section class="hero">
+  <div class="container">
+    <div class="hero-badge fade-in">
+      <span class="badge"><span class="badge-dot"></span> Mac App · Free to start</span>
+    </div>
+
+    <h1 class="fade-in" style="transition-delay: 0.1s">
+      Your AI co-pilot for every<br/>
+      <span class="gradient-text">interview and meeting</span>
+    </h1>
+
+    <p class="fade-in" style="transition-delay: 0.2s">
+      Meeting AI listens in real time, transcribes every word, and answers questions the moment they're asked — all in a tiny floating overlay that only you can see.
+    </p>
+
+    <div class="hero-ctas fade-in" style="transition-delay: 0.3s">
+      <a href="#download" class="btn btn-primary btn-lg">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Download for Mac — Free
+      </a>
+      <a href="#pricing" class="btn btn-secondary btn-lg">See Pricing</a>
+    </div>
+
+    <p class="hero-note fade-in" style="transition-delay: 0.4s">
+      macOS 12+ · Apple Silicon &amp; Intel · No account required to try
+    </p>
+
+    <!-- App mockup -->
+    <div class="mockup-wrapper fade-in" style="transition-delay: 0.5s">
+      <div class="mockup-glow"></div>
+      <div class="mockup">
+        <!-- Header -->
+        <div class="mockup-header">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <div class="mockup-dot" style="background:#ef4444;animation:pulse 2s infinite;"></div>
+            <span class="mockup-title">Meeting AI</span>
+            <span style="font-size:9px;color:#475569;">• Listening</span>
+          </div>
+          <div style="display:flex;gap:6px;align-items:center;">
+            <span style="font-size:9px;color:#64748b;">⌘↵ screen</span>
+            <div style="width:6px;height:6px;border-radius:50%;background:#334155;"></div>
+          </div>
+        </div>
+        <!-- Mode toggle -->
+        <div style="display:flex;margin:8px 12px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:8px;padding:3px;gap:3px;">
+          <div style="flex:1;text-align:center;padding:4px;border-radius:6px;background:rgba(239,68,68,0.8);font-size:9px;font-weight:600;color:#fff;">● Listening</div>
+          <div style="flex:1;text-align:center;padding:4px;font-size:9px;font-weight:500;color:#475569;">Ask Mode</div>
+        </div>
+        <!-- Tabs -->
+        <div class="mockup-tabs">
+          <div class="mockup-tab active">Assist</div>
+          <div class="mockup-tab">Say This</div>
+          <div class="mockup-tab">Follow-up</div>
+          <div class="mockup-tab">Recap</div>
+        </div>
+        <!-- Body -->
+        <div class="mockup-body">
+          <div class="mockup-speech">"…tell me about a time you solved a difficult technical problem under pressure."</div>
+          <div class="mockup-qa">
+            <div class="mockup-q">
+              <div class="mockup-q-label">Question</div>
+              <div class="mockup-q-text">Tell me about a time you solved a difficult technical problem under pressure.</div>
+            </div>
+            <div class="mockup-a">
+              <div class="mockup-a-label">Answer</div>
+              <div class="mockup-a-text">At my previous role, our payment service went down during peak traffic. I quickly isolated the bottleneck to a database connection pool and increased the limit — restoring service in under 8 minutes.<span class="mockup-cursor"></span></div>
+            </div>
+          </div>
+        </div>
+        <!-- Footer -->
+        <div class="mockup-footer">
+          <div class="mockup-btn-start">■ Stop</div>
+          <div class="mockup-btn-icon">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#64748b" stroke-width="2.5"><path d="M14 2H6a2 2 0 0 0-2 2v16"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/></svg>
+          </div>
+          <div class="mockup-btn-icon">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#64748b" stroke-width="2.5"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Logos / social proof ── -->
+<div style="border-top:1px solid var(--border);border-bottom:1px solid var(--border);padding:24px 0;position:relative;z-index:1;">
+  <div class="container">
+    <p style="text-align:center;font-size:12px;color:var(--text-dim);letter-spacing:1px;text-transform:uppercase;margin-bottom:16px;">Works with your favorite meeting tools</p>
+    <div style="display:flex;justify-content:center;gap:40px;flex-wrap:wrap;align-items:center;opacity:0.4;filter:grayscale(1);">
+      <span style="font-size:15px;font-weight:700;color:#fff;">Zoom</span>
+      <span style="font-size:15px;font-weight:700;color:#fff;">Google Meet</span>
+      <span style="font-size:15px;font-weight:700;color:#fff;">Teams</span>
+      <span style="font-size:15px;font-weight:700;color:#fff;">Webex</span>
+      <span style="font-size:15px;font-weight:700;color:#fff;">Slack Huddles</span>
+    </div>
+  </div>
+</div>
+
+<!-- ── Features ── -->
+<section id="features">
+  <div class="container">
+    <div class="fade-in">
+      <div class="section-label">Features</div>
+      <h2 class="section-title">Everything you need to<br/><span class="gradient-text">perform at your best</span></h2>
+      <p class="section-sub">Built for interviews, meetings, and any situation where you need instant AI support — without anyone knowing.</p>
+    </div>
+
+    <div class="features-grid">
+      <div class="feature-card fade-in">
+        <div class="feature-icon" style="background:rgba(59,130,246,0.12);">🎙️</div>
+        <h3>Live Transcription</h3>
+        <p>Captures and transcribes every word in real time using Whisper AI. No setup, no plugins — works with any meeting tool.</p>
+      </div>
+      <div class="feature-card fade-in">
+        <div class="feature-icon" style="background:rgba(16,185,129,0.12);">⚡</div>
+        <h3>Instant AI Answers</h3>
+        <p>Detects interview questions automatically and generates a confident, natural answer before the silence gets awkward.</p>
+      </div>
+      <div class="feature-card fade-in">
+        <div class="feature-icon" style="background:rgba(139,92,246,0.12);">💬</div>
+        <h3>Ask Mode</h3>
+        <p>Type any follow-up question and get a precise answer in seconds. Full conversation history maintained for context.</p>
+      </div>
+      <div class="feature-card fade-in">
+        <div class="feature-icon" style="background:rgba(245,158,11,0.12);">📋</div>
+        <h3>Smart Tabs</h3>
+        <p>Say This, Follow-up Questions, and Recap tabs generate AI content on demand — always based on the live conversation.</p>
+      </div>
+      <div class="feature-card fade-in">
+        <div class="feature-icon" style="background:rgba(239,68,68,0.12);">📸</div>
+        <h3>Screen Read (⌘↵)</h3>
+        <p>Press ⌘↵ to capture and analyze anything on screen — coding challenges, whiteboard questions, shared documents.</p>
+      </div>
+      <div class="feature-card fade-in">
+        <div class="feature-icon" style="background:rgba(20,184,166,0.12);">🔒</div>
+        <h3>Completely Invisible</h3>
+        <p>Hidden from screen sharing and recordings. Collapses to a tiny floating pill when not in use. Only you can see it.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── How it works ── -->
+<section id="how">
+  <div class="container">
+    <div class="fade-in" style="text-align:center;">
+      <div class="section-label">How It Works</div>
+      <h2 class="section-title">Up and running in <span class="gradient-text">60 seconds</span></h2>
+    </div>
+    <div class="steps">
+      <div class="step fade-in">
+        <div class="step-num">1</div>
+        <h3>Download &amp; Install</h3>
+        <p>Download the Mac app, drag it to Applications, and open it. Sign up with Google or email in seconds.</p>
+      </div>
+      <div class="step fade-in">
+        <div class="step-num">2</div>
+        <h3>Start Listening</h3>
+        <p>Click Start before your interview or meeting. Meeting AI captures audio and transcribes everything live.</p>
+      </div>
+      <div class="step fade-in">
+        <div class="step-num">3</div>
+        <h3>Get AI Help Instantly</h3>
+        <p>Questions are detected and answered automatically. Use Ask Mode or ⌘↵ for anything else on screen.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Pricing ── -->
+<section id="pricing">
+  <div class="container">
+    <div class="fade-in" style="text-align:center;">
+      <div class="section-label">Pricing</div>
+      <h2 class="section-title">Simple, honest pricing</h2>
+      <p class="section-sub" style="margin:0 auto;">Start free, upgrade when you're ready. No hidden fees, cancel anytime.</p>
+    </div>
+
+    <div class="pricing-grid">
+      <!-- Free -->
+      <div class="pricing-card fade-in">
+        <div class="plan-name">Free</div>
+        <div class="plan-price">$0</div>
+        <div class="plan-desc">Try it out, no credit card needed</div>
+        <ul class="plan-features">
+          <li>
+            <span class="check check-yes">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+            </span>
+            5 free AI answers
+          </li>
+          <li>
+            <span class="check check-yes">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+            </span>
+            Unlimited live transcription
+          </li>
+          <li>
+            <span class="check check-yes">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+            </span>
+            Ask Mode (manual questions)
+          </li>
+          <li class="dim">
+            <span class="check check-no">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#334155" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </span>
+            Say This / Recap / Follow-up tabs
+          </li>
+          <li class="dim">
+            <span class="check check-no">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#334155" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </span>
+            Screen read (⌘↵)
+          </li>
+        </ul>
+        <a href="#download" class="btn btn-secondary" style="width:100%;justify-content:center;">Get Started Free</a>
+      </div>
+
+      <!-- Pro -->
+      <div class="pricing-card featured fade-in">
+        <div class="featured-badge">Most Popular</div>
+        <div class="plan-name" style="color:#93c5fd;">Pro</div>
+        <div class="plan-price gradient-text">$9.99<span> / month</span></div>
+        <div class="plan-desc">For professionals who want an edge</div>
+        <ul class="plan-features">
+          <li>
+            <span class="check check-yes">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+            </span>
+            <strong>Unlimited</strong> AI answers
+          </li>
+          <li>
+            <span class="check check-yes">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+            </span>
+            Unlimited live transcription
+          </li>
+          <li>
+            <span class="check check-yes">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+            </span>
+            Say This, Follow-up &amp; Recap tabs
+          </li>
+          <li>
+            <span class="check check-yes">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+            </span>
+            Screen read (⌘↵) unlimited
+          </li>
+          <li>
+            <span class="check check-yes">
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
+            </span>
+            Export notes &amp; email summaries
+          </li>
+        </ul>
+        <a href="#download" class="btn btn-primary" style="width:100%;justify-content:center;">
+          Start Free → Upgrade In-App
+        </a>
+        <p style="text-align:center;font-size:11px;color:var(--text-muted);margin-top:10px;">Cancel anytime · Billed monthly via Stripe</p>
+      </div>
+    </div>
+
+    <p style="text-align:center;margin-top:32px;font-size:13px;color:var(--text-dim);">
+      Questions? Email us at <a href="mailto:aitha.brm@gmail.com" style="color:var(--text-muted);">aitha.brm@gmail.com</a>
+    </p>
+  </div>
+</section>
+
+<!-- ── Download ── -->
+<section id="download" style="border-top:1px solid var(--border);text-align:center;">
+  <div class="container">
+    <div class="fade-in">
+      <div class="section-label">Download</div>
+      <h2 class="section-title">Ready to get your edge?</h2>
+      <p class="section-sub" style="margin:0 auto;">Free to download. Works with Zoom, Google Meet, Teams, and any other meeting tool.</p>
+    </div>
+
+    <div class="download-card fade-in">
+      <p class="download-os">MACOS 12 MONTEREY OR LATER REQUIRED</p>
+      <div class="download-btns">
+        <a href="https://github.com/prashanthaitha24/meeting-ai/releases/latest" class="download-btn">
+          <div class="download-btn-left">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg>
+            <div>
+              <div style="font-weight:600;">Apple Silicon (M1/M2/M3/M4)</div>
+              <div style="font-size:12px;color:var(--text-muted);">meeting-ai-arm64.dmg</div>
+            </div>
+          </div>
+          <span class="download-chip">Recommended</span>
+        </a>
+        <a href="https://github.com/prashanthaitha24/meeting-ai/releases/latest" class="download-btn">
+          <div class="download-btn-left">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg>
+            <div>
+              <div style="font-weight:600;">Intel Mac</div>
+              <div style="font-size:12px;color:var(--text-muted);">meeting-ai-x64.dmg</div>
+            </div>
+          </div>
+          <span style="font-size:11px;color:var(--text-muted);">x64</span>
+        </a>
+      </div>
+      <p class="download-note" style="margin-top:16px;">
+        Not sure which Mac you have? Apple menu → About This Mac.<br/>
+        First launch: right-click the app → Open (unsigned app notice).
+      </p>
+      <p class="system-req">macOS 12+ · Microphone permission required · 150 MB</p>
+    </div>
+  </div>
+</section>
+
+<!-- ── Footer ── -->
+<footer>
+  <div class="container footer-inner">
+    <div class="footer-left">
+      <a href="#" class="logo" style="margin-bottom:4px;">
+        <div class="logo-icon" style="width:24px;height:24px;border-radius:6px;">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round">
+            <path d="M12 2a3 3 0 0 1 3 3v7a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="22"/>
+          </svg>
+        </div>
+        <span style="font-size:13px;font-weight:700;">Meeting AI</span>
+      </a>
+      <span class="footer-copy">© 2024 AI-Empire. All rights reserved.</span>
+      <span class="footer-company">Contact: <a href="mailto:aitha.brm@gmail.com" class="footer-link">aitha.brm@gmail.com</a></span>
+    </div>
+    <div class="footer-links">
+      <a href="#features" class="footer-link">Features</a>
+      <a href="#pricing" class="footer-link">Pricing</a>
+      <a href="#download" class="footer-link">Download</a>
+      <a href="privacy.html" class="footer-link">Privacy</a>
+      <a href="terms.html" class="footer-link">Terms</a>
+      <a href="https://github.com/prashanthaitha24/meeting-ai" class="footer-link" target="_blank" rel="noopener">GitHub</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  // Sticky nav
+  const nav = document.getElementById('nav')
+  window.addEventListener('scroll', () => {
+    nav.classList.toggle('scrolled', window.scrollY > 20)
+  })
+
+  // Fade-in on scroll
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(e => { if (e.isIntersecting) { e.target.classList.add('visible'); observer.unobserve(e.target) } })
+  }, { threshold: 0.1 })
+  document.querySelectorAll('.fade-in').forEach(el => observer.observe(el))
+
+  // Smooth anchor scroll offset for fixed nav
+  document.querySelectorAll('a[href^="#"]').forEach(a => {
+    a.addEventListener('click', e => {
+      const id = a.getAttribute('href').slice(1)
+      const el = document.getElementById(id)
+      if (el) { e.preventDefault(); el.scrollIntoView({ behavior: 'smooth', block: 'start' }) }
+    })
+  })
+</script>
+</body>
+</html>
