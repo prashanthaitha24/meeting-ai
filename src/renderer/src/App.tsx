@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
-import type { Session } from '../../preload/index.d'
+import type { Session, UsageInfo } from '../../preload/index.d'
 import { SpeechTranscriber } from './lib/speech'
 import { TranscriptPanel, TranscriptEntry } from './components/TranscriptPanel'
 import { AuthScreen } from './components/AuthScreen'
+import { UpgradeModal } from './components/UpgradeModal'
 
 const EXPANDED_WIDTH   = 440
 const EXPANDED_HEIGHT  = 760
@@ -119,10 +120,33 @@ function GeneratedPanel({
 // ── Main app ──────────────────────────────────────────────────────────────────
 export default function App(): JSX.Element {
   const [session, setSession] = useState<Session | null | 'loading'>('loading')
+  const [usage, setUsage] = useState<UsageInfo | null>(null)
+  const [showUpgradeModal, setShowUpgradeModal] = useState(false)
+
   useEffect(() => {
-    window.api.checkSession().then(setSession)
+    window.api.checkSession().then((s) => {
+      setSession(s)
+      if (s) {
+        window.api.getUsage().then(setUsage)
+      }
+    })
     const t = setInterval(() => window.api.checkSession().then(setSession), 5 * 60 * 1000)
     return () => clearInterval(t)
+  }, [])
+
+  // Wire up usage-limit-reached and stripe-success events
+  useEffect(() => {
+    const unsubLimit = window.api.onUsageLimitReached(() => {
+      setShowUpgradeModal(true)
+    })
+    const unsubSuccess = window.api.onStripeSuccess(() => {
+      setShowUpgradeModal(false)
+      window.api.getUsage().then(setUsage)
+    })
+    return () => {
+      unsubLimit()
+      unsubSuccess()
+    }
   }, [])
 
   const [isRecording, setIsRecording] = useState(false)
@@ -482,6 +506,8 @@ export default function App(): JSX.Element {
     stopRecording()
     await window.api.logout()
     setSession(null)
+    setUsage(null)
+    setShowUpgradeModal(false)
   }
 
   // ── Loading ─────────────────────────────────────────────────────────────────
@@ -494,12 +520,17 @@ export default function App(): JSX.Element {
     )
   }
 
-  if (!session) return <AuthShell onLogin={setSession} />
+  if (!session) return (
+    <AuthShell onLogin={(s) => {
+      setSession(s)
+      window.api.getUsage().then(setUsage)
+    }} />
+  )
 
   // ── Main app ────────────────────────────────────────────────────────────────
   return (
     <div
-      className="flex flex-col overflow-hidden border border-white/15"
+      className="relative flex flex-col overflow-hidden border border-white/15"
       style={{
         background: isCollapsed ? 'rgba(14,14,14,0.92)' : 'rgba(18,18,18,0.82)',
         backdropFilter: 'blur(20px)',
@@ -511,6 +542,14 @@ export default function App(): JSX.Element {
           ? '0 4px 24px rgba(0,0,0,0.5)'
           : '0 8px 32px rgba(0,0,0,0.4)',
       }}>
+
+      {/* ── Upgrade modal overlay ── */}
+      {showUpgradeModal && !isCollapsed && (
+        <UpgradeModal
+          onClose={() => setShowUpgradeModal(false)}
+          freeCallsUsed={usage?.freeCallsUsed ?? 5}
+        />
+      )}
 
       {/* ── Header / collapsed pill ── */}
       {isCollapsed ? (
@@ -548,6 +587,24 @@ export default function App(): JSX.Element {
           </div>
 
           <div className="flex items-center gap-1 flex-shrink-0" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+            {/* Usage indicator / upgrade button for free tier */}
+            {usage && usage.subscriptionStatus !== 'active' && (
+              <button
+                onClick={() => setShowUpgradeModal(true)}
+                title={`${usage.freeCallsUsed}/${usage.freeLimit} AI answers used — click to upgrade`}
+                className="px-1.5 py-0.5 rounded text-[9px] font-medium bg-amber-500/15 text-amber-400 hover:bg-amber-500/25 transition-colors border border-amber-500/20">
+                {usage.freeCallsUsed}/{usage.freeLimit}
+              </button>
+            )}
+            {/* Manage subscription for active subscribers */}
+            {usage?.subscriptionStatus === 'active' && (
+              <button
+                onClick={() => window.api.stripePortal()}
+                title="Manage subscription"
+                className="px-1.5 py-0.5 rounded text-[9px] font-medium bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25 transition-colors border border-emerald-500/20">
+                Pro
+              </button>
+            )}
             <button onClick={toggleCollapse} title="Collapse to pill"
               className="w-6 h-6 rounded flex items-center justify-center text-gray-500 hover:text-gray-200 hover:bg-white/10 transition-colors">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">

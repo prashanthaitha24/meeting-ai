@@ -1,71 +1,42 @@
 import {
-  app,
-  shell,
-  BrowserWindow,
-  globalShortcut,
-  ipcMain,
-  desktopCapturer,
-  session,
-  systemPreferences,
+  app, shell, BrowserWindow, globalShortcut, ipcMain,
+  desktopCapturer, session, systemPreferences,
 } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
-import OpenAI from 'openai'
-import * as fs from 'fs'
-import * as os from 'os'
 import * as path from 'path'
 import * as dotenv from 'dotenv'
-
-import { loadSession, saveSession, clearSession, buildSession } from './session-store'
-import { emailSignIn, emailSignUp } from './email-auth'
-import { googleSignIn } from './google-oauth'
+import * as fs from 'fs'
+import {
+  emailSignIn, emailSignUp, googleSignIn, handleOAuthCallback,
+  loadSession, logout, getAccessToken,
+} from './supabase-auth'
 
 dotenv.config({ path: is.dev ? '.env' : path.join(process.resourcesPath, '.env') })
 
-// Enable Web Speech API in Electron's Chromium
+const BACKEND_URL = process.env.BACKEND_URL!
+
+// Enable Web Speech API
 app.commandLine.appendSwitch('enable-features', 'WebSpeechAPI')
 app.commandLine.appendSwitch('enable-speech-dispatcher')
 
-let mainWindow: BrowserWindow | null = null
-
-// ── Cost-saving: attempt local insight before calling GPT-4o ──────────────
-function tryLocalInsight(question: string, transcript: string): string | null {
-  if (!transcript || transcript.trim().length < 80) return null
-  const q = question.toLowerCase().trim()
-  const sentences = transcript
-    .split(/(?<=[.!?])\s+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 15)
-
-  if (sentences.length === 0) return null
-
-  // Simple summary: spread key sentences across transcript
-  if (/^(summarize|summary|tldr|brief|what was (said|discussed)|give me a (summary|recap))/i.test(q)) {
-    if (sentences.length <= 4) return `Transcript so far:\n\n${transcript.trim()}`
-    const indices = [0, Math.floor(sentences.length * 0.33), Math.floor(sentences.length * 0.66), sentences.length - 1]
-    const key = [...new Set(indices)].map((i) => sentences[i])
-    return `**Summary** (local):\n\n${key.map((s) => `• ${s}`).join('\n')}\n\n*Ask a specific question for AI-powered insights.*`
+// Register custom URL protocol for OAuth + Stripe callbacks
+if (process.defaultApp) {
+  if (process.argv.length >= 2) {
+    app.setAsDefaultProtocolClient('meetingai', process.execPath, [path.resolve(process.argv[1])])
   }
-
-  // Action items
-  if (/action item|to[- ]?do|follow[- ]?up|next step|who (will|should|is going)/i.test(q)) {
-    const pattern = /\b(will|should|going to|need to|have to|must|plan to|action|assigned|follow.?up)\b/i
-    const items = sentences.filter((s) => pattern.test(s)).slice(0, 8)
-    if (items.length > 0) {
-      return `**Action items** (local):\n\n${items.map((s) => `☐ ${s}`).join('\n')}\n\n*Ask for AI analysis for more context.*`
-    }
-    return 'No clear action items detected yet — the recording may need more time.'
-  }
-
-  return null // fall through to GPT-4o
+} else {
+  app.setAsDefaultProtocolClient('meetingai')
 }
+
+let mainWindow: BrowserWindow | null = null
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 440,
     height: 760,
-    minWidth: 320,
-    minHeight: 40,
+    minWidth: 100,
+    minHeight: 28,
     frame: false,
     transparent: true,
     alwaysOnTop: true,
@@ -81,9 +52,7 @@ function createWindow(): void {
   mainWindow.setContentProtection(true)
   mainWindow.setAlwaysOnTop(true, 'screen-saver', 1)
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
-
   mainWindow.on('ready-to-show', () => mainWindow!.show())
-
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
     return { action: 'deny' }
@@ -96,19 +65,29 @@ function createWindow(): void {
   }
 }
 
+// Handle OAuth and Stripe callbacks from the custom URL scheme
+app.on('open-url', (event, url) => {
+  event.preventDefault()
+  if (url.startsWith('meetingai://auth/callback')) {
+    handleOAuthCallback(url)
+  } else if (url.startsWith('meetingai://stripe/success')) {
+    mainWindow?.webContents.send('stripe-success')
+  }
+  // Bring app to front
+  mainWindow?.show()
+  mainWindow?.focus()
+})
+
 app.whenReady().then(async () => {
   electronApp.setAppUserModelId('com.meeting-ai')
 
-  // Request macOS microphone permission upfront
   if (process.platform === 'darwin') {
     const micAccess = await systemPreferences.askForMediaAccess('microphone')
-    if (!micAccess) console.warn('[Permissions] Microphone access denied by user')
+    if (!micAccess) console.warn('[Permissions] Microphone access denied')
   }
 
-  // Allow microphone access for Web Speech API and getUserMedia
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
-    const allowed = ['media', 'audioCapture', 'microphone']
-    callback(allowed.includes(permission))
+    callback(['media', 'audioCapture', 'microphone'].includes(permission))
   })
 
   session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
@@ -129,11 +108,9 @@ app.whenReady().then(async () => {
     else { mainWindow.show(); mainWindow.focus() }
   })
 
-  // Cmd+Enter — capture screen and answer whatever is visible
   globalShortcut.register('CommandOrControl+Return', async () => {
     if (!mainWindow) return
-    mainWindow.show()
-    mainWindow.focus()
+    mainWindow.show(); mainWindow.focus()
     mainWindow.webContents.send('trigger-screen-read')
   })
 
@@ -148,172 +125,147 @@ app.on('window-all-closed', () => {
 
 app.on('will-quit', () => globalShortcut.unregisterAll())
 
-// ── Auth: check session ───────────────────────────────────────────────────
+// ── Auth IPCs ─────────────────────────────────────────────────────────────────
 ipcMain.handle('auth:check-session', () => loadSession())
+ipcMain.handle('auth:logout', () => { logout(); return true })
+ipcMain.handle('auth:email-signin', async (_e, email: string, password: string) => emailSignIn(email, password))
+ipcMain.handle('auth:email-signup', async (_e, email: string, password: string, name: string) => emailSignUp(email, password, name))
+ipcMain.handle('auth:google-signin', async () => googleSignIn())
 
-// ── Auth: logout ──────────────────────────────────────────────────────────
-ipcMain.handle('auth:logout', () => { clearSession(); return true })
-
-// ── Auth: email sign-in ───────────────────────────────────────────────────
-ipcMain.handle('auth:email-signin', async (_e, email: string, password: string) => {
-  const user = await emailSignIn(email, password)
-  const s = buildSession({ userId: user.userId, email: user.email, name: user.name, avatarUrl: null, provider: 'email' })
-  saveSession(s)
-  return s
+// ── Usage IPC ─────────────────────────────────────────────────────────────────
+ipcMain.handle('get-usage', async () => {
+  const token = await getAccessToken()
+  if (!token) return null
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/usage`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    return res.ok ? await res.json() : null
+  } catch { return null }
 })
 
-// ── Auth: email sign-up ───────────────────────────────────────────────────
-ipcMain.handle('auth:email-signup', async (_e, email: string, password: string, name: string) => {
-  const user = await emailSignUp(email, password, name)
-  const s = buildSession({ userId: user.userId, email: user.email, name: user.name, avatarUrl: null, provider: 'email' })
-  saveSession(s)
-  return s
+// ── Stripe IPCs ───────────────────────────────────────────────────────────────
+ipcMain.handle('stripe:checkout', async () => {
+  const token = await getAccessToken()
+  if (!token) throw new Error('Not authenticated')
+  const res = await fetch(`${BACKEND_URL}/api/stripe/checkout`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  const { url } = await res.json()
+  if (url) shell.openExternal(url)
 })
 
-// ── Auth: Google OAuth PKCE ───────────────────────────────────────────────
-ipcMain.handle('auth:google-signin', async () => {
-  const clientId = process.env.GOOGLE_CLIENT_ID
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET
-  if (!clientId || !clientSecret) {
-    throw new Error('GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be set in .env')
-  }
-  const user = await googleSignIn(clientId, clientSecret)
-  const s = buildSession({ userId: user.id, email: user.email, name: user.name, avatarUrl: user.picture, provider: 'google' })
-  saveSession(s)
-  return s
+ipcMain.handle('stripe:portal', async () => {
+  const token = await getAccessToken()
+  if (!token) throw new Error('Not authenticated')
+  const res = await fetch(`${BACKEND_URL}/api/stripe/portal`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (!res.ok) throw new Error('No active subscription')
+  const { url } = await res.json()
+  if (url) shell.openExternal(url)
 })
 
-// ── IPC: Get screen sources ───────────────────────────────────────────────
+// ── Desktop sources ───────────────────────────────────────────────────────────
 ipcMain.handle('get-desktop-sources', async () => {
   const sources = await desktopCapturer.getSources({ types: ['screen'], fetchWindowIcons: false })
   return sources.map((s) => ({ id: s.id, name: s.name }))
 })
 
-// ── IPC: Transcribe audio via Groq Whisper (free tier, native fetch) ─────────
+// ── Transcribe audio (NOT counted against free limit) ─────────────────────────
 ipcMain.handle('transcribe-audio', async (_event, audioData: ArrayBuffer) => {
-  const apiKey = process.env.GROQ_API_KEY
-  if (!apiKey) return ''
-
+  const token = await getAccessToken()
+  if (!token) return ''
   const audioBuffer = Buffer.from(audioData)
   if (audioBuffer.length < 1000) return ''
 
   try {
     const formData = new FormData()
     formData.append('file', new Blob([audioBuffer], { type: 'audio/webm' }), 'audio.webm')
-    formData.append('model', 'whisper-large-v3-turbo')
-    formData.append('response_format', 'text')
-    formData.append('language', 'en')
-
-    const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+    const res = await fetch(`${BACKEND_URL}/api/transcribe`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}` },
+      headers: { Authorization: `Bearer ${token}` },
       body: formData,
     })
-
-    if (!response.ok) {
-      console.warn('[Groq Whisper] error:', response.status, await response.text())
-      return ''
-    }
-    return (await response.text()).trim()
-  } catch (e) {
-    console.warn('[Groq Whisper] failed:', (e as Error).message)
-    return ''
-  }
+    if (!res.ok) return ''
+    const { text } = await res.json()
+    return text ?? ''
+  } catch { return '' }
 })
 
-// ── IPC: Chat — local insight first, GPT-4o as fallback ──────────────────
-ipcMain.handle(
-  'chat-with-claude',
-  async (_event, messages: Array<{ role: string; content: string }>, transcript: string) => {
-    // Cloud LLM path — Groq (free tier, fast)
-    const apiKey = process.env.GROQ_API_KEY
-    if (!apiKey) throw new Error('GROQ_API_KEY not set in .env — get a free key at console.groq.com')
-    const groq = new OpenAI({ apiKey, baseURL: 'https://api.groq.com/openai/v1' })
+// ── Helper: read SSE stream from backend and forward chunks to renderer ────────
+async function streamFromBackend(url: string, token: string, body: object): Promise<void> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
 
-    const systemPrompt = `You are a real-time AI interview assistant. You listen to interview questions and instantly provide strong, concise answers the candidate can speak naturally.
-
-Live transcript so far:
-${transcript || '(Listening...)'}
-
-When answering interview questions:
-- Give a direct, confident answer the candidate can say out loud
-- For behavioural questions use the STAR format briefly
-- For technical questions be precise and use examples
-- Keep answers to 3-5 sentences unless deep detail is needed
-- Never say "As an AI..." — respond as if you are the candidate
-- If the question is unclear from context, give the most likely intended answer`
-
-    const stream = await groq.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
-      max_tokens: 1024,
-      stream: true,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        ...messages.map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content })),
-      ],
-    })
-
-    for await (const chunk of stream) {
-      const text = chunk.choices[0]?.delta?.content ?? ''
-      if (text) mainWindow?.webContents.send('chat-chunk', { text, done: false })
+  if (!res.ok) {
+    let errData: Record<string, unknown> = {}
+    try { errData = await res.json() } catch {}
+    if (res.status === 402 && errData.error === 'usage_limit_reached') {
+      mainWindow?.webContents.send('usage-limit-reached', { upgradeUrl: errData.upgradeUrl })
+      return
     }
-    mainWindow?.webContents.send('chat-chunk', { text: '', done: true })
-    return true
+    throw new Error((errData.error as string) ?? `HTTP ${res.status}`)
   }
-)
 
-// ── IPC: Screen capture → Groq vision → answer ───────────────────────────
+  const reader = res.body!.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue
+      try {
+        const data = JSON.parse(line.slice(6)) as { text?: string; done?: boolean; error?: string }
+        if (data.done) {
+          mainWindow?.webContents.send('chat-chunk', { text: '', done: true })
+        } else if (data.text) {
+          mainWindow?.webContents.send('chat-chunk', { text: data.text, done: false })
+        }
+      } catch {}
+    }
+  }
+}
+
+// ── Chat ──────────────────────────────────────────────────────────────────────
+ipcMain.handle('chat-with-claude', async (_event, messages: Array<{ role: string; content: string }>, transcript: string) => {
+  const token = await getAccessToken()
+  if (!token) throw new Error('Not authenticated')
+  await streamFromBackend(`${BACKEND_URL}/api/chat`, token, { messages, transcript })
+  return true
+})
+
+// ── Screen read ───────────────────────────────────────────────────────────────
 ipcMain.handle('read-screen', async (_event, transcript: string) => {
-  const apiKey = process.env.GROQ_API_KEY
-  if (!apiKey) throw new Error('GROQ_API_KEY not set')
+  const token = await getAccessToken()
+  if (!token) throw new Error('Not authenticated')
 
-  // Temporarily disable content protection so the screenshot includes everything
   mainWindow?.setContentProtection(false)
   await new Promise((r) => setTimeout(r, 80))
-
   const sources = await desktopCapturer.getSources({
     types: ['screen'],
     thumbnailSize: { width: 1920, height: 1080 },
   })
-
   mainWindow?.setContentProtection(true)
 
   const base64 = sources[0]?.thumbnail.toPNG().toString('base64')
   if (!base64) throw new Error('Could not capture screen')
 
-  const groq = new OpenAI({ apiKey, baseURL: 'https://api.groq.com/openai/v1' })
-
-  const stream = await groq.chat.completions.create({
-    model: 'meta-llama/llama-4-scout-17b-16e-instruct',
-    max_tokens: 1024,
-    stream: true,
-    messages: [
-      {
-        role: 'user',
-        content: [
-          { type: 'image_url', image_url: { url: `data:image/png;base64,${base64}` } },
-          {
-            type: 'text',
-            text: `You are a real-time AI interview assistant. Look at this screenshot carefully.
-Identify any interview question, coding problem, or task visible on the screen and provide a strong, concise answer the candidate can use immediately.
-
-${transcript ? `Meeting transcript so far:\n${transcript}\n` : ''}
-Be direct and answer as if you are the candidate. If it's a coding problem, provide working code with a brief explanation.`,
-          },
-        ],
-      },
-    ],
-  })
-
-  for await (const chunk of stream) {
-    const text = chunk.choices[0]?.delta?.content ?? ''
-    if (text) mainWindow?.webContents.send('chat-chunk', { text, done: false })
-  }
-  mainWindow?.webContents.send('chat-chunk', { text: '', done: true })
+  await streamFromBackend(`${BACKEND_URL}/api/screen`, token, { base64, transcript })
   return true
 })
 
-// ── IPC: Window sizing (collapse / expand) ────────────────────────────────
+// ── Window controls ───────────────────────────────────────────────────────────
 ipcMain.on('set-window-height', (_event, height: number) => {
   if (!mainWindow) return
   const [width] = mainWindow.getSize()
@@ -330,18 +282,15 @@ ipcMain.on('set-window-size', (_event, width: number, height: number) => {
 ipcMain.on('hide-window', () => mainWindow?.hide())
 ipcMain.on('close-window', () => mainWindow?.close())
 
-// ── IPC: Open external URL (for mailto:, etc.) ────────────────────────────
+// ── Open external URL (mailto:, etc.) ─────────────────────────────────────────
 ipcMain.handle('open-external', (_event, url: string) => shell.openExternal(url))
 
-// ── IPC: Save notes as PDF via save dialog ────────────────────────────────
+// ── Save notes ────────────────────────────────────────────────────────────────
 ipcMain.handle('save-notes', async (_event, content: string) => {
   const { dialog } = await import('electron')
   const result = await dialog.showSaveDialog({
     defaultPath: `meeting-notes-${new Date().toISOString().slice(0, 10)}.txt`,
-    filters: [
-      { name: 'Text Files', extensions: ['txt'] },
-      { name: 'All Files', extensions: ['*'] },
-    ],
+    filters: [{ name: 'Text Files', extensions: ['txt'] }, { name: 'All Files', extensions: ['*'] }],
   })
   if (!result.canceled && result.filePath) {
     fs.writeFileSync(result.filePath, content, 'utf8')

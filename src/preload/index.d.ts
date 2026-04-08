@@ -9,34 +9,40 @@ export interface Session {
   expiresAt: number
 }
 
+export interface UsageInfo {
+  subscriptionStatus: 'free' | 'active' | 'canceled' | 'past_due'
+  freeCallsUsed: number
+  freeLimit: number
+  canMakeCall: boolean
+}
+
 interface MeetingAPI {
-  // Auth
   checkSession(): Promise<Session | null>
   emailSignIn(email: string, password: string): Promise<Session>
   emailSignUp(email: string, password: string, name: string): Promise<Session>
   googleSignIn(): Promise<Session>
   logout(): Promise<boolean>
 
-  // Audio
+  getUsage(): Promise<UsageInfo | null>
+  stripeCheckout(): Promise<void>
+  stripePortal(): Promise<void>
+  onUsageLimitReached(cb: (data: { upgradeUrl?: string }) => void): () => void
+  onStripeSuccess(cb: () => void): () => void
+
   getDesktopSources(): Promise<Array<{ id: string; name: string }>>
   transcribeAudio(audioData: ArrayBuffer): Promise<string>
 
-  // Chat
-  chatWithClaude(
-    messages: Array<{ role: string; content: string }>,
-    transcript: string
-  ): Promise<boolean>
+  chatWithClaude(messages: Array<{ role: string; content: string }>, transcript: string): Promise<boolean>
   onChatChunk(callback: (chunk: { text: string; done: boolean }) => void): () => void
 
-  // Window
   readScreen(transcript: string): Promise<boolean>
   onTriggerScreenRead(callback: () => void): () => void
+
   hideWindow(): void
   closeWindow(): void
   setWindowHeight(height: number): void
   setWindowSize(width: number, height: number): void
 
-  // Utilities
   openExternal(url: string): Promise<void>
   saveNotes(content: string): Promise<boolean>
 }
