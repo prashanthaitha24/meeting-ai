@@ -364,7 +364,7 @@ ipcMain.on('set-window-size', (_event, width: number, height: number) => {
 })
 
 ipcMain.on('hide-window', () => mainWindow?.hide())
-ipcMain.on('close-window', () => app.quit())
+ipcMain.on('close-window', () => { clearTokens(); app.quit() })
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 const SETTINGS_FILE = path.join(os.homedir(), '.meeting-ai', 'settings.json')

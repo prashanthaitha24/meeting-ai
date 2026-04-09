@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useState } from 'react'
 
 interface Props {
   onClose: () => void
@@ -6,9 +6,22 @@ interface Props {
 }
 
 export function UpgradeModal({ onClose, freeCallsUsed }: Props): JSX.Element {
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [opened, setOpened] = useState(false)
+
   const handleUpgrade = async () => {
-    await window.api.stripeCheckout()
-    onClose()
+    if (loading) return
+    setLoading(true)
+    setError(null)
+    try {
+      await window.api.stripeCheckout()
+      setOpened(true)
+    } catch {
+      setError('Could not open checkout. Please try again.')
+    } finally {
+      setLoading(false)
+    }
   }
 
   return (
@@ -55,20 +68,37 @@ export function UpgradeModal({ onClose, freeCallsUsed }: Props): JSX.Element {
 
         {/* Pricing */}
         <div className="px-5 pb-5 space-y-2.5">
+          {error && (
+            <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/40 rounded-lg px-3 py-2 text-center">
+              {error}
+            </p>
+          )}
+          {opened && !error && (
+            <p className="text-xs text-emerald-400 bg-emerald-900/20 border border-emerald-800/30 rounded-lg px-3 py-2 text-center">
+              Checkout opened in your browser — complete payment there, then come back.
+            </p>
+          )}
           <button
             onClick={handleUpgrade}
-            className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-sm font-semibold text-white transition-colors flex items-center justify-center gap-2"
+            disabled={loading}
+            className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-sm font-semibold text-white transition-colors flex items-center justify-center gap-2"
           >
-            Upgrade — $9.99 / month
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <line x1="5" y1="12" x2="19" y2="12" /><polyline points="12 5 19 12 12 19" />
-            </svg>
+            {loading ? (
+              <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            ) : (
+              <>
+                {opened ? 'Open Checkout Again' : 'Upgrade — $9.99 / month'}
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <line x1="5" y1="12" x2="19" y2="12" /><polyline points="12 5 19 12 12 19" />
+                </svg>
+              </>
+            )}
           </button>
           <button
             onClick={onClose}
             className="w-full py-2 rounded-xl text-xs text-gray-600 hover:text-gray-400 transition-colors"
           >
-            Maybe later
+            {opened ? "I'll finish later" : 'Maybe later'}
           </button>
           <p className="text-[10px] text-gray-700 text-center">
             Cancel anytime · Billed monthly via Stripe
