@@ -1,24 +1,31 @@
 import {
   app, shell, BrowserWindow, globalShortcut, ipcMain,
-  desktopCapturer, session, systemPreferences,
+  desktopCapturer, session, systemPreferences, protocol,
 } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import * as path from 'path'
+import * as os from 'os'
 import * as dotenv from 'dotenv'
 import * as fs from 'fs'
 import {
-  emailSignIn, emailSignUp, googleSignIn, handleOAuthCallback,
-  loadSession, logout, getAccessToken,
+  emailSignIn, emailSignUp, googleSignIn, appleSignIn, handleOAuthCallback,
+  loadSession, logout, getAccessToken, clearTokens,
 } from './supabase-auth'
 
 dotenv.config({ path: is.dev ? '.env' : path.join(process.resourcesPath, '.env') })
 
-const BACKEND_URL = process.env.BACKEND_URL!
+const BACKEND_URL = process.env.BACKEND_URL || 'https://meeting-ai-three-theta.vercel.app'
 
 // Enable Web Speech API
 app.commandLine.appendSwitch('enable-features', 'WebSpeechAPI')
 app.commandLine.appendSwitch('enable-speech-dispatcher')
+
+// Register meetingai:// as a privileged scheme so BrowserWindow popup can navigate to it
+// Must be called before app is ready
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'meetingai', privileges: { secure: true, standard: true, supportFetchAPI: true } },
+])
 
 // Register custom URL protocol for OAuth + Stripe callbacks
 if (process.defaultApp) {
@@ -29,13 +36,41 @@ if (process.defaultApp) {
   app.setAsDefaultProtocolClient('meetingai')
 }
 
+// Windows: ensure only one instance runs; pass deep-link URL to the existing instance
+const gotLock = app.requestSingleInstanceLock()
+if (!gotLock) {
+  app.quit()
+}
+
 let mainWindow: BrowserWindow | null = null
 
+// ── Window bounds persistence ─────────────────────────────────────────────────
+const BOUNDS_FILE = path.join(os.homedir(), '.meeting-ai', 'window-bounds.json')
+
+function loadBounds(): { x?: number; y?: number; width: number; height: number } {
+  try {
+    if (fs.existsSync(BOUNDS_FILE)) {
+      return JSON.parse(fs.readFileSync(BOUNDS_FILE, 'utf8'))
+    }
+  } catch {}
+  return { width: 440, height: 760 }
+}
+
+function saveBounds(win: BrowserWindow): void {
+  try {
+    const b = win.getBounds()
+    const dir = path.dirname(BOUNDS_FILE)
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(BOUNDS_FILE, JSON.stringify(b), 'utf8')
+  } catch {}
+}
+
 function createWindow(): void {
+  const bounds = loadBounds()
+
   mainWindow = new BrowserWindow({
-    width: 440,
-    height: 760,
-    minWidth: 100,
+    ...bounds,
+    minWidth: 300,
     minHeight: 28,
     frame: false,
     transparent: true,
@@ -49,14 +84,23 @@ function createWindow(): void {
     },
   })
 
-  mainWindow.setContentProtection(true)
-  mainWindow.setAlwaysOnTop(true, 'screen-saver', 1)
-  mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  const settings = loadSettings()
+  mainWindow.setContentProtection(settings.undetectable !== false)
+  if (process.platform === 'darwin') {
+    mainWindow.setAlwaysOnTop(true, 'screen-saver', 1)
+    mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  } else {
+    mainWindow.setAlwaysOnTop(true, 'pop-up-menu')
+  }
   mainWindow.on('ready-to-show', () => mainWindow!.show())
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
     return { action: 'deny' }
   })
+
+  // Save bounds when window is moved or resized
+  mainWindow.on('resized', () => mainWindow && saveBounds(mainWindow))
+  mainWindow.on('moved', () => mainWindow && saveBounds(mainWindow))
 
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
@@ -65,25 +109,59 @@ function createWindow(): void {
   }
 }
 
-// Handle OAuth and Stripe callbacks from the custom URL scheme
+// macOS: deep link via open-url event
 app.on('open-url', (event, url) => {
   event.preventDefault()
-  if (url.startsWith('meetingai://auth/callback')) {
+  if (url.startsWith('meetingai://auth')) {
     handleOAuthCallback(url)
   } else if (url.startsWith('meetingai://stripe/success')) {
     mainWindow?.webContents.send('stripe-success')
   }
-  // Bring app to front
   mainWindow?.show()
   mainWindow?.focus()
+})
+
+// Windows: deep link arrives as a second-instance command-line argument
+app.on('second-instance', (_event, commandLine) => {
+  const url = commandLine.find((arg) => arg.startsWith('meetingai://'))
+  if (url) {
+    if (url.startsWith('meetingai://auth')) handleOAuthCallback(url)
+    else if (url.startsWith('meetingai://stripe/success')) mainWindow?.webContents.send('stripe-success')
+  }
+  if (mainWindow) { mainWindow.show(); mainWindow.focus() }
 })
 
 app.whenReady().then(async () => {
   electronApp.setAppUserModelId('com.meeting-ai')
 
+  // Handle meetingai:// URLs navigated to inside a BrowserWindow (OAuth popup)
+  protocol.handle('meetingai', (request) => {
+    const url = request.url
+    if (url.startsWith('meetingai://auth')) {
+      handleOAuthCallback(url)
+    } else if (url.startsWith('meetingai://stripe/success')) {
+      mainWindow?.webContents.send('stripe-success')
+    }
+    mainWindow?.show()
+    mainWindow?.focus()
+    return new Response('OK', { status: 200 })
+  })
+
+  // macOS requires explicit microphone permission prompt
   if (process.platform === 'darwin') {
     const micAccess = await systemPreferences.askForMediaAccess('microphone')
     if (!micAccess) console.warn('[Permissions] Microphone access denied')
+  }
+
+  // Windows: handle deep link from startup command-line argument
+  if (process.platform === 'win32') {
+    const deepLinkUrl = process.argv.find((arg) => arg.startsWith('meetingai://'))
+    if (deepLinkUrl) {
+      if (deepLinkUrl.startsWith('meetingai://auth')) handleOAuthCallback(deepLinkUrl)
+      else if (deepLinkUrl.startsWith('meetingai://stripe/success')) {
+        mainWindow?.webContents.send('stripe-success')
+      }
+    }
   }
 
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
@@ -120,7 +198,11 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
+  app.quit() // quit on all platforms when window is closed
+})
+
+app.on('before-quit', () => {
+  clearTokens() // clear session so next launch requires login
 })
 
 app.on('will-quit', () => globalShortcut.unregisterAll())
@@ -131,6 +213,7 @@ ipcMain.handle('auth:logout', () => { logout(); return true })
 ipcMain.handle('auth:email-signin', async (_e, email: string, password: string) => emailSignIn(email, password))
 ipcMain.handle('auth:email-signup', async (_e, email: string, password: string, name: string) => emailSignUp(email, password, name))
 ipcMain.handle('auth:google-signin', async () => googleSignIn())
+ipcMain.handle('auth:apple-signin', async () => appleSignIn())
 
 // ── Usage IPC ─────────────────────────────────────────────────────────────────
 ipcMain.handle('get-usage', async () => {
@@ -208,6 +291,7 @@ async function streamFromBackend(url: string, token: string, body: object): Prom
     try { errData = await res.json() } catch {}
     if (res.status === 402 && errData.error === 'usage_limit_reached') {
       mainWindow?.webContents.send('usage-limit-reached', { upgradeUrl: errData.upgradeUrl })
+      mainWindow?.webContents.send('chat-chunk', { text: '', done: true }) // clean up streaming state
       return
     }
     throw new Error((errData.error as string) ?? `HTTP ${res.status}`)
@@ -280,10 +364,76 @@ ipcMain.on('set-window-size', (_event, width: number, height: number) => {
 })
 
 ipcMain.on('hide-window', () => mainWindow?.hide())
-ipcMain.on('close-window', () => mainWindow?.close())
+ipcMain.on('close-window', () => app.quit())
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+const SETTINGS_FILE = path.join(os.homedir(), '.meeting-ai', 'settings.json')
+
+function loadSettings(): Record<string, unknown> {
+  try {
+    if (fs.existsSync(SETTINGS_FILE)) return JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'))
+  } catch {}
+  return { undetectable: true }
+}
+
+function saveSettings(settings: Record<string, unknown>): void {
+  try {
+    const dir = path.dirname(SETTINGS_FILE)
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings), 'utf8')
+  } catch {}
+}
+
+ipcMain.handle('settings:load', () => loadSettings())
+ipcMain.handle('settings:save', (_e, settings: Record<string, unknown>) => {
+  saveSettings(settings)
+  // Apply undetectable immediately
+  if (typeof settings.undetectable === 'boolean') {
+    mainWindow?.setContentProtection(settings.undetectable)
+  }
+  return true
+})
 
 // ── Open external URL (mailto:, etc.) ─────────────────────────────────────────
 ipcMain.handle('open-external', (_event, url: string) => shell.openExternal(url))
+
+// ── History ───────────────────────────────────────────────────────────────────
+const HISTORY_DIR = path.join(os.homedir(), '.meeting-ai', 'history')
+
+ipcMain.handle('history:save', (_e, userId: string, sessionData: object) => {
+  try {
+    if (!fs.existsSync(HISTORY_DIR)) fs.mkdirSync(HISTORY_DIR, { recursive: true })
+    const file = path.join(HISTORY_DIR, `${userId}.json`)
+    let sessions: object[] = []
+    if (fs.existsSync(file)) {
+      try { sessions = JSON.parse(fs.readFileSync(file, 'utf8')) } catch {}
+    }
+    sessions.unshift(sessionData)
+    // Prune anything older than 90 days
+    const cutoff = Date.now() - 90 * 24 * 60 * 60 * 1000
+    sessions = sessions.filter((s: any) => new Date(s.date).getTime() > cutoff)
+    fs.writeFileSync(file, JSON.stringify(sessions), 'utf8')
+    return true
+  } catch { return false }
+})
+
+ipcMain.handle('history:load', (_e, userId: string, days: number) => {
+  try {
+    const file = path.join(HISTORY_DIR, `${userId}.json`)
+    if (!fs.existsSync(file)) return []
+    const sessions: any[] = JSON.parse(fs.readFileSync(file, 'utf8'))
+    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000
+    return sessions.filter((s) => new Date(s.date).getTime() > cutoff)
+  } catch { return [] }
+})
+
+ipcMain.handle('history:clear', (_e, userId: string) => {
+  try {
+    const file = path.join(HISTORY_DIR, `${userId}.json`)
+    if (fs.existsSync(file)) fs.rmSync(file)
+    return true
+  } catch { return false }
+})
 
 // ── Save notes ────────────────────────────────────────────────────────────────
 ipcMain.handle('save-notes', async (_event, content: string) => {
