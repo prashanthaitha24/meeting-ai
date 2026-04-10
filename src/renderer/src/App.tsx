@@ -263,9 +263,14 @@ function GeneratedPanel({
   )
 }
 
+// Bump this whenever the Privacy Policy or Terms of Service materially change.
+// Doing so forces every user (including reinstalls that kept localStorage) to re-accept.
+const CONSENT_VERSION = '1'
+const CONSENT_KEY = `consent_accepted_v${CONSENT_VERSION}`
+
 // ── Main app ──────────────────────────────────────────────────────────────────
 export default function App(): JSX.Element {
-  const [consentGiven, setConsentGiven] = useState(() => localStorage.getItem('consent_accepted') === 'true')
+  const [consentGiven, setConsentGiven] = useState(() => localStorage.getItem(CONSENT_KEY) === 'true')
   const [session, setSession] = useState<Session | null | 'loading'>('loading')
   const [usage, setUsage] = useState<UsageInfo | null>(null)
   const [showUpgradeModal, setShowUpgradeModal] = useState(false)
@@ -741,7 +746,7 @@ export default function App(): JSX.Element {
         </div>
         <ConsentScreen
           onAccept={() => {
-            localStorage.setItem('consent_accepted', 'true')
+            localStorage.setItem(CONSENT_KEY, 'true')
             setConsentGiven(true)
           }}
           onDecline={() => window.api.closeWindow()}

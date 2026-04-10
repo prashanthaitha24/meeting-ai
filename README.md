@@ -61,24 +61,33 @@ meeting-ai/
 │   ├── main/           # Electron main process
 │   │   ├── index.ts    # App entry, IPCs, window management
 │   │   ├── supabase-auth.ts  # OAuth + session handling
-│   │   └── logger.ts   # File-based logging
+│   │   └── logger.ts   # File-based logging (PII-redacted)
 │   ├── preload/        # Context bridge (renderer ↔ main)
 │   └── renderer/       # React frontend
 │       └── src/
-│           ├── App.tsx
+│           ├── App.tsx              # Main shell, all modal state
 │           └── components/
+│               ├── AuthScreen.tsx
+│               ├── ConsentScreen.tsx
+│               ├── TranscriptPanel.tsx
+│               ├── HistoryTab.tsx
+│               └── UpgradeModal.tsx
 ├── backend/            # Next.js API (deployed to Vercel)
 │   ├── app/api/
-│   │   ├── chat/       # Claude streaming
-│   │   ├── screen/     # Screen vision
-│   │   ├── transcribe/ # Whisper
-│   │   ├── usage/      # Daily limit tracking
-│   │   └── stripe/     # Checkout, portal, webhooks
+│   │   ├── chat/           # Claude streaming
+│   │   ├── screen/         # Screen vision
+│   │   ├── transcribe/     # Whisper
+│   │   ├── usage/          # Daily limit tracking
+│   │   ├── stripe/         # Checkout, portal, redirect, webhooks
+│   │   └── account/        # GDPR delete + export endpoints
 │   └── lib/
 │       ├── usage.ts    # Daily reset logic
 │       ├── stripe.ts
 │       └── supabase.ts
 ├── docs/               # GitHub Pages (thavionai.com)
+│   ├── index.html      # Landing page
+│   ├── privacy.html    # Privacy Policy
+│   └── terms.html      # Terms of Service
 ├── .github/workflows/
 │   └── release.yml     # Cross-platform build on git tag
 └── electron-builder.yml
@@ -230,6 +239,18 @@ create trigger on_auth_user_created
 ## Usage Limits
 
 Free users get **3 AI responses per day** (resets at midnight UTC). Pro subscribers get unlimited responses at $9.99/month via Stripe.
+
+---
+
+## GDPR / CCPA Compliance
+
+- **Consent screen** shown on first launch and re-shown whenever `CONSENT_VERSION` is bumped in `App.tsx` (version-stamped localStorage key — survives reinstalls correctly)
+- **Data export** — Settings → My Data → Export: downloads account data as JSON
+- **Account deletion** — Settings → My Data → Delete: cancels Stripe subscription, deletes Supabase profile + auth user, clears local history
+- **Log PII redaction** — `logger.ts` redacts UUIDs, emails, and JWT tokens before writing to `app.log`
+- **No meeting data on servers** — transcripts and session history are local-only
+
+> To force all users to re-accept the consent screen (e.g. after a privacy policy update), increment `CONSENT_VERSION` in `src/renderer/src/App.tsx`.
 
 ---
 
