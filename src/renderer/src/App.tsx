@@ -961,7 +961,7 @@ export default function App(): JSX.Element {
             <div className="flex items-center justify-between pt-1 border-t border-white/8">
               <div>
                 <p className="text-xs font-medium text-gray-200">My Data</p>
-                <p className="text-[10px] text-gray-500 mt-0.5">Export or permanently delete your account</p>
+                <p className="text-[10px] text-gray-500 mt-0.5">GDPR / CCPA — export or delete your account</p>
               </div>
               <div className="flex gap-1.5 flex-shrink-0">
                 <button
@@ -973,6 +973,21 @@ export default function App(): JSX.Element {
                   onClick={() => setShowDeleteModal(true)}
                   className="px-2 py-1 rounded text-[10px] font-semibold text-red-400 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 transition-colors">
                   Delete
+                </button>
+              </div>
+            </div>
+            <div className="flex items-center justify-between pt-1 border-t border-white/8">
+              <p className="text-[10px] text-gray-600">Legal</p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => window.api.openExternal('https://thavionai.com/privacy.html')}
+                  className="text-[10px] text-gray-500 hover:text-blue-400 transition-colors underline underline-offset-2">
+                  Privacy Policy
+                </button>
+                <button
+                  onClick={() => window.api.openExternal('https://thavionai.com/terms.html')}
+                  className="text-[10px] text-gray-500 hover:text-blue-400 transition-colors underline underline-offset-2">
+                  Terms of Service
                 </button>
               </div>
             </div>

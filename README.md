@@ -152,8 +152,8 @@ npm run dist:mac
 ```
 
 Outputs to `dist/`:
-- `Meeting AI-1.0.1-arm64.dmg` — Apple Silicon (M1/M2/M3)
-- `Meeting AI-1.0.1.dmg` — Intel
+- `Meeting AI-1.0.3-arm64.dmg` — Apple Silicon (M1/M2/M3)
+- `Meeting AI-1.0.3.dmg` — Intel
 
 ### Windows (run on Windows or via GitHub Actions)
 
@@ -162,14 +162,14 @@ npm run dist:win
 ```
 
 Outputs to `dist/`:
-- `Meeting.AI-Setup-1.0.1-x64.exe` — Windows 10/11
+- `Meeting.AI-Setup-1.0.3-x64.exe` — Windows 10/11
 
 ### Automated releases (recommended)
 
 Push a git tag to trigger a full cross-platform build via GitHub Actions:
 
 ```bash
-git tag v1.0.2 && git push --tags
+git tag v1.0.3 && git push --tags
 ```
 
 GitHub Actions builds Mac DMGs on `macos-latest` and the Windows installer on `windows-latest`, then attaches both to a GitHub Release automatically.
