@@ -125,14 +125,20 @@ function createWindow(): void {
   }
 }
 
-// macOS: deep link via open-url event
-app.on('open-url', (event, url) => {
-  event.preventDefault()
+function handleDeepLink(url: string) {
   if (url.startsWith('meetingai://auth')) {
     handleOAuthCallback(url)
   } else if (url.startsWith('meetingai://stripe/success')) {
     mainWindow?.webContents.send('stripe-success')
+  } else if (url.startsWith('meetingai://stripe/cancel')) {
+    mainWindow?.webContents.send('stripe-cancel')
   }
+}
+
+// macOS: deep link via open-url event
+app.on('open-url', (event, url) => {
+  event.preventDefault()
+  handleDeepLink(url)
   mainWindow?.show()
   mainWindow?.focus()
 })
@@ -140,10 +146,7 @@ app.on('open-url', (event, url) => {
 // Windows: deep link arrives as a second-instance command-line argument
 app.on('second-instance', (_event, commandLine) => {
   const url = commandLine.find((arg) => arg.startsWith('meetingai://'))
-  if (url) {
-    if (url.startsWith('meetingai://auth')) handleOAuthCallback(url)
-    else if (url.startsWith('meetingai://stripe/success')) mainWindow?.webContents.send('stripe-success')
-  }
+  if (url) handleDeepLink(url)
   if (mainWindow) { mainWindow.show(); mainWindow.focus() }
 })
 
@@ -153,12 +156,7 @@ app.whenReady().then(async () => {
 
   // Handle meetingai:// URLs navigated to inside a BrowserWindow (OAuth popup)
   protocol.handle('meetingai', (request) => {
-    const url = request.url
-    if (url.startsWith('meetingai://auth')) {
-      handleOAuthCallback(url)
-    } else if (url.startsWith('meetingai://stripe/success')) {
-      mainWindow?.webContents.send('stripe-success')
-    }
+    handleDeepLink(request.url)
     mainWindow?.show()
     mainWindow?.focus()
     return new Response('OK', { status: 200 })

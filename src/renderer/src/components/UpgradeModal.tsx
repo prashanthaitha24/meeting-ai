@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 
 interface Props {
   onClose: () => void
@@ -9,11 +9,23 @@ export function UpgradeModal({ onClose, freeCallsUsed }: Props): JSX.Element {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [opened, setOpened] = useState(false)
+  const [cancelled, setCancelled] = useState(false)
+
+  // Listen for Stripe cancel redirect (user clicked ← on checkout page)
+  useEffect(() => {
+    const unsub = window.api.onStripeCancel(() => {
+      setOpened(false)
+      setCancelled(true)
+      setLoading(false)
+    })
+    return unsub
+  }, [])
 
   const handleUpgrade = async () => {
     if (loading) return
     setLoading(true)
     setError(null)
+    setCancelled(false)
     try {
       await window.api.stripeCheckout()
       setOpened(true)
@@ -73,7 +85,12 @@ export function UpgradeModal({ onClose, freeCallsUsed }: Props): JSX.Element {
               {error}
             </p>
           )}
-          {opened && !error && (
+          {cancelled && !error && (
+            <p className="text-xs text-gray-400 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-center">
+              No worries — no charges were made. You can upgrade anytime.
+            </p>
+          )}
+          {opened && !error && !cancelled && (
             <p className="text-xs text-emerald-400 bg-emerald-900/20 border border-emerald-800/30 rounded-lg px-3 py-2 text-center">
               Checkout opened in your browser — complete payment there, then come back.
             </p>
@@ -87,7 +104,7 @@ export function UpgradeModal({ onClose, freeCallsUsed }: Props): JSX.Element {
               <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
             ) : (
               <>
-                {opened ? 'Open Checkout Again' : 'Upgrade — $9.99 / month'}
+                {cancelled ? 'Try Again' : opened ? 'Open Checkout Again' : 'Upgrade — $9.99 / month'}
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                   <line x1="5" y1="12" x2="19" y2="12" /><polyline points="12 5 19 12 12 19" />
                 </svg>

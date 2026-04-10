@@ -24,6 +24,11 @@ const api = {
     ipcRenderer.on('stripe-success', handler)
     return () => ipcRenderer.removeListener('stripe-success', handler)
   },
+  onStripeCancel: (cb: () => void): (() => void) => {
+    const handler = () => cb()
+    ipcRenderer.on('stripe-cancel', handler)
+    return () => ipcRenderer.removeListener('stripe-cancel', handler)
+  },
 
   // Audio
   getDesktopSources: () => ipcRenderer.invoke('get-desktop-sources'),

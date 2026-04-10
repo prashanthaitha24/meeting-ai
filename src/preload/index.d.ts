@@ -43,6 +43,7 @@ interface MeetingAPI {
   stripePortal(): Promise<void>
   onUsageLimitReached(cb: (data: { upgradeUrl?: string }) => void): () => void
   onStripeSuccess(cb: () => void): () => void
+  onStripeCancel(cb: () => void): () => void
 
   getDesktopSources(): Promise<Array<{ id: string; name: string }>>
   transcribeAudio(audioData: ArrayBuffer): Promise<string>
