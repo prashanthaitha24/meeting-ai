@@ -34,64 +34,65 @@ export function ConsentScreen({ onAccept, onDecline }: Props): JSX.Element {
 
         <div className="space-y-3 text-[11px] text-gray-400 leading-relaxed">
           <p>
-            Meeting AI ("the App") is an AI-powered assistant designed to support users during
-            meetings and interviews. By using the App, you acknowledge and agree to the following:
+            Meeting AI by ThavionAI is an AI-powered assistant for meetings and interviews.
+            Please read the following carefully before using the app.
           </p>
 
           <div>
-            <p className="text-gray-300 font-medium mb-1">1. No Guarantee of Accuracy</p>
+            <p className="text-gray-300 font-medium mb-1">1. Data We Collect</p>
             <p>
-              AI-generated responses are provided for informational and assistive purposes only.
-              They may contain errors, omissions, or inaccuracies. You are solely responsible for
-              evaluating and verifying any content before acting on it.
+              We collect your email address and name (for your account) and usage counts.
+              Meeting transcripts and session history are stored <strong className="text-gray-300">locally on your device only</strong> — never on our servers.
             </p>
           </div>
 
           <div>
-            <p className="text-gray-300 font-medium mb-1">2. Professional Responsibility</p>
+            <p className="text-gray-300 font-medium mb-1">2. Third-Party Data Processors</p>
             <p>
-              The App does not constitute legal, financial, medical, or professional advice of any
-              kind. AI-Empire and its developers are not liable for any decisions made, outcomes
-              achieved, or consequences arising from use of the App or its generated content.
+              Audio is sent to <strong className="text-gray-300">OpenAI Whisper</strong> for transcription and is not retained after processing.
+              AI responses are generated via <strong className="text-gray-300">Anthropic Claude</strong>.
+              Accounts are managed by <strong className="text-gray-300">Supabase</strong>.
+              Payments are handled by <strong className="text-gray-300">Stripe</strong>.
+              Crash reports may be sent to <strong className="text-gray-300">Sentry</strong>.
+              None of your meeting content is sold or shared for advertising.
             </p>
           </div>
 
           <div>
             <p className="text-gray-300 font-medium mb-1">3. Recording &amp; Consent</p>
             <p>
-              You are solely responsible for complying with all applicable laws regarding the
-              recording and transcription of conversations. In many jurisdictions, all-party consent
-              is required before recording. Ensure you have obtained all necessary consents before
-              using the App's transcription features.
+              You are solely responsible for complying with all applicable recording laws.
+              Many jurisdictions require all-party consent before recording a conversation.
+              Ensure you have consent from all participants before using transcription features.
             </p>
           </div>
 
           <div>
-            <p className="text-gray-300 font-medium mb-1">4. Limitation of Liability</p>
+            <p className="text-gray-300 font-medium mb-1">4. Your Rights (GDPR / CCPA)</p>
             <p>
-              To the maximum extent permitted by law, AI-Empire shall not be liable for any
-              indirect, incidental, consequential, or punitive damages arising from your use of
-              the App, including but not limited to interview outcomes, employment decisions, or
-              business results.
+              You have the right to access, export, and permanently delete your data at any time
+              from Settings → Account. California residents have the right to know we do not sell
+              personal information.
             </p>
           </div>
 
           <div>
-            <p className="text-gray-300 font-medium mb-1">5. Data &amp; Privacy</p>
+            <p className="text-gray-300 font-medium mb-1">5. Limitation of Liability</p>
             <p>
-              Audio is processed in real time and is not retained after transcription. Your account
-              data is stored securely. By using the App, you agree to our{' '}
-              <button
-                onClick={() => window.api.openExternal('https://prashanthaitha24.github.io/meeting-ai/privacy.html')}
-                className="text-blue-400 underline hover:text-blue-300">
-                Privacy Policy
-              </button>
+              AI responses are for informational purposes only and do not constitute professional
+              advice. ThavionAI is not liable for decisions made based on app output.
+            </p>
+          </div>
+
+          <div>
+            <p className="text-gray-300 font-medium mb-1">6. Legal</p>
+            <p>
+              By continuing you agree to our{' '}
+              <button onClick={() => window.api.openExternal('https://thavionai.com/privacy.html')}
+                className="text-blue-400 underline hover:text-blue-300">Privacy Policy</button>
               {' '}and{' '}
-              <button
-                onClick={() => window.api.openExternal('https://prashanthaitha24.github.io/meeting-ai/terms.html')}
-                className="text-blue-400 underline hover:text-blue-300">
-                Terms of Service
-              </button>.
+              <button onClick={() => window.api.openExternal('https://thavionai.com/terms.html')}
+                className="text-blue-400 underline hover:text-blue-300">Terms of Service</button>.
             </p>
           </div>
         </div>

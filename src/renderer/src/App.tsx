@@ -113,6 +113,70 @@ function ReportIssueModal({ onClose }: { onClose: () => void }): JSX.Element {
   )
 }
 
+// ── Delete Account modal ──────────────────────────────────────────────────────
+function DeleteAccountModal({ onClose, onDeleted }: { onClose: () => void; onDeleted: () => void }): JSX.Element {
+  const [status, setStatus] = React.useState<'idle' | 'deleting' | 'error'>('idle')
+  const [errorMsg, setErrorMsg] = React.useState('')
+
+  const handleDelete = async () => {
+    setStatus('deleting')
+    try {
+      const ok = await window.api.deleteAccount()
+      if (ok) {
+        onDeleted()
+      } else {
+        setErrorMsg('Deletion failed. Please contact support@thavionai.com')
+        setStatus('error')
+      }
+    } catch (e: unknown) {
+      setErrorMsg(e instanceof Error ? e.message : 'An error occurred')
+      setStatus('error')
+    }
+  }
+
+  return (
+    <div className="absolute inset-0 flex items-center justify-center z-50 rounded-xl"
+      style={{ background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(8px)' }}>
+      <div className="mx-4 rounded-2xl border border-red-500/20 overflow-hidden w-full"
+        style={{ background: 'rgba(20,20,20,0.98)', maxWidth: 340 }}>
+        <div className="px-4 pt-4 pb-3 border-b border-white/10">
+          <h2 className="text-sm font-semibold text-white">Delete Account</h2>
+          <p className="text-[10px] text-gray-500 mt-0.5">This action is permanent and cannot be undone</p>
+        </div>
+        <div className="px-4 py-3 flex flex-col gap-3">
+          <div className="rounded-lg px-3 py-2.5 text-[11px] text-red-300 leading-relaxed"
+            style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>
+            <p className="font-semibold mb-1">What will be deleted:</p>
+            <ul className="text-red-400/80 space-y-0.5 list-disc list-inside">
+              <li>Your account and login credentials</li>
+              <li>Subscription (will be cancelled)</li>
+              <li>All usage data and account history</li>
+            </ul>
+            <p className="mt-2 text-gray-500">Local session transcripts are already stored only on this device and will remain until you delete the app.</p>
+          </div>
+          {status === 'error' && (
+            <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-lg px-3 py-2">
+              {errorMsg}
+            </p>
+          )}
+          <div className="flex gap-2">
+            <button onClick={onClose} disabled={status === 'deleting'}
+              className="flex-1 py-2 rounded-lg text-xs text-gray-600 hover:text-gray-400 border border-white/8 transition-colors disabled:opacity-40">
+              Cancel
+            </button>
+            <button onClick={handleDelete} disabled={status === 'deleting'}
+              className="flex-1 py-2 rounded-lg bg-red-600 hover:bg-red-500 disabled:opacity-50 text-xs font-semibold text-white transition-colors flex items-center justify-center gap-1.5">
+              {status === 'deleting'
+                ? <span className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                : 'Delete My Account'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Auth shell ────────────────────────────────────────────────────────────────
 function AuthShell({ onLogin }: { onLogin: (s: Session) => void }) {
   return (
@@ -245,6 +309,7 @@ export default function App(): JSX.Element {
   const [showSettings, setShowSettings] = useState(false)
   const [showReportModal, setShowReportModal] = useState(false)
   const [showShortcuts, setShowShortcuts] = useState(false)
+  const [showDeleteModal, setShowDeleteModal] = useState(false)
 
   // UX indicators
   const [showTakingNotes, setShowTakingNotes] = useState(false)
@@ -743,6 +808,14 @@ export default function App(): JSX.Element {
         <ReportIssueModal onClose={() => setShowReportModal(false)} />
       )}
 
+      {/* ── Delete Account modal ── */}
+      {showDeleteModal && !isCollapsed && (
+        <DeleteAccountModal
+          onClose={() => setShowDeleteModal(false)}
+          onDeleted={() => { setShowDeleteModal(false); handleLogout() }}
+        />
+      )}
+
       {/* ── Header / collapsed pill ── */}
       {isCollapsed ? (
         /* Pill view — minimal, clean */
@@ -879,6 +952,24 @@ export default function App(): JSX.Element {
                 className="px-2 py-1 rounded text-[10px] font-semibold text-orange-400 bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/20 transition-colors flex-shrink-0">
                 Report
               </button>
+            </div>
+            <div className="flex items-center justify-between pt-1 border-t border-white/8">
+              <div>
+                <p className="text-xs font-medium text-gray-200">My Data</p>
+                <p className="text-[10px] text-gray-500 mt-0.5">Export or permanently delete your account</p>
+              </div>
+              <div className="flex gap-1.5 flex-shrink-0">
+                <button
+                  onClick={async () => { await window.api.exportData() }}
+                  className="px-2 py-1 rounded text-[10px] font-semibold text-blue-400 bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/20 transition-colors">
+                  Export
+                </button>
+                <button
+                  onClick={() => setShowDeleteModal(true)}
+                  className="px-2 py-1 rounded text-[10px] font-semibold text-red-400 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 transition-colors">
+                  Delete
+                </button>
+              </div>
             </div>
           </div>
         )}

@@ -70,6 +70,8 @@ interface MeetingAPI {
   saveSettings(settings: Record<string, unknown>): Promise<boolean>
 
   reportIssue(description: string): Promise<boolean>
+  deleteAccount(): Promise<boolean>
+  exportData(): Promise<boolean>
 }
 
 declare global {

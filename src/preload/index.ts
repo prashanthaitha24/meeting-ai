@@ -69,6 +69,9 @@ const api = {
   saveSettings: (settings: Record<string, unknown>) => ipcRenderer.invoke('settings:save', settings),
 
   reportIssue: (description: string) => ipcRenderer.invoke('report-issue', description),
+
+  deleteAccount: () => ipcRenderer.invoke('account:delete'),
+  exportData: () => ipcRenderer.invoke('account:export'),
 }
 
 if (process.contextIsolated) {

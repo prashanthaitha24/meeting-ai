@@ -250,13 +250,13 @@ ipcMain.handle('stripe:checkout', async () => {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
   })
-  const body = await res.json().catch(() => ({}))
+  const body = await res.json().catch(() => ({})) as Record<string, unknown>
   if (!res.ok) {
     log.error('Stripe checkout failed', { status: res.status, body })
-    throw new Error(body.error ?? `Server error ${res.status}`)
+    throw new Error((body.error as string) ?? `Server error ${res.status}`)
   }
   if (!body.url) throw new Error('No checkout URL returned')
-  shell.openExternal(body.url)
+  shell.openExternal(body.url as string)
 })
 
 ipcMain.handle('stripe:portal', async () => {
@@ -267,8 +267,8 @@ ipcMain.handle('stripe:portal', async () => {
     headers: { Authorization: `Bearer ${token}` },
   })
   if (!res.ok) throw new Error('No active subscription')
-  const { url } = await res.json()
-  if (url) shell.openExternal(url)
+  const portalBody = await res.json() as Record<string, unknown>
+  if (portalBody.url) shell.openExternal(portalBody.url as string)
 })
 
 // ── Desktop sources ───────────────────────────────────────────────────────────
@@ -293,8 +293,8 @@ ipcMain.handle('transcribe-audio', async (_event, audioData: ArrayBuffer) => {
       body: formData,
     })
     if (!res.ok) return ''
-    const { text } = await res.json()
-    return text ?? ''
+    const transcribeBody = await res.json() as Record<string, unknown>
+    return (transcribeBody.text as string) ?? ''
   } catch { return '' }
 })
 
@@ -308,7 +308,7 @@ async function streamFromBackend(url: string, token: string, body: object): Prom
 
   if (!res.ok) {
     let errData: Record<string, unknown> = {}
-    try { errData = await res.json() } catch {}
+    try { errData = await res.json() as Record<string, unknown> } catch {}
     if (res.status === 402 && errData.error === 'usage_limit_reached') {
       mainWindow?.webContents.send('usage-limit-reached', { upgradeUrl: errData.upgradeUrl })
       mainWindow?.webContents.send('chat-chunk', { text: '', done: true }) // clean up streaming state
@@ -412,6 +412,47 @@ ipcMain.handle('settings:save', (_e, settings: Record<string, unknown>) => {
     mainWindow?.setContentProtection(settings.undetectable)
   }
   return true
+})
+
+// ── Account (GDPR/CCPA) ───────────────────────────────────────────────────────
+ipcMain.handle('account:delete', async () => {
+  const token = await getAccessToken()
+  if (!token) throw new Error('Not authenticated')
+  const res = await fetch(`${BACKEND_URL}/api/account/delete`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({})) as Record<string, unknown>
+    throw new Error((body.error as string) ?? `Delete failed: ${res.status}`)
+  }
+  // Clear all local data after server deletion
+  clearTokens()
+  try {
+    const HISTORY_DIR = path.join(os.homedir(), '.meeting-ai', 'history')
+    if (fs.existsSync(HISTORY_DIR)) fs.rmSync(HISTORY_DIR, { recursive: true })
+  } catch {}
+  return true
+})
+
+ipcMain.handle('account:export', async () => {
+  const token = await getAccessToken()
+  if (!token) throw new Error('Not authenticated')
+  const res = await fetch(`${BACKEND_URL}/api/account/export`, {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  if (!res.ok) throw new Error('Export failed')
+  const json = await res.text()
+  const { dialog } = await import('electron')
+  const result = await dialog.showSaveDialog({
+    defaultPath: `thavionai-data-export-${new Date().toISOString().slice(0, 10)}.json`,
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  })
+  if (!result.canceled && result.filePath) {
+    fs.writeFileSync(result.filePath, json, 'utf8')
+    return true
+  }
+  return false
 })
 
 // ── Open external URL (mailto:, etc.) ─────────────────────────────────────────
