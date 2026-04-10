@@ -250,8 +250,13 @@ ipcMain.handle('stripe:checkout', async () => {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
   })
-  const { url } = await res.json()
-  if (url) shell.openExternal(url)
+  const body = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    log.error('Stripe checkout failed', { status: res.status, body })
+    throw new Error(body.error ?? `Server error ${res.status}`)
+  }
+  if (!body.url) throw new Error('No checkout URL returned')
+  shell.openExternal(body.url)
 })
 
 ipcMain.handle('stripe:portal', async () => {
