@@ -30,12 +30,13 @@ export async function POST(req: NextRequest) {
       .eq('id', auth.userId)
   }
 
+  const base = process.env.BACKEND_URL ?? 'https://meeting-ai-three-theta.vercel.app'
   const session = await stripe.checkout.sessions.create({
     customer: customerId,
     line_items: [{ price: process.env.STRIPE_PRICE_ID!, quantity: 1 }],
     mode: 'subscription',
-    success_url: 'meetingai://stripe/success',
-    cancel_url: 'meetingai://stripe/cancel',
+    success_url: `${base}/api/stripe/redirect?to=success`,
+    cancel_url: `${base}/api/stripe/redirect?to=cancel`,
     metadata: { userId: auth.userId! },
     subscription_data: { metadata: { userId: auth.userId! } },
     allow_promotion_codes: true,

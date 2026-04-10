@@ -244,6 +244,7 @@ export default function App(): JSX.Element {
   const [undetectable, setUndetectable] = useState(true)
   const [showSettings, setShowSettings] = useState(false)
   const [showReportModal, setShowReportModal] = useState(false)
+  const [showShortcuts, setShowShortcuts] = useState(false)
 
   // UX indicators
   const [showTakingNotes, setShowTakingNotes] = useState(false)
@@ -779,24 +780,34 @@ export default function App(): JSX.Element {
           </div>
 
           <div className="flex items-center gap-1 flex-shrink-0" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-            {/* Usage indicator / upgrade button for free tier */}
+            {/* Upgrade button — always visible for free users */}
             {usage && usage.subscriptionStatus !== 'active' && (
               <button
                 onClick={() => setShowUpgradeModal(true)}
-                title={`${usage.freeCallsUsed}/${usage.freeLimit} AI answers used — click to upgrade`}
-                className="px-1.5 py-0.5 rounded text-[9px] font-medium bg-amber-500/15 text-amber-400 hover:bg-amber-500/25 transition-colors border border-amber-500/20">
-                {usage.freeCallsUsed}/{usage.freeLimit}
+                title={`${usage.freeCallsUsed}/${usage.freeLimit} AI answers used today — Upgrade to Pro`}
+                className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-semibold bg-gradient-to-r from-blue-600/80 to-indigo-600/80 hover:from-blue-500 hover:to-indigo-500 text-white transition-all border border-blue-500/30">
+                <svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                {usage.freeCallsUsed}/{usage.freeLimit} · Upgrade
               </button>
             )}
-            {/* Manage subscription for active subscribers */}
+            {/* Pro badge for subscribers */}
             {usage?.subscriptionStatus === 'active' && (
               <button
                 onClick={() => window.api.stripePortal()}
                 title="Manage subscription"
-                className="px-1.5 py-0.5 rounded text-[9px] font-medium bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25 transition-colors border border-emerald-500/20">
-                Pro
+                className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25 transition-colors border border-emerald-500/20">
+                ✦ Pro
               </button>
             )}
+            {/* Shortcuts */}
+            <button
+              onClick={() => setShowShortcuts((v) => !v)}
+              title="Keyboard shortcuts"
+              className={`w-6 h-6 rounded flex items-center justify-center transition-colors ${showShortcuts ? 'text-blue-400 bg-blue-500/15' : 'text-gray-500 hover:text-gray-200 hover:bg-white/10'}`}>
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="2" y="6" width="20" height="13" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/>
+              </svg>
+            </button>
             <button onClick={toggleCollapse} title="Collapse to pill"
               className="w-6 h-6 rounded flex items-center justify-center text-gray-500 hover:text-gray-200 hover:bg-white/10 transition-colors">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
@@ -869,6 +880,30 @@ export default function App(): JSX.Element {
                 Report
               </button>
             </div>
+          </div>
+        )}
+
+        {/* ── Shortcuts panel ── */}
+        {showShortcuts && (
+          <div className="border-b border-white/10 px-3 py-2.5 flex flex-col gap-2 flex-shrink-0"
+            style={{ background: 'rgba(8,8,8,0.7)' }}>
+            <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Keyboard Shortcuts</p>
+            {[
+              { keys: ['⌘', 'Shift', 'Space'], label: 'Show / hide app' },
+              { keys: ['⌘', '↵'], label: 'Read screen + analyze' },
+            ].map(({ keys, label }) => (
+              <div key={label} className="flex items-center justify-between">
+                <span className="text-[11px] text-gray-400">{label}</span>
+                <div className="flex items-center gap-1">
+                  {keys.map((k) => (
+                    <kbd key={k} className="px-1.5 py-0.5 rounded text-[10px] font-semibold text-gray-300"
+                      style={{ background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)' }}>
+                      {k}
+                    </kbd>
+                  ))}
+                </div>
+              </div>
+            ))}
           </div>
         )}
         </>
