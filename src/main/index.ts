@@ -1,3 +1,4 @@
+import * as Sentry from '@sentry/electron/main'
 import {
   app, shell, BrowserWindow, globalShortcut, ipcMain,
   desktopCapturer, session, systemPreferences, protocol,
@@ -12,8 +13,23 @@ import {
   emailSignIn, emailSignUp, googleSignIn, appleSignIn, handleOAuthCallback,
   loadSession, logout, getAccessToken, clearTokens,
 } from './supabase-auth'
+import { log, readRecentLogs, LOG_FILE_PATH } from './logger'
 
 dotenv.config({ path: is.dev ? '.env' : path.join(process.resourcesPath, '.env') })
+
+// ── Sentry (automatic crash + error monitoring) ───────────────────────────────
+const SENTRY_DSN = process.env.SENTRY_DSN
+if (SENTRY_DSN) {
+  Sentry.init({
+    dsn: SENTRY_DSN,
+    environment: is.dev ? 'development' : 'production',
+    release: app.getVersion(),
+  })
+}
+
+// Catch unhandled main-process errors and log them
+process.on('uncaughtException',  (err) => log.error('Uncaught exception', err))
+process.on('unhandledRejection', (err) => log.error('Unhandled rejection', err))
 
 const BACKEND_URL = process.env.BACKEND_URL || 'https://meeting-ai-three-theta.vercel.app'
 
@@ -132,6 +148,7 @@ app.on('second-instance', (_event, commandLine) => {
 })
 
 app.whenReady().then(async () => {
+  log.info(`App started v${app.getVersion()} platform=${process.platform} arch=${process.arch}`)
   electronApp.setAppUserModelId('com.meeting-ai')
 
   // Handle meetingai:// URLs navigated to inside a BrowserWindow (OAuth popup)
@@ -433,6 +450,34 @@ ipcMain.handle('history:clear', (_e, userId: string) => {
     if (fs.existsSync(file)) fs.rmSync(file)
     return true
   } catch { return false }
+})
+
+// ── Report Issue ──────────────────────────────────────────────────────────────
+ipcMain.handle('report-issue', async (_e, userDescription: string) => {
+  const logs = readRecentLogs(150)
+  const info = [
+    `Meeting AI — Diagnostic Report`,
+    `Generated: ${new Date().toISOString()}`,
+    `Version: ${app.getVersion()}`,
+    `Platform: ${process.platform} ${process.arch}`,
+    `OS: ${os.release()}`,
+    `Electron: ${process.versions.electron}`,
+    `Node: ${process.versions.node}`,
+    `Log file: ${LOG_FILE_PATH}`,
+    '',
+    '── User description ──',
+    userDescription || '(none provided)',
+    '',
+    '── Recent logs (last 150 lines) ──',
+    logs,
+  ].join('\n')
+
+  log.info('User submitted issue report', { description: userDescription })
+
+  const subject = encodeURIComponent(`[Meeting AI] Issue Report — v${app.getVersion()}`)
+  const body    = encodeURIComponent(info.slice(0, 4000)) // mailto body limit
+  shell.openExternal(`mailto:support@thavionai.com?subject=${subject}&body=${body}`)
+  return true
 })
 
 // ── Save notes ────────────────────────────────────────────────────────────────

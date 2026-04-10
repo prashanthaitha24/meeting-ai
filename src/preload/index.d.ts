@@ -9,6 +9,20 @@ export interface Session {
   expiresAt: number
 }
 
+export interface HistoryEntry {
+  id: string
+  question: string
+  answer: string
+}
+
+export interface HistorySession {
+  id: string
+  date: string
+  transcript: string
+  entries: HistoryEntry[]
+  tabContent: { say: string; followup: string; recap: string }
+}
+
 export interface UsageInfo {
   subscriptionStatus: 'free' | 'active' | 'canceled' | 'past_due'
   freeCallsUsed: number
@@ -21,6 +35,7 @@ interface MeetingAPI {
   emailSignIn(email: string, password: string): Promise<Session>
   emailSignUp(email: string, password: string, name: string): Promise<Session>
   googleSignIn(): Promise<Session>
+  appleSignIn(): Promise<Session>
   logout(): Promise<boolean>
 
   getUsage(): Promise<UsageInfo | null>
@@ -45,6 +60,15 @@ interface MeetingAPI {
 
   openExternal(url: string): Promise<void>
   saveNotes(content: string): Promise<boolean>
+
+  saveSession(userId: string, session: HistorySession): Promise<boolean>
+  loadHistory(userId: string, days: number): Promise<HistorySession[]>
+  clearHistory(userId: string): Promise<boolean>
+
+  loadSettings(): Promise<Record<string, unknown>>
+  saveSettings(settings: Record<string, unknown>): Promise<boolean>
+
+  reportIssue(description: string): Promise<boolean>
 }
 
 declare global {

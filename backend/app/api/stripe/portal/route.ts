@@ -3,6 +3,8 @@ import { stripe } from '@/lib/stripe'
 import { supabaseAdmin } from '@/lib/supabase'
 import { verifyAuth } from '@/lib/auth'
 
+export const dynamic = 'force-dynamic'
+
 export async function POST(req: NextRequest) {
   const auth = await verifyAuth(req)
   if (!auth.ok) return Response.json({ error: 'Unauthorized' }, { status: 401 })

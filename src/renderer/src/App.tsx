@@ -3,10 +3,12 @@ import type { Session, UsageInfo } from '../../preload/index.d'
 import { SpeechTranscriber } from './lib/speech'
 import { TranscriptPanel, TranscriptEntry } from './components/TranscriptPanel'
 import { AuthScreen } from './components/AuthScreen'
+import { ConsentScreen } from './components/ConsentScreen'
+import { HistoryTab } from './components/HistoryTab'
 import { UpgradeModal } from './components/UpgradeModal'
 
-const EXPANDED_WIDTH   = 440
-const EXPANDED_HEIGHT  = 760
+const EXPANDED_WIDTH   = 400
+const EXPANDED_HEIGHT  = 540
 const COLLAPSED_WIDTH  = 210
 const COLLAPSED_HEIGHT = 30
 
@@ -16,11 +18,12 @@ const SILENCE_FLUSH_MS      = 1200
 const MIN_SPEECH_MS         = 1000
 const MAX_CHUNK_MS          = 12000
 
-type Tab = 'assist' | 'say' | 'followup' | 'recap'
+type Tab = 'assist' | 'say' | 'followup' | 'recap' | 'history'
+type ContentTab = 'say' | 'followup' | 'recap'
 type Mode = 'listening' | 'ask'
 type StreamTarget =
   | { kind: 'entry'; id: string }
-  | { kind: 'tab'; tab: Exclude<Tab, 'assist'> }
+  | { kind: 'tab'; tab: ContentTab }
 
 function looksLikeQuestion(text: string): boolean {
   // Strip common filler words Whisper prepends (So, And, Well, Now, Okay…)
@@ -32,11 +35,89 @@ function looksLikeQuestion(text: string): boolean {
 
 function uid() { return Math.random().toString(36).slice(2) }
 
+// ── Report Issue modal ────────────────────────────────────────────────────────
+function ReportIssueModal({ onClose }: { onClose: () => void }): JSX.Element {
+  const [description, setDescription] = React.useState('')
+  const [status, setStatus] = React.useState<'idle' | 'sending' | 'sent' | 'error'>('idle')
+
+  const handleSend = async () => {
+    setStatus('sending')
+    try {
+      await window.api.reportIssue(description)
+      setStatus('sent')
+    } catch {
+      setStatus('error')
+    }
+  }
+
+  return (
+    <div className="absolute inset-0 flex items-center justify-center z-50 rounded-xl"
+      style={{ background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(8px)' }}>
+      <div className="mx-4 rounded-2xl border border-white/15 overflow-hidden w-full"
+        style={{ background: 'rgba(20,20,20,0.98)', maxWidth: 340 }}>
+        <div className="px-4 pt-4 pb-3 border-b border-white/10 flex items-center justify-between">
+          <div>
+            <h2 className="text-sm font-semibold text-white">Report an Issue</h2>
+            <p className="text-[10px] text-gray-500 mt-0.5">We'll receive your logs automatically</p>
+          </div>
+          <button onClick={onClose} className="w-6 h-6 rounded flex items-center justify-center text-gray-600 hover:text-gray-300 hover:bg-white/10 transition-colors">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+        <div className="px-4 py-3 flex flex-col gap-3">
+          {status === 'sent' ? (
+            <div className="text-center py-4">
+              <p className="text-emerald-400 text-sm font-semibold mb-1">Report sent!</p>
+              <p className="text-xs text-gray-500">Your email client opened with the report. We'll follow up at your email address.</p>
+              <button onClick={onClose} className="mt-4 px-4 py-1.5 rounded-lg bg-white/8 hover:bg-white/12 text-xs text-gray-300 transition-colors">Close</button>
+            </div>
+          ) : (
+            <>
+              <div>
+                <label className="text-[10px] text-gray-500 font-medium uppercase tracking-wide">What happened? (optional)</label>
+                <textarea
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  placeholder="Describe what you were doing when the issue occurred…"
+                  rows={4}
+                  className="w-full mt-1.5 rounded-lg px-3 py-2 text-xs outline-none resize-none"
+                  style={{ background: 'rgba(255,255,255,0.07)', border: '1px solid rgba(255,255,255,0.12)', color: '#f1f5f9', caretColor: '#60a5fa', WebkitUserSelect: 'text' }}
+                />
+              </div>
+              <p className="text-[10px] text-gray-600 leading-relaxed">
+                This will open your email client with app logs and system info pre-filled. No personal meeting content is included.
+              </p>
+              {status === 'error' && (
+                <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-lg px-3 py-2">
+                  Could not open email. Please email us at support@thavionai.com
+                </p>
+              )}
+              <div className="flex gap-2">
+                <button onClick={onClose} className="flex-1 py-2 rounded-lg text-xs text-gray-600 hover:text-gray-400 border border-white/8 transition-colors">Cancel</button>
+                <button
+                  onClick={handleSend}
+                  disabled={status === 'sending'}
+                  className="flex-1 py-2 rounded-lg bg-orange-600/80 hover:bg-orange-500 disabled:opacity-50 text-xs font-semibold text-white transition-colors flex items-center justify-center gap-1.5">
+                  {status === 'sending'
+                    ? <span className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    : 'Send Report'}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Auth shell ────────────────────────────────────────────────────────────────
 function AuthShell({ onLogin }: { onLogin: (s: Session) => void }) {
   return (
     <div className="flex flex-col select-none overflow-hidden rounded-2xl border border-white/15"
-      style={{ background: 'rgba(15,15,15,0.95)', backdropFilter: 'blur(16px)', height: EXPANDED_HEIGHT, width: EXPANDED_WIDTH }}>
+      style={{ background: 'rgba(15,15,15,0.95)', backdropFilter: 'blur(16px)', height: '100vh', width: '100vw' }}>
       <div className="flex items-center justify-between px-3 border-b border-white/10 flex-shrink-0"
         style={{ height: COLLAPSED_HEIGHT, WebkitAppRegion: 'drag' } as React.CSSProperties}>
         <div className="flex items-center gap-2">
@@ -63,6 +144,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'say',      label: 'Say This' },
   { id: 'followup', label: 'Follow-up' },
   { id: 'recap',    label: 'Recap' },
+  { id: 'history',  label: 'History' },
 ]
 
 // ── Generated content panel ────────────────────────────────────────────────────
@@ -119,6 +201,7 @@ function GeneratedPanel({
 
 // ── Main app ──────────────────────────────────────────────────────────────────
 export default function App(): JSX.Element {
+  const [consentGiven, setConsentGiven] = useState(() => localStorage.getItem('consent_accepted') === 'true')
   const [session, setSession] = useState<Session | null | 'loading'>('loading')
   const [usage, setUsage] = useState<UsageInfo | null>(null)
   const [showUpgradeModal, setShowUpgradeModal] = useState(false)
@@ -157,14 +240,31 @@ export default function App(): JSX.Element {
   const [activeTab, setActiveTab]     = useState<Tab>('assist')
   const [activeMode, setActiveMode]   = useState<Mode>('listening')
 
+  // Settings
+  const [undetectable, setUndetectable] = useState(true)
+  const [showSettings, setShowSettings] = useState(false)
+  const [showReportModal, setShowReportModal] = useState(false)
+
+  // UX indicators
+  const [showTakingNotes, setShowTakingNotes] = useState(false)
+  const [showSummaryBanner, setShowSummaryBanner] = useState(false)
+  const [firstVoiceSeen, setFirstVoiceSeen] = useState(false)
+
+  // Load settings on mount
+  useEffect(() => {
+    window.api.loadSettings().then((s) => {
+      if (typeof s.undetectable === 'boolean') setUndetectable(s.undetectable)
+    })
+  }, [])
+
   // Inline Q&A feed
   const [entries, setEntries] = useState<TranscriptEntry[]>([])
 
   // Generated tab content
-  const [tabContent, setTabContent] = useState<Record<Exclude<Tab, 'assist'>, string>>({
+  const [tabContent, setTabContent] = useState<Record<ContentTab, string>>({
     say: '', followup: '', recap: '',
   })
-  const [tabStreaming, setTabStreaming] = useState<Record<Exclude<Tab, 'assist'>, boolean>>({
+  const [tabStreaming, setTabStreaming] = useState<Record<ContentTab, boolean>>({
     say: false, followup: false, recap: false,
   })
 
@@ -180,12 +280,18 @@ export default function App(): JSX.Element {
   // (recorder.onstop is set up once; without refs it captures stale state)
   const isStreamingRef  = useRef(false)
   const entriesRef      = useRef<TranscriptEntry[]>([])
+  const usageRef        = useRef(usage)
   isStreamingRef.current = isStreaming
   entriesRef.current     = entries
+  usageRef.current       = usage
 
   // ── Screen read ─────────────────────────────────────────────────────────────
   const triggerScreenRead = useCallback(() => {
     if (isStreaming) return
+    if (usageRef.current && !usageRef.current.canMakeCall) {
+      setShowUpgradeModal(true)
+      return
+    }
     const id = uid()
     streamTargetRef.current = { kind: 'entry', id }
     streamingTextRef.current = ''
@@ -224,6 +330,8 @@ export default function App(): JSX.Element {
       if (done) {
         const finalText = streamingTextRef.current
         setIsStreaming(false)
+        // Refresh usage count after each AI response
+        window.api.getUsage().then(setUsage)
         if (target.kind === 'entry') {
           const id = target.id
           setEntries((prev) => prev.map((e) =>
@@ -291,6 +399,10 @@ export default function App(): JSX.Element {
   // skipDedup=true for manual typed questions; false for auto speech detection.
   const sendQuestion = useCallback((question: string, skipDedup = false) => {
     if (isStreamingRef.current) return
+    if (usageRef.current && !usageRef.current.canMakeCall) {
+      setShowUpgradeModal(true)
+      return
+    }
     if (!skipDedup && question === lastQuestionRef.current) return
     lastQuestionRef.current = question
 
@@ -321,12 +433,16 @@ export default function App(): JSX.Element {
   }, []) // stable — all live values come from refs
 
   // ── Generate tab content ────────────────────────────────────────────────────
-  const generateTabContent = useCallback((tab: Exclude<Tab, 'assist'>) => {
+  const generateTabContent = useCallback((tab: ContentTab) => {
     if (isStreaming) return
+    if (usageRef.current && !usageRef.current.canMakeCall) {
+      setShowUpgradeModal(true)
+      return
+    }
     const transcript = transcriptRef.current
     if (!transcript.trim()) return
 
-    const prompts: Record<Exclude<Tab, 'assist'>, string> = {
+    const prompts: Record<ContentTab, string> = {
       say: 'Review the transcript and give 3-5 short, confident statements the candidate can say out loud right now. Number each one. Be direct — no fluff.',
       followup: 'Review the transcript and write 5 smart questions the candidate or interviewer should raise next. Number each one. Be specific to what was discussed.',
       recap: 'Write a structured summary of the conversation so far. Include: (1) Key topics covered, (2) Important points made, (3) Decisions or outcomes, (4) What to expect next. Keep each section to 2-3 bullet points.',
@@ -357,6 +473,14 @@ export default function App(): JSX.Element {
   const appendSpeech = useCallback((text: string) => {
     if (!text) return
     transcriptRef.current = transcriptRef.current ? `${transcriptRef.current} ${text}` : text
+
+    // Show "Taking notes" toast on first voice detected
+    if (!firstVoiceSeen) {
+      setFirstVoiceSeen(true)
+      setShowTakingNotes(true)
+      setTimeout(() => setShowTakingNotes(false), 3000)
+    }
+
     setEntries((prev) => {
       const last = prev[prev.length - 1]
       if (last?.type === 'speech') {
@@ -365,7 +489,7 @@ export default function App(): JSX.Element {
       return [...prev, { id: uid(), type: 'speech', text }]
     })
     if (looksLikeQuestion(text)) sendQuestion(text)
-  }, [sendQuestion])
+  }, [sendQuestion, firstVoiceSeen])
 
   // Stable ref so the recorder closure always calls the latest appendSpeech
   const appendSpeechRef = useRef(appendSpeech)
@@ -460,6 +584,11 @@ export default function App(): JSX.Element {
     setStatus('Stopped')
     setActiveMode('ask')
     setActiveTab('assist')
+    setFirstVoiceSeen(false)
+    // Show summary banner if there's meaningful content
+    if (transcriptRef.current.trim().split(' ').length > 20) {
+      setShowSummaryBanner(true)
+    }
     focusInput()
   }
 
@@ -504,10 +633,55 @@ export default function App(): JSX.Element {
 
   const handleLogout = async () => {
     stopRecording()
+    // Save current session to history before logging out
+    const qaEntries = entries
+      .filter((e): e is Extract<typeof entries[number], { type: 'qa' }> => e.type === 'qa' && !!e.answer)
+      .map((e) => e.type === 'qa' ? { id: e.id, question: e.question, answer: e.answer } : null)
+      .filter(Boolean)
+    if (session && typeof session !== 'string' && qaEntries.length > 0) {
+      await window.api.saveSession(session.userId, {
+        id: Math.random().toString(36).slice(2),
+        date: new Date().toISOString(),
+        transcript: transcriptRef.current,
+        entries: qaEntries as { id: string; question: string; answer: string }[],
+        tabContent,
+      })
+    }
     await window.api.logout()
     setSession(null)
     setUsage(null)
     setShowUpgradeModal(false)
+  }
+
+  // ── Consent (first launch only) ─────────────────────────────────────────────
+  if (!consentGiven) {
+    return (
+      <div className="flex flex-col select-none overflow-hidden rounded-2xl border border-white/15"
+        style={{ background: 'rgba(15,15,15,0.95)', backdropFilter: 'blur(16px)', height: EXPANDED_HEIGHT, width: EXPANDED_WIDTH }}>
+        <div className="flex items-center justify-between px-3 border-b border-white/10 flex-shrink-0"
+          style={{ height: COLLAPSED_HEIGHT, WebkitAppRegion: 'drag' } as React.CSSProperties}>
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-gray-700" />
+            <span className="text-xs font-semibold text-gray-300 tracking-wide">Meeting AI</span>
+          </div>
+          <div style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+            <button onClick={() => window.api.closeWindow()}
+              className="w-6 h-6 rounded flex items-center justify-center text-gray-600 hover:text-red-400 hover:bg-white/10 transition-colors">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+        </div>
+        <ConsentScreen
+          onAccept={() => {
+            localStorage.setItem('consent_accepted', 'true')
+            setConsentGiven(true)
+          }}
+          onDecline={() => window.api.closeWindow()}
+        />
+      </div>
+    )
   }
 
   // ── Loading ─────────────────────────────────────────────────────────────────
@@ -523,6 +697,18 @@ export default function App(): JSX.Element {
   if (!session) return (
     <AuthShell onLogin={(s) => {
       setSession(s)
+      setEntries([])
+      setTabContent({ say: '', followup: '', recap: '' })
+      setTabStreaming({ say: false, followup: false, recap: false })
+      setIsStreaming(false)
+      setInterimText('')
+      setActiveTab('assist')
+      setActiveMode('listening')
+      setShowSummaryBanner(false)
+      setFirstVoiceSeen(false)
+      transcriptRef.current = ''
+      lastQuestionRef.current = ''
+      streamTargetRef.current = null
       window.api.getUsage().then(setUsage)
     }} />
   )
@@ -535,8 +721,8 @@ export default function App(): JSX.Element {
         background: isCollapsed ? 'rgba(14,14,14,0.92)' : 'rgba(18,18,18,0.82)',
         backdropFilter: 'blur(20px)',
         borderRadius: isCollapsed ? 999 : 14,
-        height: isCollapsed ? COLLAPSED_HEIGHT : EXPANDED_HEIGHT,
-        width: isCollapsed ? COLLAPSED_WIDTH : EXPANDED_WIDTH,
+        height: isCollapsed ? COLLAPSED_HEIGHT : '100vh',
+        width: isCollapsed ? COLLAPSED_WIDTH : '100vw',
         transition: 'border-radius 0.25s ease',
         boxShadow: isCollapsed
           ? '0 4px 24px rgba(0,0,0,0.5)'
@@ -549,6 +735,11 @@ export default function App(): JSX.Element {
           onClose={() => setShowUpgradeModal(false)}
           freeCallsUsed={usage?.freeCallsUsed ?? 5}
         />
+      )}
+
+      {/* ── Report Issue modal ── */}
+      {showReportModal && !isCollapsed && (
+        <ReportIssueModal onClose={() => setShowReportModal(false)} />
       )}
 
       {/* ── Header / collapsed pill ── */}
@@ -574,7 +765,8 @@ export default function App(): JSX.Element {
           </div>
         </div>
       ) : (
-        /* Full header */
+        /* Full header + settings panel */
+        <>
         <div
           className="flex items-center justify-between px-3 border-b border-white/10 flex-shrink-0"
           style={{ height: 40, background: 'rgba(8,8,8,0.5)', WebkitAppRegion: 'drag', borderRadius: '14px 14px 0 0' } as React.CSSProperties}>
@@ -611,11 +803,26 @@ export default function App(): JSX.Element {
                 <polyline points="18 15 12 9 6 15" />
               </svg>
             </button>
-            <button onClick={handleLogout} title={`${session.email} — click to sign out`}
-              className="w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-semibold bg-blue-600/40 text-blue-300 hover:bg-red-600/40 hover:text-red-300 transition-colors overflow-hidden">
+            <div className="flex items-center gap-1">
               {session.avatarUrl
-                ? <img src={session.avatarUrl} alt="" className="w-full h-full object-cover rounded-full" />
-                : (session.name ?? session.email)[0].toUpperCase()}
+                ? <img src={session.avatarUrl} alt="" className="w-5 h-5 rounded-full object-cover border border-white/20" />
+                : <span className="w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-semibold bg-blue-600/40 text-blue-300 border border-blue-500/30">{(session.name ?? session.email)[0].toUpperCase()}</span>
+              }
+              <button onClick={handleLogout}
+                title={session.email}
+                className="px-1.5 py-0.5 rounded text-[9px] font-medium text-gray-500 hover:text-red-400 hover:bg-red-500/10 transition-colors border border-transparent hover:border-red-500/20">
+                Sign Out
+              </button>
+            </div>
+            {/* Settings gear */}
+            <button
+              onClick={() => setShowSettings((v) => !v)}
+              title="Settings"
+              className={`w-6 h-6 rounded flex items-center justify-center transition-colors ${showSettings ? 'text-blue-400 bg-blue-500/15' : 'text-gray-500 hover:text-gray-200 hover:bg-white/10'}`}>
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+              </svg>
             </button>
             <button onClick={() => window.api.hideWindow()}
               className="w-6 h-6 rounded flex items-center justify-center text-gray-500 hover:text-gray-200 hover:bg-white/10 transition-colors">
@@ -631,10 +838,44 @@ export default function App(): JSX.Element {
             </button>
           </div>
         </div>
+
+        {/* ── Settings panel ── */}
+        {showSettings && (
+          <div className="border-b border-white/10 px-3 py-2.5 flex flex-col gap-3 flex-shrink-0"
+            style={{ background: 'rgba(8,8,8,0.7)' }}>
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs font-medium text-gray-200">Stealth Mode</p>
+                <p className="text-[10px] text-gray-500 mt-0.5">Hide app from screen recordings &amp; screenshots</p>
+              </div>
+              <button
+                onClick={async () => {
+                  const next = !undetectable
+                  setUndetectable(next)
+                  await window.api.saveSettings({ undetectable: next })
+                }}
+                className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${undetectable ? 'bg-blue-600' : 'bg-gray-700'}`}>
+                <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${undetectable ? 'translate-x-4' : 'translate-x-0'}`} />
+              </button>
+            </div>
+            <div className="flex items-center justify-between pt-1 border-t border-white/8">
+              <div>
+                <p className="text-xs font-medium text-gray-200">Report an Issue</p>
+                <p className="text-[10px] text-gray-500 mt-0.5">Send logs &amp; app state to our support team</p>
+              </div>
+              <button
+                onClick={() => setShowReportModal(true)}
+                className="px-2 py-1 rounded text-[10px] font-semibold text-orange-400 bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/20 transition-colors flex-shrink-0">
+                Report
+              </button>
+            </div>
+          </div>
+        )}
+        </>
       )}
 
       {!isCollapsed && (
-        <>
+        <div className="flex flex-col flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
           {/* ── Mode toggle ── */}
           <div className="flex items-center px-3 py-2 gap-2 flex-shrink-0 border-b border-white/8"
             style={{ background: 'rgba(8,8,8,0.4)' }}>
@@ -682,7 +923,7 @@ export default function App(): JSX.Element {
                 {activeTab === tab.id && (
                   <span className="absolute bottom-0 left-2 right-2 h-0.5 bg-blue-500 rounded-full" />
                 )}
-                {tab.id !== 'assist' && tabStreaming[tab.id] && (
+                {tab.id !== 'assist' && tab.id !== 'history' && tabStreaming[tab.id as ContentTab] && (
                   <span className="absolute top-1.5 right-1.5 w-1 h-1 rounded-full bg-emerald-400 animate-pulse" />
                 )}
               </button>
@@ -690,7 +931,7 @@ export default function App(): JSX.Element {
           </div>
 
           {/* ── Tab content ── */}
-          <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
+          <div className="flex flex-col overflow-hidden" style={{ minHeight: 220, flex: '1 1 220px' }}>
             {activeTab === 'assist' && (
               <TranscriptPanel
                 entries={entries}
@@ -735,6 +976,10 @@ export default function App(): JSX.Element {
                 onGenerate={() => generateTabContent('recap')}
                 disabled={isStreaming || !transcriptRef.current.trim()}
               />
+            )}
+
+            {activeTab === 'history' && session && typeof session !== 'string' && (
+              <HistoryTab userId={session.userId} />
             )}
           </div>
 
@@ -800,7 +1045,45 @@ export default function App(): JSX.Element {
               </svg>
             </button>
           </div>
-        </>
+
+          {/* ── Summary banner ── */}
+          {showSummaryBanner && !isRecording && (
+            <div className="mx-3 mb-2 px-3 py-2 rounded-lg border border-emerald-500/30 flex items-center justify-between gap-2 flex-shrink-0"
+              style={{ background: 'rgba(16,185,129,0.08)' }}>
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-emerald-400 text-sm">✦</span>
+                <p className="text-[11px] text-emerald-300 font-medium truncate">Meeting ended — generate recap?</p>
+              </div>
+              <div className="flex items-center gap-1.5 flex-shrink-0">
+                <button
+                  onClick={() => {
+                    setShowSummaryBanner(false)
+                    generateTabContent('recap')
+                    setActiveTab('recap')
+                  }}
+                  className="px-2.5 py-1 rounded-md bg-emerald-600/80 hover:bg-emerald-500 text-[10px] font-semibold text-white transition-colors">
+                  Generate
+                </button>
+                <button
+                  onClick={() => setShowSummaryBanner(false)}
+                  className="w-5 h-5 rounded flex items-center justify-center text-emerald-600 hover:text-emerald-300 transition-colors">
+                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Taking notes toast ── */}
+      {showTakingNotes && (
+        <div className="absolute bottom-14 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-full flex items-center gap-1.5 pointer-events-none"
+          style={{ background: 'rgba(16,185,129,0.15)', border: '1px solid rgba(16,185,129,0.3)', backdropFilter: 'blur(8px)' }}>
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+          <span className="text-[11px] font-medium text-emerald-300">Taking notes…</span>
+        </div>
       )}
     </div>
   )

@@ -1,6 +1,6 @@
 import { supabaseAdmin } from './supabase'
 
-const FREE_LIMIT = 5
+const FREE_LIMIT = 3
 
 export interface UsageInfo {
   subscriptionStatus: 'free' | 'active' | 'canceled'

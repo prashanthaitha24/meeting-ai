@@ -3,6 +3,8 @@ import { stripe } from '@/lib/stripe'
 import { supabaseAdmin } from '@/lib/supabase'
 import Stripe from 'stripe'
 
+export const dynamic = 'force-dynamic'
+
 export async function POST(req: NextRequest) {
   const body = await req.text()
   const sig = req.headers.get('stripe-signature')
@@ -15,7 +17,7 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: 'Invalid signature' }, { status: 400 })
   }
 
-  const getUserId = (obj: { metadata?: { userId?: string } }) => obj.metadata?.userId
+  const getUserId = (obj: { metadata?: { userId?: string } | null }) => obj.metadata?.userId
 
   switch (event.type) {
     case 'checkout.session.completed': {

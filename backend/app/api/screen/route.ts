@@ -3,8 +3,14 @@ import OpenAI from 'openai'
 import { verifyAuth } from '@/lib/auth'
 import { checkAndConsume } from '@/lib/usage'
 
-const groq = new OpenAI({ apiKey: process.env.GROQ_API_KEY, baseURL: 'https://api.groq.com/openai/v1' })
+export const dynamic = 'force-dynamic'
+
 const enc = new TextEncoder()
+let _groq: OpenAI | undefined
+function getGroq() {
+  if (!_groq) _groq = new OpenAI({ apiKey: process.env.GROQ_API_KEY, baseURL: 'https://api.groq.com/openai/v1' })
+  return _groq
+}
 function sse(data: object) { return enc.encode(`data: ${JSON.stringify(data)}\n\n`) }
 
 export async function POST(req: NextRequest) {
@@ -33,7 +39,7 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: 'Invalid image' }, { status: 400 })
   }
 
-  const stream = await groq.chat.completions.create({
+  const stream = await getGroq().chat.completions.create({
     model: 'meta-llama/llama-4-scout-17b-16e-instruct',
     max_tokens: 1024,
     stream: true,

@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
-import { safeStorage, shell } from 'electron'
+import { safeStorage, shell, BrowserWindow } from 'electron'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
@@ -8,8 +8,9 @@ import { is } from '@electron-toolkit/utils'
 
 dotenv.config({ path: is.dev ? '.env' : path.join(process.resourcesPath, '.env') })
 
-const SUPABASE_URL = process.env.SUPABASE_URL!
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY!
+// These are public-facing keys — safe to hardcode (equivalent to a client-side Supabase config)
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://xmobfykkusdkomxbpjsr.supabase.co'
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhtb2JmeWtrdXNka29teGJwanNyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2NjQ3ODAsImV4cCI6MjA5MTI0MDc4MH0.D5UaNqxHibyb-mVMG9BiUqQuJZSA512jGapLDcMkMSc'
 const TOKENS_FILE = path.join(os.homedir(), '.meeting-ai', 'tokens')
 
 // Supabase client — persistSession:false because we manage storage ourselves
@@ -146,6 +147,43 @@ type OAuthPending = {
 }
 let pendingOAuth: OAuthPending | null = null
 
+let oauthWindow: BrowserWindow | null = null
+
+function openOAuthPopup(url: string): void {
+  if (oauthWindow && !oauthWindow.isDestroyed()) {
+    oauthWindow.close()
+  }
+  oauthWindow = new BrowserWindow({
+    width: 520,
+    height: 640,
+    title: 'Sign in',
+    show: true,
+    autoHideMenuBar: true,
+    webPreferences: { nodeIntegration: false, contextIsolation: true },
+  })
+  oauthWindow.loadURL(url)
+
+  const handleDeepLink = (navUrl: string) => {
+    if (!navUrl.startsWith('meetingai://')) return false
+    handleOAuthCallback(navUrl)
+    if (oauthWindow && !oauthWindow.isDestroyed()) oauthWindow.close()
+    oauthWindow = null
+    return true
+  }
+
+  // Catch navigation-based redirects (will-navigate fires before the page loads)
+  oauthWindow.webContents.on('will-navigate', (_e, navUrl) => { handleDeepLink(navUrl) })
+  // Catch JS-triggered redirects (location.href = 'meetingai://...')
+  oauthWindow.webContents.on('did-navigate', (_e, navUrl) => { handleDeepLink(navUrl) })
+  // Some OAuth providers redirect via a new window — catch that too
+  oauthWindow.webContents.setWindowOpenHandler(({ url: newUrl }) => {
+    if (handleDeepLink(newUrl)) return { action: 'deny' }
+    return { action: 'allow' }
+  })
+
+  oauthWindow.on('closed', () => { oauthWindow = null })
+}
+
 export async function googleSignIn(): Promise<AppSession> {
   return new Promise(async (resolve, reject) => {
     const { data, error } = await supabase.auth.signInWithOAuth({
@@ -159,14 +197,37 @@ export async function googleSignIn(): Promise<AppSession> {
     })
     if (error || !data.url) { reject(new Error(error?.message ?? 'No OAuth URL')); return }
 
-    shell.openExternal(data.url)
-
     const timer = setTimeout(() => {
       pendingOAuth = null
+      if (oauthWindow && !oauthWindow.isDestroyed()) { oauthWindow.close(); oauthWindow = null }
       reject(new Error('Sign-in timed out — please try again'))
     }, 5 * 60 * 1000)
 
     pendingOAuth = { resolve, reject, timer }
+    openOAuthPopup(data.url)
+  })
+}
+
+export async function appleSignIn(): Promise<AppSession> {
+  return new Promise(async (resolve, reject) => {
+    const { data, error } = await supabase.auth.signInWithOAuth({
+      provider: 'apple',
+      options: {
+        redirectTo: 'meetingai://auth/callback',
+        skipBrowserRedirect: true,
+        scopes: 'name email',
+      },
+    })
+    if (error || !data.url) { reject(new Error(error?.message ?? 'No OAuth URL')); return }
+
+    const timer = setTimeout(() => {
+      pendingOAuth = null
+      if (oauthWindow && !oauthWindow.isDestroyed()) { oauthWindow.close(); oauthWindow = null }
+      reject(new Error('Sign-in timed out — please try again'))
+    }, 5 * 60 * 1000)
+
+    pendingOAuth = { resolve, reject, timer }
+    openOAuthPopup(data.url)
   })
 }
 
@@ -175,24 +236,46 @@ export async function handleOAuthCallback(url: string): Promise<void> {
   if (!pendingOAuth) return
   try {
     const parsed = new URL(url)
-    // Supabase PKCE returns the code as a query param
+
+    // PKCE flow: code comes as a query param (?code=xxx)
     const code = parsed.searchParams.get('code')
-    if (!code) {
-      pendingOAuth.reject(new Error('No auth code in callback URL'))
+    if (code) {
+      const { data, error } = await supabase.auth.exchangeCodeForSession(code)
+      if (error || !data.session) {
+        pendingOAuth.reject(new Error(error?.message ?? 'Failed to exchange code'))
+        clearTimeout(pendingOAuth.timer)
+        pendingOAuth = null
+        return
+      }
+      const session = sessionFromSupabase(data.session)
       clearTimeout(pendingOAuth.timer)
+      pendingOAuth.resolve(session)
       pendingOAuth = null
       return
     }
-    const { data, error } = await supabase.auth.exchangeCodeForSession(code)
-    if (error || !data.session) {
-      pendingOAuth.reject(new Error(error?.message ?? 'Failed to exchange code'))
+
+    // Implicit flow: tokens come in the hash fragment (#access_token=xxx&refresh_token=xxx)
+    const hash = parsed.hash.startsWith('#') ? parsed.hash.slice(1) : parsed.hash
+    const params = new URLSearchParams(hash)
+    const accessToken = params.get('access_token')
+    const refreshToken = params.get('refresh_token')
+    if (accessToken && refreshToken) {
+      const { data, error } = await supabase.auth.setSession({ access_token: accessToken, refresh_token: refreshToken })
+      if (error || !data.session) {
+        pendingOAuth.reject(new Error(error?.message ?? 'Failed to set session'))
+        clearTimeout(pendingOAuth.timer)
+        pendingOAuth = null
+        return
+      }
+      const session = sessionFromSupabase(data.session)
       clearTimeout(pendingOAuth.timer)
+      pendingOAuth.resolve(session)
       pendingOAuth = null
       return
     }
-    const session = sessionFromSupabase(data.session)
+
+    pendingOAuth.reject(new Error('No auth code or tokens in callback URL'))
     clearTimeout(pendingOAuth.timer)
-    pendingOAuth.resolve(session)
     pendingOAuth = null
   } catch (e) {
     pendingOAuth?.reject(e instanceof Error ? e : new Error(String(e)))

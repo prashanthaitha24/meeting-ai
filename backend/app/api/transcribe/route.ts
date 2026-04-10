@@ -1,6 +1,8 @@
 import { NextRequest } from 'next/server'
 import { verifyAuth } from '@/lib/auth'
 
+export const dynamic = 'force-dynamic'
+
 export async function POST(req: NextRequest) {
   const auth = await verifyAuth(req)
   if (!auth.ok) return Response.json({ error: 'Unauthorized' }, { status: 401 })

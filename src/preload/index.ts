@@ -7,6 +7,7 @@ const api = {
   emailSignIn: (email: string, password: string) => ipcRenderer.invoke('auth:email-signin', email, password),
   emailSignUp: (email: string, password: string, name: string) => ipcRenderer.invoke('auth:email-signup', email, password, name),
   googleSignIn: () => ipcRenderer.invoke('auth:google-signin'),
+  appleSignIn: () => ipcRenderer.invoke('auth:apple-signin'),
   logout: () => ipcRenderer.invoke('auth:logout'),
 
   // Usage & subscription
@@ -54,6 +55,15 @@ const api = {
   // Utilities
   openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
   saveNotes: (content: string) => ipcRenderer.invoke('save-notes', content),
+
+  saveSession: (userId: string, session: object) => ipcRenderer.invoke('history:save', userId, session),
+  loadHistory: (userId: string, days: number) => ipcRenderer.invoke('history:load', userId, days),
+  clearHistory: (userId: string) => ipcRenderer.invoke('history:clear', userId),
+
+  loadSettings: () => ipcRenderer.invoke('settings:load'),
+  saveSettings: (settings: Record<string, unknown>) => ipcRenderer.invoke('settings:save', settings),
+
+  reportIssue: (description: string) => ipcRenderer.invoke('report-issue', description),
 }
 
 if (process.contextIsolated) {

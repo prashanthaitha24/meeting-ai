@@ -13,11 +13,13 @@ export function AuthScreen({ onLogin }: Props): JSX.Element {
   const [password, setPassword] = useState('')
   const [name, setName] = useState('')
   const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState<'google' | 'email' | null>(null)
+  const [success, setSuccess] = useState<string | null>(null)
+  const [loading, setLoading] = useState<'google' | 'apple' | 'email' | null>(null)
 
   async function handleEmail(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
+    setSuccess(null)
     setLoading('email')
     try {
       const session =
@@ -26,7 +28,21 @@ export function AuthScreen({ onLogin }: Props): JSX.Element {
           : await window.api.emailSignUp(email, password, name)
       onLogin(session)
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Authentication failed')
+      const raw = err instanceof Error ? err.message : ''
+      const lower = raw.toLowerCase()
+      if (mode === 'signup' && (lower.includes('check your email') || lower.includes('confirm'))) {
+        setSuccess(`Account created! Check your email and click the confirmation link, then come back and sign in.`)
+      } else if (lower.includes('invalid login') || lower.includes('invalid credentials') || lower.includes('wrong password') || lower.includes('user not found') || lower.includes('no user')) {
+        setError('Incorrect email or password. Please try again.')
+      } else if (lower.includes('email not confirmed') || lower.includes('not confirmed')) {
+        setError('Please confirm your email address before signing in.')
+      } else if (lower.includes('too many requests') || lower.includes('rate limit')) {
+        setError('Too many attempts. Please wait a moment and try again.')
+      } else if (lower.includes('network') || lower.includes('fetch') || lower.includes('failed to fetch')) {
+        setError('Connection error. Please check your internet and try again.')
+      } else {
+        setError('Something went wrong. Please try again.')
+      }
     } finally {
       setLoading(null)
     }
@@ -40,6 +56,19 @@ export function AuthScreen({ onLogin }: Props): JSX.Element {
       onLogin(session)
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Google sign-in failed')
+    } finally {
+      setLoading(null)
+    }
+  }
+
+  async function handleApple() {
+    setError(null)
+    setLoading('apple')
+    try {
+      const session = await window.api.appleSignIn()
+      onLogin(session)
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Apple sign-in failed')
     } finally {
       setLoading(null)
     }
@@ -81,18 +110,21 @@ export function AuthScreen({ onLogin }: Props): JSX.Element {
         Continue with Google
       </button>
 
-      {/* Apple button (placeholder — requires Apple Developer setup) */}
+      {/* Apple Sign-In */}
       <button
-        disabled
-        title="Apple Sign-In requires Apple Developer Program setup. See README."
-        className="w-full flex items-center justify-center gap-2 py-2 px-4 rounded-lg border border-white/10 bg-white/3 text-sm text-gray-600 cursor-not-allowed mb-4"
+        onClick={handleApple}
+        disabled={!!loading}
+        className="w-full flex items-center justify-center gap-2 py-2 px-4 rounded-lg border border-white/15 bg-white/5 hover:bg-white/10 text-sm text-gray-200 transition-colors disabled:opacity-50 mb-4"
       >
-        <svg width="15" height="15" viewBox="0 0 814 1000" fill="currentColor">
-          <path d="M788.1 340.9c-5.8 4.5-108.2 62.2-108.2 190.5 0 148.4 130.3 200.9 134.2 202.2-.6 3.2-20.7 71.9-68.7 141.9-42.8 61.6-87.5 123.1-155.5 123.1s-85.5-39.5-164-39.5c-76 0-103.7 40.8-165.9 40.8s-105-57.8-155.5-127.4C46 790.7 0 663 0 541.8c0-207.5 134.4-317.5 266.5-317.5 49.2 0 101.3 32.3 134.4 32.3 27.9 0 84.5-36.7 147.8-36.7z"/>
-          <path d="M580.3 126.7c-23.8 27.2-62.4 48.9-103.8 45.7-3.7-36.5 14.2-74.6 36.5-100.2C535.6 46 576.3 25.5 614.8 24c3.7 37.3-10.9 75-34.5 102.7z"/>
-        </svg>
+        {loading === 'apple' ? (
+          <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+        ) : (
+          <svg width="15" height="15" viewBox="0 0 814 1000" fill="currentColor">
+            <path d="M788.1 340.9c-5.8 4.5-108.2 62.2-108.2 190.5 0 148.4 130.3 200.9 134.2 202.2-.6 3.2-20.7 71.9-68.7 141.9-42.8 61.6-87.5 123.1-155.5 123.1s-85.5-39.5-164-39.5c-76 0-103.7 40.8-165.9 40.8s-105-57.8-155.5-127.4C46 790.7 0 663 0 541.8c0-207.5 134.4-317.5 266.5-317.5 49.2 0 101.3 32.3 134.4 32.3 27.9 0 84.5-36.7 147.8-36.7z"/>
+            <path d="M580.3 126.7c-23.8 27.2-62.4 48.9-103.8 45.7-3.7-36.5 14.2-74.6 36.5-100.2C535.6 46 576.3 25.5 614.8 24c3.7 37.3-10.9 75-34.5 102.7z"/>
+          </svg>
+        )}
         Continue with Apple
-        <span className="text-[10px] text-gray-600 ml-1">(setup required)</span>
       </button>
 
       {/* Divider */}
@@ -111,7 +143,8 @@ export function AuthScreen({ onLogin }: Props): JSX.Element {
             value={name}
             onChange={(e) => setName(e.target.value)}
             required
-            className="w-full bg-white/8 border border-white/12 rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-500 outline-none focus:border-blue-500/60 transition-colors"
+            className="w-full rounded-lg px-3 py-2 text-sm outline-none transition-colors"
+            style={{ background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.12)', color: '#f1f5f9', caretColor: '#60a5fa', WebkitUserSelect: 'text' }}
           />
         )}
         <input
@@ -120,7 +153,8 @@ export function AuthScreen({ onLogin }: Props): JSX.Element {
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           required
-          className="w-full bg-white/8 border border-white/12 rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-500 outline-none focus:border-blue-500/60 transition-colors"
+          className="w-full rounded-lg px-3 py-2 text-sm outline-none transition-colors"
+          style={{ background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.12)', color: '#f1f5f9', caretColor: '#60a5fa', WebkitUserSelect: 'text' }}
         />
         <input
           type="password"
@@ -129,12 +163,18 @@ export function AuthScreen({ onLogin }: Props): JSX.Element {
           onChange={(e) => setPassword(e.target.value)}
           required
           minLength={8}
-          className="w-full bg-white/8 border border-white/12 rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-500 outline-none focus:border-blue-500/60 transition-colors"
+          className="w-full rounded-lg px-3 py-2 text-sm outline-none transition-colors"
+          style={{ background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.12)', color: '#f1f5f9', caretColor: '#60a5fa', WebkitUserSelect: 'text' }}
         />
 
         {error && (
           <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/40 rounded-lg px-3 py-2">
             {error}
+          </p>
+        )}
+        {success && (
+          <p className="text-xs text-emerald-400 bg-emerald-900/20 border border-emerald-800/40 rounded-lg px-3 py-2 leading-relaxed">
+            {success}
           </p>
         )}
 
@@ -161,10 +201,8 @@ export function AuthScreen({ onLogin }: Props): JSX.Element {
         </button>
       </p>
 
-      {/* Local account note */}
       <p className="text-[10px] text-gray-600 text-center mt-3 leading-relaxed">
-        Email accounts are stored locally on this device.
-        Sessions expire after 24 hours.
+        Check your email to confirm your account after signing up.
       </p>
     </div>
   )
