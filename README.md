@@ -16,7 +16,7 @@ A real-time AI assistant for meetings and interviews. Runs as a transparent floa
 - **Always on top** — floats above full-screen apps and all workspaces
 - **Session history** — last 90 days of meetings saved locally
 - **Report Issue** — one-click bug report with logs sent to support
-- **Free tier** — 3 AI responses per day; Pro ($9.99/mo) for unlimited
+- **Free tier** — 3 AI responses per day; Pro Monthly ($9.99/mo) or Pro Yearly ($49.99/yr, save 58%) for unlimited
 
 ---
 
@@ -238,7 +238,11 @@ create trigger on_auth_user_created
 
 ## Usage Limits
 
-Free users get **3 AI responses per day** (resets at midnight UTC). Pro subscribers get unlimited responses at $9.99/month via Stripe.
+Free users get **3 AI responses per day** (resets at midnight UTC). Pro subscribers get unlimited responses via Stripe:
+- **Pro Monthly** — $9.99/month
+- **Pro Yearly** — $49.99/year (~$4.17/month, save 58%)
+
+Add `STRIPE_YEARLY_PRICE_ID` to both `.env` and Vercel env vars for the yearly plan to work.
 
 ---
 

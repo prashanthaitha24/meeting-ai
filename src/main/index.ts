@@ -243,12 +243,13 @@ ipcMain.handle('get-usage', async () => {
 })
 
 // ── Stripe IPCs ───────────────────────────────────────────────────────────────
-ipcMain.handle('stripe:checkout', async () => {
+ipcMain.handle('stripe:checkout', async (_event, plan: 'monthly' | 'yearly' = 'monthly') => {
   const token = await getAccessToken()
   if (!token) throw new Error('Not authenticated')
   const res = await fetch(`${BACKEND_URL}/api/stripe/checkout`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}` },
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ plan }),
   })
   const body = await res.json().catch(() => ({})) as Record<string, unknown>
   if (!res.ok) {

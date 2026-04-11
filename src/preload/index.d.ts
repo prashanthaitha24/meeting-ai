@@ -39,7 +39,7 @@ interface MeetingAPI {
   logout(): Promise<boolean>
 
   getUsage(): Promise<UsageInfo | null>
-  stripeCheckout(): Promise<void>
+  stripeCheckout(plan?: 'monthly' | 'yearly'): Promise<void>
   stripePortal(): Promise<void>
   onUsageLimitReached(cb: (data: { upgradeUrl?: string }) => void): () => void
   onStripeSuccess(cb: () => void): () => void

@@ -12,7 +12,7 @@ const api = {
 
   // Usage & subscription
   getUsage: () => ipcRenderer.invoke('get-usage'),
-  stripeCheckout: () => ipcRenderer.invoke('stripe:checkout'),
+  stripeCheckout: (plan?: 'monthly' | 'yearly') => ipcRenderer.invoke('stripe:checkout', plan ?? 'monthly'),
   stripePortal: () => ipcRenderer.invoke('stripe:portal'),
   onUsageLimitReached: (cb: (data: { upgradeUrl?: string }) => void): (() => void) => {
     const handler = (_: Electron.IpcRendererEvent, data: { upgradeUrl?: string }) => cb(data)
