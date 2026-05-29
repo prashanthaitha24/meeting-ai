@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
-import { safeStorage, shell, BrowserWindow } from 'electron'
+import { safeStorage, shell } from 'electron'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
@@ -147,41 +147,42 @@ type OAuthPending = {
 }
 let pendingOAuth: OAuthPending | null = null
 
-let oauthWindow: BrowserWindow | null = null
+/** Reject and clear any in-flight OAuth attempt (timeout, cancel, or a new attempt). */
+function settlePending(reject: boolean, err?: Error): void {
+  if (!pendingOAuth) return
+  clearTimeout(pendingOAuth.timer)
+  if (reject) pendingOAuth.reject(err ?? new Error('Sign-in cancelled'))
+  pendingOAuth = null
+}
 
-function openOAuthPopup(url: string): void {
-  if (oauthWindow && !oauthWindow.isDestroyed()) {
-    oauthWindow.close()
-  }
-  oauthWindow = new BrowserWindow({
-    width: 520,
-    height: 640,
-    title: 'Sign in',
-    show: true,
-    autoHideMenuBar: true,
-    webPreferences: { nodeIntegration: false, contextIsolation: true },
-  })
-  oauthWindow.loadURL(url)
+/**
+ * Start an OAuth flow in the user's default browser. Google (and others)
+ * block sign-in inside embedded webviews, so we never load the provider
+ * page in a BrowserWindow. The provider redirects back to
+ * `meetingai://auth/callback`, which the main process routes to
+ * handleOAuthCallback() via the `open-url` / custom-scheme handler.
+ */
+function startOAuth(
+  provider: 'google' | 'apple',
+  url: string,
+  resolve: (s: AppSession) => void,
+  reject: (e: Error) => void,
+): void {
+  // A previous attempt is still pending — cancel it before starting a new one.
+  settlePending(true, new Error('Sign-in restarted'))
 
-  const handleDeepLink = (navUrl: string) => {
-    if (!navUrl.startsWith('meetingai://')) return false
-    handleOAuthCallback(navUrl)
-    if (oauthWindow && !oauthWindow.isDestroyed()) oauthWindow.close()
-    oauthWindow = null
-    return true
-  }
+  const timer = setTimeout(() => {
+    settlePending(true, new Error('Sign-in timed out — please try again'))
+  }, 5 * 60 * 1000)
 
-  // Catch navigation-based redirects (will-navigate fires before the page loads)
-  oauthWindow.webContents.on('will-navigate', (_e, navUrl) => { handleDeepLink(navUrl) })
-  // Catch JS-triggered redirects (location.href = 'meetingai://...')
-  oauthWindow.webContents.on('did-navigate', (_e, navUrl) => { handleDeepLink(navUrl) })
-  // Some OAuth providers redirect via a new window — catch that too
-  oauthWindow.webContents.setWindowOpenHandler(({ url: newUrl }) => {
-    if (handleDeepLink(newUrl)) return { action: 'deny' }
-    return { action: 'allow' }
-  })
+  pendingOAuth = { resolve, reject, timer }
+  void provider // reserved for future per-provider handling
+  shell.openExternal(url)
+}
 
-  oauthWindow.on('closed', () => { oauthWindow = null })
+/** Called from the renderer when the user dismisses the sign-in spinner. */
+export function cancelOAuth(): void {
+  settlePending(true, new Error('Sign-in cancelled'))
 }
 
 export async function googleSignIn(): Promise<AppSession> {
@@ -196,15 +197,7 @@ export async function googleSignIn(): Promise<AppSession> {
       },
     })
     if (error || !data.url) { reject(new Error(error?.message ?? 'No OAuth URL')); return }
-
-    const timer = setTimeout(() => {
-      pendingOAuth = null
-      if (oauthWindow && !oauthWindow.isDestroyed()) { oauthWindow.close(); oauthWindow = null }
-      reject(new Error('Sign-in timed out — please try again'))
-    }, 5 * 60 * 1000)
-
-    pendingOAuth = { resolve, reject, timer }
-    openOAuthPopup(data.url)
+    startOAuth('google', data.url, resolve, reject)
   })
 }
 
@@ -219,15 +212,7 @@ export async function appleSignIn(): Promise<AppSession> {
       },
     })
     if (error || !data.url) { reject(new Error(error?.message ?? 'No OAuth URL')); return }
-
-    const timer = setTimeout(() => {
-      pendingOAuth = null
-      if (oauthWindow && !oauthWindow.isDestroyed()) { oauthWindow.close(); oauthWindow = null }
-      reject(new Error('Sign-in timed out — please try again'))
-    }, 5 * 60 * 1000)
-
-    pendingOAuth = { resolve, reject, timer }
-    openOAuthPopup(data.url)
+    startOAuth('apple', data.url, resolve, reject)
   })
 }
 

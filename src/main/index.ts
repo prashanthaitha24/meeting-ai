@@ -11,7 +11,7 @@ import * as dotenv from 'dotenv'
 import * as fs from 'fs'
 import {
   emailSignIn, emailSignUp, googleSignIn, appleSignIn, handleOAuthCallback,
-  loadSession, logout, getAccessToken, clearTokens,
+  loadSession, logout, getAccessToken, clearTokens, cancelOAuth,
 } from './supabase-auth'
 import { log, readRecentLogs, getLogFilePath } from './logger'
 import { isUndetectable, pickPrimaryScreenSource } from './window-utils'
@@ -259,6 +259,7 @@ ipcMain.handle('auth:email-signin', async (_e, email: string, password: string) 
 ipcMain.handle('auth:email-signup', async (_e, email: string, password: string, name: string) => emailSignUp(email, password, name))
 ipcMain.handle('auth:google-signin', async () => googleSignIn())
 ipcMain.handle('auth:apple-signin', async () => appleSignIn())
+ipcMain.handle('auth:cancel-oauth', () => { cancelOAuth(); return true })
 
 // ── Usage IPC ─────────────────────────────────────────────────────────────────
 ipcMain.handle('get-usage', async () => {

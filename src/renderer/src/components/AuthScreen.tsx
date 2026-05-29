@@ -74,6 +74,12 @@ export function AuthScreen({ onLogin }: Props): JSX.Element {
     }
   }
 
+  // OAuth opens in the system browser; let the user abandon a flow that
+  // never returns (closed the browser tab, etc.) instead of spinning forever.
+  function handleCancelOAuth() {
+    window.api.cancelOAuth()
+  }
+
   return (
     <div className="flex flex-col flex-1 px-5 py-6 overflow-y-auto">
       {/* Branding */}
@@ -126,6 +132,16 @@ export function AuthScreen({ onLogin }: Props): JSX.Element {
         )}
         Continue with Apple
       </button>
+
+      {/* In-flight OAuth hint + escape hatch (browser-based sign-in) */}
+      {(loading === 'google' || loading === 'apple') && (
+        <p className="text-xs text-gray-500 text-center mb-4 -mt-1">
+          Continue in your browser, then return here.{' '}
+          <button onClick={handleCancelOAuth} className="text-blue-400 hover:underline">
+            Cancel
+          </button>
+        </p>
+      )}
 
       {/* Divider */}
       <div className="flex items-center gap-3 mb-4">
