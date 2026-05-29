@@ -1,4 +1,4 @@
-import '@testing-library/jest-dom'
+import '@testing-library/jest-dom/vitest'
 
 // Mock window.api (Electron context bridge) so renderer tests work in jsdom
 const mockApi = {

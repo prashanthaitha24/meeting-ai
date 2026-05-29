@@ -1,10 +1,11 @@
 import * as fs from 'fs'
 import * as path from 'path'
-import * as os from 'os'
 import * as crypto from 'crypto'
+import { app } from 'electron'
 
-const LOG_DIR  = path.join(os.homedir(), '.meeting-ai')
-const LOG_FILE = path.join(LOG_DIR, 'app.log')
+function logDir(): string  { return app.getPath('userData') }
+function logFile(): string { return path.join(logDir(), 'app.log') }
+
 const MAX_LINES = 500
 
 type Level = 'INFO' | 'WARN' | 'ERROR'
@@ -29,18 +30,19 @@ function sanitize(extra: unknown): string {
 
 function write(level: Level, msg: string, extra?: unknown): void {
   try {
-    if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true })
+    const dir = logDir()
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+    const file = logFile()
     const extraStr = extra != null ? sanitize(extra) : ''
     const line = `[${new Date().toISOString()}] [${level}] ${redact(msg)}${extraStr}\n`
 
-    // Append to file
-    fs.appendFileSync(LOG_FILE, line, 'utf8')
+    fs.appendFileSync(file, line, 'utf8')
 
     // Rotate: keep last MAX_LINES lines
-    const content = fs.readFileSync(LOG_FILE, 'utf8')
+    const content = fs.readFileSync(file, 'utf8')
     const lines = content.split('\n').filter(Boolean)
     if (lines.length > MAX_LINES) {
-      fs.writeFileSync(LOG_FILE, lines.slice(-MAX_LINES).join('\n') + '\n', 'utf8')
+      fs.writeFileSync(file, lines.slice(-MAX_LINES).join('\n') + '\n', 'utf8')
     }
   } catch {
     // never throw from logger
@@ -57,8 +59,9 @@ export const log = {
 /** Read last N lines from log file for diagnostic report */
 export function readRecentLogs(lines = 100): string {
   try {
-    if (!fs.existsSync(LOG_FILE)) return '(no log file yet)'
-    const content = fs.readFileSync(LOG_FILE, 'utf8')
+    const file = logFile()
+    if (!fs.existsSync(file)) return '(no log file yet)'
+    const content = fs.readFileSync(file, 'utf8')
     return content.split('\n').filter(Boolean).slice(-lines).join('\n')
   } catch {
     return '(could not read log file)'
@@ -66,4 +69,7 @@ export function readRecentLogs(lines = 100): string {
 }
 
 /** Full path so the user can attach manually if needed */
-export const LOG_FILE_PATH = LOG_FILE
+export function getLogFilePath(): string { return logFile() }
+
+/** @deprecated Use getLogFilePath() — kept for callers that reference the old export */
+export const LOG_FILE_PATH = path.join(app.getPath('userData'), 'app.log')

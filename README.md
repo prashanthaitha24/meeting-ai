@@ -9,7 +9,7 @@ A real-time AI assistant for meetings and interviews. Runs as a transparent floa
 ## Features
 
 - **Real-time transcription** — continuous mic transcription via Web Speech API (free, no API calls)
-- **AI answers** — ask questions mid-meeting and get instant answers via Claude
+- **AI answers** — ask questions mid-meeting and get instant answers via Groq (Llama 3.3 70B)
 - **Say This / Follow-up / Recap tabs** — generate talking points, follow-up questions, and meeting summaries
 - **Screen reading** — capture and analyze anything on screen with `⌘↵`
 - **Stealth mode** — invisible to screen recording and screenshots (`setContentProtection`)
@@ -23,11 +23,11 @@ A real-time AI assistant for meetings and interviews. Runs as a transparent floa
 ## Architecture
 
 ```
-Microphone  ──► Web Speech API (Chromium built-in) ──► Live transcript (free)
-System audio ──► Whisper API (chunked)              ──► Participant transcript
+Microphone  ──► Web Speech API (Chromium built-in)       ──► Live transcript (free)
+System audio ──► Groq Whisper (whisper-large-v3-turbo)   ──► Participant transcript
 
-User question ──► Claude (via backend SSE stream) ──► Streamed answer
-Screen capture ──► Backend vision API             ──► Streamed answer
+User question ──► Groq Llama 3.3 70B (backend SSE)       ──► Streamed answer
+Screen capture ──► Groq Llama 4 Scout vision (backend SSE) ──► Streamed answer
 
 Auth    ──► Supabase (Google OAuth PKCE / Apple OAuth / Email)
 Billing ──► Stripe (subscription, webhooks)
@@ -44,8 +44,8 @@ Logs    ──► ~/.meeting-ai/app.log + Sentry (crash monitoring)
 | Desktop app | Electron 31 + electron-vite + TypeScript |
 | UI | React 18 + Tailwind CSS |
 | Auth | Supabase (Google OAuth, Apple OAuth, email/password) |
-| AI backend | Next.js (Vercel) — Claude via Anthropic API |
-| Transcription | OpenAI Whisper (audio chunks) + Web Speech API (mic) |
+| AI backend | Next.js (Vercel) — Groq API (Llama 3.3 70B chat, Llama 4 Scout vision) |
+| Transcription | Groq Whisper whisper-large-v3-turbo (audio chunks) + Web Speech API (mic) |
 | Billing | Stripe subscriptions + webhooks |
 | Monitoring | Sentry + local file logging |
 | Packaging | electron-builder (macOS DMG, Windows NSIS) |
@@ -74,9 +74,9 @@ meeting-ai/
 │               └── UpgradeModal.tsx
 ├── backend/            # Next.js API (deployed to Vercel)
 │   ├── app/api/
-│   │   ├── chat/           # Claude streaming
-│   │   ├── screen/         # Screen vision
-│   │   ├── transcribe/     # Whisper
+│   │   ├── chat/           # Groq Llama 3.3 70B streaming
+│   │   ├── screen/         # Groq Llama 4 Scout vision streaming
+│   │   ├── transcribe/     # Groq Whisper transcription
 │   │   ├── usage/          # Daily limit tracking
 │   │   ├── stripe/         # Checkout, portal, redirect, webhooks
 │   │   └── account/        # GDPR delete + export endpoints
@@ -123,11 +123,13 @@ For the backend, create `backend/.env.local`:
 ```env
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
-ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...
+GROQ_API_KEY=gsk_...
 STRIPE_SECRET_KEY=sk_test_...
 STRIPE_PRICE_ID=price_...
+STRIPE_YEARLY_PRICE_ID=price_...
 STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_PAYMENT_LINK=https://...    # shown on usage-limit error
+BACKEND_URL=http://localhost:3000  # or your Vercel URL
 SENTRY_DSN=https://...@sentry.io/...   # optional
 ```
 
@@ -152,8 +154,8 @@ npm run dist:mac
 ```
 
 Outputs to `dist/`:
-- `Meeting AI-1.0.3-arm64.dmg` — Apple Silicon (M1/M2/M3)
-- `Meeting AI-1.0.3.dmg` — Intel
+- `Meeting AI-1.0.4-arm64.dmg` — Apple Silicon (M1/M2/M3)
+- `Meeting AI-1.0.4.dmg` — Intel
 
 ### Windows (run on Windows or via GitHub Actions)
 
@@ -162,14 +164,14 @@ npm run dist:win
 ```
 
 Outputs to `dist/`:
-- `Meeting.AI-Setup-1.0.3-x64.exe` — Windows 10/11
+- `Meeting.AI-Setup-1.0.4-x64.exe` — Windows 10/11
 
 ### Automated releases (recommended)
 
 Push a git tag to trigger a full cross-platform build via GitHub Actions:
 
 ```bash
-git tag v1.0.3 && git push --tags
+git tag v1.0.4 && git push --tags
 ```
 
 GitHub Actions builds Mac DMGs on `macos-latest` and the Windows installer on `windows-latest`, then attaches both to a GitHub Release automatically.
@@ -275,6 +277,154 @@ Add `STRIPE_YEARLY_PRICE_ID` to both `.env` and Vercel env vars for the yearly p
 | Email / Password | Supported |
 
 Sessions are stored encrypted on-device via `safeStorage`. Cleared on app close.
+
+---
+
+## Testing on Mac (before every release)
+
+### Prerequisites
+- macOS 13+ (Ventura or later)
+- Node 18+ installed
+- All env files configured (see Local Development above)
+- Backend running locally (`cd backend && npm run dev`)
+
+### 1. Automated tests
+```bash
+npm run typecheck        # must be zero errors
+npm test                 # 26 unit/component tests must pass
+npm run test:e2e         # Playwright E2E against Electron
+```
+
+### 2. Build the DMG
+```bash
+npm run dist:mac
+# Produces: dist/Meeting AI-X.Y.Z-arm64.dmg (Apple Silicon)
+#           dist/Meeting AI-X.Y.Z.dmg        (Intel)
+```
+
+### 3. Manual smoke test checklist
+Install the DMG and run through each item before tagging:
+
+| # | Test | Expected |
+|---|------|----------|
+| 1 | Launch app cold (no prior session) | Consent screen appears |
+| 2 | Accept consent, sign in with Google | Auth succeeds, main panel shows |
+| 3 | Speak into mic | Live transcript populates in real time |
+| 4 | Ask an AI question (free tier) | Streamed answer appears in panel |
+| 5 | Ask 3 more questions | Usage limit screen shown on 4th |
+| 6 | Press `⌘↵` (screen read) | Screenshot captured + AI answer streams |
+| 7 | Press `⌘ Shift Space` | Panel hides/shows |
+| 8 | Open Settings → upgrade flow | Stripe checkout opens in browser |
+| 9 | Settings → Report Issue | No crash; logs sent |
+| 10 | Settings → My Data → Export | JSON download works |
+| 11 | Take a screenshot with another tool | App window is invisible in screenshot |
+| 12 | Open Activity Monitor | App is listed as "Meeting AI" not "Electron" |
+
+### 4. Notarization check (signed builds only)
+```bash
+spctl --assess --type exec "dist/mac-arm64/Meeting AI.app"
+# Should print: "dist/mac-arm64/Meeting AI.app: accepted"
+```
+
+---
+
+## Shipping to ThavionAI
+
+### Step 1 — Bump version
+Edit `package.json` and change `"version"`:
+```bash
+# e.g. 1.0.4 → 1.0.5
+```
+Update the DMG filenames in this README's Building section to match.
+
+### Step 2 — Run all checks locally
+```bash
+npm run typecheck && npm test && npm run dist:mac
+```
+Install the DMG and run the smoke test checklist above.
+
+### Step 3 — Commit and tag
+```bash
+git add package.json README.md
+git commit -m "chore: release vX.Y.Z"
+git tag vX.Y.Z
+git push origin main --tags
+```
+
+### Step 4 — Monitor GitHub Actions
+Go to `https://github.com/prashanthaitha24/meeting-ai/actions` — the `release.yml` workflow triggers on the tag push. It runs 4 jobs:
+- `test` — typecheck + unit tests
+- `build-mac` — arm64 + x64 DMGs (Developer ID, direct download)
+- `build-mas` — Mac App Store `.pkg` (requires MAS secrets below)
+- `build-win` — NSIS installer
+
+All artifacts are attached to a GitHub Release automatically.
+
+### Step 5 — Verify the release
+1. Open `https://github.com/prashanthaitha24/meeting-ai/releases`
+2. Confirm Mac DMGs, MAS `.pkg`, and Windows EXE are all attached
+3. Download and install the arm64 DMG as a final sanity check
+4. Update `thavionai.com` download links if needed (edit `docs/index.html`)
+5. Upload the `.pkg` to App Store Connect (see Mac App Store submission section)
+
+### Required GitHub secrets (CI)
+
+| Secret | Used by | Description |
+|---|---|---|
+| `DOTENV` | all | Full contents of root `.env` |
+| `MAC_CERT_P12` | build-mac | Base64-encoded Developer ID cert |
+| `MAC_CERT_PASSWORD` | build-mac | Developer ID cert password |
+| `MAS_CERT_P12` | build-mas | Base64-encoded Mac App Distribution cert |
+| `MAS_CERT_PASSWORD` | build-mas | MAS cert password |
+| `MAS_PROVISIONING_PROFILE` | build-mas | Base64-encoded `.provisionprofile` |
+| `APPLE_ID` | build-mac, build-mas | Apple ID email |
+| `APPLE_APP_PASSWORD` | build-mac, build-mas | App-specific password |
+| `APPLE_TEAM_ID` | build-mac, build-mas | 10-character team ID |
+
+---
+
+## Mac App Store submission
+
+The app is fully configured for MAS. Follow these steps once to get it listed.
+
+### One-time account setup
+
+1. Enroll in [Apple Developer Program](https://developer.apple.com/programs/) ($99/yr)
+2. In [App Store Connect](https://appstoreconnect.apple.com), create a new macOS app:
+   - Bundle ID: `com.meeting-ai`
+   - Name: `Meeting AI`
+   - Category: Productivity
+3. In [Certificates, IDs & Profiles](https://developer.apple.com/account/resources/certificates/list):
+   - Create a **Mac App Distribution** certificate
+   - Create a **Mac Installer Distribution** certificate
+   - Create a **Mac App Store** provisioning profile for bundle ID `com.meeting-ai`
+   - Download the profile → save as `resources/MeetingAI.provisionprofile` locally and as the `MAS_PROVISIONING_PROFILE` secret (base64)
+
+### Build MAS package locally
+
+```bash
+# Place your provisioning profile at resources/MeetingAI.provisionprofile first
+npm run dist:mas
+# Outputs: dist/Meeting AI-X.Y.Z.pkg
+```
+
+### Upload to App Store Connect
+
+```bash
+xcrun altool --upload-app \
+  --type osx \
+  --file "dist/Meeting AI-X.Y.Z.pkg" \
+  --username "$APPLE_ID" \
+  --password "$APPLE_APP_PASSWORD"
+```
+
+Or drag the `.pkg` into the [Transporter app](https://apps.apple.com/app/transporter/id1450874784).
+
+### App Review notes (include these to avoid rejection)
+
+Apple reviewers will see `setContentProtection` and `alwaysOnTop`. Add this to App Store Connect → App Review Information:
+
+> This app is a real-time AI meeting assistant overlay. `setContentProtection` prevents the assistant panel from appearing in meeting participants' screen recordings — this is a privacy feature users control in Settings → Privacy. The always-on-top window is required for the overlay to remain visible above full-screen video call windows. A walkthrough video is available at thavionai.com.
 
 ---
 

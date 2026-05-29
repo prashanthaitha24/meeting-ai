@@ -13,7 +13,7 @@ import {
   emailSignIn, emailSignUp, googleSignIn, appleSignIn, handleOAuthCallback,
   loadSession, logout, getAccessToken, clearTokens,
 } from './supabase-auth'
-import { log, readRecentLogs, LOG_FILE_PATH } from './logger'
+import { log, readRecentLogs, getLogFilePath } from './logger'
 
 dotenv.config({ path: is.dev ? '.env' : path.join(process.resourcesPath, '.env') })
 
@@ -60,8 +60,29 @@ if (!gotLock) {
 
 let mainWindow: BrowserWindow | null = null
 
+// ── One-time migration: move data from ~/.meeting-ai/ to app.getPath('userData') ──
+// Required for MAS sandbox (can't write to arbitrary home paths) and follows
+// macOS conventions for all builds going forward.
+function migrateDataFromLegacyPath(): void {
+  const legacyDir = path.join(os.homedir(), '.meeting-ai')
+  const newDir = app.getPath('userData')
+  const migratedFlag = path.join(newDir, '.migrated-v2')
+  if (!fs.existsSync(legacyDir) || fs.existsSync(migratedFlag)) return
+  try {
+    if (!fs.existsSync(newDir)) fs.mkdirSync(newDir, { recursive: true })
+    for (const item of ['window-bounds.json', 'settings.json', 'history']) {
+      const src = path.join(legacyDir, item)
+      const dst = path.join(newDir, item)
+      if (fs.existsSync(src) && !fs.existsSync(dst)) {
+        fs.cpSync(src, dst, { recursive: true })
+      }
+    }
+    fs.writeFileSync(migratedFlag, new Date().toISOString())
+  } catch {}
+}
+
 // ── Window bounds persistence ─────────────────────────────────────────────────
-const BOUNDS_FILE = path.join(os.homedir(), '.meeting-ai', 'window-bounds.json')
+const BOUNDS_FILE = path.join(app.getPath('userData'), 'window-bounds.json')
 
 function loadBounds(): { x?: number; y?: number; width: number; height: number } {
   try {
@@ -151,6 +172,7 @@ app.on('second-instance', (_event, commandLine) => {
 })
 
 app.whenReady().then(async () => {
+  migrateDataFromLegacyPath()
   log.info(`App started v${app.getVersion()} platform=${process.platform} arch=${process.arch}`)
   electronApp.setAppUserModelId('com.meeting-ai')
 
@@ -388,7 +410,7 @@ ipcMain.on('hide-window', () => mainWindow?.hide())
 ipcMain.on('close-window', () => { clearTokens(); app.quit() })
 
 // ── Settings ──────────────────────────────────────────────────────────────────
-const SETTINGS_FILE = path.join(os.homedir(), '.meeting-ai', 'settings.json')
+const SETTINGS_FILE = path.join(app.getPath('userData'), 'settings.json')
 
 function loadSettings(): Record<string, unknown> {
   try {
@@ -430,7 +452,7 @@ ipcMain.handle('account:delete', async () => {
   // Clear all local data after server deletion
   clearTokens()
   try {
-    const HISTORY_DIR = path.join(os.homedir(), '.meeting-ai', 'history')
+    const HISTORY_DIR = path.join(app.getPath('userData'), 'history')
     if (fs.existsSync(HISTORY_DIR)) fs.rmSync(HISTORY_DIR, { recursive: true })
   } catch {}
   return true
@@ -460,7 +482,7 @@ ipcMain.handle('account:export', async () => {
 ipcMain.handle('open-external', (_event, url: string) => shell.openExternal(url))
 
 // ── History ───────────────────────────────────────────────────────────────────
-const HISTORY_DIR = path.join(os.homedir(), '.meeting-ai', 'history')
+const HISTORY_DIR = path.join(app.getPath('userData'), 'history')
 
 ipcMain.handle('history:save', (_e, userId: string, sessionData: object) => {
   try {
@@ -508,7 +530,7 @@ ipcMain.handle('report-issue', async (_e, userDescription: string) => {
     `OS: ${os.release()}`,
     `Electron: ${process.versions.electron}`,
     `Node: ${process.versions.node}`,
-    `Log file: ${LOG_FILE_PATH}`,
+    `Log file: ${getLogFilePath()}`,
     '',
     '── User description ──',
     userDescription || '(none provided)',

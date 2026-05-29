@@ -11,8 +11,8 @@ Floating overlay that transcribes audio, answers questions via Claude, stays inv
 ## Stack
 - **App:** Electron 31 + electron-vite + TypeScript + React 18 + Tailwind CSS
 - **Auth:** Supabase (Google OAuth PKCE, Apple OAuth, email/password)
-- **AI:** Anthropic Claude via backend SSE stream
-- **Transcription:** OpenAI Whisper (audio chunks) + Web Speech API (live mic)
+- **AI:** Groq API — Llama 3.3 70B (chat), Llama 4 Scout (screen vision), via backend SSE stream
+- **Transcription:** Groq Whisper whisper-large-v3-turbo (audio chunks) + Web Speech API (live mic)
 - **Billing:** Stripe — Monthly $9.99/mo, Yearly $49.99/yr
 - **Monitoring:** Sentry + local file logging (~/.meeting-ai/app.log)
 - **Packaging:** electron-builder → macOS DMG (arm64 + x64), Windows NSIS
@@ -33,8 +33,9 @@ src/renderer/src/components/
   HistoryTab.tsx
   TranscriptPanel.tsx
 backend/app/api/
-  chat/route.ts             — Claude SSE stream
-  transcribe/route.ts       — Whisper transcription
+  chat/route.ts             — Groq Llama 3.3 70B SSE stream
+  screen/route.ts           — Groq Llama 4 Scout vision SSE stream
+  transcribe/route.ts       — Groq Whisper transcription
   usage/route.ts            — Daily limit check (3/day free)
   stripe/checkout/route.ts  — Creates Stripe session (plan: monthly|yearly)
   stripe/portal/route.ts    — Billing portal
@@ -119,9 +120,9 @@ SUPABASE_URL, SUPABASE_ANON_KEY, BACKEND_URL, SENTRY_DSN (optional)
 **`backend/.env.local`:**
 ```
 SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
-ANTHROPIC_API_KEY, OPENAI_API_KEY,
+GROQ_API_KEY,
 STRIPE_SECRET_KEY, STRIPE_PRICE_ID, STRIPE_YEARLY_PRICE_ID, STRIPE_WEBHOOK_SECRET,
-BACKEND_URL
+STRIPE_PAYMENT_LINK, BACKEND_URL
 ```
 
 ## Testing

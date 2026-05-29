@@ -58,6 +58,45 @@ jobs:
           name: mac-dmg
           path: dist/*.dmg
 
+  build-mas:
+    needs: [test]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Write .env
+        run: echo "${{ secrets.DOTENV }}" > .env
+
+      - name: Write MAS provisioning profile
+        run: |
+          echo "${{ secrets.MAS_PROVISIONING_PROFILE }}" | base64 --decode > resources/MeetingAI.provisionprofile
+
+      - name: Build & package Mac App Store
+        run: |
+          [ -z "$CSC_LINK" ] && unset CSC_LINK || true
+          npm run dist:mas -- --publish never
+        env:
+          CSC_LINK: ${{ secrets.MAS_CERT_P12 }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAS_CERT_PASSWORD }}
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Upload MAS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mas-pkg
+          path: dist/*.pkg
+
   build-win:
     needs: [test]
     runs-on: windows-latest
@@ -86,7 +125,7 @@ jobs:
           path: dist/*.exe
 
   release:
-    needs: [build-mac, build-win]
+    needs: [build-mac, build-mas, build-win]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -101,6 +140,7 @@ jobs:
           name: "Meeting AI ${{ github.ref_name }}"
           files: |
             artifacts/mac-dmg/*.dmg
+            artifacts/mas-pkg/*.pkg
             artifacts/win-installer/*.exe
           generate_release_notes: true
         env:

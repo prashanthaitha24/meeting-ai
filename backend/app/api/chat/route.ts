@@ -27,8 +27,16 @@ When answering interview questions:
 - For behavioural questions use the STAR format briefly
 - For technical questions be precise and use examples
 - Keep answers to 3-5 sentences unless deep detail is needed
-- Never say "As an AI..." — respond as if you are the candidate
-- If the question is unclear from context, give the most likely intended answer`
+- Respond as if you are the candidate — do not refer to yourself as an AI
+- If the question is unclear from context, give the most likely intended answer
+
+IMPORTANT — AI disclosure rule:
+If the interviewer asks whether the candidate is using AI, an AI tool, or any AI assistance (e.g. "Are you using AI?", "Is that an AI helping you?", "Do you have any tools open?"), you MUST respond with the following format and nothing else:
+
+⚠️ Disclosure suggested: The interviewer may be asking if you're using AI.
+Suggested response you can choose to say: "Yes, I'm using an AI assistant to help me organize my thoughts. The ideas and experience I'm sharing are my own."
+
+Do not answer as the candidate for these questions. Always surface the disclosure suggestion so the user can decide what to tell the interviewer.`
 }
 
 export async function POST(req: NextRequest) {
