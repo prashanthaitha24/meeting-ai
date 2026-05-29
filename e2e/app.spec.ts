@@ -9,14 +9,12 @@ const APP_MAIN = path.resolve(__dirname, '../out/main/index.js')
 // each test starts completely fresh (no cached session or consent flag).
 async function launchApp() {
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'meeting-ai-test-'))
-  const app = await electron.launch({
-    args: [APP_MAIN],
-    env: {
-      ...process.env,
-      NODE_ENV: 'test',
-      ELECTRON_USER_DATA: userData,
-    },
-  })
+  const env = { ...process.env, NODE_ENV: 'test', ELECTRON_USER_DATA: userData }
+  // IDEs/extension hosts (e.g. VS Code) set ELECTRON_RUN_AS_NODE=1, which makes
+  // the Electron binary run as plain Node — no GUI, no `app` — so launch fails.
+  // Strip it so the suite works regardless of where it's invoked from.
+  delete env.ELECTRON_RUN_AS_NODE
+  const app = await electron.launch({ args: [APP_MAIN], env })
   return { app, userData }
 }
 

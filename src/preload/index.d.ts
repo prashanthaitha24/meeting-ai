@@ -36,6 +36,7 @@ interface MeetingAPI {
   emailSignUp(email: string, password: string, name: string): Promise<Session>
   googleSignIn(): Promise<Session>
   appleSignIn(): Promise<Session>
+  cancelOAuth(): Promise<boolean>
   logout(): Promise<boolean>
 
   getUsage(): Promise<UsageInfo | null>

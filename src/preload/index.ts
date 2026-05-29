@@ -8,6 +8,7 @@ const api = {
   emailSignUp: (email: string, password: string, name: string) => ipcRenderer.invoke('auth:email-signup', email, password, name),
   googleSignIn: () => ipcRenderer.invoke('auth:google-signin'),
   appleSignIn: () => ipcRenderer.invoke('auth:apple-signin'),
+  cancelOAuth: () => ipcRenderer.invoke('auth:cancel-oauth'),
   logout: () => ipcRenderer.invoke('auth:logout'),
 
   // Usage & subscription
