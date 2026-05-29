@@ -14,6 +14,7 @@ import {
   loadSession, logout, getAccessToken, clearTokens,
 } from './supabase-auth'
 import { log, readRecentLogs, getLogFilePath } from './logger'
+import { isUndetectable, pickPrimaryScreenSource } from './window-utils'
 
 dotenv.config({ path: is.dev ? '.env' : path.join(process.resourcesPath, '.env') })
 
@@ -122,7 +123,7 @@ function createWindow(): void {
   })
 
   const settings = loadSettings()
-  mainWindow.setContentProtection(settings.undetectable !== false)
+  mainWindow.setContentProtection(isUndetectable(settings))
   if (process.platform === 'darwin') {
     mainWindow.setAlwaysOnTop(true, 'screen-saver', 1)
     mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
@@ -172,6 +173,9 @@ app.on('second-instance', (_event, commandLine) => {
 })
 
 app.whenReady().then(async () => {
+  // A second instance failed to get the lock and is quitting — don't set up
+  // windows, shortcuts or handlers on the way out.
+  if (!gotLock) return
   migrateDataFromLegacyPath()
   log.info(`App started v${app.getVersion()} platform=${process.platform} arch=${process.arch}`)
   electronApp.setAppUserModelId('com.meeting-ai')
@@ -207,7 +211,11 @@ app.whenReady().then(async () => {
 
   session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
     desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
-      callback({ video: sources[0], audio: 'loopback' })
+      const source = pickPrimaryScreenSource(sources)
+      // No screen available (e.g. permission denied) — deny gracefully
+      // instead of handing back `{ video: undefined }`.
+      if (!source) { callback({}); return }
+      callback({ video: source, audio: 'loopback' })
     })
   })
 
@@ -383,9 +391,10 @@ ipcMain.handle('read-screen', async (_event, transcript: string) => {
     types: ['screen'],
     thumbnailSize: { width: 1920, height: 1080 },
   })
-  mainWindow?.setContentProtection(true)
+  // Restore the user's chosen protection state — don't force it back on.
+  mainWindow?.setContentProtection(isUndetectable(loadSettings()))
 
-  const base64 = sources[0]?.thumbnail.toPNG().toString('base64')
+  const base64 = pickPrimaryScreenSource(sources)?.thumbnail.toPNG().toString('base64')
   if (!base64) throw new Error('Could not capture screen')
 
   await streamFromBackend(`${BACKEND_URL}/api/screen`, token, { base64, transcript })
