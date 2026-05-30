@@ -3,6 +3,7 @@ import { safeStorage, shell } from 'electron'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
+import * as http from 'http'
 import * as dotenv from 'dotenv'
 import { is } from '@electron-toolkit/utils'
 
@@ -13,9 +14,12 @@ const SUPABASE_URL = process.env.SUPABASE_URL || 'https://xmobfykkusdkomxbpjsr.s
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhtb2JmeWtrdXNka29teGJwanNyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU2NjQ3ODAsImV4cCI6MjA5MTI0MDc4MH0.D5UaNqxHibyb-mVMG9BiUqQuJZSA512jGapLDcMkMSc'
 const TOKENS_FILE = path.join(os.homedir(), '.meeting-ai', 'tokens')
 
-// Supabase client — persistSession:false because we manage storage ourselves
+// Supabase client — persistSession:false because we manage storage ourselves.
+// flowType:'pkce' so the OAuth code arrives as a `?code=` query param (which a
+// loopback HTTP server can read); implicit-flow tokens come in the URL hash,
+// which is never sent to a server.
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-  auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+  auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false, flowType: 'pkce' },
 })
 
 export interface StoredTokens {
@@ -147,8 +151,56 @@ type OAuthPending = {
 }
 let pendingOAuth: OAuthPending | null = null
 
+// ── Dev loopback redirect ─────────────────────────────────────────────────────
+// In production the provider redirects to the `meetingai://` custom scheme,
+// which macOS routes to the running app. That scheme is unreliable under
+// `npm run dev` (it relaunches the bare Electron binary), so in dev we redirect
+// to a short-lived local HTTP server instead. The Supabase redirect allow-list
+// must include this exact URL.
+const LOOPBACK_HOST = '127.0.0.1'
+const LOOPBACK_PORT = 9847
+const LOOPBACK_REDIRECT = `http://${LOOPBACK_HOST}:${LOOPBACK_PORT}/callback`
+const PROD_REDIRECT = 'meetingai://auth/callback'
+
+/** Redirect URL Supabase sends the user back to after the provider grants. */
+export function oauthRedirectUrl(devMode: boolean = is.dev): string {
+  return devMode ? LOOPBACK_REDIRECT : PROD_REDIRECT
+}
+
+let loopbackServer: http.Server | null = null
+
+function stopLoopbackServer(): void {
+  if (loopbackServer) {
+    loopbackServer.close()
+    loopbackServer = null
+  }
+}
+
+function startLoopbackServer(): void {
+  stopLoopbackServer()
+  loopbackServer = http.createServer((req, res) => {
+    if (!req.url || !req.url.startsWith('/callback')) {
+      res.writeHead(404); res.end('Not found'); return
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html' })
+    res.end(
+      '<!doctype html><html><body style="font-family:-apple-system,sans-serif;text-align:center;padding-top:48px;color:#1e293b">' +
+      '<h2>Signed in &#10003;</h2><p>You can close this tab and return to Meeting AI.</p>' +
+      '</body></html>',
+    )
+    // Absolute URL so handleOAuthCallback can parse the `?code=` query param.
+    handleOAuthCallback(`http://${LOOPBACK_HOST}:${LOOPBACK_PORT}${req.url}`)
+    stopLoopbackServer()
+  })
+  loopbackServer.on('error', (err) => {
+    settlePending(true, new Error(`Local sign-in server failed: ${err.message}`))
+  })
+  loopbackServer.listen(LOOPBACK_PORT, LOOPBACK_HOST)
+}
+
 /** Reject and clear any in-flight OAuth attempt (timeout, cancel, or a new attempt). */
 function settlePending(reject: boolean, err?: Error): void {
+  stopLoopbackServer()
   if (!pendingOAuth) return
   clearTimeout(pendingOAuth.timer)
   if (reject) pendingOAuth.reject(err ?? new Error('Sign-in cancelled'))
@@ -158,9 +210,9 @@ function settlePending(reject: boolean, err?: Error): void {
 /**
  * Start an OAuth flow in the user's default browser. Google (and others)
  * block sign-in inside embedded webviews, so we never load the provider
- * page in a BrowserWindow. The provider redirects back to
- * `meetingai://auth/callback`, which the main process routes to
- * handleOAuthCallback() via the `open-url` / custom-scheme handler.
+ * page in a BrowserWindow. The provider redirects back to either the dev
+ * loopback server or the `meetingai://` custom scheme, both of which reach
+ * handleOAuthCallback().
  */
 function startOAuth(
   provider: 'google' | 'apple',
@@ -170,6 +222,8 @@ function startOAuth(
 ): void {
   // A previous attempt is still pending — cancel it before starting a new one.
   settlePending(true, new Error('Sign-in restarted'))
+
+  if (is.dev) startLoopbackServer()
 
   const timer = setTimeout(() => {
     settlePending(true, new Error('Sign-in timed out — please try again'))
@@ -190,7 +244,7 @@ export async function googleSignIn(): Promise<AppSession> {
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
-        redirectTo: 'meetingai://auth/callback',
+        redirectTo: oauthRedirectUrl(),
         skipBrowserRedirect: true,
         queryParams: { access_type: 'offline', prompt: 'consent' },
         scopes: 'openid email profile',
@@ -206,7 +260,7 @@ export async function appleSignIn(): Promise<AppSession> {
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider: 'apple',
       options: {
-        redirectTo: 'meetingai://auth/callback',
+        redirectTo: oauthRedirectUrl(),
         skipBrowserRedirect: true,
         scopes: 'name email',
       },
