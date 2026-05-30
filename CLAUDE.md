@@ -87,6 +87,11 @@ Bump version number to force all users (including existing) to re-accept after p
 Custom scheme `meetingai://` — macOS: `open-url` event, Windows: `second-instance` argv.
 Stripe checkout redirects via `/api/stripe/redirect?to=success|cancel` HTTPS bridge (Stripe rejects custom schemes).
 
+### OAuth (Google/Apple)
+Sign-in opens in the **system browser** (`shell.openExternal`), never an embedded BrowserWindow (Google blocks embedded webviews). Flow is **PKCE** (`flowType:'pkce'` → `?code=` query param). Redirect target depends on env:
+- **Prod (packaged):** `meetingai://auth/callback` via the OS `open-url` deep link.
+- **Dev (`npm run dev`):** loopback server at `http://127.0.0.1:9847/callback` (custom scheme is unreliable in dev). **This exact URL must be in Supabase → Authentication → URL Configuration → Redirect URLs.** Port/host: `LOOPBACK_PORT`/`LOOPBACK_HOST` in `supabase-auth.ts`.
+
 ### IPC pattern
 All renderer→main calls go through `window.api.*` (context bridge).
 Main handlers in `src/main/index.ts` using `ipcMain.handle()`.
