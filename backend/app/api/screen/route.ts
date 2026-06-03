@@ -2,6 +2,9 @@ import { NextRequest } from 'next/server'
 import OpenAI from 'openai'
 import { verifyAuth } from '@/lib/auth'
 import { checkAndConsume } from '@/lib/usage'
+import { EXAM_REFUSAL, EXAM_CLASSIFIER_PROMPT, isExamVerdict } from '@/lib/exam-guard'
+
+const VISION_MODEL = 'meta-llama/llama-4-scout-17b-16e-instruct'
 
 export const dynamic = 'force-dynamic'
 
@@ -12,6 +15,33 @@ function getGroq() {
   return _groq
 }
 function sse(data: object) { return enc.encode(`data: ${JSON.stringify(data)}\n\n`) }
+
+/**
+ * Guardrail: quick vision check for academic-exam screenshots so we can refuse
+ * before answering. Fails open (returns false) — a classifier hiccup must not
+ * block legitimate interview/meeting use, which is the product's purpose.
+ */
+async function screenIsExam(base64: string): Promise<boolean> {
+  try {
+    const res = await getGroq().chat.completions.create({
+      model: VISION_MODEL,
+      max_tokens: 4,
+      temperature: 0,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'image_url', image_url: { url: `data:image/png;base64,${base64}` } },
+            { type: 'text', text: EXAM_CLASSIFIER_PROMPT },
+          ],
+        },
+      ],
+    })
+    return isExamVerdict(res.choices[0]?.message?.content)
+  } catch {
+    return false
+  }
+}
 
 export async function POST(req: NextRequest) {
   const auth = await verifyAuth(req)
@@ -39,8 +69,23 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: 'Invalid image' }, { status: 400 })
   }
 
+  // Guardrail: refuse to help cheat on academic exams. Stream the refusal
+  // back through the same SSE channel the renderer already handles.
+  if (await screenIsExam(base64)) {
+    const refusal = new ReadableStream({
+      start(controller) {
+        controller.enqueue(sse({ text: EXAM_REFUSAL }))
+        controller.enqueue(sse({ done: true }))
+        controller.close()
+      },
+    })
+    return new Response(refusal, {
+      headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no' },
+    })
+  }
+
   const stream = await getGroq().chat.completions.create({
-    model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+    model: VISION_MODEL,
     max_tokens: 1024,
     stream: true,
     messages: [
