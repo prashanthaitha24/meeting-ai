@@ -171,7 +171,7 @@ Outputs to `dist/`:
 Push a git tag to trigger a full cross-platform build via GitHub Actions:
 
 ```bash
-git tag v1.0.5 && git push --tags
+git tag v1.0.6 && git push --tags
 ```
 
 GitHub Actions builds Mac DMGs on `macos-latest` and the Windows installer on `windows-latest`, then attaches both to a GitHub Release automatically.
