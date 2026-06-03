@@ -84,26 +84,35 @@ export async function POST(req: NextRequest) {
     })
   }
 
-  const stream = await getGroq().chat.completions.create({
-    model: VISION_MODEL,
-    max_tokens: 1024,
-    stream: true,
-    messages: [
-      {
-        role: 'user',
-        content: [
-          { type: 'image_url', image_url: { url: `data:image/png;base64,${base64}` } },
-          {
-            type: 'text',
-            text: `You are a real-time AI interview assistant. Look at this screenshot carefully.
+  let stream
+  try {
+    stream = await getGroq().chat.completions.create({
+      model: VISION_MODEL,
+      max_tokens: 1024,
+      stream: true,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'image_url', image_url: { url: `data:image/png;base64,${base64}` } },
+            {
+              type: 'text',
+              text: `You are a real-time AI interview assistant. Look at this screenshot carefully.
 Identify any interview question, coding problem, or task visible on the screen and provide a strong, concise answer the candidate can use immediately.
 ${transcript ? `\nMeeting transcript so far:\n${transcript.slice(0, 4000)}\n` : ''}
 Be direct and answer as if you are the candidate. If it's a coding problem, provide working code with a brief explanation.`,
-          },
-        ],
-      },
-    ],
-  })
+            },
+          ],
+        },
+      ],
+    })
+  } catch (e) {
+    console.error('[screen] Groq request failed:', e)
+    return Response.json(
+      { error: 'The AI service is temporarily unavailable. Please try again in a moment.' },
+      { status: 502 },
+    )
+  }
 
   const readable = new ReadableStream({
     async start(controller) {

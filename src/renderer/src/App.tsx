@@ -373,7 +373,7 @@ export default function App(): JSX.Element {
       setIsStreaming(false)
       setEntries((prev) => prev.map((e) =>
         e.id === id && e.type === 'qa'
-          ? { ...e, answer: `Error: ${err instanceof Error ? err.message : String(err)}`, streaming: false }
+          ? { ...e, answer: '⚠️ Something went wrong. Please try again.', streaming: false }
           : e
       ))
     })
@@ -497,7 +497,7 @@ export default function App(): JSX.Element {
       setIsStreaming(false)
       setEntries((prev) => prev.map((e) =>
         e.id === id && e.type === 'qa'
-          ? { ...e, answer: `Error: ${err instanceof Error ? err.message : String(err)}`, streaming: false }
+          ? { ...e, answer: '⚠️ Something went wrong. Please try again.', streaming: false }
           : e
       ))
     })
@@ -534,7 +534,7 @@ export default function App(): JSX.Element {
       setTabStreaming((prev) => ({ ...prev, [tab]: false }))
       setTabContent((prev) => ({
         ...prev,
-        [tab]: `Error: ${err instanceof Error ? err.message : String(err)}`
+        [tab]: '⚠️ Something went wrong. Please try again.'
       }))
       streamTargetRef.current = null
     })

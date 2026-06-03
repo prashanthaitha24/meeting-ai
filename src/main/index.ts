@@ -15,6 +15,7 @@ import {
 } from './supabase-auth'
 import { log, readRecentLogs, getLogFilePath } from './logger'
 import { isUndetectable, pickPrimaryScreenSource } from './window-utils'
+import { friendlyHttpError, friendlyNetworkError } from './errors'
 
 dotenv.config({ path: is.dev ? '.env' : path.join(process.resourcesPath, '.env') })
 
@@ -331,12 +332,27 @@ ipcMain.handle('transcribe-audio', async (_event, audioData: ArrayBuffer) => {
 })
 
 // ── Helper: read SSE stream from backend and forward chunks to renderer ────────
+// Never throws — failures are surfaced to the user as a friendly message through
+// the same streaming channel, so the UI shows e.g. "The AI service is temporarily
+// unavailable…" instead of a raw "HTTP 500" / "Error invoking remote method…".
+function sendStreamError(msg: string): void {
+  mainWindow?.webContents.send('chat-chunk', { text: `⚠️ ${msg}`, done: false })
+  mainWindow?.webContents.send('chat-chunk', { text: '', done: true })
+}
+
 async function streamFromBackend(url: string, token: string, body: object): Promise<void> {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
+  let res: Response
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  } catch (e) {
+    log.error('Backend request failed (network)', e)
+    sendStreamError(friendlyNetworkError())
+    return
+  }
 
   if (!res.ok) {
     let errData: Record<string, unknown> = {}
@@ -346,37 +362,47 @@ async function streamFromBackend(url: string, token: string, body: object): Prom
       mainWindow?.webContents.send('chat-chunk', { text: '', done: true }) // clean up streaming state
       return
     }
-    throw new Error((errData.error as string) ?? `HTTP ${res.status}`)
+    log.error('Backend request failed', { status: res.status, error: errData.error })
+    sendStreamError(friendlyHttpError(res.status, typeof errData.error === 'string' ? errData.error : undefined))
+    return
   }
 
-  const reader = res.body!.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
+  try {
+    const reader = res.body!.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
 
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() ?? ''
-    for (const line of lines) {
-      if (!line.startsWith('data: ')) continue
-      try {
-        const data = JSON.parse(line.slice(6)) as { text?: string; done?: boolean; error?: string }
-        if (data.done) {
-          mainWindow?.webContents.send('chat-chunk', { text: '', done: true })
-        } else if (data.text) {
-          mainWindow?.webContents.send('chat-chunk', { text: data.text, done: false })
-        }
-      } catch {}
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        try {
+          const data = JSON.parse(line.slice(6)) as { text?: string; done?: boolean; error?: string }
+          if (data.error) {
+            sendStreamError(friendlyHttpError(502))
+            return
+          } else if (data.done) {
+            mainWindow?.webContents.send('chat-chunk', { text: '', done: true })
+          } else if (data.text) {
+            mainWindow?.webContents.send('chat-chunk', { text: data.text, done: false })
+          }
+        } catch {}
+      }
     }
+  } catch (e) {
+    log.error('Backend stream read failed', e)
+    sendStreamError(friendlyHttpError(502))
   }
 }
 
 // ── Chat ──────────────────────────────────────────────────────────────────────
 ipcMain.handle('chat-with-claude', async (_event, messages: Array<{ role: string; content: string }>, transcript: string) => {
   const token = await getAccessToken()
-  if (!token) throw new Error('Not authenticated')
+  if (!token) { sendStreamError('Your session has expired. Please sign out and sign in again.'); return true }
   await streamFromBackend(`${BACKEND_URL}/api/chat`, token, { messages, transcript })
   return true
 })
@@ -384,19 +410,22 @@ ipcMain.handle('chat-with-claude', async (_event, messages: Array<{ role: string
 // ── Screen read ───────────────────────────────────────────────────────────────
 ipcMain.handle('read-screen', async (_event, transcript: string) => {
   const token = await getAccessToken()
-  if (!token) throw new Error('Not authenticated')
+  if (!token) { sendStreamError('Your session has expired. Please sign out and sign in again.'); return true }
 
   mainWindow?.setContentProtection(false)
   await new Promise((r) => setTimeout(r, 80))
-  const sources = await desktopCapturer.getSources({
-    types: ['screen'],
-    thumbnailSize: { width: 1920, height: 1080 },
-  })
-  // Restore the user's chosen protection state — don't force it back on.
-  mainWindow?.setContentProtection(isUndetectable(loadSettings()))
-
-  const base64 = pickPrimaryScreenSource(sources)?.thumbnail.toPNG().toString('base64')
-  if (!base64) throw new Error('Could not capture screen')
+  let base64: string | undefined
+  try {
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: 1920, height: 1080 },
+    })
+    base64 = pickPrimaryScreenSource(sources)?.thumbnail.toPNG().toString('base64')
+  } finally {
+    // Restore the user's chosen protection state — don't force it back on.
+    mainWindow?.setContentProtection(isUndetectable(loadSettings()))
+  }
+  if (!base64) { sendStreamError("Couldn't capture the screen. Please check screen-recording permission in System Settings."); return true }
 
   await streamFromBackend(`${BACKEND_URL}/api/screen`, token, { base64, transcript })
   return true
