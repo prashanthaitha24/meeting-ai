@@ -12,6 +12,16 @@ function formatTime(iso: string): string {
   return new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
 }
 
+// Case-insensitive match across a session's questions, answers, transcript and recap.
+// `q` must already be lower-cased and trimmed.
+export function sessionMatches(s: HistorySession, q: string): boolean {
+  if (s.transcript?.toLowerCase().includes(q)) return true
+  if (s.tabContent?.recap?.toLowerCase().includes(q)) return true
+  return s.entries.some(
+    (e) => e.question?.toLowerCase().includes(q) || e.answer?.toLowerCase().includes(q),
+  )
+}
+
 function groupByDate(sessions: HistorySession[]): Record<string, HistorySession[]> {
   return sessions.reduce((acc, s) => {
     const key = new Date(s.date).toDateString()
@@ -79,6 +89,7 @@ export function HistoryTab({ userId }: Props): JSX.Element {
   const [sessions, setSessions] = useState<HistorySession[]>([])
   const [loading, setLoading] = useState(true)
   const [clearing, setClearing] = useState(false)
+  const [query, setQuery] = useState('')
 
   const loadHistory = useCallback(async () => {
     setLoading(true)
@@ -97,7 +108,9 @@ export function HistoryTab({ userId }: Props): JSX.Element {
     setClearing(false)
   }
 
-  const grouped = groupByDate(sessions)
+  const q = query.trim().toLowerCase()
+  const visible = q ? sessions.filter((s) => sessionMatches(s, q)) : sessions
+  const grouped = groupByDate(visible)
   const dateKeys = Object.keys(grouped)
 
   return (
@@ -125,6 +138,29 @@ export function HistoryTab({ userId }: Props): JSX.Element {
         </button>
       </div>
 
+      {/* Search */}
+      <div className="px-3 py-2 flex-shrink-0" style={{ borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+        <div className="flex items-center gap-1.5 rounded px-2 py-1"
+          style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.10)' }}>
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.4)" strokeWidth="2" strokeLinecap="round" className="flex-shrink-0">
+            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search questions, answers, transcript…"
+            className="flex-1 bg-transparent text-[11px] text-gray-200 placeholder:text-gray-600 outline-none min-w-0"
+          />
+          {query && (
+            <button onClick={() => setQuery('')} className="text-gray-600 hover:text-gray-300 flex-shrink-0" aria-label="Clear search">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+            </button>
+          )}
+        </div>
+      </div>
+
       {/* Content */}
       <div className="flex-1 overflow-y-auto min-h-0 p-3">
         {loading ? (
@@ -136,8 +172,17 @@ export function HistoryTab({ userId }: Props): JSX.Element {
             <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="1.5">
               <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>
             </svg>
-            <p className="text-[11px] text-gray-600">No sessions in the last {days} days</p>
-            <p className="text-[10px] text-gray-700">Sessions are saved when you sign out</p>
+            {q ? (
+              <>
+                <p className="text-[11px] text-gray-600">No matches for “{query.trim()}”</p>
+                <p className="text-[10px] text-gray-700">Try a different word, or widen the date range</p>
+              </>
+            ) : (
+              <>
+                <p className="text-[11px] text-gray-600">No sessions in the last {days} days</p>
+                <p className="text-[10px] text-gray-700">Sessions are saved when you save notes, email, or sign out</p>
+              </>
+            )}
           </div>
         ) : (
           <div className="space-y-4">

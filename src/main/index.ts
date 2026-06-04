@@ -238,6 +238,13 @@ app.whenReady().then(async () => {
     mainWindow.webContents.send('trigger-screen-read')
   })
 
+  // Expand / collapse the overlay between full panel and compact pill.
+  globalShortcut.register('CommandOrControl+Shift+E', () => {
+    if (!mainWindow) return
+    if (!mainWindow.isVisible()) { mainWindow.show(); mainWindow.focus() }
+    mainWindow.webContents.send('toggle-collapse')
+  })
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
@@ -527,11 +534,16 @@ ipcMain.handle('history:save', (_e, userId: string, sessionData: object) => {
   try {
     if (!fs.existsSync(HISTORY_DIR)) fs.mkdirSync(HISTORY_DIR, { recursive: true })
     const file = path.join(HISTORY_DIR, `${userId}.json`)
-    let sessions: object[] = []
+    let sessions: any[] = []
     if (fs.existsSync(file)) {
       try { sessions = JSON.parse(fs.readFileSync(file, 'utf8')) } catch {}
     }
-    sessions.unshift(sessionData)
+    // Upsert by id: re-saving the same live session (e.g. Save Notes, then later
+    // sign-out) updates the existing record instead of creating duplicates.
+    const sid = (sessionData as any)?.id
+    const idx = sid ? sessions.findIndex((s) => s && s.id === sid) : -1
+    if (idx >= 0) sessions[idx] = sessionData
+    else sessions.unshift(sessionData)
     // Prune anything older than 90 days
     const cutoff = Date.now() - 90 * 24 * 60 * 60 * 1000
     sessions = sessions.filter((s: any) => new Date(s.date).getTime() > cutoff)

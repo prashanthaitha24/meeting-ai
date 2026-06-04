@@ -352,6 +352,9 @@ export default function App(): JSX.Element {
   const isStreamingRef  = useRef(false)
   const entriesRef      = useRef<TranscriptEntry[]>([])
   const usageRef        = useRef(usage)
+  // Stable id for the current run so Save/Email/Sign-out all update one history
+  // record instead of creating duplicates.
+  const sessionIdRef    = useRef<string>(Math.random().toString(36).slice(2))
   isStreamingRef.current = isStreaming
   entriesRef.current     = entries
   usageRef.current       = usage
@@ -382,13 +385,18 @@ export default function App(): JSX.Element {
   // Global shortcuts
   useEffect(() => {
     const unsubGlobal = window.api.onTriggerScreenRead(() => triggerScreenRead())
+    const unsubToggle = window.api.onToggleCollapse(() => toggleCollapse())
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key === 'Enter') {
         e.preventDefault(); triggerScreenRead()
       }
+      // ⌘/Ctrl + Shift + E — expand / collapse the overlay
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'e' || e.key === 'E')) {
+        e.preventDefault(); toggleCollapse()
+      }
     }
     window.addEventListener('keydown', onKey)
-    return () => { unsubGlobal(); window.removeEventListener('keydown', onKey) }
+    return () => { unsubGlobal(); unsubToggle(); window.removeEventListener('keydown', onKey) }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isStreaming, entries])
 
@@ -690,9 +698,29 @@ export default function App(): JSX.Element {
     return lines.join('\n')
   }
 
+  // Persist the current run to History. Called on Save Notes / Email / Sign-out
+  // so the History tab fills up during normal use, not only when signing out.
+  // Upserts by sessionIdRef, so repeated saves update one record (no duplicates).
+  const persistSession = async () => {
+    if (!session || typeof session === 'string') return
+    const qaEntries = entries
+      .filter((e): e is Extract<typeof entries[number], { type: 'qa' }> => e.type === 'qa' && !!e.answer)
+      .map((e) => ({ id: e.id, question: e.question, answer: e.answer }))
+    // Nothing worth saving yet.
+    if (qaEntries.length === 0 && !transcriptRef.current) return
+    await window.api.saveSession(session.userId, {
+      id: sessionIdRef.current,
+      date: new Date().toISOString(),
+      transcript: transcriptRef.current,
+      entries: qaEntries,
+      tabContent,
+    })
+  }
+
   const handleExportNotes = async () => {
     const content = buildExportText()
     await window.api.saveNotes(content)
+    await persistSession()
   }
 
   const handleEmail = () => {
@@ -700,24 +728,13 @@ export default function App(): JSX.Element {
     const subject = encodeURIComponent('Meeting Notes')
     const body = encodeURIComponent(content.slice(0, 1800))
     window.api.openExternal(`mailto:?subject=${subject}&body=${body}`)
+    void persistSession()
   }
 
   const handleLogout = async () => {
     stopRecording()
     // Save current session to history before logging out
-    const qaEntries = entries
-      .filter((e): e is Extract<typeof entries[number], { type: 'qa' }> => e.type === 'qa' && !!e.answer)
-      .map((e) => e.type === 'qa' ? { id: e.id, question: e.question, answer: e.answer } : null)
-      .filter(Boolean)
-    if (session && typeof session !== 'string' && qaEntries.length > 0) {
-      await window.api.saveSession(session.userId, {
-        id: Math.random().toString(36).slice(2),
-        date: new Date().toISOString(),
-        transcript: transcriptRef.current,
-        entries: qaEntries as { id: string; question: string; answer: string }[],
-        tabContent,
-      })
-    }
+    await persistSession()
     await window.api.logout()
     setSession(null)
     setUsage(null)
@@ -835,9 +852,9 @@ export default function App(): JSX.Element {
           <div className="flex items-center gap-1 flex-shrink-0" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
             <button
               onClick={toggleCollapse}
-              title="Expand"
-              className="w-5 h-5 rounded-full flex items-center justify-center text-gray-600 hover:text-gray-300 hover:bg-white/10 transition-colors">
-              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              title="Expand (⌘⇧E)"
+              className="w-6 h-6 rounded-full flex items-center justify-center text-gray-300 hover:text-white hover:bg-white/10 transition-colors">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round">
                 <polyline points="6 9 12 15 18 9" />
               </svg>
             </button>
@@ -886,9 +903,9 @@ export default function App(): JSX.Element {
                 <rect x="2" y="6" width="20" height="13" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/>
               </svg>
             </button>
-            <button onClick={toggleCollapse} title="Collapse to pill"
-              className="w-6 h-6 rounded flex items-center justify-center text-gray-500 hover:text-gray-200 hover:bg-white/10 transition-colors">
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+            <button onClick={toggleCollapse} title="Collapse to pill (⌘⇧E)"
+              className="w-6 h-6 rounded flex items-center justify-center text-gray-300 hover:text-white hover:bg-white/10 transition-colors">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round">
                 <polyline points="18 15 12 9 6 15" />
               </svg>
             </button>
@@ -1002,6 +1019,7 @@ export default function App(): JSX.Element {
             {[
               { keys: ['⌘', 'Shift', 'Space'], label: 'Show / hide app' },
               { keys: ['⌘', '↵'], label: 'Read screen + analyze' },
+              { keys: ['⌘', 'Shift', 'E'], label: 'Expand / collapse' },
             ].map(({ keys, label }) => (
               <div key={label} className="flex items-center justify-between">
                 <span className="text-[11px] text-gray-400">{label}</span>

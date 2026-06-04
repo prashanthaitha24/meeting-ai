@@ -54,6 +54,7 @@ interface MeetingAPI {
 
   readScreen(transcript: string): Promise<boolean>
   onTriggerScreenRead(callback: () => void): () => void
+  onToggleCollapse(callback: () => void): () => void
 
   hideWindow(): void
   closeWindow(): void
