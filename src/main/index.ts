@@ -598,16 +598,110 @@ ipcMain.handle('report-issue', async (_e, userDescription: string) => {
   return true
 })
 
-// ── Save notes ────────────────────────────────────────────────────────────────
-ipcMain.handle('save-notes', async (_event, content: string) => {
+// ── Save / email notes ──────────────────────────────────────────────────────
+type ExportFormat = 'pdf' | 'doc' | 'txt'
+interface NotesPayload { format?: ExportFormat; text: string; html: string; defaultName?: string }
+
+// Render HTML to a PDF buffer using an offscreen window (no app deps, no UI flash).
+async function htmlToPdf(html: string): Promise<Buffer> {
+  const win = new BrowserWindow({ show: false, width: 820, height: 1060, webPreferences: {} })
+  const tmp = path.join(os.tmpdir(), `meeting-notes-${Date.now()}.html`)
+  try {
+    fs.writeFileSync(tmp, html, 'utf8')
+    await win.loadFile(tmp)
+    return await win.webContents.printToPDF({ printBackground: true })
+  } finally {
+    try { fs.rmSync(tmp) } catch {}
+    if (!win.isDestroyed()) win.destroy()
+  }
+}
+
+ipcMain.handle('save-notes', async (_event, payload: NotesPayload | string) => {
   const { dialog } = await import('electron')
-  const result = await dialog.showSaveDialog({
-    defaultPath: `meeting-notes-${new Date().toISOString().slice(0, 10)}.txt`,
-    filters: [{ name: 'Text Files', extensions: ['txt'] }, { name: 'All Files', extensions: ['*'] }],
-  })
-  if (!result.canceled && result.filePath) {
-    fs.writeFileSync(result.filePath, content, 'utf8')
+  const dateStr = new Date().toISOString().slice(0, 10)
+
+  // Back-compat: an older renderer passed a plain text string (txt only).
+  if (typeof payload === 'string') {
+    const r = await dialog.showSaveDialog({
+      defaultPath: `meeting-notes-${dateStr}.txt`,
+      filters: [{ name: 'Text Files', extensions: ['txt'] }, { name: 'All Files', extensions: ['*'] }],
+    })
+    if (r.canceled || !r.filePath) return false
+    fs.writeFileSync(r.filePath, payload, 'utf8')
     return true
   }
-  return false
+
+  const format: ExportFormat = payload.format ?? 'txt'
+  const base = payload.defaultName || `meeting-notes-${dateStr}`
+  const filterMap: Record<ExportFormat, { name: string; extensions: string[] }> = {
+    pdf: { name: 'PDF Document', extensions: ['pdf'] },
+    doc: { name: 'Word Document', extensions: ['doc'] },
+    txt: { name: 'Text File', extensions: ['txt'] },
+  }
+  const result = await dialog.showSaveDialog({
+    defaultPath: `${base}.${format}`,
+    filters: [filterMap[format], { name: 'All Files', extensions: ['*'] }],
+  })
+  if (result.canceled || !result.filePath) return false
+
+  try {
+    if (format === 'pdf') {
+      fs.writeFileSync(result.filePath, await htmlToPdf(payload.html))
+    } else if (format === 'doc') {
+      fs.writeFileSync(result.filePath, payload.html, 'utf8') // Word opens HTML-based .doc
+    } else {
+      fs.writeFileSync(result.filePath, payload.text, 'utf8')
+    }
+    return true
+  } catch (e) {
+    log.error('save-notes failed', { format, error: String(e) })
+    return false
+  }
+})
+
+// Compose an email with the conversation as a PDF attachment (not stuffed into
+// the subject line). On macOS we drive Mail.app via AppleScript so the draft
+// opens with the file already attached; everywhere else we save the PDF, reveal
+// it, and open a pre-filled draft for the user to attach.
+ipcMain.handle('email-notes', async (_event, payload: { html: string }) => {
+  const subject = 'Your meeting conversation'
+  const body = 'Hi,\n\nPlease find your conversation attached.\n\nSent from Meeting AI'
+  const file = path.join(os.tmpdir(), `meeting-conversation-${new Date().toISOString().slice(0, 10)}.pdf`)
+
+  try {
+    fs.writeFileSync(file, await htmlToPdf(payload.html))
+  } catch (e) {
+    log.error('email-notes: PDF render failed', { error: String(e) })
+    // No attachment possible — fall back to a plain pre-filled draft.
+    shell.openExternal(`mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`)
+    return false
+  }
+
+  if (process.platform === 'darwin') {
+    // AppleScript string literals can't contain raw newlines — use \n escapes.
+    const bodyOsa = body.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')
+    const osa = [
+      'tell application "Mail"',
+      `set msg to make new outgoing message with properties {subject:"${subject}", content:"${bodyOsa}\\n\\n", visible:true}`,
+      'tell msg',
+      `make new attachment with properties {file name:(POSIX file "${file}")} at after the last paragraph`,
+      'end tell',
+      'activate',
+      'end tell',
+    ].join('\n')
+    try {
+      const { execFile } = await import('child_process')
+      await new Promise<void>((resolve, reject) =>
+        execFile('osascript', ['-e', osa], (err) => (err ? reject(err) : resolve())),
+      )
+      return true
+    } catch (e) {
+      log.warn('email-notes: Mail.app automation failed, falling back', { error: String(e) })
+    }
+  }
+
+  // Cross-platform fallback: reveal the saved PDF and open a pre-filled draft.
+  shell.showItemInFolder(file)
+  shell.openExternal(`mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`)
+  return true
 })

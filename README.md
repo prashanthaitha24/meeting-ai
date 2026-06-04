@@ -15,6 +15,7 @@ A real-time AI assistant for meetings and interviews. Runs as a transparent floa
 - **Stealth mode** — invisible to screen recording and screenshots (`setContentProtection`)
 - **Always on top** — floats above full-screen apps and all workspaces
 - **Session history** — last 90 days of meetings saved locally; captured whenever you save notes, email, or sign out, and searchable by question, answer, transcript, or recap
+- **Save / share conversation** — export the conversation as a formatted Q&A document in **PDF, Word (.doc), or Text**, or email it as a PDF attachment
 - **Report Issue** — one-click bug report with logs sent to support
 - **Free tier** — 3 AI responses per day; Pro Monthly ($9.99/mo) or Pro Yearly ($49.99/yr, save 58%) for unlimited
 

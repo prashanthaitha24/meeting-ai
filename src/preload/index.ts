@@ -65,7 +65,9 @@ const api = {
 
   // Utilities
   openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
-  saveNotes: (content: string) => ipcRenderer.invoke('save-notes', content),
+  saveNotes: (payload: { format: 'pdf' | 'doc' | 'txt'; text: string; html: string; defaultName?: string }) =>
+    ipcRenderer.invoke('save-notes', payload),
+  emailNotes: (payload: { html: string }) => ipcRenderer.invoke('email-notes', payload),
 
   saveSession: (userId: string, session: object) => ipcRenderer.invoke('history:save', userId, session),
   loadHistory: (userId: string, days: number) => ipcRenderer.invoke('history:load', userId, days),

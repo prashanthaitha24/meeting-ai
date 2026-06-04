@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import type { Session, UsageInfo } from '../../preload/index.d'
 import { SpeechTranscriber } from './lib/speech'
+import { buildExportText, buildExportHtml, type ExportData } from './lib/exportDoc'
 import { TranscriptPanel, TranscriptEntry } from './components/TranscriptPanel'
 import { AuthScreen } from './components/AuthScreen'
 import { ConsentScreen } from './components/ConsentScreen'
@@ -315,6 +316,7 @@ export default function App(): JSX.Element {
   const [showReportModal, setShowReportModal] = useState(false)
   const [showShortcuts, setShowShortcuts] = useState(false)
   const [showDeleteModal, setShowDeleteModal] = useState(false)
+  const [showSaveMenu, setShowSaveMenu] = useState(false)
 
   // UX indicators
   const [showTakingNotes, setShowTakingNotes] = useState(false)
@@ -672,31 +674,17 @@ export default function App(): JSX.Element {
   }
 
   // ── Export helpers ──────────────────────────────────────────────────────────
-  const buildExportText = (): string => {
-    const lines: string[] = [
-      `Meeting Notes — ${new Date().toLocaleString()}`,
-      '='.repeat(50),
-      '',
-    ]
-    if (transcriptRef.current) {
-      lines.push('TRANSCRIPT', '-'.repeat(30), transcriptRef.current, '')
-    }
-    entries.filter((e) => e.type === 'qa').forEach((e) => {
-      if (e.type === 'qa') {
-        lines.push(`Q: ${e.question}`, `A: ${e.answer}`, '')
-      }
-    })
-    if (tabContent.recap) {
-      lines.push('RECAP', '-'.repeat(30), tabContent.recap, '')
-    }
-    if (tabContent.say) {
-      lines.push('TALKING POINTS', '-'.repeat(30), tabContent.say, '')
-    }
-    if (tabContent.followup) {
-      lines.push('FOLLOW-UP QUESTIONS', '-'.repeat(30), tabContent.followup, '')
-    }
-    return lines.join('\n')
-  }
+  // Snapshot the live conversation into the format-agnostic export shape.
+  const collectExportData = (): ExportData => ({
+    date: new Date().toLocaleString(),
+    transcript: transcriptRef.current,
+    qa: entries
+      .filter((e): e is Extract<typeof entries[number], { type: 'qa' }> => e.type === 'qa' && !!e.answer)
+      .map((e) => ({ question: e.question, answer: e.answer })),
+    recap: tabContent.recap,
+    say: tabContent.say,
+    followup: tabContent.followup,
+  })
 
   // Persist the current run to History. Called on Save Notes / Email / Sign-out
   // so the History tab fills up during normal use, not only when signing out.
@@ -717,18 +705,22 @@ export default function App(): JSX.Element {
     })
   }
 
-  const handleExportNotes = async () => {
-    const content = buildExportText()
-    await window.api.saveNotes(content)
+  const handleSaveAs = async (format: 'pdf' | 'doc' | 'txt') => {
+    setShowSaveMenu(false)
+    const data = collectExportData()
+    await window.api.saveNotes({
+      format,
+      text: buildExportText(data),
+      html: buildExportHtml(data),
+      defaultName: `meeting-notes-${new Date().toISOString().slice(0, 10)}`,
+    })
     await persistSession()
   }
 
-  const handleEmail = () => {
-    const content = buildExportText()
-    const subject = encodeURIComponent('Meeting Notes')
-    const body = encodeURIComponent(content.slice(0, 1800))
-    window.api.openExternal(`mailto:?subject=${subject}&body=${body}`)
-    void persistSession()
+  const handleEmail = async () => {
+    const data = collectExportData()
+    await window.api.emailNotes({ html: buildExportHtml(data) })
+    await persistSession()
   }
 
   const handleLogout = async () => {
@@ -1182,26 +1174,46 @@ export default function App(): JSX.Element {
               </button>
             )}
 
-            {/* Export PDF / Notes */}
-            <button
-              onClick={handleExportNotes}
-              disabled={entries.length === 0 && !transcriptRef.current}
-              title="Save notes to file"
-              className="w-7 h-7 rounded-lg bg-white/8 hover:bg-white/15 disabled:opacity-30 flex items-center justify-center text-gray-400 hover:text-gray-200 transition-colors">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                <polyline points="14 2 14 8 20 8" />
-                <line x1="16" y1="13" x2="8" y2="13" />
-                <line x1="16" y1="17" x2="8" y2="17" />
-                <polyline points="10 9 9 9 8 9" />
-              </svg>
-            </button>
+            {/* Save — format picker (PDF / Word / Text) */}
+            <div className="relative">
+              <button
+                onClick={() => setShowSaveMenu((v) => !v)}
+                disabled={entries.length === 0 && !transcriptRef.current}
+                title="Save conversation (PDF, Word, Text)"
+                className={`w-7 h-7 rounded-lg disabled:opacity-30 flex items-center justify-center transition-colors ${showSaveMenu ? 'bg-white/15 text-gray-200' : 'bg-white/8 hover:bg-white/15 text-gray-400 hover:text-gray-200'}`}>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                  <polyline points="14 2 14 8 20 8" />
+                  <line x1="16" y1="13" x2="8" y2="13" />
+                  <line x1="16" y1="17" x2="8" y2="17" />
+                  <polyline points="10 9 9 9 8 9" />
+                </svg>
+              </button>
+              {showSaveMenu && (
+                <>
+                  {/* click-away */}
+                  <div className="fixed inset-0 z-40" onClick={() => setShowSaveMenu(false)} />
+                  <div className="absolute right-0 bottom-full mb-1.5 z-50 rounded-lg overflow-hidden shadow-xl"
+                    style={{ background: 'rgba(22,22,22,0.98)', border: '1px solid rgba(255,255,255,0.12)', minWidth: 132 }}>
+                    <p className="px-3 pt-1.5 pb-1 text-[9px] uppercase tracking-wider text-gray-600">Save as</p>
+                    {([['pdf', 'PDF'], ['doc', 'Word (.doc)'], ['txt', 'Text (.txt)']] as const).map(([fmt, label]) => (
+                      <button
+                        key={fmt}
+                        onClick={() => handleSaveAs(fmt)}
+                        className="w-full text-left px-3 py-1.5 text-[11px] text-gray-300 hover:bg-white/10 hover:text-white transition-colors">
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
 
             {/* Email */}
             <button
               onClick={handleEmail}
               disabled={entries.length === 0 && !transcriptRef.current}
-              title="Send via email"
+              title="Email conversation as a PDF attachment"
               className="w-7 h-7 rounded-lg bg-white/8 hover:bg-white/15 disabled:opacity-30 flex items-center justify-center text-gray-400 hover:text-gray-200 transition-colors">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" />

@@ -62,7 +62,8 @@ interface MeetingAPI {
   setWindowSize(width: number, height: number): void
 
   openExternal(url: string): Promise<void>
-  saveNotes(content: string): Promise<boolean>
+  saveNotes(payload: { format: 'pdf' | 'doc' | 'txt'; text: string; html: string; defaultName?: string }): Promise<boolean>
+  emailNotes(payload: { html: string }): Promise<boolean>
 
   saveSession(userId: string, session: HistorySession): Promise<boolean>
   loadHistory(userId: string, days: number): Promise<HistorySession[]>
