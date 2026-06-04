@@ -14,7 +14,7 @@ A real-time AI assistant for meetings and interviews. Runs as a transparent floa
 - **Screen reading** — capture and analyze anything on screen with `⌘↵`
 - **Stealth mode** — invisible to screen recording and screenshots (`setContentProtection`)
 - **Always on top** — floats above full-screen apps and all workspaces
-- **Session history** — last 90 days of meetings saved locally
+- **Session history** — last 90 days of meetings saved locally; captured whenever you save notes, email, or sign out, and searchable by question, answer, transcript, or recap
 - **Report Issue** — one-click bug report with logs sent to support
 - **Free tier** — 3 AI responses per day; Pro Monthly ($9.99/mo) or Pro Yearly ($49.99/yr, save 58%) for unlimited
 
@@ -235,6 +235,7 @@ create trigger on_auth_user_created
 |---|---|
 | `⌘ Shift Space` | Toggle panel visibility |
 | `⌘ ↵` | Read screen and analyze |
+| `⌘ Shift E` | Expand / collapse the overlay |
 
 ---
 

@@ -72,16 +72,27 @@ export async function POST(req: NextRequest) {
     .filter(m => validRoles.has(m.role) && typeof m.content === 'string' && m.content.length <= 4000)
     .slice(-20) // max 20 messages for context
 
-  // 5. Stream from Groq
-  const stream = await getGroq().chat.completions.create({
-    model: 'llama-3.3-70b-versatile',
-    max_tokens: 1024,
-    stream: true,
-    messages: [
-      { role: 'system', content: buildSystemPrompt(transcript.slice(0, 8000)) },
-      ...safeMessages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
-    ],
-  })
+  // 5. Stream from Groq — guard the request so an upstream failure (bad/rate-limited
+  // GROQ_API_KEY, deprecated model, Groq outage) returns a clean error instead of a
+  // bare unhandled 500. The real cause is logged server-side for diagnosis.
+  let stream
+  try {
+    stream = await getGroq().chat.completions.create({
+      model: 'llama-3.3-70b-versatile',
+      max_tokens: 1024,
+      stream: true,
+      messages: [
+        { role: 'system', content: buildSystemPrompt(transcript.slice(0, 8000)) },
+        ...safeMessages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
+      ],
+    })
+  } catch (e) {
+    console.error('[chat] Groq request failed:', e)
+    return Response.json(
+      { error: 'The AI service is temporarily unavailable. Please try again in a moment.' },
+      { status: 502 },
+    )
+  }
 
   const readable = new ReadableStream({
     async start(controller) {

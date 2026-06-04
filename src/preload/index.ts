@@ -51,6 +51,11 @@ const api = {
     ipcRenderer.on('trigger-screen-read', handler)
     return () => ipcRenderer.removeListener('trigger-screen-read', handler)
   },
+  onToggleCollapse: (callback: () => void): (() => void) => {
+    const handler = () => callback()
+    ipcRenderer.on('toggle-collapse', handler)
+    return () => ipcRenderer.removeListener('toggle-collapse', handler)
+  },
 
   // Window controls
   hideWindow: (): void => ipcRenderer.send('hide-window'),
