@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react'
 import type { Session, UsageInfo } from '../../preload/index.d'
 import { SpeechTranscriber } from './lib/speech'
 import { buildExportText, buildExportHtml, type ExportData } from './lib/exportDoc'
+import { prepareForQuery, prepareForSummary } from './lib/transcript'
 import { TranscriptPanel, TranscriptEntry } from './components/TranscriptPanel'
 import { AuthScreen } from './components/AuthScreen'
 import { ConsentScreen } from './components/ConsentScreen'
@@ -12,6 +13,11 @@ const EXPANDED_WIDTH   = 400
 const EXPANDED_HEIGHT  = 540
 const COLLAPSED_WIDTH  = 210
 const COLLAPSED_HEIGHT = 30
+
+// Auto-stop recording after this long with no detected voice; once the "still
+// there?" prompt shows, auto-stop after the grace period if the user ignores it.
+const SILENCE_LIMIT_MS = 5 * 60 * 1000
+const SILENCE_GRACE_MS = 60 * 1000
 
 // VAD settings
 const SILENCE_RMS_THRESHOLD = 0.01
@@ -317,6 +323,7 @@ export default function App(): JSX.Element {
   const [showShortcuts, setShowShortcuts] = useState(false)
   const [showDeleteModal, setShowDeleteModal] = useState(false)
   const [showSaveMenu, setShowSaveMenu] = useState(false)
+  const [showSilencePrompt, setShowSilencePrompt] = useState(false)
 
   // UX indicators
   const [showTakingNotes, setShowTakingNotes] = useState(false)
@@ -357,6 +364,9 @@ export default function App(): JSX.Element {
   // Stable id for the current run so Save/Email/Sign-out all update one history
   // record instead of creating duplicates.
   const sessionIdRef    = useRef<string>(Math.random().toString(36).slice(2))
+  // Silence auto-stop: timestamp of last detected voice + when the prompt opened.
+  const lastVoiceRef    = useRef(0)
+  const promptedAtRef   = useRef(0)
   isStreamingRef.current = isStreaming
   entriesRef.current     = entries
   usageRef.current       = usage
@@ -374,7 +384,7 @@ export default function App(): JSX.Element {
     setIsStreaming(true)
     setActiveTab('assist')
     setEntries((prev) => [...prev, { id, type: 'qa', question: 'Reading screen…', answer: '', streaming: true }])
-    window.api.readScreen(transcriptRef.current).catch((err: unknown) => {
+    window.api.readScreen(prepareForQuery(transcriptRef.current)).catch((err: unknown) => {
       setIsStreaming(false)
       setEntries((prev) => prev.map((e) =>
         e.id === id && e.type === 'qa'
@@ -503,7 +513,7 @@ export default function App(): JSX.Element {
       ])
     messages.push({ role: 'user', content: question })
 
-    window.api.chatWithClaude(messages, transcriptRef.current).catch((err: unknown) => {
+    window.api.chatWithClaude(messages, prepareForQuery(transcriptRef.current)).catch((err: unknown) => {
       setIsStreaming(false)
       setEntries((prev) => prev.map((e) =>
         e.id === id && e.type === 'qa'
@@ -538,7 +548,7 @@ export default function App(): JSX.Element {
 
     window.api.chatWithClaude(
       [{ role: 'user', content: prompts[tab] }],
-      transcript
+      prepareForSummary(transcript)
     ).catch((err: unknown) => {
       setIsStreaming(false)
       setTabStreaming((prev) => ({ ...prev, [tab]: false }))
@@ -554,6 +564,13 @@ export default function App(): JSX.Element {
   const appendSpeech = useCallback((text: string) => {
     if (!text) return
     transcriptRef.current = transcriptRef.current ? `${transcriptRef.current} ${text}` : text
+
+    // Voice detected — reset the silence timer and dismiss the "still there?" prompt.
+    lastVoiceRef.current = Date.now()
+    if (promptedAtRef.current) {
+      promptedAtRef.current = 0
+      setShowSilencePrompt(false)
+    }
 
     // Show "Taking notes" toast on first voice detected
     if (!firstVoiceSeen) {
@@ -670,8 +687,34 @@ export default function App(): JSX.Element {
     if (transcriptRef.current.trim().split(' ').length > 20) {
       setShowSummaryBanner(true)
     }
+    setShowSilencePrompt(false)
     focusInput()
   }
+
+  // Stable ref so the silence timer always calls the latest stopRecording.
+  const stopRecordingRef = useRef(stopRecording)
+  stopRecordingRef.current = stopRecording
+
+  // ── Silence auto-stop ───────────────────────────────────────────────────────
+  // While recording, watch for a long gap with no detected voice. After
+  // SILENCE_LIMIT_MS show a "still there?" prompt; if ignored for SILENCE_GRACE_MS,
+  // stop recording so we don't keep an empty session (and burn transcription) open.
+  useEffect(() => {
+    if (!isRecording) { setShowSilencePrompt(false); return }
+    lastVoiceRef.current = Date.now()
+    promptedAtRef.current = 0
+    const iv = setInterval(() => {
+      const now = Date.now()
+      if (now - lastVoiceRef.current < SILENCE_LIMIT_MS) return
+      if (!promptedAtRef.current) {
+        promptedAtRef.current = now
+        setShowSilencePrompt(true)
+      } else if (now - promptedAtRef.current >= SILENCE_GRACE_MS) {
+        stopRecordingRef.current()
+      }
+    }, 15000)
+    return () => clearInterval(iv)
+  }, [isRecording])
 
   // ── Export helpers ──────────────────────────────────────────────────────────
   // Snapshot the live conversation into the format-agnostic export shape.
@@ -1221,6 +1264,29 @@ export default function App(): JSX.Element {
               </svg>
             </button>
           </div>
+
+          {/* ── Silence "still there?" prompt ── */}
+          {showSilencePrompt && isRecording && (
+            <div className="mx-3 mb-2 px-3 py-2 rounded-lg border border-amber-500/30 flex items-center justify-between gap-2 flex-shrink-0"
+              style={{ background: 'rgba(245,158,11,0.08)' }}>
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-amber-400 text-sm">⏸</span>
+                <p className="text-[11px] text-amber-200 font-medium truncate">No voice for 5 min — still there?</p>
+              </div>
+              <div className="flex items-center gap-1.5 flex-shrink-0">
+                <button
+                  onClick={() => { lastVoiceRef.current = Date.now(); promptedAtRef.current = 0; setShowSilencePrompt(false) }}
+                  className="px-2.5 py-1 rounded-md bg-amber-600/80 hover:bg-amber-500 text-[10px] font-semibold text-white transition-colors">
+                  Keep recording
+                </button>
+                <button
+                  onClick={stopRecording}
+                  className="px-2 py-1 rounded-md bg-white/10 hover:bg-white/20 text-[10px] font-medium text-gray-300 transition-colors">
+                  Stop
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* ── Summary banner ── */}
           {showSummaryBanner && !isRecording && (

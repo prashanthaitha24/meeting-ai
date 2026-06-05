@@ -73,7 +73,9 @@ export async function POST(req: NextRequest) {
   let textStream
   try {
     textStream = await streamChat({
-      system: buildSystemPrompt(transcript.slice(0, 8000)),
+      // Tail, not head: a live answer needs the most recent context. The client
+      // already sends a cleaned sliding window; this is a server-side safety cap.
+      system: buildSystemPrompt(transcript.slice(-24000)),
       messages: safeMessages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
     })
   } catch (e) {

@@ -100,7 +100,7 @@ export async function POST(req: NextRequest) {
               type: 'text',
               text: `You are a real-time AI interview assistant. Look at this screenshot carefully.
 Identify any interview question, coding problem, or task visible on the screen and provide a strong, concise answer the candidate can use immediately.
-${transcript ? `\nMeeting transcript so far:\n${transcript.slice(0, 4000)}\n` : ''}
+${transcript ? `\nMeeting transcript so far:\n${transcript.slice(-6000)}\n` : ''}
 Be direct and answer as if you are the candidate. If it's a coding problem, provide working code with a brief explanation.`,
             },
           ],

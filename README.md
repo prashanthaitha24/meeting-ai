@@ -13,6 +13,9 @@ A real-time AI assistant for meetings and interviews. Runs as a transparent floa
 - **Say This / Follow-up / Recap tabs** — generate talking points, follow-up questions, and meeting summaries
 - **Screen reading** — capture and analyze anything on screen with `⌘↵`
 - **Stealth mode** — invisible to screen recording and screenshots (`setContentProtection`)
+- **Silence auto-stop** — after 5 min with no voice, prompts "still there?" and stops recording if ignored
+- **On-device transcript trimming** — strips filler words and sends only the recent context window per question (lower cost, less data leaves the device)
+- **Reliable answers** — Groq primary with automatic retry + OpenAI failover so answers survive rate-limits/outages
 - **Always on top** — floats above full-screen apps and all workspaces
 - **Session history** — last 90 days of meetings saved locally; captured whenever you save notes, email, or sign out, and searchable by question, answer, transcript, or recap
 - **Save / share conversation** — export the conversation as a formatted Q&A document in **PDF, Word (.doc), or Text**, or email it as a PDF attachment
