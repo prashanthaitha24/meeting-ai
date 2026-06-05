@@ -15,7 +15,7 @@ A real-time AI assistant for meetings and interviews. Runs as a transparent floa
 - **Stealth mode** — invisible to screen recording and screenshots (`setContentProtection`)
 - **Silence auto-stop** — after 5 min with no voice, prompts "still there?" and stops recording if ignored
 - **On-device transcript trimming** — strips filler words and sends only the recent context window per question (lower cost, less data leaves the device)
-- **Reliable answers** — Groq primary with automatic retry + OpenAI failover so answers survive rate-limits/outages
+- **Reliable answers** — round-robin pool across multiple AI providers (Groq, OpenAI, Cerebras, Google, …) with retry + failover, so answers survive any one provider's rate-limits/outages
 - **Always on top** — floats above full-screen apps and all workspaces
 - **Session history** — last 90 days of meetings saved locally; captured whenever you save notes, email, or sign out, and searchable by question, answer, transcript, or recap
 - **Save / share conversation** — export the conversation as a formatted Q&A document in **PDF, Word (.doc), or Text**, or email it as a PDF attachment
@@ -127,9 +127,14 @@ For the backend, create `backend/.env.local`:
 ```env
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+# AI provider pool (round-robin + failover) — at least one key required:
 GROQ_API_KEY=gsk_...
-OPENAI_API_KEY=sk-...          # optional — Groq→OpenAI failover for chat answers
-OPENAI_MODEL=gpt-5.4-mini      # optional — fallback model (default shown)
+OPENAI_API_KEY=sk-...          # optional pool member
+CEREBRAS_API_KEY=csk-...       # optional pool member
+GEMINI_API_KEY=...             # optional pool member (Google)
+TOGETHER_API_KEY=...           # optional pool member
+XAI_API_KEY=xai-...            # optional pool member (Grok)
+# optional per-provider model overrides: GROQ_MODEL, OPENAI_MODEL, CEREBRAS_MODEL, GEMINI_MODEL, ...
 STRIPE_SECRET_KEY=sk_test_...
 STRIPE_PRICE_ID=price_...
 STRIPE_YEARLY_PRICE_ID=price_...

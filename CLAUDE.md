@@ -120,20 +120,24 @@ SUPABASE_URL, SUPABASE_ANON_KEY, BACKEND_URL, SENTRY_DSN (optional)
 **`backend/.env.local`:**
 ```
 SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
-GROQ_API_KEY,
-OPENAI_API_KEY,      # optional — enables Groq→OpenAI failover for chat answers
-OPENAI_MODEL,        # optional — defaults to gpt-5.4-mini
+# AI provider pool — at least one key required; each adds a pool member:
+GROQ_API_KEY, OPENAI_API_KEY, CEREBRAS_API_KEY, GEMINI_API_KEY, TOGETHER_API_KEY, XAI_API_KEY,
+# optional per-provider model overrides:
+# GROQ_MODEL, OPENAI_MODEL, CEREBRAS_MODEL, GEMINI_MODEL, TOGETHER_MODEL, XAI_MODEL
 STRIPE_SECRET_KEY, STRIPE_PRICE_ID, STRIPE_YEARLY_PRICE_ID, STRIPE_WEBHOOK_SECRET,
 STRIPE_PAYMENT_LINK, BACKEND_URL
 ```
 
 ### AI reliability (chat answers)
-`backend/lib/ai.ts` `streamChat()` tries Groq first (retried on 429/5xx via
-`backend/lib/retry.ts`) and falls back to OpenAI `gpt-5.4-mini` when Groq is
-rate-limited/down — but only if `OPENAI_API_KEY` is set. Both speak the OpenAI
-chat-completions protocol, so one client/normalizer handles both. Failover is at
-connect time only. Screen-vision (`screen/route.ts`) is retried but not yet
-failed-over.
+`backend/lib/ai.ts` `streamChat()` runs a **round-robin + failover pool** over
+the providers in `PROVIDER_SPECS`. A provider is active only if its API key env
+is set, so you scale the pool by adding keys (no code change). Each request
+starts at the next provider in rotation (load balancing — each sees ~1/N of
+traffic) and falls through the rest on failure (resilience); each call is retried
+on 429/5xx via `backend/lib/retry.ts`. All providers are OpenAI-protocol
+compatible (Google Gemini via its OpenAI endpoint), so one SDK + one normalizer
+covers the pool. The round-robin cursor is per warm instance (not global).
+Screen-vision (`screen/route.ts`) is retried on Groq but not yet pooled.
 
 ## Testing
 - Unit/component: Vitest + React Testing Library (`npm test`)
