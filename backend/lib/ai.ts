@@ -68,6 +68,37 @@ function getActiveProviders(): ActiveProvider[] {
 
 let _cursor = 0
 
+/** Which providers are configured (key present) — no secrets exposed. */
+export function providerStatus(): { name: string; configured: boolean; model: string | null }[] {
+  return PROVIDER_SPECS.map((s) => ({
+    name: s.name,
+    configured: !!process.env[s.apiKeyEnv],
+    model: process.env[s.apiKeyEnv] ? process.env[s.modelEnv] || s.defaultModel : null,
+  }))
+}
+
+/** Tiny 1-token request to each active provider to verify the key actually works. */
+export async function pingProviders(): Promise<
+  { name: string; ok: boolean; ms: number; model: string; error?: string }[]
+> {
+  return Promise.all(
+    getActiveProviders().map(async (p) => {
+      const t0 = Date.now()
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const params: Record<string, any> = { model: p.model, messages: [{ role: 'user', content: 'ping' }] }
+        params[p.tokenParam] = 1
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await p.client.chat.completions.create(params as any)
+        return { name: p.name, ok: true, ms: Date.now() - t0, model: p.model }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        return { name: p.name, ok: false, ms: Date.now() - t0, model: p.model, error: msg.slice(0, 200) }
+      }
+    }),
+  )
+}
+
 export interface ChatTurn { role: 'user' | 'assistant'; content: string }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
