@@ -3,6 +3,7 @@ import OpenAI from 'openai'
 import { verifyAuth } from '@/lib/auth'
 import { checkAndConsume } from '@/lib/usage'
 import { EXAM_REFUSAL, EXAM_CLASSIFIER_PROMPT, isExamVerdict } from '@/lib/exam-guard'
+import { withRetry } from '@/lib/retry'
 
 const VISION_MODEL = 'meta-llama/llama-4-scout-17b-16e-instruct'
 
@@ -86,7 +87,7 @@ export async function POST(req: NextRequest) {
 
   let stream
   try {
-    stream = await getGroq().chat.completions.create({
+    stream = await withRetry(() => getGroq().chat.completions.create({
       model: VISION_MODEL,
       max_tokens: 1024,
       stream: true,
@@ -105,7 +106,7 @@ Be direct and answer as if you are the candidate. If it's a coding problem, prov
           ],
         },
       ],
-    })
+    }), 'screen')
   } catch (e) {
     console.error('[screen] Groq request failed:', e)
     return Response.json(

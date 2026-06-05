@@ -1,16 +1,11 @@
 import { NextRequest } from 'next/server'
-import OpenAI from 'openai'
 import { verifyAuth } from '@/lib/auth'
 import { checkAndConsume } from '@/lib/usage'
+import { streamChat } from '@/lib/ai'
 
 export const dynamic = 'force-dynamic'
 
 const enc = new TextEncoder()
-let _groq: OpenAI | undefined
-function getGroq() {
-  if (!_groq) _groq = new OpenAI({ apiKey: process.env.GROQ_API_KEY, baseURL: 'https://api.groq.com/openai/v1' })
-  return _groq
-}
 
 function sse(data: object) {
   return enc.encode(`data: ${JSON.stringify(data)}\n\n`)
@@ -72,22 +67,17 @@ export async function POST(req: NextRequest) {
     .filter(m => validRoles.has(m.role) && typeof m.content === 'string' && m.content.length <= 4000)
     .slice(-20) // max 20 messages for context
 
-  // 5. Stream from Groq — guard the request so an upstream failure (bad/rate-limited
-  // GROQ_API_KEY, deprecated model, Groq outage) returns a clean error instead of a
-  // bare unhandled 500. The real cause is logged server-side for diagnosis.
-  let stream
+  // 5. Stream the answer with provider failover (Groq → Claude, each retried on
+  // transient errors). If BOTH providers fail to connect, return a clean 502 with
+  // a friendly message instead of a bare 500. The cause is logged for diagnosis.
+  let textStream
   try {
-    stream = await getGroq().chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
-      max_tokens: 1024,
-      stream: true,
-      messages: [
-        { role: 'system', content: buildSystemPrompt(transcript.slice(0, 8000)) },
-        ...safeMessages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
-      ],
+    textStream = await streamChat({
+      system: buildSystemPrompt(transcript.slice(0, 8000)),
+      messages: safeMessages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
     })
   } catch (e) {
-    console.error('[chat] Groq request failed:', e)
+    console.error('[chat] all providers failed:', e)
     return Response.json(
       { error: 'The AI service is temporarily unavailable. Please try again in a moment.' },
       { status: 502 },
@@ -97,19 +87,14 @@ export async function POST(req: NextRequest) {
   const readable = new ReadableStream({
     async start(controller) {
       try {
-        for await (const chunk of stream) {
-          const text = chunk.choices[0]?.delta?.content ?? ''
-          if (text) controller.enqueue(sse({ text }))
-        }
+        for await (const text of textStream) controller.enqueue(sse({ text }))
         controller.enqueue(sse({ done: true }))
       } catch (e) {
+        console.error('[chat] stream error:', e)
         controller.enqueue(sse({ error: 'Stream error' }))
       } finally {
         controller.close()
       }
-    },
-    cancel() {
-      stream.controller.abort()
     },
   })
 
