@@ -130,6 +130,7 @@ SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 # AI provider pool (round-robin + failover) — at least one key required:
 GROQ_API_KEY=gsk_...
 OPENAI_API_KEY=sk-...          # optional pool member
+ANTHROPIC_API_KEY=sk-ant-...   # optional pool member (Claude via OpenAI-compat)
 CEREBRAS_API_KEY=csk-...       # optional pool member
 GEMINI_API_KEY=...             # optional pool member (Google)
 TOGETHER_API_KEY=...           # optional pool member

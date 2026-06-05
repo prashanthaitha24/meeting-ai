@@ -35,7 +35,9 @@ interface ProviderSpec {
 const PROVIDER_SPECS: ProviderSpec[] = [
   { name: 'groq', apiKeyEnv: 'GROQ_API_KEY', baseURL: 'https://api.groq.com/openai/v1', defaultModel: 'llama-3.3-70b-versatile', modelEnv: 'GROQ_MODEL', tokenParam: 'max_tokens' },
   { name: 'openai', apiKeyEnv: 'OPENAI_API_KEY', defaultModel: 'gpt-5.4-mini', modelEnv: 'OPENAI_MODEL', tokenParam: 'max_completion_tokens' },
-  { name: 'cerebras', apiKeyEnv: 'CEREBRAS_API_KEY', baseURL: 'https://api.cerebras.ai/v1', defaultModel: 'llama-3.3-70b', modelEnv: 'CEREBRAS_MODEL', tokenParam: 'max_tokens' },
+  // Anthropic via its OpenAI-compatible endpoint (streaming + max_tokens supported).
+  { name: 'anthropic', apiKeyEnv: 'ANTHROPIC_API_KEY', baseURL: 'https://api.anthropic.com/v1/', defaultModel: 'claude-haiku-4-5', modelEnv: 'ANTHROPIC_MODEL', tokenParam: 'max_tokens' },
+  { name: 'cerebras', apiKeyEnv: 'CEREBRAS_API_KEY', baseURL: 'https://api.cerebras.ai/v1', defaultModel: 'gpt-oss-120b', modelEnv: 'CEREBRAS_MODEL', tokenParam: 'max_tokens' },
   { name: 'google', apiKeyEnv: 'GEMINI_API_KEY', baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/', defaultModel: 'gemini-2.5-flash', modelEnv: 'GEMINI_MODEL', tokenParam: 'max_tokens' },
   { name: 'together', apiKeyEnv: 'TOGETHER_API_KEY', baseURL: 'https://api.together.xyz/v1', defaultModel: 'meta-llama/Llama-3.3-70B-Instruct-Turbo', modelEnv: 'TOGETHER_MODEL', tokenParam: 'max_tokens' },
   { name: 'xai', apiKeyEnv: 'XAI_API_KEY', baseURL: 'https://api.x.ai/v1', defaultModel: 'grok-4.3', modelEnv: 'XAI_MODEL', tokenParam: 'max_tokens' },
