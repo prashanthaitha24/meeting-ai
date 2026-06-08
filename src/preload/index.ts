@@ -69,6 +69,12 @@ const api = {
     ipcRenderer.invoke('save-notes', payload),
   emailNotes: (payload: { html: string }) => ipcRenderer.invoke('email-notes', payload),
 
+  // BYOK — the user's own AI provider + key (key never returned to the renderer)
+  byokGet: () => ipcRenderer.invoke('byok:get'),
+  byokSet: (payload: { providerId: string; model?: string; key: string }) => ipcRenderer.invoke('byok:set', payload),
+  byokClear: () => ipcRenderer.invoke('byok:clear'),
+  byokTest: (payload: { providerId: string; model?: string; key: string }) => ipcRenderer.invoke('byok:test', payload),
+
   saveSession: (userId: string, session: object) => ipcRenderer.invoke('history:save', userId, session),
   loadHistory: (userId: string, days: number) => ipcRenderer.invoke('history:load', userId, days),
   clearHistory: (userId: string) => ipcRenderer.invoke('history:clear', userId),

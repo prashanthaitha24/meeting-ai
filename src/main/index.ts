@@ -16,6 +16,9 @@ import {
 import { log, readRecentLogs, getLogFilePath } from './logger'
 import { isUndetectable, pickPrimaryScreenSource } from './window-utils'
 import { friendlyHttpError, friendlyNetworkError } from './errors'
+import { byokStatus, byokCredentials, saveByok, clearByok } from './byok'
+import { streamProviderChat, streamProviderScreen, testProviderKey, type StreamCallbacks } from './ai-direct'
+import type { ProviderId } from '../shared/providers'
 
 dotenv.config({ path: is.dev ? '.env' : path.join(process.resourcesPath, '.env') })
 
@@ -406,18 +409,44 @@ async function streamFromBackend(url: string, token: string, body: object): Prom
   }
 }
 
+// ── BYOK: the user's own AI provider + key ────────────────────────────────────
+ipcMain.handle('byok:get', () => byokStatus())
+ipcMain.handle('byok:set', (_e, payload: { providerId: ProviderId; model?: string; key: string }) => {
+  saveByok(payload.providerId, payload.model, payload.key)
+  return true
+})
+ipcMain.handle('byok:clear', () => { clearByok(); return true })
+ipcMain.handle('byok:test', (_e, payload: { providerId: ProviderId; model?: string; key: string }) =>
+  testProviderKey(payload.providerId, payload.model, payload.key))
+
+// Bridge the direct-stream callbacks to the existing chat-chunk renderer channel.
+function chatChunkCallbacks(): StreamCallbacks {
+  return {
+    onChunk: (text) => mainWindow?.webContents.send('chat-chunk', { text, done: false }),
+    onDone: () => mainWindow?.webContents.send('chat-chunk', { text: '', done: true }),
+    onError: (msg) => sendStreamError(msg),
+  }
+}
+
+// Keep only valid, recent turns (mirrors the old backend-side validation).
+function safeTurns(messages: Array<{ role: string; content: string }>) {
+  return messages
+    .filter((m) => (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string' && m.content.length <= 4000)
+    .slice(-20) as Array<{ role: 'user' | 'assistant'; content: string }>
+}
+
 // ── Chat ──────────────────────────────────────────────────────────────────────
 ipcMain.handle('chat-with-claude', async (_event, messages: Array<{ role: string; content: string }>, transcript: string) => {
-  const token = await getAccessToken()
-  if (!token) { sendStreamError('Your session has expired. Please sign out and sign in again.'); return true }
-  await streamFromBackend(`${BACKEND_URL}/api/chat`, token, { messages, transcript })
+  const creds = byokCredentials()
+  if (!creds) { sendStreamError('Add your AI provider key in Settings to start getting answers.'); return true }
+  await streamProviderChat(creds, safeTurns(messages), transcript, chatChunkCallbacks())
   return true
 })
 
 // ── Screen read ───────────────────────────────────────────────────────────────
 ipcMain.handle('read-screen', async (_event, transcript: string) => {
-  const token = await getAccessToken()
-  if (!token) { sendStreamError('Your session has expired. Please sign out and sign in again.'); return true }
+  const creds = byokCredentials()
+  if (!creds) { sendStreamError('Add your AI provider key in Settings to read the screen.'); return true }
 
   mainWindow?.setContentProtection(false)
   await new Promise((r) => setTimeout(r, 80))
@@ -434,7 +463,7 @@ ipcMain.handle('read-screen', async (_event, transcript: string) => {
   }
   if (!base64) { sendStreamError("Couldn't capture the screen. Please check screen-recording permission in System Settings."); return true }
 
-  await streamFromBackend(`${BACKEND_URL}/api/screen`, token, { base64, transcript })
+  await streamProviderScreen(creds, base64, transcript, chatChunkCallbacks())
   return true
 })
 

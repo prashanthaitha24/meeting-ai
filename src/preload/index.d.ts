@@ -65,6 +65,12 @@ interface MeetingAPI {
   saveNotes(payload: { format: 'pdf' | 'doc' | 'txt'; text: string; html: string; defaultName?: string }): Promise<boolean>
   emailNotes(payload: { html: string }): Promise<boolean>
 
+  // BYOK — bring your own AI provider key
+  byokGet(): Promise<{ providerId: string; model: string; hasKey: boolean } | null>
+  byokSet(payload: { providerId: string; model?: string; key: string }): Promise<boolean>
+  byokClear(): Promise<boolean>
+  byokTest(payload: { providerId: string; model?: string; key: string }): Promise<{ ok: boolean; error?: string }>
+
   saveSession(userId: string, session: HistorySession): Promise<boolean>
   loadHistory(userId: string, days: number): Promise<HistorySession[]>
   clearHistory(userId: string): Promise<boolean>
