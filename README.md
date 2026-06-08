@@ -2,6 +2,8 @@
 
 A real-time AI assistant for meetings and interviews. Runs as a transparent floating overlay on macOS and Windows — listens, transcribes, and answers questions instantly while staying invisible to screen recording.
 
+**Free and unlimited — bring your own AI key.** You connect your own provider key (OpenAI, Groq, Claude, or Gemini) and the app calls it directly from your machine. Your conversations and key never pass through our servers.
+
 **Website:** [thavionai.com](https://thavionai.com) · **Support:** support@thavionai.com
 
 ---
@@ -9,18 +11,18 @@ A real-time AI assistant for meetings and interviews. Runs as a transparent floa
 ## Features
 
 - **Real-time transcription** — continuous mic transcription via Web Speech API (free, no API calls)
-- **AI answers** — ask questions mid-meeting and get instant answers via Groq (Llama 3.3 70B)
+- **AI answers** — ask questions mid-meeting and get instant streamed answers from your chosen provider
 - **Say This / Follow-up / Recap tabs** — generate talking points, follow-up questions, and meeting summaries
 - **Screen reading** — capture and analyze anything on screen with `⌘↵`
 - **Stealth mode** — invisible to screen recording and screenshots (`setContentProtection`)
 - **Silence auto-stop** — after 5 min with no voice, prompts "still there?" and stops recording if ignored
 - **On-device transcript trimming** — strips filler words and sends only the recent context window per question (lower cost, less data leaves the device)
-- **Reliable answers** — round-robin pool across multiple AI providers (Groq, OpenAI, Cerebras, Google, …) with retry + failover, so answers survive any one provider's rate-limits/outages
+- **Bring your own key** — choose **OpenAI, Groq, Claude, or Gemini** on first launch; requests go directly from your machine to your provider. Your key is encrypted on-device (OS keychain) and never uploaded
 - **Always on top** — floats above full-screen apps and all workspaces
 - **Session history** — last 90 days of meetings saved locally; captured whenever you save notes, email, or sign out, and searchable by question, answer, transcript, or recap
 - **Save / share conversation** — export the conversation as a formatted Q&A document in **PDF, Word (.doc), or Text**, or email it as a PDF attachment
 - **Report Issue** — one-click bug report with logs sent to support
-- **Free tier** — 3 AI responses per day; Pro Monthly ($9.99/mo) or Pro Yearly ($49.99/yr, save 58%) for unlimited
+- **Free & unlimited** — no subscription, no account; you only pay your own AI provider for what you use. Optional “buy me a coffee” tip if you'd like to support development
 
 ---
 
@@ -30,12 +32,11 @@ A real-time AI assistant for meetings and interviews. Runs as a transparent floa
 Microphone  ──► Web Speech API (Chromium built-in)       ──► Live transcript (free)
 System audio ──► Groq Whisper (whisper-large-v3-turbo)   ──► Participant transcript
 
-User question ──► Groq Llama 3.3 70B (backend SSE)       ──► Streamed answer
-Screen capture ──► Groq Llama 4 Scout vision (backend SSE) ──► Streamed answer
+User question ──► your AI provider (direct, on-device)  ──► Streamed answer
+Screen capture ──► your provider's vision model (direct)  ──► Streamed answer
 
-Auth    ──► Supabase (Google OAuth PKCE / Apple OAuth / Email)
-Billing ──► Stripe (subscription, webhooks)
-Backend ──► Next.js on Vercel
+Key     ──► stored encrypted on-device (Electron safeStorage / OS keychain)
+Support ──► Stripe one-time "buy me a coffee" (optional)
 Logs    ──► ~/.meeting-ai/app.log + Sentry (crash monitoring)
 ```
 
@@ -48,9 +49,9 @@ Logs    ──► ~/.meeting-ai/app.log + Sentry (crash monitoring)
 | Desktop app | Electron 31 + electron-vite + TypeScript |
 | UI | React 18 + Tailwind CSS |
 | Auth | Supabase (Google OAuth, Apple OAuth, email/password) |
-| AI backend | Next.js (Vercel) — Groq API (Llama 3.3 70B chat, Llama 4 Scout vision) |
-| Transcription | Groq Whisper whisper-large-v3-turbo (audio chunks) + Web Speech API (mic) |
-| Billing | Stripe subscriptions + webhooks |
+| AI | Bring your own key — OpenAI / Groq / Claude / Gemini, called directly from the app (OpenAI-compatible) |
+| Transcription | Web Speech API (mic) + optional provider Whisper |
+| Support | Stripe one-time "buy me a coffee" (optional) |
 | Monitoring | Sentry + local file logging |
 | Packaging | electron-builder (macOS DMG, Windows NSIS) |
 | CI/CD | GitHub Actions — builds Mac + Windows on tag push |
@@ -251,13 +252,11 @@ create trigger on_auth_user_created
 
 ---
 
-## Usage Limits
+## Pricing & limits
 
-Free users get **3 AI responses per day** (resets at midnight UTC). Pro subscribers get unlimited responses via Stripe:
-- **Pro Monthly** — $9.99/month
-- **Pro Yearly** — $49.99/year (~$4.17/month, save 58%)
+Meeting AI is **free and unlimited**. There's no subscription and no usage cap from us — on first launch you choose an AI provider and paste **your own API key**, which is stored encrypted on-device and used to call the provider directly. Your only "limit" is whatever your provider's own plan allows.
 
-Add `STRIPE_YEARLY_PRICE_ID` to both `.env` and Vercel env vars for the yearly plan to work.
+An optional **“Buy me a coffee”** one-time tip (via Stripe) supports development — entirely voluntary.
 
 ---
 
