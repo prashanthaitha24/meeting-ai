@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
-import type { Session, UsageInfo } from '../../preload/index.d'
+import type { Session } from '../../preload/index.d'
 import { SpeechTranscriber } from './lib/speech'
 import { buildExportText, buildExportHtml, type ExportData } from './lib/exportDoc'
 import { prepareForQuery, prepareForSummary } from './lib/transcript'
@@ -7,7 +7,6 @@ import { TranscriptPanel, TranscriptEntry } from './components/TranscriptPanel'
 import { AuthScreen } from './components/AuthScreen'
 import { ConsentScreen } from './components/ConsentScreen'
 import { HistoryTab } from './components/HistoryTab'
-import { UpgradeModal } from './components/UpgradeModal'
 
 const EXPANDED_WIDTH   = 400
 const EXPANDED_HEIGHT  = 540
@@ -279,33 +278,11 @@ const CONSENT_KEY = `consent_accepted_v${CONSENT_VERSION}`
 export default function App(): JSX.Element {
   const [consentGiven, setConsentGiven] = useState(() => localStorage.getItem(CONSENT_KEY) === 'true')
   const [session, setSession] = useState<Session | null | 'loading'>('loading')
-  const [usage, setUsage] = useState<UsageInfo | null>(null)
-  const [showUpgradeModal, setShowUpgradeModal] = useState(false)
 
   useEffect(() => {
-    window.api.checkSession().then((s) => {
-      setSession(s)
-      if (s) {
-        window.api.getUsage().then(setUsage)
-      }
-    })
+    window.api.checkSession().then(setSession)
     const t = setInterval(() => window.api.checkSession().then(setSession), 5 * 60 * 1000)
     return () => clearInterval(t)
-  }, [])
-
-  // Wire up usage-limit-reached and stripe-success events
-  useEffect(() => {
-    const unsubLimit = window.api.onUsageLimitReached(() => {
-      setShowUpgradeModal(true)
-    })
-    const unsubSuccess = window.api.onStripeSuccess(() => {
-      setShowUpgradeModal(false)
-      window.api.getUsage().then(setUsage)
-    })
-    return () => {
-      unsubLimit()
-      unsubSuccess()
-    }
   }, [])
 
   const [isRecording, setIsRecording] = useState(false)
@@ -360,7 +337,6 @@ export default function App(): JSX.Element {
   // (recorder.onstop is set up once; without refs it captures stale state)
   const isStreamingRef  = useRef(false)
   const entriesRef      = useRef<TranscriptEntry[]>([])
-  const usageRef        = useRef(usage)
   // Stable id for the current run so Save/Email/Sign-out all update one history
   // record instead of creating duplicates.
   const sessionIdRef    = useRef<string>(Math.random().toString(36).slice(2))
@@ -369,15 +345,10 @@ export default function App(): JSX.Element {
   const promptedAtRef   = useRef(0)
   isStreamingRef.current = isStreaming
   entriesRef.current     = entries
-  usageRef.current       = usage
 
   // ── Screen read ─────────────────────────────────────────────────────────────
   const triggerScreenRead = useCallback(() => {
     if (isStreaming) return
-    if (usageRef.current && !usageRef.current.canMakeCall) {
-      setShowUpgradeModal(true)
-      return
-    }
     const id = uid()
     streamTargetRef.current = { kind: 'entry', id }
     streamingTextRef.current = ''
@@ -421,8 +392,6 @@ export default function App(): JSX.Element {
       if (done) {
         const finalText = streamingTextRef.current
         setIsStreaming(false)
-        // Refresh usage count after each AI response
-        window.api.getUsage().then(setUsage)
         if (target.kind === 'entry') {
           const id = target.id
           setEntries((prev) => prev.map((e) =>
@@ -490,10 +459,6 @@ export default function App(): JSX.Element {
   // skipDedup=true for manual typed questions; false for auto speech detection.
   const sendQuestion = useCallback((question: string, skipDedup = false) => {
     if (isStreamingRef.current) return
-    if (usageRef.current && !usageRef.current.canMakeCall) {
-      setShowUpgradeModal(true)
-      return
-    }
     if (!skipDedup && question === lastQuestionRef.current) return
     lastQuestionRef.current = question
 
@@ -526,10 +491,6 @@ export default function App(): JSX.Element {
   // ── Generate tab content ────────────────────────────────────────────────────
   const generateTabContent = useCallback((tab: ContentTab) => {
     if (isStreaming) return
-    if (usageRef.current && !usageRef.current.canMakeCall) {
-      setShowUpgradeModal(true)
-      return
-    }
     const transcript = transcriptRef.current
     if (!transcript.trim()) return
 
@@ -772,8 +733,6 @@ export default function App(): JSX.Element {
     await persistSession()
     await window.api.logout()
     setSession(null)
-    setUsage(null)
-    setShowUpgradeModal(false)
   }
 
   // ── Consent (first launch only) ─────────────────────────────────────────────
@@ -832,7 +791,6 @@ export default function App(): JSX.Element {
       transcriptRef.current = ''
       lastQuestionRef.current = ''
       streamTargetRef.current = null
-      window.api.getUsage().then(setUsage)
     }} />
   )
 
@@ -851,14 +809,6 @@ export default function App(): JSX.Element {
           ? '0 4px 24px rgba(0,0,0,0.5)'
           : '0 8px 32px rgba(0,0,0,0.4)',
       }}>
-
-      {/* ── Upgrade modal overlay ── */}
-      {showUpgradeModal && !isCollapsed && (
-        <UpgradeModal
-          onClose={() => setShowUpgradeModal(false)}
-          freeCallsUsed={usage?.freeCallsUsed ?? 5}
-        />
-      )}
 
       {/* ── Report Issue modal ── */}
       {showReportModal && !isCollapsed && (
@@ -910,25 +860,6 @@ export default function App(): JSX.Element {
           </div>
 
           <div className="flex items-center gap-1 flex-shrink-0" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-            {/* Upgrade button — always visible for free users */}
-            {usage && usage.subscriptionStatus !== 'active' && (
-              <button
-                onClick={() => setShowUpgradeModal(true)}
-                title={`${usage.freeCallsUsed}/${usage.freeLimit} AI answers used today — Upgrade to Pro`}
-                className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-semibold bg-gradient-to-r from-blue-600/80 to-indigo-600/80 hover:from-blue-500 hover:to-indigo-500 text-white transition-all border border-blue-500/30">
-                <svg width="8" height="8" viewBox="0 0 24 24" fill="currentColor"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-                {usage.freeCallsUsed}/{usage.freeLimit} · Upgrade
-              </button>
-            )}
-            {/* Pro badge for subscribers */}
-            {usage?.subscriptionStatus === 'active' && (
-              <button
-                onClick={() => window.api.stripePortal()}
-                title="Manage subscription"
-                className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25 transition-colors border border-emerald-500/20">
-                ✦ Pro
-              </button>
-            )}
             {/* Shortcuts */}
             <button
               onClick={() => setShowShortcuts((v) => !v)}
