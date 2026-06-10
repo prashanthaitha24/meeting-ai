@@ -6,6 +6,7 @@ import { prepareForQuery, prepareForSummary } from './lib/transcript'
 import { TranscriptPanel, TranscriptEntry } from './components/TranscriptPanel'
 import { AuthScreen } from './components/AuthScreen'
 import { ConsentScreen } from './components/ConsentScreen'
+import { ProviderSetup } from './components/ProviderSetup'
 import { HistoryTab } from './components/HistoryTab'
 
 const EXPANDED_WIDTH   = 400
@@ -274,16 +275,53 @@ function GeneratedPanel({
 const CONSENT_VERSION = '1'
 const CONSENT_KEY = `consent_accepted_v${CONSENT_VERSION}`
 
+// A device-local identity for the login-less (BYOK) flow — no account required.
+// History and settings key off this stable id, persisted in localStorage.
+const LOCAL_USER_KEY = 'local_user_id'
+function getLocalSession(): Session {
+  let id = localStorage.getItem(LOCAL_USER_KEY)
+  if (!id) {
+    id = 'local-' + (crypto.randomUUID?.() ?? Math.random().toString(36).slice(2))
+    localStorage.setItem(LOCAL_USER_KEY, id)
+  }
+  return {
+    userId: id,
+    email: 'you@local',
+    name: 'You',
+    avatarUrl: null,
+    provider: 'email',
+    expiresAt: Date.now() + 10 * 365 * 24 * 3600 * 1000,
+  }
+}
+
+type ByokStatus = { providerId: string; model: string; hasKey: boolean }
+
 // ── Main app ──────────────────────────────────────────────────────────────────
 export default function App(): JSX.Element {
   const [consentGiven, setConsentGiven] = useState(() => localStorage.getItem(CONSENT_KEY) === 'true')
   const [session, setSession] = useState<Session | null | 'loading'>('loading')
+  const [byok, setByok] = useState<ByokStatus | null | 'loading'>('loading')
+
+  const reloadByok = useCallback(() => window.api.byokGet().then((b) => setByok(b)), [])
+  useEffect(() => { reloadByok() }, [reloadByok])
 
   useEffect(() => {
-    window.api.checkSession().then(setSession)
-    const t = setInterval(() => window.api.checkSession().then(setSession), 5 * 60 * 1000)
+    // A real account (if the user previously signed in) takes precedence; a null
+    // result must NOT clobber a device-local session we've already adopted.
+    const apply = (s: Session | null) =>
+      setSession((prev) => (s ? s : prev && prev !== 'loading' ? prev : null))
+    window.api.checkSession().then(apply)
+    const t = setInterval(() => window.api.checkSession().then(apply), 5 * 60 * 1000)
     return () => clearInterval(t)
   }, [])
+
+  // Once a BYOK key is configured, the app is usable with no login: adopt a
+  // device-local identity instead of forcing an account.
+  useEffect(() => {
+    if (byok && byok !== 'loading' && byok.hasKey && session === null) {
+      setSession(getLocalSession())
+    }
+  }, [byok, session])
 
   const [isRecording, setIsRecording] = useState(false)
   const [isCollapsed, setIsCollapsed] = useState(false)
@@ -766,8 +804,8 @@ export default function App(): JSX.Element {
     )
   }
 
-  // ── Loading ─────────────────────────────────────────────────────────────────
-  if (session === 'loading') {
+  // ── Loading (session or BYOK status still resolving) ────────────────────────
+  if (session === 'loading' || byok === 'loading') {
     return (
       <div className="flex items-center justify-center border border-white/10"
         style={{ background: 'rgba(15,15,15,0.9)', height: COLLAPSED_HEIGHT, width: COLLAPSED_WIDTH, borderRadius: 999 }}>
@@ -776,23 +814,41 @@ export default function App(): JSX.Element {
     )
   }
 
-  if (!session) return (
-    <AuthShell onLogin={(s) => {
-      setSession(s)
-      setEntries([])
-      setTabContent({ say: '', followup: '', recap: '' })
-      setTabStreaming({ say: false, followup: false, recap: false })
-      setIsStreaming(false)
-      setInterimText('')
-      setActiveTab('assist')
-      setActiveMode('listening')
-      setShowSummaryBanner(false)
-      setFirstVoiceSeen(false)
-      transcriptRef.current = ''
-      lastQuestionRef.current = ''
-      streamTargetRef.current = null
-    }} />
-  )
+  // ── BYOK setup (required before the app can be used) ────────────────────────
+  if (!byok || !byok.hasKey) {
+    return (
+      <div className="flex flex-col select-none overflow-hidden rounded-2xl border border-white/15"
+        style={{ background: 'rgba(15,15,15,0.95)', backdropFilter: 'blur(16px)', height: EXPANDED_HEIGHT, width: EXPANDED_WIDTH }}>
+        <div className="flex items-center justify-between px-3 border-b border-white/10 flex-shrink-0"
+          style={{ height: COLLAPSED_HEIGHT, WebkitAppRegion: 'drag' } as React.CSSProperties}>
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-gray-700" />
+            <span className="text-xs font-semibold text-gray-300 tracking-wide">Meeting AI</span>
+          </div>
+          <div style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+            <button onClick={() => window.api.closeWindow()}
+              className="w-6 h-6 rounded flex items-center justify-center text-gray-600 hover:text-red-400 hover:bg-white/10 transition-colors">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </div>
+        </div>
+        <ProviderSetup onDone={reloadByok} />
+      </div>
+    )
+  }
+
+  // BYOK is configured → a device-local session is adopted by the effect above.
+  // This brief spinner covers the tick before it lands (no account required).
+  if (!session) {
+    return (
+      <div className="flex items-center justify-center border border-white/10"
+        style={{ background: 'rgba(15,15,15,0.9)', height: COLLAPSED_HEIGHT, width: COLLAPSED_WIDTH, borderRadius: 999 }}>
+        <span className="w-3 h-3 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+      </div>
+    )
+  }
 
   // ── Main app ────────────────────────────────────────────────────────────────
   return (
