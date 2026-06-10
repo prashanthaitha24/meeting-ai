@@ -249,6 +249,9 @@ function GeneratedPanel({
 const CONSENT_VERSION = '1'
 const CONSENT_KEY = `consent_accepted_v${CONSENT_VERSION}`
 
+// One-time Stripe "buy me a coffee" payment link (pay what you like).
+const COFFEE_URL = 'https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601'
+
 // A device-local identity for the login-less (BYOK) flow — no account required.
 // History and settings key off this stable id, persisted in localStorage.
 const LOCAL_USER_KEY = 'local_user_id'
@@ -938,7 +941,23 @@ export default function App(): JSX.Element {
         {showSettings && (
           <div className="border-b border-white/10 px-3 py-2.5 flex flex-col gap-3 flex-shrink-0"
             style={{ background: 'rgba(8,8,8,0.7)' }}>
-            <div className="flex items-center justify-between">
+            {/* Support development — optional one-time tip */}
+            <div className="rounded-lg p-2.5"
+              style={{ background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.25)' }}>
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs font-semibold text-emerald-300">Support development ☕</p>
+                <button
+                  onClick={() => window.api.openExternal(COFFEE_URL)}
+                  className="px-2.5 py-1 rounded text-[10px] font-semibold text-white bg-emerald-600 hover:bg-emerald-500 transition-colors flex-shrink-0">
+                  Buy me a coffee
+                </button>
+              </div>
+              <p className="text-[10px] text-gray-400 mt-1 leading-relaxed">
+                If you like our product and would like to support future development and new open
+                products, you can contribute whatever you want — totally optional.
+              </p>
+            </div>
+            <div className="flex items-center justify-between pt-1 border-t border-white/8">
               <div>
                 <p className="text-xs font-medium text-gray-200">Stealth Mode</p>
                 <p className="text-[10px] text-gray-500 mt-0.5">Hide app from screen recordings &amp; screenshots</p>
