@@ -70,7 +70,7 @@ test('accept button is disabled until checkbox is checked', async () => {
   }
 })
 
-test('accepting consent shows auth screen', async () => {
+test('accepting consent shows the BYOK provider setup', async () => {
   const { app, userData } = await launchApp()
   try {
     const win = await app.firstWindow()
@@ -80,8 +80,31 @@ test('accepting consent shows auth screen', async () => {
     await win.getByRole('checkbox').click()
     await win.getByText('Accept & Continue').click()
 
-    // After consent, should show auth screen
-    await expect(win.getByText(/Sign in|Log in|Welcome/i)).toBeVisible({ timeout: 5000 })
+    // Login-less BYOK onboarding (no account / sign-in anymore)
+    await expect(win.getByText('Connect your AI')).toBeVisible({ timeout: 5000 })
+    await expect(win.getByText('Validate & Continue')).toBeVisible()
+    // Groq is the default-selected provider, so its key field is shown
+    await expect(win.getByText('Groq API key')).toBeVisible()
+  } finally {
+    await app.close()
+    fs.rmSync(userData, { recursive: true, force: true })
+  }
+})
+
+test('provider picker switches the active key field', async () => {
+  const { app, userData } = await launchApp()
+  try {
+    const win = await app.firstWindow()
+    await win.waitForLoadState('domcontentloaded')
+    await win.waitForSelector('text=Before You Begin')
+
+    await win.getByRole('checkbox').click()
+    await win.getByText('Accept & Continue').click()
+    await win.waitForSelector('text=Connect your AI')
+
+    // Selecting a different provider card updates the key label
+    await win.getByText('OpenAI', { exact: true }).click()
+    await expect(win.getByText('OpenAI API key')).toBeVisible({ timeout: 3000 })
   } finally {
     await app.close()
     fs.rmSync(userData, { recursive: true, force: true })

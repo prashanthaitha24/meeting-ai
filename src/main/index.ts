@@ -20,6 +20,13 @@ import type { ProviderId } from '../shared/providers'
 
 dotenv.config({ path: is.dev ? '.env' : path.join(process.resourcesPath, '.env') })
 
+// Allow a throwaway profile dir (E2E tests, sandboxes). Must run before any
+// `app.getPath('userData')` use and before the single-instance lock — Electron
+// keys that lock on the userData dir, so each test profile gets its own.
+if (process.env.ELECTRON_USER_DATA) {
+  app.setPath('userData', process.env.ELECTRON_USER_DATA)
+}
+
 // ── Sentry (automatic crash + error monitoring) ───────────────────────────────
 const SENTRY_DSN = process.env.SENTRY_DSN
 if (SENTRY_DSN) {
