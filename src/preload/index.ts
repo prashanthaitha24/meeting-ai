@@ -2,35 +2,6 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
 const api = {
-  // Auth
-  checkSession: () => ipcRenderer.invoke('auth:check-session'),
-  emailSignIn: (email: string, password: string) => ipcRenderer.invoke('auth:email-signin', email, password),
-  emailSignUp: (email: string, password: string, name: string) => ipcRenderer.invoke('auth:email-signup', email, password, name),
-  googleSignIn: () => ipcRenderer.invoke('auth:google-signin'),
-  appleSignIn: () => ipcRenderer.invoke('auth:apple-signin'),
-  cancelOAuth: () => ipcRenderer.invoke('auth:cancel-oauth'),
-  logout: () => ipcRenderer.invoke('auth:logout'),
-
-  // Usage & subscription
-  getUsage: () => ipcRenderer.invoke('get-usage'),
-  stripeCheckout: (plan?: 'monthly' | 'yearly') => ipcRenderer.invoke('stripe:checkout', plan ?? 'monthly'),
-  stripePortal: () => ipcRenderer.invoke('stripe:portal'),
-  onUsageLimitReached: (cb: (data: { upgradeUrl?: string }) => void): (() => void) => {
-    const handler = (_: Electron.IpcRendererEvent, data: { upgradeUrl?: string }) => cb(data)
-    ipcRenderer.on('usage-limit-reached', handler)
-    return () => ipcRenderer.removeListener('usage-limit-reached', handler)
-  },
-  onStripeSuccess: (cb: () => void): (() => void) => {
-    const handler = () => cb()
-    ipcRenderer.on('stripe-success', handler)
-    return () => ipcRenderer.removeListener('stripe-success', handler)
-  },
-  onStripeCancel: (cb: () => void): (() => void) => {
-    const handler = () => cb()
-    ipcRenderer.on('stripe-cancel', handler)
-    return () => ipcRenderer.removeListener('stripe-cancel', handler)
-  },
-
   // Audio
   getDesktopSources: () => ipcRenderer.invoke('get-desktop-sources'),
   transcribeAudio: (audioData: ArrayBuffer) => ipcRenderer.invoke('transcribe-audio', audioData),

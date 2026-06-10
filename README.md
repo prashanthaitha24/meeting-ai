@@ -19,7 +19,7 @@ A real-time AI assistant for meetings and interviews. Runs as a transparent floa
 - **On-device transcript trimming** — strips filler words and sends only the recent context window per question (lower cost, less data leaves the device)
 - **Bring your own key** — choose **OpenAI, Groq, Claude, or Gemini** on first launch; requests go directly from your machine to your provider. Your key is encrypted on-device (OS keychain) and never uploaded
 - **Always on top** — floats above full-screen apps and all workspaces
-- **Session history** — last 90 days of meetings saved locally; captured whenever you save notes, email, or sign out, and searchable by question, answer, transcript, or recap
+- **Session history** — last 90 days of meetings saved locally; captured whenever you save notes, email, or switch provider, and searchable by question, answer, transcript, or recap
 - **Save / share conversation** — export the conversation as a formatted Q&A document in **PDF, Word (.doc), or Text**, or email it as a PDF attachment
 - **Report Issue** — one-click bug report with logs sent to support
 - **Free & unlimited** — no subscription, no account; you only pay your own AI provider for what you use. Optional “buy me a coffee” tip if you'd like to support development
@@ -30,14 +30,15 @@ A real-time AI assistant for meetings and interviews. Runs as a transparent floa
 
 ```
 Microphone  ──► Web Speech API (Chromium built-in)       ──► Live transcript (free)
-System audio ──► Groq Whisper (whisper-large-v3-turbo)   ──► Participant transcript
+Audio chunks ──► your provider's Whisper (OpenAI/Groq, direct) ──► Participant transcript
 
 User question ──► your AI provider (direct, on-device)  ──► Streamed answer
 Screen capture ──► your provider's vision model (direct)  ──► Streamed answer
 
-Key     ──► stored encrypted on-device (Electron safeStorage / OS keychain)
-Support ──► Stripe one-time "buy me a coffee" (optional)
-Logs    ──► ~/.meeting-ai/app.log + Sentry (crash monitoring)
+No login   ──► device-local identity; history & settings stored on-device only
+Key        ──► stored encrypted on-device (Electron safeStorage / OS keychain)
+Support    ──► Stripe one-time "buy me a coffee" (optional)
+Logs       ──► ~/.meeting-ai/app.log + Sentry (crash monitoring)
 ```
 
 ---
@@ -48,9 +49,9 @@ Logs    ──► ~/.meeting-ai/app.log + Sentry (crash monitoring)
 |---|---|
 | Desktop app | Electron 31 + electron-vite + TypeScript |
 | UI | React 18 + Tailwind CSS |
-| Auth | Supabase (Google OAuth, Apple OAuth, email/password) |
+| Auth | None — login-less; a device-local identity, no account or server |
 | AI | Bring your own key — OpenAI / Groq / Claude / Gemini, called directly from the app (OpenAI-compatible) |
-| Transcription | Web Speech API (mic) + optional provider Whisper |
+| Transcription | Web Speech API (mic) + your provider's Whisper (OpenAI / Groq), direct |
 | Support | Stripe one-time "buy me a coffee" (optional) |
 | Monitoring | Sentry + local file logging |
 | Packaging | electron-builder (macOS DMG, Windows NSIS) |
@@ -65,30 +66,23 @@ meeting-ai/
 ├── src/
 │   ├── main/           # Electron main process
 │   │   ├── index.ts    # App entry, IPCs, window management
-│   │   ├── supabase-auth.ts  # OAuth + session handling
+│   │   ├── ai-direct.ts     # Direct BYOK calls (chat / vision / transcription)
+│   │   ├── byok.ts          # Encrypted on-device key store (safeStorage)
 │   │   └── logger.ts   # File-based logging (PII-redacted)
+│   ├── shared/         # Code shared by main + renderer
+│   │   └── providers.ts     # BYOK provider registry (OpenAI/Groq/Claude/Gemini)
 │   ├── preload/        # Context bridge (renderer ↔ main)
 │   └── renderer/       # React frontend
 │       └── src/
 │           ├── App.tsx              # Main shell, all modal state
 │           └── components/
-│               ├── AuthScreen.tsx
+│               ├── ProviderSetup.tsx    # First-run: pick provider + enter key
 │               ├── ConsentScreen.tsx
 │               ├── TranscriptPanel.tsx
-│               ├── HistoryTab.tsx
-│               └── UpgradeModal.tsx
-├── backend/            # Next.js API (deployed to Vercel)
-│   ├── app/api/
-│   │   ├── chat/           # Groq Llama 3.3 70B streaming
-│   │   ├── screen/         # Groq Llama 4 Scout vision streaming
-│   │   ├── transcribe/     # Groq Whisper transcription
-│   │   ├── usage/          # Daily limit tracking
-│   │   ├── stripe/         # Checkout, portal, redirect, webhooks
-│   │   └── account/        # GDPR delete + export endpoints
-│   └── lib/
-│       ├── usage.ts    # Daily reset logic
-│       ├── stripe.ts
-│       └── supabase.ts
+│               └── HistoryTab.tsx
+├── backend/            # Next.js API — LEGACY, no longer used by the app.
+│                       # AI, vision and transcription now run BYOK-direct.
+│                       # Kept only for the optional Stripe "coffee" link / webhooks.
 ├── docs/               # GitHub Pages (thavionai.com)
 │   ├── index.html      # Landing page
 │   ├── privacy.html    # Privacy Policy
@@ -112,48 +106,30 @@ npm install
 
 ### 2. Configure environment
 
-Create `.env` in the project root:
+The app is **login-less and backend-free** — there's nothing to configure to run
+it. You bring your own AI provider key in-app on first launch (stored encrypted
+on-device). The only optional root `.env` value is crash monitoring:
 
 ```env
-# Supabase
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_ANON_KEY=your-anon-key
-
-# Backend
-BACKEND_URL=http://localhost:3000   # or your Vercel URL
+# Optional
+SENTRY_DSN=your-sentry-dsn
 ```
 
-For the backend, create `backend/.env.local`:
+> The `backend/` folder is legacy and no longer required by the app. You only
+> need `backend/.env.local` if you're running the optional Stripe "buy me a
+> coffee" endpoints:
 
 ```env
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
-# AI provider pool (round-robin + failover) — at least one key required:
-GROQ_API_KEY=gsk_...
-OPENAI_API_KEY=sk-...          # optional pool member
-ANTHROPIC_API_KEY=sk-ant-...   # optional pool member (Claude via OpenAI-compat)
-CEREBRAS_API_KEY=csk-...       # optional pool member
-GEMINI_API_KEY=...             # optional pool member (Google)
-TOGETHER_API_KEY=...           # optional pool member
-XAI_API_KEY=xai-...            # optional pool member (Grok)
-# optional per-provider model overrides: GROQ_MODEL, OPENAI_MODEL, CEREBRAS_MODEL, GEMINI_MODEL, ...
+# Only for the optional "buy me a coffee" Stripe endpoints
 STRIPE_SECRET_KEY=sk_test_...
-STRIPE_PRICE_ID=price_...
-STRIPE_YEARLY_PRICE_ID=price_...
 STRIPE_WEBHOOK_SECRET=whsec_...
-STRIPE_PAYMENT_LINK=https://...    # shown on usage-limit error
-BACKEND_URL=http://localhost:3000  # or your Vercel URL
-SENTRY_DSN=https://...@sentry.io/...   # optional
+STRIPE_PAYMENT_LINK=https://buy.stripe.com/...   # the coffee link
 ```
 
 ### 3. Run
 
 ```bash
-# Terminal 1 — backend
-cd backend && npm run dev
-
-# Terminal 2 — Electron app
-npm run dev
+npm run dev   # Electron app — no backend needed
 ```
 
 ---
@@ -202,43 +178,12 @@ GitHub Actions builds Mac DMGs on `macos-latest` and the Windows installer on `w
 
 ---
 
-## Supabase Setup
+## No backend or database
 
-Run these in Supabase → SQL Editor:
-
-```sql
--- Profiles table
-create table profiles (
-  id uuid primary key references auth.users(id),
-  email text,
-  name text,
-  avatar_url text,
-  stripe_customer_id text,
-  subscription_status text default 'free',
-  free_calls_used int default 0,
-  free_calls_reset_date date,   -- daily reset tracker
-  created_at timestamptz default now()
-);
-
--- Auto-create profile on signup
-create or replace function handle_new_user()
-returns trigger as $$
-begin
-  insert into profiles (id, email, name, avatar_url)
-  values (
-    new.id,
-    new.email,
-    new.raw_user_meta_data->>'full_name',
-    new.raw_user_meta_data->>'avatar_url'
-  );
-  return new;
-end;
-$$ language plpgsql security definer;
-
-create trigger on_auth_user_created
-  after insert on auth.users
-  for each row execute procedure handle_new_user();
-```
+There is **no account system and no server-side data**. The app runs entirely
+on-device: your meeting history and settings live in the app's local userData
+folder, and your AI provider key is encrypted with the OS keychain
+(`safeStorage`). Nothing is synced, and there is no Supabase/Postgres to set up.
 
 ---
 
@@ -263,10 +208,10 @@ An optional **“Buy me a coffee”** one-time tip (via Stripe) supports develop
 ## GDPR / CCPA Compliance
 
 - **Consent screen** shown on first launch and re-shown whenever `CONSENT_VERSION` is bumped in `App.tsx` (version-stamped localStorage key — survives reinstalls correctly)
-- **Data export** — Settings → My Data → Export: downloads account data as JSON
-- **Account deletion** — Settings → My Data → Delete: cancels Stripe subscription, deletes Supabase profile + auth user, clears local history
+- **Data export** — Settings → My Data → Export: saves all local meeting history to a JSON file
+- **Erase my data** — Settings → My Data → Delete: wipes the stored API key and all local history, returning to the setup screen
 - **Log PII redaction** — `logger.ts` redacts UUIDs, emails, and JWT tokens before writing to `app.log`
-- **No meeting data on servers** — transcripts and session history are local-only
+- **No data on servers** — there is no account; transcripts, history and your key never leave the device
 
 > To force all users to re-accept the consent screen (e.g. after a privacy policy update), increment `CONSENT_VERSION` in `src/renderer/src/App.tsx`.
 
@@ -280,15 +225,17 @@ An optional **“Buy me a coffee”** one-time tip (via Stripe) supports develop
 
 ---
 
-## Auth Providers
+## AI Providers (bring your own key)
 
-| Provider | Status |
-|---|---|
-| Google OAuth | Supported (PKCE flow via Supabase) |
-| Apple OAuth | Supported (PKCE flow via Supabase) |
-| Email / Password | Supported |
+| Provider | Chat | Vision (screen) | Transcription |
+|---|---|---|---|
+| Groq | ✅ Llama 3.3 70B | ✅ Llama 4 Scout | ✅ Whisper v3 Turbo |
+| OpenAI | ✅ GPT-5-series | ✅ | ✅ Whisper |
+| Anthropic (Claude) | ✅ Haiku | ✅ | — (uses Web Speech) |
+| Google Gemini | ✅ Flash | ✅ | — (uses Web Speech) |
 
-Sessions are stored encrypted on-device via `safeStorage`. Cleared on app close.
+You pick one on first launch and paste your own key — stored encrypted on-device
+via `safeStorage`. Switch provider anytime from the panel header.
 
 ---
 
@@ -297,13 +244,12 @@ Sessions are stored encrypted on-device via `safeStorage`. Cleared on app close.
 ### Prerequisites
 - macOS 13+ (Ventura or later)
 - Node 18+ installed
-- All env files configured (see Local Development above)
-- Backend running locally (`cd backend && npm run dev`)
+- An AI provider API key to paste on first launch (no env/backend needed)
 
 ### 1. Automated tests
 ```bash
 npm run typecheck        # must be zero errors
-npm test                 # 26 unit/component tests must pass
+npm test                 # unit/component tests must pass
 npm run test:e2e         # Playwright E2E against Electron
 ```
 
@@ -319,14 +265,14 @@ Install the DMG and run through each item before tagging:
 
 | # | Test | Expected |
 |---|------|----------|
-| 1 | Launch app cold (no prior session) | Consent screen appears |
-| 2 | Accept consent, sign in with Google | Auth succeeds, main panel shows |
+| 1 | Launch app cold (no prior setup) | Consent screen appears |
+| 2 | Accept consent, pick a provider + paste key, Validate | Key validates, main panel shows |
 | 3 | Speak into mic | Live transcript populates in real time |
-| 4 | Ask an AI question (free tier) | Streamed answer appears in panel |
-| 5 | Ask 3 more questions | Usage limit screen shown on 4th |
+| 4 | Ask an AI question | Streamed answer appears in panel |
+| 5 | Ask several more questions | No limits — all answered |
 | 6 | Press `⌘↵` (screen read) | Screenshot captured + AI answer streams |
 | 7 | Press `⌘ Shift Space` | Panel hides/shows |
-| 8 | Open Settings → upgrade flow | Stripe checkout opens in browser |
+| 8 | Header → Switch | Returns to provider-setup screen |
 | 9 | Settings → Report Issue | No crash; logs sent |
 | 10 | Settings → My Data → Export | JSON download works |
 | 11 | Take a screenshot with another tool | App window is invisible in screenshot |

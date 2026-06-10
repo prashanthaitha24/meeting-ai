@@ -155,6 +155,31 @@ export async function streamProviderScreen(
   await streamCompletion(`${p.baseURL}/chat/completions`, creds.key, body, cb)
 }
 
+/**
+ * Transcribe an audio chunk with the user's own key via the provider's
+ * Whisper-style endpoint. Returns '' if the provider has no transcription
+ * endpoint (caller falls back to the on-device Web Speech API) or on any error.
+ */
+export async function transcribeProviderAudio(creds: Creds, audio: Buffer): Promise<string> {
+  const p = PROVIDERS[creds.providerId]
+  if (!p.transcribeModel) return ''
+  try {
+    const form = new FormData()
+    form.append('file', new Blob([audio], { type: 'audio/webm' }), 'audio.webm')
+    form.append('model', p.transcribeModel)
+    const res = await fetch(`${p.baseURL}/audio/transcriptions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${creds.key}` },
+      body: form,
+    })
+    if (!res.ok) return ''
+    const j = (await res.json()) as { text?: string }
+    return j.text ?? ''
+  } catch {
+    return ''
+  }
+}
+
 /** Validate a key with a tiny non-streaming request. */
 export async function testProviderKey(
   providerId: ProviderId,

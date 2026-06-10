@@ -14,6 +14,12 @@ export interface ProviderInfo {
   defaultModel: string
   /** Model used for screen-read (vision) requests. */
   visionModel: string
+  /**
+   * Model used for audio transcription via `${baseURL}/audio/transcriptions`.
+   * Undefined → provider has no Whisper-style endpoint; the app falls back to
+   * the on-device Web Speech API for that provider.
+   */
+  transcribeModel?: string
   /** GPT-5-series needs max_completion_tokens; the rest use max_tokens. */
   tokenParam: 'max_tokens' | 'max_completion_tokens'
   keyPlaceholder: string
@@ -30,6 +36,7 @@ export const PROVIDERS: Record<ProviderId, ProviderInfo> = {
     baseURL: 'https://api.groq.com/openai/v1',
     defaultModel: 'llama-3.3-70b-versatile',
     visionModel: 'meta-llama/llama-4-scout-17b-16e-instruct',
+    transcribeModel: 'whisper-large-v3-turbo',
     tokenParam: 'max_tokens',
     keyPlaceholder: 'gsk_...',
     signupUrl: 'https://console.groq.com/keys',
@@ -41,6 +48,7 @@ export const PROVIDERS: Record<ProviderId, ProviderInfo> = {
     baseURL: 'https://api.openai.com/v1',
     defaultModel: 'gpt-5.4-mini',
     visionModel: 'gpt-5.4-mini',
+    transcribeModel: 'whisper-1',
     tokenParam: 'max_completion_tokens',
     keyPlaceholder: 'sk-...',
     signupUrl: 'https://platform.openai.com/api-keys',

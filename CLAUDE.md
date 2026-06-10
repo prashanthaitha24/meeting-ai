@@ -5,49 +5,36 @@ Electron 31 desktop app (macOS + Windows) — real-time AI assistant for meeting
 Floating overlay that transcribes audio, answers questions via Claude, stays invisible to screen recording.
 
 **Website:** thavionai.com (GitHub Pages, docs/)
-**Backend:** Next.js on Vercel (backend/)
+**Backend:** Next.js on Vercel (backend/) — **LEGACY, no longer used by the app.** AI/vision/transcription now run BYOK-direct; kept only for the optional Stripe "coffee" link.
 **Support:** support@thavionai.com
 
 ## Stack
 - **App:** Electron 31 + electron-vite + TypeScript + React 18 + Tailwind CSS
-- **Auth:** Supabase (Google OAuth PKCE, Apple OAuth, email/password)
-- **AI:** Groq API — Llama 3.3 70B (chat), Llama 4 Scout (screen vision), via backend SSE stream
-- **Transcription:** Groq Whisper whisper-large-v3-turbo (audio chunks) + Web Speech API (live mic)
-- **Billing:** Stripe — Monthly $9.99/mo, Yearly $49.99/yr
+- **Auth:** None — login-less (Stage 4). Device-local identity in `localStorage` (`local_user_id`); no Supabase, no accounts.
+- **AI (BYOK):** User brings their own key (OpenAI / Groq / Anthropic / Google), called **directly** from the main process — `src/main/ai-direct.ts` + `src/shared/providers.ts`. No backend, no founder key.
+- **Transcription:** Web Speech API (live mic) + the user's own provider Whisper (`/audio/transcriptions`, OpenAI/Groq only; Anthropic/Google fall back to Web Speech).
+- **Billing:** Free. Optional one-time Stripe "buy me a coffee" tip (no subscriptions).
 - **Monitoring:** Sentry + local file logging (~/.meeting-ai/app.log)
 - **Packaging:** electron-builder → macOS DMG (arm64 + x64), Windows NSIS
 
 ## Key file paths
 ```
 src/main/index.ts          — Electron main process, all IPC handlers
+src/main/ai-direct.ts      — BYOK direct calls: streamProviderChat/Screen, transcribeProviderAudio, testProviderKey
+src/main/byok.ts           — Encrypted on-device key store (safeStorage)
+src/shared/providers.ts    — BYOK provider registry (shared main+renderer)
 src/main/logger.ts         — File logging with PII redaction (UUIDs, emails, JWTs)
-src/main/supabase-auth.ts  — OAuth popup + session handling
 src/preload/index.ts       — Context bridge (window.api)
 src/preload/index.d.ts     — Type definitions for window.api
-src/renderer/src/App.tsx   — Main React shell, all modal state
+src/renderer/src/App.tsx   — Main React shell, all modal state; login-less gating (consent → BYOK setup → app)
 src/renderer/src/components/
-  AuthScreen.tsx            — Login/signup UI
+  ProviderSetup.tsx         — First-run BYOK onboarding (pick provider + validate key)
   ConsentScreen.tsx         — First-launch GDPR consent (versioned key: consent_accepted_v1)
-  UpgradeModal.tsx          — Plan toggle (monthly/yearly), Stripe checkout
-  DeleteAccountModal.tsx    — GDPR erasure confirmation
+  DeleteAccountModal.tsx    — "Erase my data" (local wipe: key + history)
   HistoryTab.tsx
   TranscriptPanel.tsx
-backend/app/api/
-  chat/route.ts             — Groq Llama 3.3 70B SSE stream
-  screen/route.ts           — Groq Llama 4 Scout vision SSE stream
-  transcribe/route.ts       — Groq Whisper transcription
-  usage/route.ts            — Daily limit check (3/day free)
-  stripe/checkout/route.ts  — Creates Stripe session (plan: monthly|yearly)
-  stripe/portal/route.ts    — Billing portal
-  stripe/redirect/route.ts  — HTTPS bridge → meetingai:// deep link
-  stripe/webhook/route.ts   — Subscription status sync
-  account/delete/route.ts   — GDPR erasure (Stripe cancel → Supabase delete)
-  account/export/route.ts   — GDPR portability (JSON download)
-backend/lib/
-  usage.ts                  — Daily reset logic (free_calls_reset_date column)
-  auth.ts                   — verifyAuth() — JWT verification
-  stripe.ts                 — Stripe client
-  supabase.ts               — Supabase admin client
+backend/ (LEGACY — not called by the app; AI/transcription are BYOK-direct now)
+  app/api/stripe/*          — Optional "buy me a coffee" checkout/webhook
 docs/
   index.html                — Landing page (thavionai.com)
   privacy.html              — Privacy Policy (GDPR/CCPA compliant)
@@ -78,66 +65,42 @@ git tag v1.x.x && git push origin v1.x.x
 `CONSENT_VERSION = '1'` in App.tsx. Key: `consent_accepted_v1`.
 Bump version number to force all users (including existing) to re-accept after policy changes.
 
-### Stripe plans
-- Monthly: `STRIPE_PRICE_ID` env var
-- Yearly: `STRIPE_YEARLY_PRICE_ID` env var
-- Both must be set in `.env` (local) and Vercel environment variables
+### BYOK (bring your own key) — the core AI model
+On first launch (after consent) `ProviderSetup.tsx` asks the user to pick a
+provider and paste their key. `byok:test` validates it; `byok:set` stores it
+**encrypted** via `safeStorage` at `userData/byok.json`. The key is NEVER
+returned to the renderer — `byok:get` returns only `{providerId, model, hasKey}`.
+All AI runs main-side in `ai-direct.ts` (chat, vision, transcription) using the
+decrypted key, direct to the provider. Add a provider by extending
+`src/shared/providers.ts` (`PROVIDERS` / `PROVIDER_LIST`).
+
+### Login-less identity
+No accounts. `getLocalSession()` in App.tsx mints a stable device-local id
+(`localStorage.local_user_id`) once a key is configured; history/settings key off
+it. "Switch" in the header → `byok:clear` → back to `ProviderSetup`.
 
 ### Deep links
 Custom scheme `meetingai://` — macOS: `open-url` event, Windows: `second-instance` argv.
-Stripe checkout redirects via `/api/stripe/redirect?to=success|cancel` HTTPS bridge (Stripe rejects custom schemes).
+Only `stripe/success|cancel` branches remain (coffee link). OAuth deep links removed.
 
 ### IPC pattern
 All renderer→main calls go through `window.api.*` (context bridge).
 Main handlers in `src/main/index.ts` using `ipcMain.handle()`.
 
-### Usage limits
-Free: 3 AI calls/day. Reset tracked by `free_calls_reset_date` column in Supabase `profiles` table.
-Backend resets count when date changes (UTC).
+### No usage limits
+Fully free — there is no per-day cap and no usage tracking. The user's only limit
+is their own provider plan.
 
 ### Log PII redaction
 `logger.ts` redacts UUIDs (hashed), emails, JWT tokens before writing to file.
 Console output is NOT redacted (dev use only).
 
-## Supabase schema
-```sql
-profiles (
-  id uuid references auth.users,
-  email text, name text, avatar_url text,
-  stripe_customer_id text,
-  subscription_status text default 'free',
-  free_calls_used int default 0,
-  free_calls_reset_date date,
-  created_at timestamptz
-)
-```
-
 ## Environment variables needed
-**Root `.env`:**
-```
-SUPABASE_URL, SUPABASE_ANON_KEY, BACKEND_URL, SENTRY_DSN (optional)
-```
-**`backend/.env.local`:**
-```
-SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,
-# AI provider pool — at least one key required; each adds a pool member:
-GROQ_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, CEREBRAS_API_KEY, GEMINI_API_KEY, TOGETHER_API_KEY, XAI_API_KEY,
-# optional per-provider model overrides:
-# GROQ_MODEL, OPENAI_MODEL, CEREBRAS_MODEL, GEMINI_MODEL, TOGETHER_MODEL, XAI_MODEL
-STRIPE_SECRET_KEY, STRIPE_PRICE_ID, STRIPE_YEARLY_PRICE_ID, STRIPE_WEBHOOK_SECRET,
-STRIPE_PAYMENT_LINK, BACKEND_URL
-```
+The **app needs no env vars** to run (login-less, BYOK). Optional root `.env`:
+`SENTRY_DSN` (crash monitoring).
 
-### AI reliability (chat answers)
-`backend/lib/ai.ts` `streamChat()` runs a **round-robin + failover pool** over
-the providers in `PROVIDER_SPECS`. A provider is active only if its API key env
-is set, so you scale the pool by adding keys (no code change). Each request
-starts at the next provider in rotation (load balancing — each sees ~1/N of
-traffic) and falls through the rest on failure (resilience); each call is retried
-on 429/5xx via `backend/lib/retry.ts`. All providers are OpenAI-protocol
-compatible (Google Gemini via its OpenAI endpoint), so one SDK + one normalizer
-covers the pool. The round-robin cursor is per warm instance (not global).
-Screen-vision (`screen/route.ts`) is retried on Groq but not yet pooled.
+The legacy `backend/.env.local` is only for the optional Stripe coffee endpoints:
+`STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PAYMENT_LINK`.
 
 ## Testing
 - Unit/component: Vitest + React Testing Library (`npm test`)

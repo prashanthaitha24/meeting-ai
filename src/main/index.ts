@@ -9,15 +9,13 @@ import * as path from 'path'
 import * as os from 'os'
 import * as dotenv from 'dotenv'
 import * as fs from 'fs'
-import {
-  emailSignIn, emailSignUp, googleSignIn, appleSignIn, handleOAuthCallback,
-  loadSession, logout, getAccessToken, clearTokens, cancelOAuth,
-} from './supabase-auth'
 import { log, readRecentLogs, getLogFilePath } from './logger'
 import { isUndetectable, pickPrimaryScreenSource } from './window-utils'
-import { friendlyHttpError, friendlyNetworkError } from './errors'
 import { byokStatus, byokCredentials, saveByok, clearByok } from './byok'
-import { streamProviderChat, streamProviderScreen, testProviderKey, type StreamCallbacks } from './ai-direct'
+import {
+  streamProviderChat, streamProviderScreen, testProviderKey,
+  transcribeProviderAudio, type StreamCallbacks,
+} from './ai-direct'
 import type { ProviderId } from '../shared/providers'
 
 dotenv.config({ path: is.dev ? '.env' : path.join(process.resourcesPath, '.env') })
@@ -35,8 +33,6 @@ if (SENTRY_DSN) {
 // Catch unhandled main-process errors and log them
 process.on('uncaughtException',  (err) => log.error('Uncaught exception', err))
 process.on('unhandledRejection', (err) => log.error('Unhandled rejection', err))
-
-const BACKEND_URL = process.env.BACKEND_URL || 'https://meeting-ai-three-theta.vercel.app'
 
 // Enable Web Speech API
 app.commandLine.appendSwitch('enable-features', 'WebSpeechAPI')
@@ -152,9 +148,7 @@ function createWindow(): void {
 }
 
 function handleDeepLink(url: string) {
-  if (url.startsWith('meetingai://auth')) {
-    handleOAuthCallback(url)
-  } else if (url.startsWith('meetingai://stripe/success')) {
+  if (url.startsWith('meetingai://stripe/success')) {
     mainWindow?.webContents.send('stripe-success')
   } else if (url.startsWith('meetingai://stripe/cancel')) {
     mainWindow?.webContents.send('stripe-cancel')
@@ -201,12 +195,7 @@ app.whenReady().then(async () => {
   // Windows: handle deep link from startup command-line argument
   if (process.platform === 'win32') {
     const deepLinkUrl = process.argv.find((arg) => arg.startsWith('meetingai://'))
-    if (deepLinkUrl) {
-      if (deepLinkUrl.startsWith('meetingai://auth')) handleOAuthCallback(deepLinkUrl)
-      else if (deepLinkUrl.startsWith('meetingai://stripe/success')) {
-        mainWindow?.webContents.send('stripe-success')
-      }
-    }
+    if (deepLinkUrl) handleDeepLink(deepLinkUrl)
   }
 
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
@@ -257,62 +246,7 @@ app.on('window-all-closed', () => {
   app.quit() // quit on all platforms when window is closed
 })
 
-app.on('before-quit', () => {
-  clearTokens() // clear session so next launch requires login
-})
-
 app.on('will-quit', () => globalShortcut.unregisterAll())
-
-// ── Auth IPCs ─────────────────────────────────────────────────────────────────
-ipcMain.handle('auth:check-session', () => loadSession())
-ipcMain.handle('auth:logout', () => { logout(); return true })
-ipcMain.handle('auth:email-signin', async (_e, email: string, password: string) => emailSignIn(email, password))
-ipcMain.handle('auth:email-signup', async (_e, email: string, password: string, name: string) => emailSignUp(email, password, name))
-ipcMain.handle('auth:google-signin', async () => googleSignIn())
-ipcMain.handle('auth:apple-signin', async () => appleSignIn())
-ipcMain.handle('auth:cancel-oauth', () => { cancelOAuth(); return true })
-
-// ── Usage IPC ─────────────────────────────────────────────────────────────────
-ipcMain.handle('get-usage', async () => {
-  const token = await getAccessToken()
-  if (!token) return null
-  try {
-    const res = await fetch(`${BACKEND_URL}/api/usage`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
-    return res.ok ? await res.json() : null
-  } catch { return null }
-})
-
-// ── Stripe IPCs ───────────────────────────────────────────────────────────────
-ipcMain.handle('stripe:checkout', async (_event, plan: 'monthly' | 'yearly' = 'monthly') => {
-  const token = await getAccessToken()
-  if (!token) throw new Error('Not authenticated')
-  const res = await fetch(`${BACKEND_URL}/api/stripe/checkout`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ plan }),
-  })
-  const body = await res.json().catch(() => ({})) as Record<string, unknown>
-  if (!res.ok) {
-    log.error('Stripe checkout failed', { status: res.status, body })
-    throw new Error((body.error as string) ?? `Server error ${res.status}`)
-  }
-  if (!body.url) throw new Error('No checkout URL returned')
-  shell.openExternal(body.url as string)
-})
-
-ipcMain.handle('stripe:portal', async () => {
-  const token = await getAccessToken()
-  if (!token) throw new Error('Not authenticated')
-  const res = await fetch(`${BACKEND_URL}/api/stripe/portal`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}` },
-  })
-  if (!res.ok) throw new Error('No active subscription')
-  const portalBody = await res.json() as Record<string, unknown>
-  if (portalBody.url) shell.openExternal(portalBody.url as string)
-})
 
 // ── Desktop sources ───────────────────────────────────────────────────────────
 ipcMain.handle('get-desktop-sources', async () => {
@@ -320,25 +254,15 @@ ipcMain.handle('get-desktop-sources', async () => {
   return sources.map((s) => ({ id: s.id, name: s.name }))
 })
 
-// ── Transcribe audio (NOT counted against free limit) ─────────────────────────
+// ── Transcribe audio (BYOK — the user's own key, direct to their provider) ────
+// Returns '' if the chosen provider has no transcription endpoint (Anthropic,
+// Google); the renderer still has the on-device Web Speech API for live mic.
 ipcMain.handle('transcribe-audio', async (_event, audioData: ArrayBuffer) => {
-  const token = await getAccessToken()
-  if (!token) return ''
+  const creds = byokCredentials()
+  if (!creds) return ''
   const audioBuffer = Buffer.from(audioData)
   if (audioBuffer.length < 1000) return ''
-
-  try {
-    const formData = new FormData()
-    formData.append('file', new Blob([audioBuffer], { type: 'audio/webm' }), 'audio.webm')
-    const res = await fetch(`${BACKEND_URL}/api/transcribe`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-      body: formData,
-    })
-    if (!res.ok) return ''
-    const transcribeBody = await res.json() as Record<string, unknown>
-    return (transcribeBody.text as string) ?? ''
-  } catch { return '' }
+  return transcribeProviderAudio(creds, audioBuffer)
 })
 
 // ── Helper: read SSE stream from backend and forward chunks to renderer ────────
@@ -348,65 +272,6 @@ ipcMain.handle('transcribe-audio', async (_event, audioData: ArrayBuffer) => {
 function sendStreamError(msg: string): void {
   mainWindow?.webContents.send('chat-chunk', { text: `⚠️ ${msg}`, done: false })
   mainWindow?.webContents.send('chat-chunk', { text: '', done: true })
-}
-
-async function streamFromBackend(url: string, token: string, body: object): Promise<void> {
-  let res: Response
-  try {
-    res = await fetch(url, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-  } catch (e) {
-    log.error('Backend request failed (network)', e)
-    sendStreamError(friendlyNetworkError())
-    return
-  }
-
-  if (!res.ok) {
-    let errData: Record<string, unknown> = {}
-    try { errData = await res.json() as Record<string, unknown> } catch {}
-    if (res.status === 402 && errData.error === 'usage_limit_reached') {
-      mainWindow?.webContents.send('usage-limit-reached', { upgradeUrl: errData.upgradeUrl })
-      mainWindow?.webContents.send('chat-chunk', { text: '', done: true }) // clean up streaming state
-      return
-    }
-    log.error('Backend request failed', { status: res.status, error: errData.error })
-    sendStreamError(friendlyHttpError(res.status, typeof errData.error === 'string' ? errData.error : undefined))
-    return
-  }
-
-  try {
-    const reader = res.body!.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop() ?? ''
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue
-        try {
-          const data = JSON.parse(line.slice(6)) as { text?: string; done?: boolean; error?: string }
-          if (data.error) {
-            sendStreamError(friendlyHttpError(502))
-            return
-          } else if (data.done) {
-            mainWindow?.webContents.send('chat-chunk', { text: '', done: true })
-          } else if (data.text) {
-            mainWindow?.webContents.send('chat-chunk', { text: data.text, done: false })
-          }
-        } catch {}
-      }
-    }
-  } catch (e) {
-    log.error('Backend stream read failed', e)
-    sendStreamError(friendlyHttpError(502))
-  }
 }
 
 // ── BYOK: the user's own AI provider + key ────────────────────────────────────
@@ -482,7 +347,7 @@ ipcMain.on('set-window-size', (_event, width: number, height: number) => {
 })
 
 ipcMain.on('hide-window', () => mainWindow?.hide())
-ipcMain.on('close-window', () => { clearTokens(); app.quit() })
+ipcMain.on('close-window', () => app.quit())
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 const SETTINGS_FILE = path.join(app.getPath('userData'), 'settings.json')
@@ -512,35 +377,30 @@ ipcMain.handle('settings:save', (_e, settings: Record<string, unknown>) => {
   return true
 })
 
-// ── Account (GDPR/CCPA) ───────────────────────────────────────────────────────
+// ── Data (GDPR/CCPA) — everything is local now, so this is a local wipe/export ──
 ipcMain.handle('account:delete', async () => {
-  const token = await getAccessToken()
-  if (!token) throw new Error('Not authenticated')
-  const res = await fetch(`${BACKEND_URL}/api/account/delete`, {
-    method: 'DELETE',
-    headers: { Authorization: `Bearer ${token}` },
-  })
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({})) as Record<string, unknown>
-    throw new Error((body.error as string) ?? `Delete failed: ${res.status}`)
-  }
-  // Clear all local data after server deletion
-  clearTokens()
+  // No account, no server: erase the API key and all local meeting history.
+  clearByok()
   try {
-    const HISTORY_DIR = path.join(app.getPath('userData'), 'history')
-    if (fs.existsSync(HISTORY_DIR)) fs.rmSync(HISTORY_DIR, { recursive: true })
+    const dir = path.join(app.getPath('userData'), 'history')
+    if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true })
   } catch {}
   return true
 })
 
 ipcMain.handle('account:export', async () => {
-  const token = await getAccessToken()
-  if (!token) throw new Error('Not authenticated')
-  const res = await fetch(`${BACKEND_URL}/api/account/export`, {
-    headers: { Authorization: `Bearer ${token}` },
-  })
-  if (!res.ok) throw new Error('Export failed')
-  const json = await res.text()
+  // Bundle all locally-stored meeting history into a single JSON file.
+  const dir = path.join(app.getPath('userData'), 'history')
+  const sessions: unknown[] = []
+  try {
+    if (fs.existsSync(dir)) {
+      for (const f of fs.readdirSync(dir)) {
+        if (!f.endsWith('.json')) continue
+        try { sessions.push(...JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'))) } catch {}
+      }
+    }
+  } catch {}
+  const json = JSON.stringify({ app: 'Meeting AI', exportedAt: new Date().toISOString(), sessions }, null, 2)
   const { dialog } = await import('electron')
   const result = await dialog.showSaveDialog({
     defaultPath: `thavionai-data-export-${new Date().toISOString().slice(0, 10)}.json`,

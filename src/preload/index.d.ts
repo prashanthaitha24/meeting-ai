@@ -23,29 +23,7 @@ export interface HistorySession {
   tabContent: { say: string; followup: string; recap: string }
 }
 
-export interface UsageInfo {
-  subscriptionStatus: 'free' | 'active' | 'canceled' | 'past_due'
-  freeCallsUsed: number
-  freeLimit: number
-  canMakeCall: boolean
-}
-
 interface MeetingAPI {
-  checkSession(): Promise<Session | null>
-  emailSignIn(email: string, password: string): Promise<Session>
-  emailSignUp(email: string, password: string, name: string): Promise<Session>
-  googleSignIn(): Promise<Session>
-  appleSignIn(): Promise<Session>
-  cancelOAuth(): Promise<boolean>
-  logout(): Promise<boolean>
-
-  getUsage(): Promise<UsageInfo | null>
-  stripeCheckout(plan?: 'monthly' | 'yearly'): Promise<void>
-  stripePortal(): Promise<void>
-  onUsageLimitReached(cb: (data: { upgradeUrl?: string }) => void): () => void
-  onStripeSuccess(cb: () => void): () => void
-  onStripeCancel(cb: () => void): () => void
-
   getDesktopSources(): Promise<Array<{ id: string; name: string }>>
   transcribeAudio(audioData: ArrayBuffer): Promise<string>
 

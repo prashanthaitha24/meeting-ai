@@ -4,9 +4,9 @@ import { SpeechTranscriber } from './lib/speech'
 import { buildExportText, buildExportHtml, type ExportData } from './lib/exportDoc'
 import { prepareForQuery, prepareForSummary } from './lib/transcript'
 import { TranscriptPanel, TranscriptEntry } from './components/TranscriptPanel'
-import { AuthScreen } from './components/AuthScreen'
 import { ConsentScreen } from './components/ConsentScreen'
 import { ProviderSetup } from './components/ProviderSetup'
+import { PROVIDERS, type ProviderId } from '../../shared/providers'
 import { HistoryTab } from './components/HistoryTab'
 
 const EXPANDED_WIDTH   = 400
@@ -147,19 +147,18 @@ function DeleteAccountModal({ onClose, onDeleted }: { onClose: () => void; onDel
       <div className="mx-4 rounded-2xl border border-red-500/20 overflow-hidden w-full"
         style={{ background: 'rgba(20,20,20,0.98)', maxWidth: 340 }}>
         <div className="px-4 pt-4 pb-3 border-b border-white/10">
-          <h2 className="text-sm font-semibold text-white">Delete Account</h2>
+          <h2 className="text-sm font-semibold text-white">Erase My Data</h2>
           <p className="text-[10px] text-gray-500 mt-0.5">This action is permanent and cannot be undone</p>
         </div>
         <div className="px-4 py-3 flex flex-col gap-3">
           <div className="rounded-lg px-3 py-2.5 text-[11px] text-red-300 leading-relaxed"
             style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>
-            <p className="font-semibold mb-1">What will be deleted:</p>
+            <p className="font-semibold mb-1">What will be erased from this device:</p>
             <ul className="text-red-400/80 space-y-0.5 list-disc list-inside">
-              <li>Your account and login credentials</li>
-              <li>Subscription (will be cancelled)</li>
-              <li>All usage data and account history</li>
+              <li>Your saved AI provider key</li>
+              <li>All meeting history and transcripts</li>
             </ul>
-            <p className="mt-2 text-gray-500">Local session transcripts are already stored only on this device and will remain until you delete the app.</p>
+            <p className="mt-2 text-gray-500">Everything is stored locally — there is no account or server data to delete. You'll return to the setup screen.</p>
           </div>
           {status === 'error' && (
             <p className="text-xs text-red-400 bg-red-900/20 border border-red-800/30 rounded-lg px-3 py-2">
@@ -175,36 +174,11 @@ function DeleteAccountModal({ onClose, onDeleted }: { onClose: () => void; onDel
               className="flex-1 py-2 rounded-lg bg-red-600 hover:bg-red-500 disabled:opacity-50 text-xs font-semibold text-white transition-colors flex items-center justify-center gap-1.5">
               {status === 'deleting'
                 ? <span className="w-3 h-3 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                : 'Delete My Account'}
+                : 'Erase Everything'}
             </button>
           </div>
         </div>
       </div>
-    </div>
-  )
-}
-
-// ── Auth shell ────────────────────────────────────────────────────────────────
-function AuthShell({ onLogin }: { onLogin: (s: Session) => void }) {
-  return (
-    <div className="flex flex-col select-none overflow-hidden rounded-2xl border border-white/15"
-      style={{ background: 'rgba(15,15,15,0.95)', backdropFilter: 'blur(16px)', height: '100vh', width: '100vw' }}>
-      <div className="flex items-center justify-between px-3 border-b border-white/10 flex-shrink-0"
-        style={{ height: COLLAPSED_HEIGHT, WebkitAppRegion: 'drag' } as React.CSSProperties}>
-        <div className="flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full bg-gray-700" />
-          <span className="text-xs font-semibold text-gray-300 tracking-wide">Meeting AI</span>
-        </div>
-        <div style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-          <button onClick={() => window.api.closeWindow()}
-            className="w-6 h-6 rounded flex items-center justify-center text-gray-600 hover:text-red-400 hover:bg-white/10 transition-colors">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-            </svg>
-          </button>
-        </div>
-      </div>
-      <AuthScreen onLogin={onLogin} />
     </div>
   )
 }
@@ -299,26 +273,16 @@ type ByokStatus = { providerId: string; model: string; hasKey: boolean }
 // ── Main app ──────────────────────────────────────────────────────────────────
 export default function App(): JSX.Element {
   const [consentGiven, setConsentGiven] = useState(() => localStorage.getItem(CONSENT_KEY) === 'true')
-  const [session, setSession] = useState<Session | null | 'loading'>('loading')
+  // No accounts: the app is login-less. Once a BYOK key is configured the user
+  // is "signed in" with a device-local identity (history/settings key off it).
+  const [session, setSession] = useState<Session | null>(null)
   const [byok, setByok] = useState<ByokStatus | null | 'loading'>('loading')
 
   const reloadByok = useCallback(() => window.api.byokGet().then((b) => setByok(b)), [])
   useEffect(() => { reloadByok() }, [reloadByok])
 
   useEffect(() => {
-    // A real account (if the user previously signed in) takes precedence; a null
-    // result must NOT clobber a device-local session we've already adopted.
-    const apply = (s: Session | null) =>
-      setSession((prev) => (s ? s : prev && prev !== 'loading' ? prev : null))
-    window.api.checkSession().then(apply)
-    const t = setInterval(() => window.api.checkSession().then(apply), 5 * 60 * 1000)
-    return () => clearInterval(t)
-  }, [])
-
-  // Once a BYOK key is configured, the app is usable with no login: adopt a
-  // device-local identity instead of forcing an account.
-  useEffect(() => {
-    if (byok && byok !== 'loading' && byok.hasKey && session === null) {
+    if (byok && byok !== 'loading' && byok.hasKey && !session) {
       setSession(getLocalSession())
     }
   }, [byok, session])
@@ -765,11 +729,13 @@ export default function App(): JSX.Element {
     await persistSession()
   }
 
-  const handleLogout = async () => {
+  // Disconnect the current AI provider — wipes the stored key and returns to the
+  // provider-setup screen. (There are no accounts to "log out" of anymore.)
+  const handleDisconnect = async () => {
     stopRecording()
-    // Save current session to history before logging out
     await persistSession()
-    await window.api.logout()
+    await window.api.byokClear()
+    setByok(null)
     setSession(null)
   }
 
@@ -804,8 +770,8 @@ export default function App(): JSX.Element {
     )
   }
 
-  // ── Loading (session or BYOK status still resolving) ────────────────────────
-  if (session === 'loading' || byok === 'loading') {
+  // ── Loading (BYOK status still resolving) ───────────────────────────────────
+  if (byok === 'loading') {
     return (
       <div className="flex items-center justify-center border border-white/10"
         style={{ background: 'rgba(15,15,15,0.9)', height: COLLAPSED_HEIGHT, width: COLLAPSED_WIDTH, borderRadius: 999 }}>
@@ -875,7 +841,7 @@ export default function App(): JSX.Element {
       {showDeleteModal && !isCollapsed && (
         <DeleteAccountModal
           onClose={() => setShowDeleteModal(false)}
-          onDeleted={() => { setShowDeleteModal(false); handleLogout() }}
+          onDeleted={() => { setShowDeleteModal(false); handleDisconnect() }}
         />
       )}
 
@@ -932,14 +898,15 @@ export default function App(): JSX.Element {
               </svg>
             </button>
             <div className="flex items-center gap-1">
-              {session.avatarUrl
-                ? <img src={session.avatarUrl} alt="" className="w-5 h-5 rounded-full object-cover border border-white/20" />
-                : <span className="w-5 h-5 rounded-full flex items-center justify-center text-[9px] font-semibold bg-blue-600/40 text-blue-300 border border-blue-500/30">{(session.name ?? session.email)[0].toUpperCase()}</span>
-              }
-              <button onClick={handleLogout}
-                title={session.email}
+              <span
+                title="Connected AI provider"
+                className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-blue-600/30 text-blue-200 border border-blue-500/30">
+                {PROVIDERS[byok.providerId as ProviderId]?.label ?? 'AI'}
+              </span>
+              <button onClick={handleDisconnect}
+                title="Disconnect / switch AI provider"
                 className="px-1.5 py-0.5 rounded text-[9px] font-medium text-gray-500 hover:text-red-400 hover:bg-red-500/10 transition-colors border border-transparent hover:border-red-500/20">
-                Sign Out
+                Switch
               </button>
             </div>
             {/* Settings gear */}
@@ -1000,7 +967,7 @@ export default function App(): JSX.Element {
             <div className="flex items-center justify-between pt-1 border-t border-white/8">
               <div>
                 <p className="text-xs font-medium text-gray-200">My Data</p>
-                <p className="text-[10px] text-gray-500 mt-0.5">GDPR / CCPA — export or delete your account</p>
+                <p className="text-[10px] text-gray-500 mt-0.5">Stored only on this device — export or erase it anytime</p>
               </div>
               <div className="flex gap-1.5 flex-shrink-0">
                 <button
