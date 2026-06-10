@@ -887,7 +887,7 @@ export default function App(): JSX.Element {
           <div className="flex items-center gap-1 flex-shrink-0" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
             {/* Shortcuts */}
             <button
-              onClick={() => setShowShortcuts((v) => !v)}
+              onClick={() => { setShowShortcuts((v) => !v); setShowSettings(false) }}
               title="Keyboard shortcuts"
               className={`w-6 h-6 rounded flex items-center justify-center transition-colors ${showShortcuts ? 'text-blue-400 bg-blue-500/15' : 'text-gray-500 hover:text-gray-200 hover:bg-white/10'}`}>
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -914,7 +914,7 @@ export default function App(): JSX.Element {
             </div>
             {/* Settings gear */}
             <button
-              onClick={() => setShowSettings((v) => !v)}
+              onClick={() => { setShowSettings((v) => !v); setShowShortcuts(false) }}
               title="Settings"
               className={`w-6 h-6 rounded flex items-center justify-center transition-colors ${showSettings ? 'text-blue-400 bg-blue-500/15' : 'text-gray-500 hover:text-gray-200 hover:bg-white/10'}`}>
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
