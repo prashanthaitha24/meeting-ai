@@ -1,0 +1,230 @@
+{
+  "id": "devops-ansible",
+  "minutes": 30,
+  "intro": "Not everything runs in a container. Kubernetes nodes, database servers, build agents, network devices and the legacy estate every company has are still machines that need packages, users, config files and services kept in a known state. Terraform creates the machine; something has to configure what is inside it. Ansible does that over plain SSH with no agent to install, which is why it remains the most approachable configuration management tool.",
+  "objectives": [
+    "Explain Ansible's agentless push model and where it fits beside Terraform and containers",
+    "Write inventories with groups and variables, and target hosts with patterns",
+    "Write idempotent playbooks using modules, variables, templates, handlers and conditionals",
+    "Organise reusable automation into roles and protect secrets with Ansible Vault",
+    "Test changes safely with check mode, diff mode, limits and linting"
+  ],
+  "sections": [
+    {
+      "heading": "How Ansible works",
+      "blocks": [
+        { "type": "p", "text": "Ansible runs on a **control node**, your laptop or a CI runner, and connects to **managed nodes** over SSH. For each task it copies a small Python program to the target, runs it, collects the JSON result and removes it. There is no daemon on the targets and no central server to maintain; the requirements are SSH access and Python on the managed node." },
+        { "type": "p", "text": "You describe the state you want, in YAML, using **modules**. A module knows how to check the current state and change it only if needed. \"Package nginx is present\" installs it the first time and does nothing the second. That property, **idempotency**, is the point of the tool, and it is what separates a playbook from a shell script. Each task reports `ok` (already correct), `changed` (it fixed something) or `failed`." },
+        { "type": "table", "headers": ["Tool", "Manages", "Typical question it answers"], "rows": [
+          ["Terraform", "Cloud resources: networks, VMs, databases, DNS", "Does this server exist?"],
+          ["Ansible", "What is inside a machine: packages, files, users, services", "Is this server configured correctly?"],
+          ["Docker / Kubernetes", "Applications packaged as images", "Is this app running?"]
+        ]},
+        { "type": "code", "lang": "bash", "code": "python3 -m pip install --user ansible\nansible --version\n\n# ad-hoc commands: one module, right now, no playbook\nansible all -i inventory.ini -m ansible.builtin.ping\nansible web -i inventory.ini -m ansible.builtin.command -a \"uptime\"\nansible db -i inventory.ini -m ansible.builtin.setup -a \"filter=ansible_distribution*\"" },
+        { "type": "callout", "kind": "note", "text": "The `ping` module is not ICMP. It proves that Ansible can log in over SSH and run Python on the target, which is the real prerequisite for everything else." }
+      ]
+    },
+    {
+      "heading": "Inventory",
+      "blocks": [
+        { "type": "p", "text": "The **inventory** lists the hosts Ansible may touch and arranges them into **groups**. Groups are how you say \"all web servers\" or \"everything in production\", and variables can be attached to a group or a single host." },
+        { "type": "code", "lang": "yaml", "caption": "inventory/production.yml", "code": "all:\n  children:\n    web:\n      hosts:\n        web1.example.com:\n        web2.example.com:\n      vars:\n        http_port: 8080\n    db:\n      hosts:\n        db1.example.com:\n          postgres_role: primary\n  vars:\n    ansible_user: deploy\n    ansible_ssh_private_key_file: ~/.ssh/deploy_ed25519" },
+        { "type": "p", "text": "Keep one inventory per environment (`inventory/staging.yml`, `inventory/production.yml`) so that choosing production is always an explicit `-i` flag and never an accident. Variables that belong to groups are tidier in files than inline: Ansible automatically loads `group_vars/web.yml` and `host_vars/db1.example.com.yml` found next to the inventory or the playbook." },
+        { "type": "p", "text": "In the cloud, servers come and go, so a static file goes stale. **Dynamic inventory** plugins query the provider's API and build groups from tags, which ties in neatly with the tagging discipline you will meet in the FinOps module." },
+        { "type": "code", "lang": "bash", "code": "ansible-inventory -i inventory/production.yml --graph      # groups and hosts as a tree\nansible-inventory -i inventory/production.yml --host web1.example.com   # merged variables" }
+      ]
+    },
+    {
+      "heading": "Playbooks",
+      "blocks": [
+        { "type": "p", "text": "A **playbook** is a list of **plays**. Each play maps a group of hosts to an ordered list of **tasks**, and each task calls one module. Ansible runs a task on every host in the play before moving to the next task." },
+        { "type": "code", "lang": "yaml", "caption": "site.yml", "code": "- name: Configure web servers\n  hosts: web\n  become: true\n  vars:\n    app_user: shop\n\n  tasks:\n    - name: Install nginx\n      ansible.builtin.apt:\n        name: nginx\n        state: present\n        update_cache: true\n        cache_valid_time: 3600\n\n    - name: Create the application user\n      ansible.builtin.user:\n        name: \"{{ app_user }}\"\n        system: true\n        shell: /usr/sbin/nologin\n\n    - name: Deploy the nginx site config\n      ansible.builtin.template:\n        src: templates/shop.conf.j2\n        dest: /etc/nginx/sites-available/shop.conf\n        owner: root\n        group: root\n        mode: \"0644\"\n      notify: Reload nginx\n\n    - name: Make sure nginx is running and enabled at boot\n      ansible.builtin.service:\n        name: nginx\n        state: started\n        enabled: true\n\n  handlers:\n    - name: Reload nginx\n      ansible.builtin.service:\n        name: nginx\n        state: reloaded" },
+        { "type": "list", "items": [
+          "`become: true` escalates privileges with `sudo`, the same principle of least privilege as in the Linux module: connect as an ordinary user and escalate only where needed.",
+          "Modules are referred to by their **fully qualified collection name**, such as `ansible.builtin.apt`, which avoids ambiguity when several collections are installed.",
+          "A **handler** runs only if a task that notifies it reported `changed`, and only once, at the end of the play. That is how you reload a service when its config changed, and not otherwise.",
+          "`state: started` plus `enabled: true` is the \"start versus enable\" distinction from the Linux module, expressed declaratively.",
+          "Quote file modes (`\"0644\"`). Unquoted, YAML reads the number as decimal and you get the wrong permissions."
+        ]},
+        { "type": "code", "lang": "bash", "code": "ansible-playbook -i inventory/staging.yml site.yml\nansible-playbook -i inventory/production.yml site.yml --limit web1.example.com\nansible-playbook -i inventory/production.yml site.yml --tags nginx" }
+      ]
+    },
+    {
+      "heading": "Variables, facts, templates and conditionals",
+      "blocks": [
+        { "type": "p", "text": "Before the first task, Ansible gathers **facts** about each host: operating system, addresses, memory, CPU count. Facts and your own variables are available in tasks and in **Jinja2 templates**, which is how one template produces the right config file for each host." },
+        { "type": "code", "lang": "jinja2", "caption": "templates/shop.conf.j2", "code": "# Managed by Ansible. Manual changes will be overwritten.\nupstream shop_backend {\n{% for host in groups['web'] %}\n    server {{ hostvars[host]['ansible_default_ipv4']['address'] }}:{{ http_port }};\n{% endfor %}\n}\n\nserver {\n    listen 80;\n    server_name {{ inventory_hostname }};\n    # {{ ansible_facts['distribution'] }} host with {{ ansible_facts['processor_vcpus'] }} vCPUs\n    location / {\n        proxy_pass http://shop_backend;\n    }\n}" },
+        { "type": "code", "lang": "yaml", "code": "- name: Install the firewall package on Debian-family hosts only\n  ansible.builtin.apt:\n    name: ufw\n    state: present\n  when: ansible_facts['os_family'] == \"Debian\"\n\n- name: Create several directories\n  ansible.builtin.file:\n    path: \"/srv/shop/{{ item }}\"\n    state: directory\n    owner: \"{{ app_user }}\"\n    mode: \"0750\"\n  loop:\n    - releases\n    - shared\n    - logs\n\n- name: Check the running application version\n  ansible.builtin.command: /srv/shop/bin/shop --version\n  register: shop_version\n  changed_when: false          # a read-only command never counts as a change\n  failed_when: shop_version.rc not in [0, 3]" },
+        { "type": "p", "text": "Variables can be defined in more than twenty places, with a defined precedence. You do not need the whole list. Remember the ends: **role defaults** are the weakest, so they are where a role puts overridable settings, and **extra vars** passed with `-e` on the command line beat everything." },
+        { "type": "callout", "kind": "warning", "text": "`command` and `shell` run arbitrary commands and cannot know whether anything changed, so they report `changed` every time and break idempotency. Reach for a purpose-built module first. When you must use them, add `creates:` or `changed_when:` so that a second run is a no-op." }
+      ]
+    },
+    {
+      "heading": "Roles and secrets",
+      "blocks": [
+        { "type": "p", "text": "A **role** packages tasks, handlers, templates, files and default variables in a standard directory layout, so that the same automation can be reused across playbooks and shared through Ansible Galaxy." },
+        { "type": "code", "lang": "text", "code": "roles/nginx/\n  defaults/main.yml     # overridable settings (lowest precedence)\n  vars/main.yml         # internal constants (high precedence)\n  tasks/main.yml        # entry point for the role's tasks\n  handlers/main.yml\n  templates/            # Jinja2 templates\n  files/                # static files\n  meta/main.yml         # dependencies on other roles" },
+        { "type": "code", "lang": "yaml", "caption": "site.yml using roles", "code": "- name: Web tier\n  hosts: web\n  become: true\n  roles:\n    - common\n    - role: nginx\n      vars:\n        nginx_worker_connections: 4096" },
+        { "type": "p", "text": "Pin third-party roles and collections in a `requirements.yml` and install them with `ansible-galaxy install -r requirements.yml`, for the same reproducibility reasons as any other dependency." },
+        { "type": "p", "text": "**Ansible Vault** encrypts variable files so that they can live in Git. The decryption password is supplied at run time, from a prompt locally or from a secret in CI." },
+        { "type": "code", "lang": "bash", "code": "ansible-vault create group_vars/production/vault.yml\nansible-vault edit group_vars/production/vault.yml\nansible-vault view group_vars/production/vault.yml\nansible-playbook -i inventory/production.yml site.yml --ask-vault-pass\nansible-playbook -i inventory/production.yml site.yml --vault-password-file ~/.vault_pass" },
+        { "type": "p", "text": "Add `no_log: true` to any task that handles a secret, or its value can appear in the output and in CI logs." }
+      ]
+    },
+    {
+      "heading": "Running changes safely",
+      "blocks": [
+        { "type": "code", "lang": "bash", "code": "ansible-playbook site.yml --syntax-check\nansible-lint site.yml                                   # separate tool; catches bad practice\nansible-playbook -i inventory/production.yml site.yml --check --diff   # dry run with file diffs\nansible-playbook -i inventory/production.yml site.yml --limit 'web[0]' # one canary host first\nansible-playbook -i inventory/production.yml site.yml --list-hosts     # who would be touched?" },
+        { "type": "p", "text": "`--check` asks modules to report what they would change without doing it, and `--diff` shows the file changes line by line. Together they are Ansible's equivalent of `terraform plan`. They are not perfect, because a task that depends on the result of an earlier task may misreport in check mode, but they catch most surprises." },
+        { "type": "p", "text": "For fleets, control the **blast radius** inside the play: `serial` updates hosts in batches instead of all at once, and `max_fail_percentage` stops the rollout when too many hosts fail." },
+        { "type": "code", "lang": "yaml", "code": "- name: Rolling update of the web tier\n  hosts: web\n  become: true\n  serial: \"25%\"\n  max_fail_percentage: 10\n  roles:\n    - shop_app" },
+        { "type": "p", "text": "The idempotency test for any playbook is simple: run it twice. The second run must report `changed=0`. If it does not, a task is not describing state, and it will keep causing needless restarts and noisy diffs." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Configure two servers and prove it is idempotent",
+    "steps": [
+      "Create two small Linux VMs you can reach over SSH with a key: cloud free tier, Multipass, or Vagrant. Install Ansible on your own machine.",
+      "Write a YAML inventory with a `web` group containing both hosts, and confirm connectivity with `ansible web -i inventory.yml -m ansible.builtin.ping`.",
+      "Write a playbook that installs nginx, deploys an `index.html` from a Jinja2 template that prints the hostname and an OS fact, and ensures the service is started and enabled.",
+      "Add a handler that reloads nginx, notified only by the config template task. Run the playbook twice and confirm the second run shows `changed=0` and the handler did not fire.",
+      "Change the template, then run with `--check --diff` to preview the change, then apply it to a single host with `--limit` before the rest.",
+      "Move the tasks into a `roles/nginx` role with a default variable in `defaults/main.yml`, and override it from the playbook.",
+      "Put a fake API key in a vault-encrypted vars file, use it in a template, add `no_log: true` to the task, and run with `--ask-vault-pass`. Run `ansible-lint` and fix what it reports."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Agentless: a control node pushes over SSH; targets need only SSH and Python.",
+      "Idempotency is the whole point. Declare state with modules; a second run must show `changed=0`.",
+      "Inventory defines who, groups define targeting, one inventory file per environment.",
+      "Handlers run once, at the end of the play, and only when a notifying task changed something.",
+      "Avoid `command` and `shell`; if unavoidable, add `creates:` or `changed_when:`.",
+      "Role `defaults/` are the weakest variables; `-e` extra vars are the strongest.",
+      "Preview with `--check --diff`, narrow with `--limit`, batch with `serial`.",
+      "Secrets go in Ansible Vault, and tasks that touch them get `no_log: true`."
+    ],
+    "groups": [
+      {
+        "title": "Command line",
+        "items": [
+          { "syntax": "ansible GROUP -i INV -m ansible.builtin.ping", "desc": "Test SSH login and Python on the targets" },
+          { "syntax": "ansible GROUP -i INV -m MODULE -a \"ARGS\"", "desc": "Ad-hoc: run one module now" },
+          { "syntax": "ansible-playbook -i INV site.yml", "desc": "Run a playbook" },
+          { "syntax": "--check --diff", "desc": "Dry run, showing file changes" },
+          { "syntax": "--limit HOST_OR_GROUP", "desc": "Restrict to a subset of the play's hosts" },
+          { "syntax": "--tags NAME / --skip-tags NAME", "desc": "Run or skip tagged tasks" },
+          { "syntax": "-e \"key=value\"", "desc": "Extra variables; highest precedence" },
+          { "syntax": "--list-hosts / --list-tasks", "desc": "Show what would be targeted or run" },
+          { "syntax": "-v / -vvv", "desc": "More output; `-vvv` shows SSH details" }
+        ]
+      },
+      {
+        "title": "Everyday modules",
+        "items": [
+          { "syntax": "ansible.builtin.package / apt / dnf", "desc": "Packages: `name`, `state: present|absent|latest`" },
+          { "syntax": "ansible.builtin.service", "desc": "`state: started|stopped|restarted|reloaded`, `enabled: true`" },
+          { "syntax": "ansible.builtin.copy", "desc": "Static file to the target: `src`, `dest`, `owner`, `mode`" },
+          { "syntax": "ansible.builtin.template", "desc": "Render a Jinja2 template; `validate:` checks it before replacing" },
+          { "syntax": "ansible.builtin.file", "desc": "Directories, links, permissions: `state: directory|link|absent`" },
+          { "syntax": "ansible.builtin.lineinfile", "desc": "Ensure one line is present in a file" },
+          { "syntax": "ansible.builtin.user / group", "desc": "Accounts and groups" },
+          { "syntax": "ansible.builtin.git", "desc": "Check out a repository at a version" },
+          { "syntax": "ansible.builtin.uri", "desc": "HTTP request, useful for health checks" },
+          { "syntax": "ansible.builtin.debug", "desc": "Print a variable: `var: NAME`" }
+        ]
+      },
+      {
+        "title": "Task keywords",
+        "items": [
+          { "syntax": "become: true", "desc": "Run with sudo" },
+          { "syntax": "when: CONDITION", "desc": "Run only if true; no `{{ }}` around the expression" },
+          { "syntax": "loop: [a, b, c]", "desc": "Repeat the task; the current element is `item`" },
+          { "syntax": "register: NAME", "desc": "Save the task's result in a variable" },
+          { "syntax": "notify: HANDLER NAME", "desc": "Queue a handler if this task reports changed" },
+          { "syntax": "changed_when: false", "desc": "Mark a read-only command as never changing" },
+          { "syntax": "failed_when: CONDITION", "desc": "Define what failure means for this task" },
+          { "syntax": "no_log: true", "desc": "Hide the task's arguments and output" },
+          { "syntax": "tags: [NAME]", "desc": "Label tasks for selective runs" }
+        ]
+      },
+      {
+        "title": "Roles, Galaxy and Vault",
+        "items": [
+          { "syntax": "ansible-galaxy role init NAME", "desc": "Scaffold the standard role layout" },
+          { "syntax": "ansible-galaxy install -r requirements.yml", "desc": "Install pinned roles and collections" },
+          { "syntax": "ansible-vault create|edit|view FILE", "desc": "Work with an encrypted variables file" },
+          { "syntax": "ansible-vault encrypt_string 'VALUE' --name 'KEY'", "desc": "Encrypt one value to paste into YAML" },
+          { "syntax": "--ask-vault-pass / --vault-password-file FILE", "desc": "Supply the vault password at run time" },
+          { "syntax": "ansible-lint", "desc": "Lint playbooks and roles for mistakes and bad practice" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Replacing modules with `shell` commands, so that every run reports changes and restarts services for nothing.",
+      "Writing `mode: 0644` unquoted, which YAML reads as a decimal number and produces wrong permissions.",
+      "Restarting a service in a normal task instead of a handler, so it restarts on every run.",
+      "Running against production because it was the default inventory instead of an explicit `-i`.",
+      "Committing plaintext secrets in `group_vars`, or leaking them into logs without `no_log`.",
+      "Updating every host at once, with no `serial` batches and no canary host."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "You run the same playbook twice with no changes in between. What should a well-written playbook report on the second run?",
+      "options": [
+        "changed=0, because every task found the system already in the desired state",
+        "The same number of changed tasks as the first run",
+        "Failures, because the packages and users already exist",
+        "Nothing, because Ansible skips playbooks it has run before"
+      ],
+      "answer": 0,
+      "explain": "Modules check state before acting, so a second run has nothing to do. Any task that still reports `changed` is not idempotent, usually a `command` or `shell` task."
+    },
+    {
+      "q": "A template task with `notify: Reload nginx` reports `ok` instead of `changed`. What happens to the handler?",
+      "options": [
+        "It does not run, because handlers fire only when a notifying task changed something",
+        "It runs at the end of the play, as handlers always do",
+        "It runs immediately after the template task completes",
+        "It runs only on the first host in the group"
+      ],
+      "answer": 0,
+      "explain": "Handlers exist to avoid unnecessary restarts. They are triggered only by a `changed` result, run once at the end of the play, however many tasks notified them."
+    },
+    {
+      "q": "Which task is NOT idempotent as written?",
+      "options": [
+        "ansible.builtin.shell: echo 'max_connections = 200' >> /etc/app.conf",
+        "ansible.builtin.lineinfile with line 'max_connections = 200' in /etc/app.conf",
+        "ansible.builtin.apt with name nginx and state present",
+        "ansible.builtin.service with name nginx, state started, enabled true"
+      ],
+      "answer": 0,
+      "explain": "The shell task appends another copy of the line on every run and always reports `changed`. `lineinfile` checks whether the line is already there, and the other two declare a state."
+    },
+    {
+      "q": "What does `ansible-playbook site.yml --check --diff` do?",
+      "options": [
+        "Reports what would change, including file differences, without changing anything",
+        "Applies the playbook, then shows the differences from the previous run",
+        "Compares the playbook with the version committed in Git",
+        "Validates the YAML syntax only, without contacting any host"
+      ],
+      "answer": 0,
+      "explain": "Check mode is a dry run against the real hosts, and diff mode adds line-by-line file changes. `--syntax-check` is the option that only parses the playbook."
+    },
+    {
+      "q": "A role should offer a setting that users can easily override from a playbook or inventory. Where should the role define it?",
+      "options": [
+        "roles/NAME/defaults/main.yml, which has the lowest precedence",
+        "roles/NAME/vars/main.yml, which has high precedence",
+        "As a hard-coded value directly in the template file",
+        "In roles/NAME/meta/main.yml alongside the dependencies"
+      ],
+      "answer": 0,
+      "explain": "Role defaults are the weakest variables, so almost anything overrides them. Role `vars` are strong and meant for internal constants that callers should not normally change."
+    }
+  ]
+}

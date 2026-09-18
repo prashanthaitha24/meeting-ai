@@ -1,0 +1,227 @@
+{
+  "id": "devops-git",
+  "minutes": 30,
+  "intro": "Git is where every change to your application and your infrastructure begins. Pipelines trigger on it, GitOps controllers deploy from it, and during an incident the first question is usually \"what changed?\", which Git answers. This module moves you past memorised commands to a working model of commits, branches and remotes, so that rebasing, resolving conflicts and recovering from mistakes stop being frightening.",
+  "objectives": [
+    "Explain commits, branches and `HEAD` as a graph of snapshots with movable labels",
+    "Use a short-lived feature branch and pull request workflow from start to merge",
+    "Choose between merge and rebase, and resolve a conflict in either one",
+    "Undo mistakes safely with `restore`, `revert`, `reset` and `reflog`",
+    "Describe trunk-based development and why delivery pipelines favour it"
+  ],
+  "sections": [
+    {
+      "heading": "The model: snapshots and labels",
+      "blocks": [
+        { "type": "p", "text": "A **commit** is a snapshot of your whole project plus a message, an author, and a pointer to its parent commit. Commits are identified by a hash and never change; any command that appears to edit a commit actually creates a new one. Follow the parent pointers and you get the history: a graph." },
+        { "type": "p", "text": "A **branch** is nothing more than a label pointing at one commit. Creating a branch copies no files; it writes one tiny reference file. When you commit, the label of the branch you are on moves forward to the new commit. **HEAD** is the label that says \"you are here\", and it normally points at a branch." },
+        { "type": "p", "text": "Between your files and the history sits the **staging area** (the index). `git add` copies a change into the staging area, and `git commit` turns whatever is staged into a snapshot. That extra step is what lets you split a messy afternoon of edits into several clean, reviewable commits." },
+        { "type": "code", "lang": "bash", "code": "git status                      # what is modified, staged, untracked\ngit diff                        # unstaged changes\ngit diff --staged               # what the next commit will contain\ngit add -p                      # stage selected hunks interactively\ngit commit -m \"Add health endpoint\"\ngit log --oneline --graph --all # the commit graph, one line per commit" },
+        { "type": "callout", "kind": "tip", "text": "When Git confuses you, run `git log --oneline --graph --all`. Nearly every command is an operation on that picture: adding a commit, moving a label, or copying commits from one place to another." }
+      ]
+    },
+    {
+      "heading": "Remotes and the feature-branch workflow",
+      "blocks": [
+        { "type": "p", "text": "A **remote** is another copy of the repository, conventionally named `origin`. Your clone keeps read-only bookmarks such as `origin/main` that record where the remote's branches were the last time you talked to it. `git fetch` updates those bookmarks and changes nothing else. `git pull` is a fetch followed by a merge (or a rebase, if configured) into your current branch." },
+        { "type": "p", "text": "The everyday team workflow is: branch off the latest `main`, commit, push the branch, open a **pull request** (PR), let CI and a reviewer check it, merge, delete the branch." },
+        { "type": "code", "lang": "bash", "code": "git switch main\ngit pull                                  # start from the latest main\ngit switch -c feature/health-endpoint     # create the branch and move onto it\n# ...edit, git add, git commit...\ngit push -u origin feature/health-endpoint   # -u remembers the upstream\n# open the pull request in your Git host, get review, merge\ngit switch main\ngit pull\ngit branch -d feature/health-endpoint     # delete the merged local branch" },
+        { "type": "p", "text": "A good PR is small, does one thing, and has a description that says **why**. Small PRs are reviewed faster and more carefully, conflict less, and are trivial to revert. That is not politeness; it is the biggest lever you have on delivery speed, as you will see in the DORA metrics module." }
+      ]
+    },
+    {
+      "heading": "Merge or rebase",
+      "blocks": [
+        { "type": "p", "text": "While you worked, `main` moved on. There are two ways to combine the histories. A **merge** creates a new commit with two parents that joins the lines of work. Nothing existing is altered, so it is always safe, but the history shows every join. If `main` has not moved at all, Git simply slides the label forward, which is called a **fast-forward**." },
+        { "type": "p", "text": "A **rebase** takes your commits and replays them, one by one, on top of the new `main`. The result is a straight line that reads as if you had started today. Because commits are immutable, the replayed commits are new commits with new hashes; the originals are abandoned." },
+        { "type": "code", "lang": "bash", "code": "# bring your feature branch up to date by rebasing\ngit fetch origin\ngit rebase origin/main\n\n# tidy your own commits before review: squash, reorder, reword\ngit rebase -i origin/main\n\n# you already pushed this branch, so the remote must accept rewritten history\ngit push --force-with-lease" },
+        { "type": "callout", "kind": "warning", "text": "The golden rule: never rebase commits that other people have based work on, which in practice means never rebase a shared branch such as `main`. Rebasing your own feature branch is fine. When you must force-push, use `--force-with-lease`, which refuses if someone else pushed to the branch since your last fetch. Plain `--force` silently destroys their work." },
+        { "type": "p", "text": "Most teams rebase or squash locally and let the Git host perform the final merge. \"Squash and merge\" collapses a PR into one commit on `main`, which keeps `main` readable and makes each change a single revertable unit." }
+      ]
+    },
+    {
+      "heading": "Resolving conflicts",
+      "blocks": [
+        { "type": "p", "text": "A conflict happens when both sides changed the same lines and Git will not guess. It pauses, and marks the file:" },
+        { "type": "code", "lang": "text", "code": "<<<<<<< HEAD\nreplicas: 3\n=======\nreplicas: 5\n>>>>>>> feature/scale-up" },
+        { "type": "p", "text": "The part above `=======` is the branch you are on; the part below is what is coming in. Edit the file to the correct final content, which may be one side, the other, or a combination, and delete all three marker lines. Then tell Git you are finished." },
+        { "type": "code", "lang": "bash", "code": "git status                  # lists the files still in conflict\n# ...edit each file, remove the markers...\ngit add deploy/values.yaml\ngit merge --continue        # or: git rebase --continue\n\ngit merge --abort           # changed your mind? go back to before the merge\ngit rebase --abort" },
+        { "type": "callout", "kind": "note", "text": "During a rebase the meaning of the two sides is swapped: `HEAD` is the branch you are replaying onto, and the lower part is your own commit. Read the content, not the labels. A rebase can also stop several times, once for each of your commits that conflicts." }
+      ]
+    },
+    {
+      "heading": "Undoing things safely",
+      "blocks": [
+        { "type": "p", "text": "Which undo you need depends on how far the mistake travelled." },
+        { "type": "table", "headers": ["Situation", "Command", "Effect"], "rows": [
+          ["Bad edit, not staged", "`git restore FILE`", "Discards the working-copy change. Not recoverable."],
+          ["Staged by accident", "`git restore --staged FILE`", "Unstages it; your edit is kept."],
+          ["Typo in the last commit, not pushed", "`git commit --amend`", "Replaces the last commit with a corrected one."],
+          ["Bad commits, not pushed", "`git reset --soft HEAD~1`", "Moves the branch back one commit; changes stay staged."],
+          ["Bad commit already on `main`", "`git revert HASH`", "Adds a new commit that applies the inverse. History is preserved."]
+        ]},
+        { "type": "p", "text": "The dividing line is **whether the commit has been shared**. `amend`, `reset` and `rebase` rewrite history, so keep them for commits only you have. For anything on a shared branch use `git revert`, which is also how you roll back a bad production change without disturbing anyone else." },
+        { "type": "p", "text": "`git reset --hard` also throws away your working-copy changes, so use it deliberately. If you do lose commits, `git reflog` is the safety net: it lists every position `HEAD` has been at recently, including commits no branch points to any more. Find the hash, then `git switch -c rescue HASH`." },
+        { "type": "callout", "kind": "warning", "text": "A secret that was committed and pushed is compromised, even if you delete it in the next commit, because it is still in the history and in every clone. Rotate the credential first. Cleaning the history comes second." }
+      ]
+    },
+    {
+      "heading": "Trunk-based development",
+      "blocks": [
+        { "type": "p", "text": "Branching strategies differ mainly in how long work stays apart. In long-lived-branch models, changes sit on `develop` or release branches for weeks; merges become large, conflicts are painful, and nobody is sure what is deployable." },
+        { "type": "p", "text": "In **trunk-based development** everyone integrates into one branch (`main`, the trunk) at least daily, through branches that live for hours or a day or two. `main` is always releasable because every merge passed CI. Work that is not finished is merged anyway, hidden behind a **feature flag**, so integrating code is decoupled from releasing a feature." },
+        { "type": "list", "items": [
+          "Small, frequent merges make conflicts small and rare.",
+          "CI runs against what will really ship, not against a branch that drifted for a month.",
+          "Releases are cut from `main` with a **tag** such as `v1.4.0`, not from a long-lived branch.",
+          "Protect `main`: require a PR, passing checks, and at least one review."
+        ]},
+        { "type": "code", "lang": "bash", "code": "git tag -a v1.4.0 -m \"Release 1.4.0\"   # annotated tag on the current commit\ngit push origin v1.4.0                  # tags are not pushed by default\ngit describe --tags                     # nearest tag, useful for build versions" }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Collide with yourself, then recover",
+    "steps": [
+      "Create a repository on your Git host, clone it, and commit a small `config.yaml` with a line `replicas: 3` on `main`.",
+      "Create `feature/a` and change the line to `replicas: 5`. Switch back to `main` and change the same line to `replicas: 4`. Commit both.",
+      "On `feature/a`, run `git rebase main`, resolve the conflict by hand, and continue. Inspect the result with `git log --oneline --graph --all`.",
+      "Push the branch, open a pull request, and merge it with \"squash and merge\". Pull `main` and confirm it gained exactly one commit.",
+      "Make a bad commit on `main`, push it, and undo it properly with `git revert`. Confirm the history still contains both commits.",
+      "Create a commit on a scratch branch, delete the branch with `git branch -D`, then recover the commit using `git reflog`.",
+      "Turn on branch protection for `main` in your Git host so that direct pushes are rejected, and verify that a direct push now fails."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "A commit is an immutable snapshot with a parent; a branch is a movable label; `HEAD` is where you are.",
+      "`fetch` only updates your view of the remote. `pull` is fetch plus merge or rebase.",
+      "Merge preserves history and is always safe. Rebase rewrites your commits into a straight line.",
+      "Never rewrite shared history. On shared branches undo with `git revert`, not `reset`.",
+      "`--force-with-lease`, never plain `--force`.",
+      "Small, short-lived branches merged to an always-releasable `main` beat long-lived branches.",
+      "`git reflog` can recover almost anything that was ever committed."
+    ],
+    "groups": [
+      {
+        "title": "Everyday",
+        "items": [
+          { "syntax": "git status", "desc": "Modified, staged and untracked files" },
+          { "syntax": "git add -p", "desc": "Stage changes hunk by hunk" },
+          { "syntax": "git diff --staged", "desc": "Exactly what the next commit will contain" },
+          { "syntax": "git commit -m \"MESSAGE\"", "desc": "Snapshot the staged changes" },
+          { "syntax": "git log --oneline --graph --all", "desc": "The commit graph with every branch" },
+          { "syntax": "git stash / git stash pop", "desc": "Shelve uncommitted work, then bring it back" }
+        ]
+      },
+      {
+        "title": "Branches and remotes",
+        "items": [
+          { "syntax": "git switch -c NAME", "desc": "Create a branch and move onto it" },
+          { "syntax": "git switch NAME", "desc": "Move to an existing branch" },
+          { "syntax": "git fetch origin", "desc": "Update `origin/*` bookmarks; touches nothing else" },
+          { "syntax": "git pull --rebase", "desc": "Fetch, then replay your local commits on top" },
+          { "syntax": "git push -u origin NAME", "desc": "Publish a branch and remember its upstream" },
+          { "syntax": "git branch -d NAME", "desc": "Delete a merged branch (`-D` forces)" }
+        ]
+      },
+      {
+        "title": "Combine histories",
+        "items": [
+          { "syntax": "git merge NAME", "desc": "Join NAME into the current branch" },
+          { "syntax": "git rebase origin/main", "desc": "Replay your commits on top of the latest main" },
+          { "syntax": "git rebase -i origin/main", "desc": "Squash, reorder or reword your own commits" },
+          { "syntax": "git merge --abort / git rebase --abort", "desc": "Back out of a conflicted operation" },
+          { "syntax": "git cherry-pick HASH", "desc": "Copy one commit onto the current branch" },
+          { "syntax": "git push --force-with-lease", "desc": "Overwrite your remote branch only if nobody else pushed" }
+        ]
+      },
+      {
+        "title": "Undo",
+        "items": [
+          { "syntax": "git restore FILE", "desc": "Throw away an unstaged edit (permanent)" },
+          { "syntax": "git restore --staged FILE", "desc": "Unstage, keep the edit" },
+          { "syntax": "git commit --amend", "desc": "Replace the last, unpushed commit" },
+          { "syntax": "git reset --soft HEAD~1", "desc": "Undo the last commit, keep its changes staged" },
+          { "syntax": "git revert HASH", "desc": "New commit that reverses HASH; safe on shared branches" },
+          { "syntax": "git reflog", "desc": "Every recent position of HEAD, for recovering lost commits" }
+        ]
+      },
+      {
+        "title": "Investigate what changed",
+        "items": [
+          { "syntax": "git log -p -- PATH", "desc": "History of one file, with diffs" },
+          { "syntax": "git blame FILE", "desc": "Which commit last touched each line" },
+          { "syntax": "git diff v1.3.0..v1.4.0", "desc": "Everything that changed between two releases" },
+          { "syntax": "git bisect start / good / bad", "desc": "Binary-search history for the commit that broke something" },
+          { "syntax": "git tag -a v1.4.0 -m \"MSG\"", "desc": "Mark a release; push it with `git push origin v1.4.0`" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Rebasing or force-pushing a branch other people are working on, which orphans their commits.",
+      "Using `git reset` to undo a commit that is already on `main` instead of `git revert`.",
+      "Believing that deleting a committed secret in a later commit makes it safe. Rotate it.",
+      "Letting a feature branch live for weeks, then losing a day to one enormous merge conflict.",
+      "Running `git pull` with uncommitted work and a diverged branch, then fighting a surprise merge; fetch and look first.",
+      "Committing build output, `.env` files or dependencies because `.gitignore` was never set up."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "What is a Git branch, physically?",
+      "options": [
+        "A movable reference that points at a single commit",
+        "A full copy of the project files in a separate folder",
+        "A list of all the diffs made since the branch was created",
+        "A locked area of the repository that only one person can use"
+      ],
+      "answer": 0,
+      "explain": "A branch is just a named pointer to one commit, which is why creating one is instant. The history comes from following each commit's parent pointer."
+    },
+    {
+      "q": "A broken commit was merged to `main` an hour ago and teammates have already pulled it. What is the right way to undo it?",
+      "options": [
+        "Reset main to the earlier commit and force-push it",
+        "Run `git revert` on the commit and push the new commit",
+        "Amend the commit locally and push with `--force`",
+        "Delete main on the remote and push it again"
+      ],
+      "answer": 1,
+      "explain": "The commit is shared, so history must not be rewritten. `git revert` adds a new commit that applies the inverse change, which everyone can pull normally."
+    },
+    {
+      "q": "You rebased your already-pushed feature branch onto the latest main. `git push` is rejected. What should you do?",
+      "options": [
+        "Run `git pull` to merge the remote branch back in, then push",
+        "Push with `--force-with-lease` to replace the remote branch",
+        "Push with `--force` so the rejection is ignored",
+        "Delete your local branch and clone the repository again"
+      ],
+      "answer": 1,
+      "explain": "Rebasing created new commits, so the remote branch has diverged. `--force-with-lease` overwrites it only if nobody else has pushed there. Pulling would merge the old commits back in and duplicate your work; plain `--force` would overwrite a colleague's push without warning."
+    },
+    {
+      "q": "What does `git fetch` change in your local repository?",
+      "options": [
+        "It merges the remote changes into your current branch",
+        "It updates remote-tracking references such as `origin/main` only",
+        "It overwrites your working files with the remote version",
+        "It uploads your local commits to the remote"
+      ],
+      "answer": 1,
+      "explain": "Fetch downloads new commits and moves the `origin/*` bookmarks. Your branches and files are untouched until you merge or rebase, which is why fetching is always safe."
+    },
+    {
+      "q": "In trunk-based development, how does a team merge a feature that will take three weeks to finish?",
+      "options": [
+        "Keep a feature branch open for three weeks and merge at the end",
+        "Freeze main until the feature is complete",
+        "Merge small pieces daily, hidden behind a feature flag",
+        "Build it on a fork and copy the files over when done"
+      ],
+      "answer": 2,
+      "explain": "Trunk-based development separates integrating code from releasing a feature. Incomplete work is merged continuously but kept switched off with a flag, so main stays releasable and merges stay small."
+    }
+  ]
+}

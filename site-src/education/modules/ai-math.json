@@ -1,0 +1,203 @@
+{
+  "id": "ai-math",
+  "minutes": 35,
+  "intro": "You can build useful things with machine learning without a mathematics degree, but not without a feel for four ideas. Vectors are how data and meaning are represented. Matrices are how models transform them. Probability is how models express uncertainty, and how you judge whether a result can be trusted. Gradients are how every model learns. This module gives you working intuition for each, with small examples you can check by hand and the one line of NumPy that does the same thing at scale.",
+  "objectives": [
+    "Represent data as vectors, and compare them with the dot product, norm and cosine similarity",
+    "Explain a matrix multiplication as a transformation, and track the shapes through a neural network layer",
+    "Apply mean, variance, conditional probability and Bayes' rule to data and to model outputs",
+    "Explain how gradient descent minimises a loss, and what the learning rate does",
+    "Read softmax and cross-entropy, the two formulas behind nearly every classifier and language model"
+  ],
+  "sections": [
+    {
+      "heading": "Vectors: data as points in space",
+      "blocks": [
+        { "type": "p", "text": "A **vector** is an ordered list of numbers. In machine learning, everything becomes one. A house is `[3 bedrooms, 120 m2, built 1995]`. A server at one moment is `[CPU 0.7, memory 0.4, 240 requests per second]`. A sentence is turned by a language model into an **embedding**: a vector of several hundred or a few thousand numbers, arranged so that texts with similar meaning land close together. The number of entries is the vector's **dimension**." },
+        { "type": "p", "text": "Thinking of a vector as a point, or as an arrow from the origin to that point, gives you geometry for free. Similar things are near each other. Questions such as \"which documents are most like this query?\" become questions about distance and angle. Three operations cover nearly everything." },
+        { "type": "code", "lang": "text", "code": "a = [3, 4]        b = [4, 3]\n\ndot product   a . b  = 3x4 + 4x3            = 24\nnorm (length) |a|    = sqrt(3^2 + 4^2)      = 5          |b| = 5\ncosine        cos    = a . b / (|a| |b|)    = 24 / 25    = 0.96\n\ndistance      |a - b| = |[-1, 1]| = sqrt(1 + 1)          = 1.414" },
+        { "type": "p", "text": "The **dot product** multiplies matching entries and adds the results. It is large when two vectors point the same way and have large entries, zero when they are perpendicular, and negative when they point in opposite directions. It is the single most common computation in machine learning: a neuron is a dot product, and so is attention in a transformer." },
+        { "type": "p", "text": "**Cosine similarity** is the dot product with the lengths divided out, so it measures only direction. It runs from 1, meaning the same direction, through 0, meaning unrelated, to -1, meaning opposite. It is the standard way to compare embeddings, because for text the direction carries the meaning and the length mostly does not. If vectors are first **normalised** to length 1, cosine similarity is simply the dot product, which is why vector databases often store normalised embeddings." },
+        { "type": "code", "lang": "python", "code": "import numpy as np\n\na = np.array([3.0, 4.0])\nb = np.array([4.0, 3.0])\n\na @ b                                   # dot product -> 24.0\nnp.linalg.norm(a)                       # length -> 5.0\n(a @ b) / (np.linalg.norm(a) * np.linalg.norm(b))   # cosine -> 0.96\nnp.linalg.norm(a - b)                   # Euclidean distance -> 1.414...\n\n# compare one query against many documents at once\ndocs = np.array([[4.0, 3.0], [-3.0, -4.0], [4.0, -3.0]])\ndocs_n = docs / np.linalg.norm(docs, axis=1, keepdims=True)\nq_n = a / np.linalg.norm(a)\ndocs_n @ q_n                            # -> [ 0.96, -1.0, 0.0 ]" },
+        { "type": "callout", "kind": "note", "text": "Scale matters for distance. If one feature is measured in bytes and another in fractions between 0 and 1, the first dominates every distance calculation. That is why features are **standardised** before many algorithms: subtract the mean and divide by the standard deviation, so that every feature has mean 0 and spread 1." }
+      ]
+    },
+    {
+      "heading": "Matrices: transforming many vectors at once",
+      "blocks": [
+        { "type": "p", "text": "A **matrix** is a grid of numbers with a shape of rows by columns. It plays two roles. As **data**, a matrix is a table with one row per example and one column per feature, which is exactly a NumPy array or a DataFrame. As a **transformation**, a matrix is a machine that turns one vector into another, and this is what the weights of a model are." },
+        { "type": "p", "text": "Multiplying a matrix by a vector takes the dot product of each **row** of the matrix with the vector. Each output number is therefore a weighted mix of all the inputs." },
+        { "type": "code", "lang": "text", "code": "W = | 1  2 |      x = | 5 |\n    | 3  4 |          | 6 |\n\nW x = | 1x5 + 2x6 |  =  | 17 |\n      | 3x5 + 4x6 |     | 39 |\n\nShape rule:   (m x n) @ (n x p)  ->  (m x p)     the inner sizes must match\n              (2 x 2) @ (2 x 1)  ->  (2 x 1)" },
+        { "type": "p", "text": "The shape rule is the most practical thing to take from linear algebra. When a deep learning library reports a shape mismatch, which it will, the fix is to write down the shape at every step and find where the inner dimensions disagree. Note also that order matters: in general `A @ B` is not equal to `B @ A`." },
+        { "type": "p", "text": "One layer of a neural network is exactly this, applied to a whole batch of inputs at once, with a **bias** vector added and a simple non-linear function applied to the result." },
+        { "type": "code", "lang": "python", "code": "import numpy as np\n\nrng = np.random.default_rng(0)\n\nX = rng.normal(size=(32, 10))        # a batch of 32 examples with 10 features each\nW = rng.normal(size=(10, 4))         # weights: 10 inputs -> 4 outputs\nb = np.zeros(4)                      # one bias per output\n\nZ = X @ W + b                        # (32, 10) @ (10, 4) -> (32, 4); b is broadcast\nH = np.maximum(0, Z)                 # ReLU: the non-linearity, applied element-wise\nH.shape                              # (32, 4)\n\nW.T.shape                            # transpose swaps rows and columns -> (4, 10)" },
+        { "type": "p", "text": "Without the non-linear step, stacking layers would be pointless, because two matrix multiplications in a row are equivalent to one. The non-linearity is what lets a network represent curves, thresholds and interactions. The deep learning module builds on this." }
+      ]
+    },
+    {
+      "heading": "Probability: reasoning under uncertainty",
+      "blocks": [
+        { "type": "p", "text": "Models do not output facts. A classifier outputs a probability, and your data is a sample, not the whole truth. A few concepts let you reason about both." },
+        { "type": "code", "lang": "text", "code": "data: 2, 4, 4, 4, 5, 5, 7, 9\n\nmean                = 40 / 8                         = 5\nvariance            = average squared distance from the mean\n                    = (9+1+1+1+0+0+4+16) / 8         = 4\nstandard deviation  = sqrt(variance)                 = 2\n\nmedian              = middle value (average of 4 and 5)  = 4.5" },
+        { "type": "p", "text": "The **mean** is pulled about by outliers and the **median** is not, which is why the SRE track insists on percentiles for latency. The **standard deviation** measures spread in the same units as the data. One detail catches people out: `np.std` divides by n by default, as above, while pandas `.std()` divides by n minus 1, which is the better estimate when your data is a sample. For the data above they give 2.0 and about 2.14." },
+        { "type": "p", "text": "**Conditional probability**, written P(A | B), is the probability of A given that B is known to be true. **Bayes' rule** lets you reverse a condition, and it produces the most important counter-intuitive result in applied machine learning." },
+        { "type": "code", "lang": "text", "code": "An anomaly detector watches 10,000 hosts. 1% are really faulty.\nIt catches 99% of faulty hosts, and wrongly flags 5% of healthy ones.\nA host is flagged. How likely is it to be faulty?\n\n  faulty:   100 hosts   -> 99% flagged  ->   99 true alarms\n  healthy: 9,900 hosts  ->  5% flagged  ->  495 false alarms\n\n  P(faulty | flagged) = 99 / (99 + 495) = 99 / 594 = 16.7%\n\nBayes' rule:  P(A|B) = P(B|A) x P(A) / P(B)\n            = 0.99 x 0.01 / (0.99 x 0.01 + 0.05 x 0.99) = 0.0099 / 0.0594 = 0.167" },
+        { "type": "p", "text": "A detector that is \"99% accurate\" on faulty hosts still produces five false alarms for every real one, because faults are rare. This is the **base rate** effect. It explains alert fatigue from the SRE track in a single calculation, and it is why accuracy is a misleading measure whenever one class is rare. The next module turns this into precision and recall." },
+        { "type": "list", "items": [
+          "A **distribution** describes how likely each value is. The **normal** distribution, the bell curve, describes many natural measurements. Latency, income and file sizes are not normal: they are **heavy-tailed**, with rare, very large values.",
+          "**Expected value** is the long-run average: each outcome multiplied by its probability, added up. It is what a loss function averages over your data.",
+          "**Independence** means that knowing one event tells you nothing about another. Much of statistics assumes it, and real data often violates it, as with requests from one user, or readings from one host over time.",
+          "**Correlation** measures how two variables move together, from -1 to 1. It says nothing about which causes which, or whether a third factor drives both."
+        ]}
+      ]
+    },
+    {
+      "heading": "Gradients: how models learn",
+      "blocks": [
+        { "type": "p", "text": "Training a model means finding the parameter values that make its predictions least wrong. \"Wrong\" is measured by a **loss function**, a single number that is large for bad predictions and small for good ones. Training is therefore a search for the lowest point of the loss, across millions of parameters." },
+        { "type": "p", "text": "The **derivative** of a function is its slope: how much the output changes when the input is nudged. The **gradient** is the same idea for a function of many parameters: a vector holding one slope per parameter, which together point in the direction of steepest increase. To reduce the loss, step the opposite way. That is **gradient descent**, and it is how every neural network learns." },
+        { "type": "code", "lang": "text", "code": "loss(w) = (w - 3)^2          minimum at w = 3\nslope   = 2 x (w - 3)\n\nupdate rule:  w_new = w - learning_rate x slope         learning_rate = 0.1\n\n  w = 0.000   slope = -6.000   ->  w = 0 - 0.1 x (-6.000)    = 0.600\n  w = 0.600   slope = -4.800   ->  w = 0.6 + 0.480           = 1.080\n  w = 1.080   slope = -3.840   ->  w = 1.08 + 0.384          = 1.464\n  ...each step covers 20% of the remaining distance to 3" },
+        { "type": "code", "lang": "python", "code": "def slope(w: float) -> float:\n    return 2 * (w - 3)\n\n\nw, learning_rate = 0.0, 0.1\nfor step in range(50):\n    w = w - learning_rate * slope(w)\n\nprint(round(w, 4))        # 3.0: converged to the minimum" },
+        { "type": "p", "text": "The **learning rate** is the most important setting in training. Too small, and learning takes for ever. Too large, and each step overshoots the minimum. In the example above, a learning rate of 1.0 jumps from 0 to 6 and back indefinitely, and 1.1 moves further away with every step until the numbers overflow. A loss that bounces around or turns into `NaN` usually means that the learning rate is too high." },
+        { "type": "list", "items": [
+          "With many parameters, the computation is identical, with one slope per parameter. **Backpropagation** is the algorithm that calculates all of them efficiently, by applying the chain rule backwards through the network. Frameworks such as PyTorch do it for you automatically.",
+          "**Stochastic gradient descent** estimates the gradient from a small random **batch** of examples instead of the whole dataset. Each step is noisy but cheap, so you can take many more of them.",
+          "Optimisers such as **Adam** adapt the step size for each parameter and add momentum. They are the usual default.",
+          "Real loss surfaces have many valleys, and gradient descent finds a good one, not necessarily the best. In practice that is enough."
+        ]}
+      ]
+    },
+    {
+      "heading": "Softmax and cross-entropy",
+      "blocks": [
+        { "type": "p", "text": "Two formulas sit at the output of nearly every classifier, and of every language model, which is a classifier over the next token. A network's final layer produces raw scores called **logits**, which can be any real numbers. **Softmax** converts them into a probability distribution: exponentiate each, which makes them all positive, then divide by the total, which makes them add up to 1." },
+        { "type": "code", "lang": "text", "code": "logits              [ 2.0,    1.0,    0.0  ]\nexponentiate        [ 7.389,  2.718,  1.000 ]      sum = 11.107\nsoftmax             [ 0.665,  0.245,  0.090 ]      sums to 1\n\ncross-entropy loss = -log(probability given to the correct class)\n\n  correct class given 0.90  ->  -log(0.90) = 0.105     confident and right: small loss\n  correct class given 0.50  ->  -log(0.50) = 0.693\n  correct class given 0.10  ->  -log(0.10) = 2.303     confident and wrong: large loss" },
+        { "type": "code", "lang": "python", "code": "import numpy as np\n\n\ndef softmax(logits: np.ndarray) -> np.ndarray:\n    shifted = logits - logits.max()          # subtracting the max avoids overflow\n    exps = np.exp(shifted)\n    return exps / exps.sum()\n\n\nprobs = softmax(np.array([2.0, 1.0, 0.0]))   # [0.665, 0.245, 0.090]\nloss = -np.log(probs[0])                     # true class is index 0 -> 0.408" },
+        { "type": "p", "text": "**Cross-entropy** punishes confident mistakes severely and rewards confident correct answers, which pushes the model towards calibrated probabilities. This is the loss that large language models are trained on, and **perplexity**, a figure often quoted for language models, is just the exponential of the average cross-entropy." },
+        { "type": "p", "text": "Softmax also explains **temperature**, a setting you will meet when working with language models. Dividing the logits by a temperature before the softmax changes how peaked the distribution is. A temperature below 1 sharpens it, so the most likely token dominates and the output becomes predictable. A temperature above 1 flattens it, so less likely tokens are chosen more often and the output becomes more varied. The LLM module returns to this." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Compute it by hand, then in NumPy",
+    "steps": [
+      "For `a = [1, 2, 2]` and `b = [2, 0, 1]`, calculate the dot product, both norms and the cosine similarity on paper. Check each with NumPy.",
+      "Multiply the matrix `[[2, 0], [1, 3]]` by the vector `[4, 5]` by hand. Then predict the output shape of `(64, 128) @ (128, 10)` and of `(64, 128) @ (64, 10)`, and confirm both in NumPy.",
+      "Create a random batch `X` of shape `(16, 8)` and weights `W` of shape `(8, 3)`. Compute one layer with a bias and ReLU, printing the shape after each operation.",
+      "Rework the anomaly detector example with a false positive rate of 1% instead of 5%, and then with a base rate of 10% instead of 1%. Explain which change helps more, and why.",
+      "Implement gradient descent for `loss(w) = (w - 3)^2`. Run it with learning rates 0.01, 0.1, 0.9, 1.0 and 1.1, recording `w` after 20 steps. Describe each behaviour.",
+      "Implement `softmax` and apply it to `[2, 1, 0]` at temperatures 0.5, 1 and 2, by dividing the logits first. Describe how the distribution changes.",
+      "Take five sentences, and use any embedding model or library to get their vectors. Compute the full matrix of cosine similarities and check whether the most similar pairs match your intuition."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Everything becomes a vector. Similar things are close together, and an embedding is a vector that encodes meaning.",
+      "The dot product measures alignment. Cosine similarity is the dot product with lengths removed, and is the standard for comparing embeddings.",
+      "Matrix shape rule: `(m, n) @ (n, p)` gives `(m, p)`. Most deep learning bugs are shape bugs.",
+      "A neural network layer is `activation(X @ W + b)`. Without the non-linearity, layers would collapse into one.",
+      "Base rates dominate: a rare condition plus a small false positive rate means most alarms are false.",
+      "Learning is gradient descent: step against the slope of the loss, scaled by the learning rate.",
+      "Too high a learning rate diverges, often into `NaN`. Too low a rate crawls.",
+      "Softmax turns scores into probabilities, and cross-entropy punishes confident mistakes."
+    ],
+    "groups": [
+      {
+        "title": "Vectors",
+        "items": [
+          { "syntax": "a . b = sum(a_i * b_i)", "desc": "Dot product. NumPy: `a @ b`" },
+          { "syntax": "|a| = sqrt(sum(a_i^2))", "desc": "Norm, or length. NumPy: `np.linalg.norm(a)`" },
+          { "syntax": "cos(a, b) = a . b / (|a| |b|)", "desc": "Cosine similarity, from -1 to 1" },
+          { "syntax": "|a - b|", "desc": "Euclidean distance. NumPy: `np.linalg.norm(a - b)`" },
+          { "syntax": "a / |a|", "desc": "Normalise to length 1; then cosine equals the dot product" },
+          { "syntax": "(x - mean) / std", "desc": "Standardise a feature to mean 0 and spread 1" }
+        ]
+      },
+      {
+        "title": "Matrices",
+        "items": [
+          { "syntax": "(m, n) @ (n, p) -> (m, p)", "desc": "Inner dimensions must match" },
+          { "syntax": "A @ B != B @ A", "desc": "Order matters" },
+          { "syntax": "A.T", "desc": "Transpose: swap rows and columns" },
+          { "syntax": "Z = X @ W + b", "desc": "A linear layer; `b` is broadcast across the batch" },
+          { "syntax": "np.maximum(0, Z)", "desc": "ReLU activation" },
+          { "syntax": "X.shape", "desc": "Print it at every step when debugging" }
+        ]
+      },
+      {
+        "title": "Probability and statistics",
+        "items": [
+          { "syntax": "mean = sum(x) / n", "desc": "Sensitive to outliers. `np.mean`" },
+          { "syntax": "variance = mean((x - mean)^2)", "desc": "Average squared deviation. `np.var`" },
+          { "syntax": "std = sqrt(variance)", "desc": "Spread, in the data's units. `np.std` (n) or pandas `.std()` (n-1)" },
+          { "syntax": "P(A|B) = P(A and B) / P(B)", "desc": "Conditional probability" },
+          { "syntax": "P(A|B) = P(B|A) P(A) / P(B)", "desc": "Bayes' rule" },
+          { "syntax": "E[X] = sum(x * P(x))", "desc": "Expected value" },
+          { "syntax": "np.corrcoef(x, y)", "desc": "Correlation, from -1 to 1; not causation" }
+        ]
+      },
+      {
+        "title": "Learning",
+        "items": [
+          { "syntax": "w = w - lr * gradient", "desc": "The gradient descent update" },
+          { "syntax": "d/dw (w - c)^2 = 2(w - c)", "desc": "Slope of a squared error" },
+          { "syntax": "MSE = mean((y - y_hat)^2)", "desc": "Loss for regression" },
+          { "syntax": "softmax(z)_i = exp(z_i) / sum(exp(z))", "desc": "Scores to probabilities" },
+          { "syntax": "cross-entropy = -log(p_correct)", "desc": "Loss for classification" },
+          { "syntax": "softmax(z / T)", "desc": "Temperature: T<1 sharpens, T>1 flattens" },
+          { "syntax": "perplexity = exp(mean cross-entropy)", "desc": "Common language model metric; lower is better" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Comparing raw feature vectors whose features have wildly different scales, so that one feature decides every distance.",
+      "Using Euclidean distance on embeddings where cosine similarity is intended, or forgetting to normalise.",
+      "Ignoring the base rate, and being surprised that an accurate detector mostly raises false alarms.",
+      "Setting the learning rate too high, and interpreting a `NaN` loss as a bug in the data.",
+      "Reading correlation as causation.",
+      "Guessing at shape mismatches instead of printing the shape at every step."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "What is the cosine similarity of `a = [1, 0]` and `b = [0, 5]`?",
+      "options": ["0", "1", "5", "-1"],
+      "answer": 0,
+      "explain": "The dot product is 1x0 + 0x5 = 0, so the cosine is 0. The vectors are perpendicular, which means unrelated, and the length of `b` makes no difference."
+    },
+    {
+      "q": "A batch `X` has shape `(32, 100)`. A layer should produce 10 outputs per example using `X @ W`. What shape must `W` have?",
+      "options": ["(100, 10)", "(10, 100)", "(32, 10)", "(10, 32)"],
+      "answer": 0,
+      "explain": "The inner dimensions must match: `(32, 100) @ (100, 10)` gives `(32, 10)`, which is one row of 10 outputs for each of the 32 examples."
+    },
+    {
+      "q": "A fraud model flags 2% of legitimate transactions and catches 90% of fraudulent ones. Only 0.1% of transactions are fraudulent. A transaction is flagged. Roughly how likely is it to be fraud?",
+      "options": ["About 4%", "About 90%", "About 50%", "About 98%"],
+      "answer": 0,
+      "explain": "Per 100,000 transactions: 100 are fraud, of which 90 are flagged; 99,900 are legitimate, of which 1,998 are flagged. 90 divided by 2,088 is about 4.3%. The low base rate dominates."
+    },
+    {
+      "q": "During training, the loss falls for a few steps, then swings wildly and becomes `NaN`. What is the most likely cause?",
+      "options": [
+        "The learning rate is too high, so the updates overshoot and diverge",
+        "The learning rate is too low, so the model cannot move at all",
+        "The batch size is too large for gradients to be calculated",
+        "The model has too few parameters to be able to fit the data"
+      ],
+      "answer": 0,
+      "explain": "Steps that are too large jump across the minimum, and each jump lands further away than the last, until the numbers overflow. Lowering the learning rate is the first thing to try."
+    },
+    {
+      "q": "A classifier assigns probability 0.01 to the class that turns out to be correct. How does cross-entropy loss treat this, compared with assigning 0.5?",
+      "options": [
+        "It gives a much larger loss, since confident mistakes are punished heavily",
+        "It gives the same loss, since both predictions would count as wrong",
+        "It gives a smaller loss, since the model was at least decisive",
+        "It gives a loss of zero, since probabilities below 0.05 are ignored"
+      ],
+      "answer": 0,
+      "explain": "The loss is the negative log of the probability given to the true class: about 4.6 for 0.01 against about 0.69 for 0.5. The logarithm grows without limit as that probability approaches zero."
+    }
+  ]
+}

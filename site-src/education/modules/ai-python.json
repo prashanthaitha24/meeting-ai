@@ -1,0 +1,240 @@
+{
+  "id": "ai-python",
+  "minutes": 35,
+  "intro": "Almost all practical machine learning is done in Python, and most of the hours go into handling data, not into training models: loading it, cleaning it, reshaping it and looking at it. Three libraries carry nearly all of that work. NumPy gives you fast arrays, pandas gives you tables, and Matplotlib draws the pictures that tell you whether the data means what you think. If you come from infrastructure, this is the toolkit that replaces your shell pipelines of `awk`, `sort` and `uniq` once data gets serious.",
+  "objectives": [
+    "Set up an isolated Python environment and work productively in a notebook",
+    "Use NumPy arrays, vectorised operations, broadcasting and the `axis` argument instead of Python loops",
+    "Load, inspect, filter, clean and aggregate tabular data with pandas",
+    "Combine datasets with merges and handle missing values deliberately",
+    "Plot distributions and relationships to understand a dataset before modelling it"
+  ],
+  "sections": [
+    {
+      "heading": "Environment and notebooks",
+      "blocks": [
+        { "type": "p", "text": "Data libraries have heavy, version-sensitive dependencies, so give every project its own **virtual environment** and record what you installed. This is the same reproducibility principle as lockfiles in the DevOps track." },
+        { "type": "code", "lang": "bash", "code": "python3 -m venv .venv\nsource .venv/bin/activate\npython -m pip install --upgrade pip\npip install numpy pandas matplotlib scikit-learn jupyterlab\npip freeze > requirements.txt          # record exact versions\njupyter lab                            # opens the notebook interface in a browser" },
+        { "type": "p", "text": "A **notebook** mixes code, output, charts and notes in cells that you run one at a time. It is ideal for exploration, because you can load a large file once and then poke at it for an hour. It has one serious trap: cells can be run in any order, so the state in memory may not match what the notebook shows from top to bottom. Before you trust or share a notebook, use **Restart Kernel and Run All** to prove that it works from a clean start." },
+        { "type": "list", "items": [
+          "Use notebooks to explore. Move code that has to run repeatedly or in production into `.py` modules with tests.",
+          "Set random seeds, so that results can be reproduced.",
+          "Notebooks store their output in the file, which makes diffs noisy and can leak data. Clear the output before committing, or use a tool that does it for you.",
+          "A useful variant of `print` in notebooks: the last expression in a cell is displayed automatically, and pandas tables render as formatted HTML."
+        ]}
+      ]
+    },
+    {
+      "heading": "NumPy: arrays instead of loops",
+      "blocks": [
+        { "type": "p", "text": "A Python list holds references to separate objects scattered through memory. A NumPy **array** is one contiguous block of values that all share a single type, called its `dtype`. Operations on it run in compiled code over the whole block at once, which is called **vectorisation**, and it is typically tens to hundreds of times faster than a Python loop. Every other library in this track, including pandas, scikit-learn and PyTorch, is built on the same idea." },
+        { "type": "code", "lang": "python", "code": "import numpy as np\n\nlatency_ms = np.array([120, 95, 310, 88, 2050, 101, 97])\n\nlatency_ms.shape          # (7,)  -> one dimension, seven elements\nlatency_ms.dtype          # int64\nlatency_ms / 1000         # element-wise: array of seconds, no loop\nlatency_ms.mean()         # 408.71...\nnp.percentile(latency_ms, 99)\n\nslow = latency_ms > 300   # boolean array: [False False True False True False False]\nlatency_ms[slow]          # boolean mask -> array([ 310, 2050])\nslow.sum()                # True counts as 1 -> 2 slow requests\nslow.mean()               # share that are slow -> 0.2857...\n\nnp.where(latency_ms > 300, \"slow\", \"ok\")   # vectorised if/else" },
+        { "type": "p", "text": "Most real data has more than one dimension. A two-dimensional array is a matrix with `shape` equal to `(rows, columns)`. The **`axis`** argument says which dimension an operation collapses, and it confuses everybody at first. `axis=0` works **down the rows**, giving one result per column. `axis=1` works **across the columns**, giving one result per row." },
+        { "type": "code", "lang": "python", "code": "import numpy as np\n\n# 3 servers (rows) x 4 hourly CPU readings (columns)\ncpu = np.array([[0.20, 0.35, 0.80, 0.40],\n                [0.10, 0.15, 0.30, 0.20],\n                [0.55, 0.60, 0.95, 0.70]])\n\ncpu.shape                 # (3, 4)\ncpu.mean(axis=0)          # per hour, across servers   -> shape (4,)\ncpu.mean(axis=1)          # per server, across hours   -> shape (3,)\ncpu[0]                    # first row\ncpu[:, 2]                 # third column: every server at hour 2\ncpu[cpu[:, 2] > 0.5]      # rows of the servers that were busy at hour 2\n\n# broadcasting: subtract each server's own mean from its row\ncentred = cpu - cpu.mean(axis=1, keepdims=True)     # (3, 4) - (3, 1)\ncentred.mean(axis=1)      # ~0 for every server" },
+        { "type": "p", "text": "**Broadcasting** is the rule that lets arrays of different shapes be combined. NumPy compares shapes from the right, and two dimensions are compatible when they are equal or one of them is 1, in which case the smaller array is stretched along that dimension without copying. That is why `(3, 4) - (3, 1)` works, and why `keepdims=True` matters: without it the means have shape `(3,)`, which does not line up with the rows and raises an error." },
+        { "type": "callout", "kind": "warning", "text": "Slicing a NumPy array returns a **view** onto the same memory, not a copy. Modifying `part = cpu[:2]` changes `cpu` too. Call `.copy()` when you need an independent array. Boolean masks and lists of indices, by contrast, do return copies." }
+      ]
+    },
+    {
+      "heading": "pandas: tables you can query",
+      "blocks": [
+        { "type": "p", "text": "pandas adds labels on top of NumPy. A **Series** is a one-dimensional array with an index. A **DataFrame** is a table: a set of Series sharing one index, each column with its own type. Think of it as a spreadsheet or a SQL table held in memory." },
+        { "type": "code", "lang": "python", "code": "import pandas as pd\n\ndf = pd.read_csv(\"requests.csv\", parse_dates=[\"timestamp\"])\n\ndf.shape                  # (rows, columns)\ndf.head()                 # first five rows\ndf.info()                 # column types and non-null counts: always run this first\ndf.describe()             # count, mean, std, min, quartiles, max for numeric columns\ndf[\"status\"].value_counts()              # frequency of each value\ndf[\"status\"].value_counts(normalize=True)  # the same, as proportions\ndf.isna().sum()           # missing values per column" },
+        { "type": "p", "text": "Those six or seven lines are how every analysis begins. `info()` in particular catches the two most common data problems at once: a numeric column that loaded as text because of one stray value, and columns with missing data." },
+        { "type": "code", "lang": "python", "code": "import pandas as pd\n\ndf = pd.read_csv(\"requests.csv\", parse_dates=[\"timestamp\"])\n\n# select columns\ndf[\"latency_ms\"]                       # one column -> Series\ndf[[\"route\", \"latency_ms\"]]            # several columns -> DataFrame\n\n# filter rows with a boolean mask; combine with & | ~ and PARENTHESES\nerrors = df[df[\"status\"] >= 500]\nslow_checkout = df[(df[\"route\"] == \"/checkout\") & (df[\"latency_ms\"] > 500)]\napi_routes = df[df[\"route\"].isin([\"/orders\", \"/checkout\"])]\n\n# .loc selects by label and condition, .iloc by integer position\ndf.loc[df[\"status\"] >= 500, [\"timestamp\", \"route\", \"status\"]]\ndf.iloc[0:10, 0:3]\n\n# new columns are vectorised expressions\ndf[\"latency_s\"] = df[\"latency_ms\"] / 1000\ndf[\"is_error\"] = df[\"status\"] >= 500\ndf[\"hour\"] = df[\"timestamp\"].dt.hour\n\ndf.sort_values(\"latency_ms\", ascending=False).head(10)" },
+        { "type": "p", "text": "Two syntax points cause most beginner errors. Conditions are combined with `&`, `|` and `~`, never with the Python keywords `and`, `or` and `not`, and each condition needs its own parentheses, because `&` binds more tightly than `==`. And to change values in place, use a single `.loc[rows, columns] = value`. Chained indexing such as `df[mask][\"col\"] = value` may modify a temporary copy and silently do nothing, which pandas warns about as `SettingWithCopyWarning`." }
+      ]
+    },
+    {
+      "heading": "Group, aggregate, merge",
+      "blocks": [
+        { "type": "p", "text": "**`groupby`** is the workhorse of analysis, and it is the same idea as SQL's `GROUP BY`: split the rows into groups by a key, apply an aggregation to each group, and combine the results. It replaces the shell pipeline `sort | uniq -c` and goes far beyond it." },
+        { "type": "code", "lang": "python", "code": "import pandas as pd\n\ndf = pd.read_csv(\"requests.csv\", parse_dates=[\"timestamp\"])\ndf[\"is_error\"] = df[\"status\"] >= 500\n\n# one aggregation\ndf.groupby(\"route\")[\"latency_ms\"].mean()\n\n# several named aggregations at once\nsummary = df.groupby(\"route\").agg(\n    requests=(\"latency_ms\", \"size\"),\n    p50=(\"latency_ms\", \"median\"),\n    p99=(\"latency_ms\", lambda s: s.quantile(0.99)),\n    error_rate=(\"is_error\", \"mean\"),\n).sort_values(\"error_rate\", ascending=False)\n\n# time series: requests and error rate per 5 minutes\nper_5m = (\n    df.set_index(\"timestamp\")\n      .resample(\"5min\")\n      .agg({\"latency_ms\": \"median\", \"is_error\": \"mean\"})\n)" },
+        { "type": "p", "text": "Note the trick in `error_rate`: the mean of a boolean column is the proportion of `True` values. The same approach gives you an availability SLI from a request log in one line." },
+        { "type": "p", "text": "**`merge`** joins two tables on a key, with the same join types as SQL." },
+        { "type": "code", "lang": "python", "code": "import pandas as pd\n\nrequests = pd.read_csv(\"requests.csv\")\ncustomers = pd.read_csv(\"customers.csv\")       # customer_id, plan, region\n\njoined = requests.merge(customers, on=\"customer_id\", how=\"left\")\n\nlen(requests), len(joined)                     # these should be EQUAL for a left join\njoined[\"plan\"].isna().sum()                    # requests whose customer was not found\njoined.groupby(\"plan\")[\"latency_ms\"].median()" },
+        { "type": "callout", "kind": "warning", "text": "Always compare row counts before and after a merge. If the key is not unique in the right-hand table, every matching row is duplicated, and your totals inflate silently. Pass `validate=\"many_to_one\"` to make pandas raise an error instead." }
+      ]
+    },
+    {
+      "heading": "Missing and messy data",
+      "blocks": [
+        { "type": "p", "text": "Real data has gaps, wrong types, duplicates and impossible values. pandas represents a missing value as `NaN`, which stands for \"not a number\". `NaN` is contagious in arithmetic, is skipped by default in aggregations such as `mean()`, and is **not equal to itself**, so you must test for it with `isna()` and never with `==`." },
+        { "type": "code", "lang": "python", "code": "import pandas as pd\n\ndf = pd.read_csv(\"requests.csv\")\n\ndf.isna().mean().sort_values(ascending=False)     # share missing per column\n\ndf = df.dropna(subset=[\"customer_id\"])            # drop rows missing an essential field\ndf[\"region\"] = df[\"region\"].fillna(\"unknown\")     # a category of its own\ndf[\"latency_ms\"] = df[\"latency_ms\"].fillna(df[\"latency_ms\"].median())\n\ndf[\"latency_ms\"] = pd.to_numeric(df[\"latency_ms\"], errors=\"coerce\")   # bad text -> NaN\ndf[\"route\"] = df[\"route\"].str.strip().str.lower()                     # tidy strings\ndf = df.drop_duplicates(subset=[\"request_id\"])\ndf = df[df[\"latency_ms\"].between(0, 60_000)]                          # remove impossible values\ndf[\"plan\"] = df[\"plan\"].astype(\"category\")                           # compact, faster groupby" },
+        { "type": "p", "text": "There is no universally right way to handle a missing value. Dropping rows is simplest and loses data. Filling with the median keeps the row and hides the fact that the value was unknown. Often the best choice is to fill **and** add a column recording that the value was missing, because the missingness itself can carry information. What matters is that you decide deliberately, write the decision down, and apply exactly the same treatment later, when the model runs in production." },
+        { "type": "p", "text": "For data too large for memory, read only the columns you need with `usecols`, process the file in pieces with `chunksize`, and prefer the columnar **Parquet** format to CSV, which is smaller, much faster, and preserves types." }
+      ]
+    },
+    {
+      "heading": "Look at the data",
+      "blocks": [
+        { "type": "p", "text": "Summary statistics can describe completely different datasets with identical numbers. A plot shows you, in a second, the outliers, the second cluster, the gap where logging was broken for a day, and the column that is secretly constant. Plot before you model, every time." },
+        { "type": "code", "lang": "python", "code": "import matplotlib.pyplot as plt\nimport pandas as pd\n\ndf = pd.read_csv(\"requests.csv\", parse_dates=[\"timestamp\"])\n\nfig, axes = plt.subplots(1, 3, figsize=(15, 4))\n\n# 1. distribution of one variable\naxes[0].hist(df[\"latency_ms\"], bins=50)\naxes[0].set_yscale(\"log\")                     # latency is heavy-tailed; a log axis shows the tail\naxes[0].set_xlabel(\"latency (ms)\")\naxes[0].set_title(\"Latency distribution\")\n\n# 2. relationship between two variables\naxes[1].scatter(df[\"payload_kb\"], df[\"latency_ms\"], s=4, alpha=0.3)\naxes[1].set_xlabel(\"payload (KB)\")\naxes[1].set_ylabel(\"latency (ms)\")\n\n# 3. behaviour over time\nper_min = df.set_index(\"timestamp\")[\"latency_ms\"].resample(\"1min\").median()\naxes[2].plot(per_min.index, per_min.values)\naxes[2].set_title(\"Median latency per minute\")\n\nfig.tight_layout()\nfig.savefig(\"latency_overview.png\", dpi=150)" },
+        { "type": "table", "headers": ["Question", "Plot"], "rows": [
+          ["What values does this variable take?", "Histogram; box plot to compare groups"],
+          ["How do two numeric variables relate?", "Scatter plot"],
+          ["How does it change over time?", "Line plot"],
+          ["How do categories compare?", "Bar chart"],
+          ["Which features move together?", "Heatmap of `df.corr(numeric_only=True)`"]
+        ]},
+        { "type": "p", "text": "Use the object-oriented style shown here, `fig, ax = plt.subplots()` followed by methods on `ax`, instead of the older `plt.plot()` calls that act on a hidden global figure. It stays readable when a figure has several panels. For quick exploration, pandas can plot directly with `df[\"latency_ms\"].plot.hist(bins=50)`, which uses Matplotlib underneath." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Analyse a real log file",
+    "steps": [
+      "Create a virtual environment, install the libraries, and start JupyterLab. Obtain a web server access log, or export a few thousand rows of any request data you have, as CSV.",
+      "Load it with `read_csv`, parsing the timestamp column. Run `info()`, `describe()` and `isna().sum()`, and write down three things you did not expect.",
+      "Clean it: fix column types with `to_numeric`, tidy string columns, drop duplicates, and decide what to do with missing values. Record each decision in a markdown cell.",
+      "Compute the overall error rate as the mean of a boolean column, then the request count, median, p99 and error rate per route with a single `groupby().agg()`.",
+      "Resample to five-minute buckets and find the worst five minutes for latency and for errors.",
+      "Draw a latency histogram with a log axis, a time series of the per-minute error rate, and one scatter plot of two numeric columns.",
+      "Rewrite one calculation as a Python `for` loop and time both versions with `%timeit`. Note the speed-up from vectorisation.",
+      "Restart the kernel and run all cells, to prove that the notebook works from a clean start."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Vectorise: operate on whole arrays and columns. A Python loop over rows is nearly always the wrong tool.",
+      "`axis=0` collapses rows and gives one result per column; `axis=1` gives one result per row.",
+      "Broadcasting compares shapes from the right; dimensions must match or be 1. Use `keepdims=True` to keep shapes aligned.",
+      "Boolean masks filter data. Combine with `&`, `|`, `~` and parentheses, never `and`, `or`, `not`.",
+      "The mean of a boolean column is a proportion: an error rate in one line.",
+      "Start every dataset with `info()`, `describe()`, `isna().sum()` and `value_counts()`.",
+      "Check row counts before and after every merge.",
+      "Handle missing values deliberately, and plot the data before you model it."
+    ],
+    "groups": [
+      {
+        "title": "NumPy",
+        "items": [
+          { "syntax": "np.array([1, 2, 3])", "desc": "Create an array" },
+          { "syntax": "np.zeros((3, 4)) / np.arange(10) / np.linspace(0, 1, 5)", "desc": "Common constructors" },
+          { "syntax": "a.shape / a.dtype / a.ndim", "desc": "Dimensions, element type, number of axes" },
+          { "syntax": "a.reshape(3, -1)", "desc": "Change shape; -1 means work this one out" },
+          { "syntax": "a[a > 0]", "desc": "Boolean mask" },
+          { "syntax": "a[:, 2]", "desc": "Every row, third column" },
+          { "syntax": "a.mean(axis=0)", "desc": "One value per column" },
+          { "syntax": "a.sum(axis=1, keepdims=True)", "desc": "One value per row, kept as a column for broadcasting" },
+          { "syntax": "np.where(cond, x, y)", "desc": "Vectorised if/else" },
+          { "syntax": "a @ b", "desc": "Matrix multiplication" }
+        ]
+      },
+      {
+        "title": "pandas: inspect and select",
+        "items": [
+          { "syntax": "pd.read_csv(path, parse_dates=[\"ts\"])", "desc": "Load a CSV, parsing dates" },
+          { "syntax": "df.info() / df.describe()", "desc": "Types and nulls / summary statistics" },
+          { "syntax": "df[\"col\"].value_counts(normalize=True)", "desc": "Frequencies as proportions" },
+          { "syntax": "df[[\"a\", \"b\"]]", "desc": "Select columns" },
+          { "syntax": "df[(df[\"a\"] > 1) & (df[\"b\"] == \"x\")]", "desc": "Filter rows; note the parentheses" },
+          { "syntax": "df.loc[mask, \"col\"] = value", "desc": "Assign safely by label and condition" },
+          { "syntax": "df.iloc[0:5, 0:2]", "desc": "Select by integer position" },
+          { "syntax": "df.sort_values(\"col\", ascending=False)", "desc": "Sort" }
+        ]
+      },
+      {
+        "title": "pandas: transform and combine",
+        "items": [
+          { "syntax": "df.groupby(\"k\")[\"v\"].mean()", "desc": "One aggregate per group" },
+          { "syntax": "df.groupby(\"k\").agg(n=(\"v\", \"size\"), p50=(\"v\", \"median\"))", "desc": "Several named aggregates" },
+          { "syntax": "df.set_index(\"ts\").resample(\"5min\").mean()", "desc": "Time buckets" },
+          { "syntax": "a.merge(b, on=\"key\", how=\"left\", validate=\"many_to_one\")", "desc": "SQL-style join with a safety check" },
+          { "syntax": "pd.concat([df1, df2])", "desc": "Stack tables vertically" },
+          { "syntax": "df[\"ts\"].dt.hour / df[\"s\"].str.lower()", "desc": "Datetime and string accessors" },
+          { "syntax": "df.pivot_table(index=\"a\", columns=\"b\", values=\"v\", aggfunc=\"mean\")", "desc": "Spreadsheet-style pivot" }
+        ]
+      },
+      {
+        "title": "Cleaning",
+        "items": [
+          { "syntax": "df.isna().sum()", "desc": "Missing values per column" },
+          { "syntax": "df.dropna(subset=[\"col\"])", "desc": "Drop rows missing an essential value" },
+          { "syntax": "df[\"col\"].fillna(value)", "desc": "Fill gaps" },
+          { "syntax": "pd.to_numeric(s, errors=\"coerce\")", "desc": "Convert, turning bad values into NaN" },
+          { "syntax": "df.drop_duplicates(subset=[\"id\"])", "desc": "Remove duplicate rows" },
+          { "syntax": "df[\"col\"].astype(\"category\")", "desc": "Compact type for repeated strings" },
+          { "syntax": "df.to_parquet(\"file.parquet\")", "desc": "Fast, typed, compressed storage" }
+        ]
+      },
+      {
+        "title": "Matplotlib",
+        "items": [
+          { "syntax": "fig, ax = plt.subplots(figsize=(8, 4))", "desc": "Create a figure and axes" },
+          { "syntax": "ax.hist(x, bins=50)", "desc": "Distribution" },
+          { "syntax": "ax.scatter(x, y, s=4, alpha=0.3)", "desc": "Relationship; transparency reveals density" },
+          { "syntax": "ax.plot(x, y, label=\"name\"); ax.legend()", "desc": "Line plot with a legend" },
+          { "syntax": "ax.set_xlabel / set_ylabel / set_title", "desc": "Always label axes, with units" },
+          { "syntax": "ax.set_yscale(\"log\")", "desc": "Log axis for heavy-tailed data" },
+          { "syntax": "fig.tight_layout(); fig.savefig(\"out.png\", dpi=150)", "desc": "Tidy and save" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Looping over DataFrame rows with `for` or `iterrows()` when a vectorised expression would be a hundred times faster.",
+      "Combining conditions with `and` or `or`, or omitting the parentheses around each one.",
+      "Assigning through chained indexing, which may change a copy and leave the DataFrame untouched.",
+      "Merging on a non-unique key and silently multiplying rows.",
+      "Testing for missing values with `== np.nan`, which is always false.",
+      "Trusting a notebook whose cells were run out of order, without restarting and running it from the top."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "An array `m` has shape `(100, 5)`: 100 samples and 5 features. What does `m.mean(axis=0)` return?",
+      "options": [
+        "5 values: the mean of each feature across all samples",
+        "100 values: the mean of each sample across its features",
+        "A single value: the mean of all 500 numbers in the array",
+        "An array of shape (100, 5) with the mean subtracted"
+      ],
+      "answer": 0,
+      "explain": "`axis=0` collapses the first dimension, the rows, leaving one value per column. `axis=1` would give 100 values, one per sample."
+    },
+    {
+      "q": "Which expression correctly selects rows where status is at least 500 and route is \"/checkout\"?",
+      "options": [
+        "df[(df[\"status\"] >= 500) & (df[\"route\"] == \"/checkout\")]",
+        "df[df[\"status\"] >= 500 and df[\"route\"] == \"/checkout\"]",
+        "df[df[\"status\"] >= 500 & df[\"route\"] == \"/checkout\"]",
+        "df[(df[\"status\"] >= 500) && (df[\"route\"] == \"/checkout\")]"
+      ],
+      "answer": 0,
+      "explain": "Element-wise conditions are combined with `&`, and each needs parentheses because `&` binds more tightly than the comparisons. `and` raises an error on a Series, and `&&` is not Python."
+    },
+    {
+      "q": "After `joined = orders.merge(customers, on=\"customer_id\", how=\"left\")`, `joined` has more rows than `orders`. What is the most likely reason?",
+      "options": [
+        "Some customer_id values appear more than once in the customers table",
+        "A left join always adds a row for each customer with no orders",
+        "Rows with a missing customer_id are duplicated by the merge",
+        "pandas adds a summary row at the end of every merged table"
+      ],
+      "answer": 0,
+      "explain": "A left join keeps every left row once per match on the right. Duplicate keys on the right multiply rows. Passing `validate=\"many_to_one\"` would have raised an error."
+    },
+    {
+      "q": "`df[\"is_error\"]` is a boolean column. What does `df[\"is_error\"].mean()` give you?",
+      "options": [
+        "The proportion of rows that are errors",
+        "The total number of rows that are errors",
+        "An error, since booleans cannot be averaged",
+        "The most common value, either True or False"
+      ],
+      "answer": 0,
+      "explain": "`True` counts as 1 and `False` as 0, so the mean is the fraction of `True` values. `sum()` would give the count."
+    },
+    {
+      "q": "Why is `arr * 2` on a NumPy array so much faster than a Python loop that doubles each element of a list?",
+      "options": [
+        "The operation runs in compiled code over one contiguous, single-typed block of memory",
+        "NumPy splits the work across every machine on the local network",
+        "Python lists cannot hold numbers, so each element must be parsed first",
+        "NumPy skips the multiplication and records it for later evaluation"
+      ],
+      "answer": 0,
+      "explain": "Vectorised operations avoid the interpreter's per-element overhead, including type checks and object lookups, and use memory efficiently. That is the basis of every numerical library in Python."
+    }
+  ]
+}

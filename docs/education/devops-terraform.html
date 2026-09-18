@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Infrastructure as Code with Terraform — DevOps | ThavionAI Education</title>
+  <meta name="description" content="Providers, state, modules, plan/apply discipline, and remote backends." />
+  <meta property="og:title" content="Infrastructure as Code with Terraform — ThavionAI Education" />
+  <meta property="og:description" content="Providers, state, modules, plan/apply discipline, and remote backends." />
+  <meta property="og:type" content="article" />
+  <link rel="canonical" href="https://thavionai.com/education/devops-terraform.html" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-devops" data-module="devops-terraform">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><div class="nav-logo-icon">T</div>ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html#features">Features</a>
+    <a href="../index.html#products">Products</a>
+    <a href="../education.html" class="active">Education</a>
+    <a href="../index.html#about">About</a>
+    <a href="../index.html#pricing">Pricing</a>
+    <a href="../index.html#contact" class="nav-cta">Contact Us</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#devops">DevOps</a> › Stage 3: Run at scale</div>
+    <h1>Infrastructure as Code with Terraform</h1>
+    <p class="lede">Providers, state, modules, plan/apply discipline, and remote backends.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 11 of 17</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">Infrastructure created by clicking in a cloud console cannot be reviewed, repeated or rolled back, and six months later nobody remembers why it looks the way it does. Infrastructure as Code fixes that by describing networks, clusters and databases in files that go through the same pull requests and pipelines as application code. Terraform is the most widely used tool for it. This module covers the workflow, the state file that makes it work, and the discipline that keeps it safe.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Explain the Terraform workflow of write, init, plan, apply, and what each step does</li><li>Write configuration using providers, resources, data sources, variables, locals and outputs</li><li>Describe what state is, why it must be remote and locked, and what belongs in it</li><li>Structure reusable modules and separate environments safely</li><li>Read a plan critically, and handle drift, imports and destructive changes without surprises</li></ul>
+    </div>
+    <section id="declarative-infrastructure"><h2>Declarative infrastructure</h2>
+    <p>Terraform configuration, written in <strong>HCL</strong>, declares the infrastructure you want. Terraform compares that with what it believes exists, works out the difference, and makes the API calls to close it. This is the same desired-state idea as Kubernetes, with one important difference: Terraform reconciles only when you run it, not continuously.</p>
+    <p>A <strong>provider</strong> is a plugin that translates HCL into calls to one API: AWS, Azure, Google Cloud, Cloudflare, GitHub, Kubernetes and thousands more. A <strong>resource</strong> is one thing the provider manages. Terraform builds a <strong>dependency graph</strong> from the references between resources, so it creates things in the right order and in parallel where it can.</p>
+    <div class="code"><div class="code-cap">main.tf</div><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>terraform {
+  required_version = "&gt;= 1.6"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~&gt; 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.region
+}
+
+resource "aws_s3_bucket" "artifacts" {
+  bucket = "acme-${var.environment}-artifacts"
+  tags   = local.common_tags
+}
+
+resource "aws_s3_bucket_versioning" "artifacts" {
+  bucket = aws_s3_bucket.artifacts.id      # a reference: creates the dependency
+  versioning_configuration {
+    status = "Enabled"
+  }
+}</code></pre></div>
+    <p>A resource address has the form <code>TYPE.NAME</code>, here <code>aws_s3_bucket.artifacts</code>. The name is local to your configuration and is how other resources refer to it. <code>~&gt; 5.0</code> allows any 5.x provider release but not 6.0, and <code>terraform init</code> records the exact version chosen in <code>.terraform.lock.hcl</code>, which you commit, for the same reproducibility reasons as any other lockfile.</p></section>
+  <section id="the-core-workflow"><h2>The core workflow</h2>
+    <div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>terraform init              # download providers and modules, configure the backend
+terraform fmt -recursive     # canonical formatting
+terraform validate           # syntax and internal consistency
+terraform plan -out=tfplan   # compute the changes and save them
+terraform apply tfplan       # execute exactly the saved plan
+terraform destroy            # remove everything this configuration manages</code></pre></div>
+    <p>The <strong>plan</strong> is the heart of Terraform's safety. It lists every change before anything happens, using symbols you must learn to read.</p>
+    <div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Meaning</th><th>Risk</th></tr></thead><tbody><tr><td><code>+</code></td><td>Create</td><td>Low</td></tr><tr><td><code>~</code></td><td>Update in place</td><td>Usually low; check what is changing</td></tr><tr><td><code>-</code></td><td>Destroy</td><td>High: data may be lost</td></tr><tr><td><code>-/+</code></td><td>Destroy, then create a replacement</td><td>High: downtime and data loss; look for "forces replacement"</td></tr></tbody></table></div>
+    <p>Some attributes cannot be changed on a live resource, so changing them makes Terraform replace it. Renaming a database instance can therefore mean deleting the database. Read the summary line, <code>Plan: 2 to add, 1 to change, 0 to destroy</code>, every single time, and treat any unexpected destroy as a stop sign.</p>
+    <div class="callout callout-tip"><strong>Tip</strong><p>Saving the plan with <code>-out</code> and applying that file guarantees that what was reviewed is what runs. Without it, <code>apply</code> computes a fresh plan, and the world may have changed since you looked.</p></div></section>
+  <section id="state-terraform-s-memory"><h2>State: Terraform's memory</h2>
+    <p>Terraform records every resource it manages in a <strong>state file</strong>, mapping addresses such as <code>aws_s3_bucket.artifacts</code> to real IDs in the provider. Without state it could not know that a bucket already exists, which resources to delete when you remove a block, or what depends on what. By default state is a local <code>terraform.tfstate</code> file, which fails the moment a second person or a pipeline is involved.</p>
+    <p>Teams use a <strong>remote backend</strong>: shared storage for the state, with <strong>locking</strong> so two applies cannot run at once and corrupt it.</p>
+    <figure class="diagram" id="fig-terraform-state"><div class="diagram-scroll"><svg viewBox="0 0 740 248" role="img" aria-label="Configuration files and variables go into terraform plan, which reads the remote state file and refreshes real attributes from the cloud provider&#x27;s API to compute a change set. terraform apply executes the change set through the provider API, creating or changing cloud resources, and writes the new resource mapping back to the remote state, which is locked during the run." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="terraform-state-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="terraform-state-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="terraform-state-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="terraform-state-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="terraform-state-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><polyline points="171.0,70.0 201.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#terraform-state-arrow-default)"/><rect x="159.7" y="24.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">desired</text><polyline points="341.0,70.0 371.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#terraform-state-arrow-default)"/><rect x="293.1" y="24.0" width="125.9" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">reviewed change set</text><polyline points="511.0,70.0 541.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#terraform-state-arrow-default)"/><rect x="493.6" y="24.0" width="64.9" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">API calls</text><polyline points="611.0,98.0 611.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#terraform-state-arrow-default)"/><rect x="614.0" y="116.0" width="150.3" height="16" rx="4" class="dg-label-bg"/><text x="618.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">create, change, destroy</text><polyline points="441.0,98.0 441.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#terraform-state-arrow-default)"/><rect x="318.2" y="116.0" width="119.8" height="16" rx="4" class="dg-label-bg"/><text x="434.0" y="124.0" text-anchor="end" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">writes the new IDs</text><polyline points="371.0,158.0 251.0,158.0 251.0,98.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#terraform-state-arrow-default)"/><rect x="266.4" y="139.0" width="89.3" height="16" rx="4" class="dg-label-bg"/><text x="311.0" y="147.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">known mapping</text><polyline points="631.0,206.0 631.0,228.0 291.0,228.0 291.0,98.0" fill="none" style="stroke:rgba(148,163,184,0.55)" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#terraform-state-arrow-muted)"/><rect x="382.8" y="231.0" width="156.4" height="16" rx="4" class="dg-label-bg"/><text x="461.0" y="239.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">refresh: real attributes</text><rect x="31" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Configuration</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">*.tf + tfvars</text><rect x="201" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">terraform plan</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">+ ~ - -/+</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">terraform apply</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">the saved plan</text><rect x="541" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Provider</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">hashicorp/aws</text><path d="M371,157.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M371,157.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Remote state</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">locked, encrypted</text><rect x="541" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="611.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Cloud resources</text><text x="611.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">VPC, buckets, DBs</text></svg></div><figcaption>Why state matters: `plan` compares your configuration with the state file and with what the provider reports, then `apply` makes the API calls and writes the new mapping back to the locked remote state.</figcaption></figure>
+    <div class="code"><div class="code-cap">backend.tf</div><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>terraform {
+  backend "s3" {
+    bucket       = "acme-terraform-state"
+    key          = "shop/prod/terraform.tfstate"
+    region       = "eu-west-1"
+    encrypt      = true
+    use_lockfile = true
+  }
+}</code></pre></div>
+    <ul><li><strong>State contains secrets.</strong> Generated passwords, private keys and connection strings are stored in it in plain text. Encrypt the backend, restrict who can read it, and never commit state to Git.</li><li><strong>Never edit state by hand.</strong> Use the <code>terraform state</code> subcommands, or better, the declarative <code>moved</code>, <code>import</code> and <code>removed</code> blocks.</li><li><strong>Turn on versioning</strong> for the storage that holds state, so a bad write can be recovered.</li><li><strong>Keep states small.</strong> One state for the whole company means every plan is slow and every mistake has an enormous blast radius. Split by environment and by layer, for example network, cluster and application.</li></ul>
+    <div class="callout callout-note"><strong>Note</strong><p>Locking options depend on the backend and the Terraform version. Older S3 setups use a DynamoDB table for locks; newer versions can use a lock file in the bucket. Check the backend documentation for the version you run.</p></div></section>
+  <section id="variables-locals-outputs-and-data-sources"><h2>Variables, locals, outputs and data sources</h2>
+    <div class="code"><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>variable "environment" {
+  type        = string
+  description = "Deployment environment"
+  validation {
+    condition     = contains(["dev", "staging", "prod"], var.environment)
+    error_message = "environment must be dev, staging or prod."
+  }
+}
+
+variable "instance_count" {
+  type    = number
+  default = 2
+}
+
+variable "db_password" {
+  type      = string
+  sensitive = true          # redacted in plan output; still stored in state
+}
+
+locals {
+  common_tags = {
+    Environment = var.environment
+    ManagedBy   = "terraform"
+    Team        = "shop"
+  }
+}
+
+data "aws_caller_identity" "current" {}     # read-only lookup of something that exists
+
+output "bucket_name" {
+  value = aws_s3_bucket.artifacts.bucket
+}</code></pre></div>
+    <p><strong>Variables</strong> are a configuration's inputs, <strong>outputs</strong> are its results, and <strong>locals</strong> are named expressions that save you repeating yourself. A <strong>data source</strong> reads information about something Terraform does not manage, such as the current account, the newest machine image or an existing network.</p>
+    <p>Variable values are resolved in a fixed order, with later sources winning: the <code>default</code>, then <code>TF_VAR_name</code> environment variables, then <code>terraform.tfvars</code>, then <code>*.auto.tfvars</code>, then <code>-var-file</code> and <code>-var</code> on the command line. Pipelines typically pass secrets as <code>TF_VAR_</code> environment variables and everything else in a per-environment <code>.tfvars</code> file.</p>
+    <div class="code"><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># one resource per item, addressed by key: aws_iam_user.team["alice"]
+resource "aws_iam_user" "team" {
+  for_each = toset(["alice", "bob", "carol"])
+  name     = each.key
+}</code></pre></div>
+    <p>Prefer <code>for_each</code> to <code>count</code> for collections. With <code>count</code>, resources are addressed by position, so removing the first item shifts every index and Terraform plans to destroy and recreate the rest. With <code>for_each</code> they are addressed by key, and removing one touches only that one.</p></section>
+  <section id="modules-and-environments"><h2>Modules and environments</h2>
+    <p>A <strong>module</strong> is a directory of <code>.tf</code> files with variables as inputs and outputs as results, the unit of reuse. The directory where you run Terraform is the <strong>root module</strong>; it calls child modules. Write a module when you need the same group of resources more than once, or want to enforce a standard such as "every bucket is encrypted and versioned".</p>
+    <div class="code"><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>module "network" {
+  source = "./modules/network"
+
+  environment = var.environment
+  cidr_block  = "10.20.0.0/16"
+}
+
+module "cluster" {
+  source  = "terraform-aws-modules/eks/aws"   # from the public registry
+  version = "~&gt; 20.0"                         # always pin registry modules
+
+  cluster_name = "shop-${var.environment}"
+  vpc_id       = module.network.vpc_id         # a module output
+  subnet_ids   = module.network.private_subnet_ids
+}</code></pre></div>
+    <p>For environments, the robust pattern is one directory per environment, each with its own backend and therefore its own state, all calling the same modules with different inputs.</p>
+    <div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>infra/
+  modules/
+    network/   cluster/   database/
+  envs/
+    dev/       main.tf  backend.tf  terraform.tfvars
+    staging/   main.tf  backend.tf  terraform.tfvars
+    prod/      main.tf  backend.tf  terraform.tfvars</code></pre></div>
+    <p>Separate states mean that a mistake in <code>dev</code> cannot touch <code>prod</code>, and you can grant different people access to each. Terraform <strong>workspaces</strong> offer several states for one configuration, but every workspace shares the same backend and code, which makes it easy to apply to the wrong one. They suit short-lived copies better than the split between production and everything else.</p></section>
+  <section id="drift-imports-and-guard-rails"><h2>Drift, imports and guard rails</h2>
+    <p><strong>Drift</strong> is when real infrastructure no longer matches the configuration because someone changed it by hand. <code>terraform plan</code> reveals it as an unexpected change. You then either revert the manual change by applying, or accept it by updating the code. Running a scheduled plan in CI and alerting on any difference catches drift early.</p>
+    <div class="code"><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># adopt an existing resource into state without recreating it
+import {
+  to = aws_s3_bucket.legacy
+  id = "acme-legacy-uploads"
+}
+
+# rename or move a resource in code without destroying it
+moved {
+  from = aws_s3_bucket.artifacts
+  to   = aws_s3_bucket.build_artifacts
+}
+
+resource "aws_db_instance" "main" {
+  # ...arguments...
+  lifecycle {
+    prevent_destroy = true        # any plan that would destroy this fails
+    ignore_changes  = [tags["LastPatched"]]
+  }
+}</code></pre></div>
+    <p>Renaming a resource block without a <code>moved</code> block looks to Terraform like "delete the old one, create a new one", which for a database is catastrophic. Put <code>prevent_destroy</code> on anything stateful.</p>
+    <p>In a team, nobody applies from a laptop. A pull request runs <code>fmt -check</code>, <code>validate</code>, a linter such as <code>tflint</code>, a security scanner, and <code>plan</code>, posting the plan for review. After merge, the pipeline applies that plan using short-lived cloud credentials obtained through OIDC. OpenTofu, the open-source fork of Terraform, uses the same language and workflow, so everything here applies to it too.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Build, change and protect real infrastructure</h2>
+    <ol><li>Install Terraform or OpenTofu. Use a free-tier cloud account, or avoid cloud cost entirely with the <code>hashicorp/local</code> and <code>hashicorp/random</code> providers, or the <code>kreuzwerker/docker</code> provider against your local Docker.</li><li>Write a configuration with a pinned provider, two resources where one references the other, a variable with validation, and an output. Run <code>init</code>, <code>fmt</code>, <code>validate</code>, <code>plan -out=tfplan</code> and <code>apply tfplan</code>.</li><li>Open <code>terraform.tfstate</code> and read it. Find the resource IDs, and find any sensitive value stored in plain text. Then run <code>terraform state list</code> and <code>terraform state show</code> on one resource.</li><li>Change an attribute that updates in place, then one that forces replacement. Compare the <code>~</code> and <code>-/+</code> plans and find the "forces replacement" note.</li><li>Convert a <code>count</code>-based list of resources to <code>for_each</code>, remove the first item, and compare the plan with what <code>count</code> would have done.</li><li>Create drift: change or delete a resource outside Terraform, run <code>plan</code>, and resolve it both ways, once by re-applying and once by updating the code.</li><li>Extract your resources into <code>modules/</code> and call the module from <code>envs/dev</code> and <code>envs/prod</code> with separate state. Add <code>prevent_destroy</code> to one resource and confirm <code>terraform destroy</code> refuses.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Infrastructure as Code with Terraform — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Workflow: <code>init</code>, <code>fmt</code>, <code>validate</code>, <code>plan -out</code>, review, <code>apply</code> the saved plan.</li><li>Read every plan. <code>-/+</code> and <code>-</code> mean destruction; find out why before approving.</li><li>State maps your code to real resources. It must be remote, locked, encrypted and versioned, and it contains secrets.</li><li>One state per environment and layer keeps the blast radius small.</li><li>Prefer <code>for_each</code> to <code>count</code>, so removing one item does not reshuffle the rest.</li><li>Rename with <code>moved</code>, adopt with <code>import</code>, protect stateful resources with <code>prevent_destroy</code>.</li><li>Pin provider and module versions and commit <code>.terraform.lock.hcl</code>.</li><li>Apply from a pipeline, not a laptop.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Core commands</h3><table><tbody><tr><td><code>terraform init</code></td><td>Install providers and modules; set up the backend</td></tr><tr><td><code>terraform init -upgrade</code></td><td>Move to newer provider versions within constraints</td></tr><tr><td><code>terraform fmt -recursive</code></td><td>Format all files (<code>-check</code> in CI)</td></tr><tr><td><code>terraform validate</code></td><td>Check syntax and references</td></tr><tr><td><code>terraform plan -out=tfplan</code></td><td>Compute and save the change set</td></tr><tr><td><code>terraform apply tfplan</code></td><td>Execute exactly the saved plan</td></tr><tr><td><code>terraform plan -var-file=prod.tfvars</code></td><td>Supply variable values from a file</td></tr><tr><td><code>terraform destroy</code></td><td>Remove everything in this state</td></tr></tbody></table></div><div class="cheat-group"><h3>Inspect and repair state</h3><table><tbody><tr><td><code>terraform state list</code></td><td>Every resource address in state</td></tr><tr><td><code>terraform state show ADDRESS</code></td><td>All recorded attributes of one resource</td></tr><tr><td><code>terraform output</code></td><td>Print output values (<code>-json</code> for scripts)</td></tr><tr><td><code>terraform plan -refresh-only</code></td><td>Show drift without proposing config changes</td></tr><tr><td><code>terraform state mv OLD NEW</code></td><td>Rename in state (prefer a <code>moved</code> block)</td></tr><tr><td><code>terraform state rm ADDRESS</code></td><td>Stop managing a resource without deleting it</td></tr><tr><td><code>terraform force-unlock LOCK_ID</code></td><td>Release a stale lock; be certain nothing is running</td></tr></tbody></table></div><div class="cheat-group"><h3>HCL building blocks</h3><table><tbody><tr><td><code>resource "TYPE" "NAME" { ... }</code></td><td>Something Terraform creates and manages</td></tr><tr><td><code>data "TYPE" "NAME" { ... }</code></td><td>Read-only lookup of existing infrastructure</td></tr><tr><td><code>variable "NAME" { type = string }</code></td><td>Input; read as <code>var.NAME</code></td></tr><tr><td><code>locals { NAME = expression }</code></td><td>Named expression; read as <code>local.NAME</code></td></tr><tr><td><code>output "NAME" { value = ... }</code></td><td>Result exposed to callers and the CLI</td></tr><tr><td><code>module "NAME" { source = "..." }</code></td><td>Call a module; read results as <code>module.NAME.OUTPUT</code></td></tr><tr><td><code>TYPE.NAME.ATTRIBUTE</code></td><td>Reference, which also creates a dependency</td></tr><tr><td><code>"prefix-${var.environment}"</code></td><td>String interpolation</td></tr></tbody></table></div><div class="cheat-group"><h3>Meta-arguments and lifecycle</h3><table><tbody><tr><td><code>for_each = toset([...]) / each.key</code></td><td>One instance per item, addressed by key</td></tr><tr><td><code>count = N / count.index</code></td><td>N instances, addressed by position</td></tr><tr><td><code>depends_on = [RESOURCE]</code></td><td>Explicit dependency when no reference exists</td></tr><tr><td><code>lifecycle { prevent_destroy = true }</code></td><td>Fail any plan that destroys this resource</td></tr><tr><td><code>lifecycle { create_before_destroy = true }</code></td><td>Build the replacement first to avoid downtime</td></tr><tr><td><code>lifecycle { ignore_changes = [ATTR] }</code></td><td>Do not revert external changes to an attribute</td></tr><tr><td><code>import { to = ADDRESS  id = "ID" }</code></td><td>Adopt an existing resource</td></tr><tr><td><code>moved { from = OLD  to = NEW }</code></td><td>Rename without destroy and recreate</td></tr></tbody></table></div><div class="cheat-group"><h3>Variable precedence (lowest to highest)</h3><table><tbody><tr><td><code>default in the variable block</code></td><td>Used when nothing else sets it</td></tr><tr><td><code>TF_VAR_name environment variable</code></td><td>Common for secrets in pipelines</td></tr><tr><td><code>terraform.tfvars, then *.auto.tfvars</code></td><td>Loaded automatically</td></tr><tr><td><code>-var-file=FILE, -var 'name=value'</code></td><td>Command line; wins over everything</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Approving a plan without noticing that a rename produced <code>-/+</code> on a database.</li><li>Keeping state locally or in Git, where it conflicts, leaks secrets and gets lost.</li><li>Putting every environment in one state, so a <code>dev</code> experiment can break <code>prod</code>.</li><li>Using <code>count</code> for a list, then removing an early element and recreating everything after it.</li><li>Fixing things in the cloud console "just this once", creating drift that the next apply reverts.</li><li>Leaving provider and module versions unpinned, so the same code behaves differently next month.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "A plan shows `-/+ aws_db_instance.main (forces replacement)` after you changed one argument. What will `apply` do?", "options": ["Destroy the existing database and create a new one in its place", "Update the database in place with a short restart", "Create a second database and keep the old one running alongside", "Skip the resource, since replacements need a separate command"], "answer": 0, "explain": "`-/+` means destroy then create, because that argument cannot be changed on a live resource. For a database that is data loss unless you have planned for it, which is why `prevent_destroy` belongs on stateful resources."}, {"q": "Why do teams keep Terraform state in a remote backend with locking?", "options": ["So everyone shares one source of truth and two applies cannot corrupt it at once", "Because providers cannot be downloaded without a remote backend", "So that state no longer needs to contain any sensitive values", "Because remote state makes plans run without calling the cloud API"], "answer": 0, "explain": "State is Terraform's record of what it manages. Sharing it lets a team and a pipeline work on the same infrastructure, and the lock stops concurrent writes. Remote state still contains secrets, so it must be encrypted and access-controlled."}, {"q": "Three IAM users are created with `count = 3` from the list `[\"alice\", \"bob\", \"carol\"]`. You remove \"alice\". What does the plan show?", "options": ["Changes to all positions, because every index shifted down by one", "Only the alice user is destroyed and the others are untouched", "Nothing, because count ignores changes to the underlying list", "An error, because count lists cannot shrink after creation"], "answer": 0, "explain": "`count` addresses instances by index. After the removal, index 0 is bob and index 1 is carol, so Terraform renames or recreates them and destroys index 2. `for_each` addresses by key and would touch only alice."}, {"q": "You rename `resource \"aws_s3_bucket\" \"data\"` to `\"customer_data\"` in the code. How do you keep Terraform from deleting the bucket?", "options": ["Add a moved block from the old address to the new one", "Run terraform init again so the new name is registered", "Add depends_on pointing at the old resource name", "Mark the bucket variable as sensitive before applying"], "answer": 0, "explain": "Without guidance, Terraform sees one resource removed and another added. A `moved` block tells it the address changed, so state is updated and the real bucket is untouched."}, {"q": "Someone enlarged a disk in the cloud console. Your configuration still has the old size. What does the next `terraform plan` show?", "options": ["A change to set the disk back to the size in the configuration", "No changes, because Terraform only compares code with its own state", "An error telling you to import the modified resource again", "A new second disk created at the size from the configuration"], "answer": 0, "explain": "Plan refreshes real attributes first, notices the drift, and proposes to make reality match the code. You then either apply to revert the manual change or update the code to accept it."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="devops-helm.html"><span>← Previous</span><strong>Packaging with Helm</strong></a>
+    <a class="pager-up" href="../education.html#devops">All DevOps modules</a>
+    <a class="pager-link pager-next" href="devops-ansible.html"><span>Next →</span><strong>Configuration management with Ansible</strong></a>
+  </nav>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="mailto:support@thavionai.com?subject=Education%20feedback%3A%20devops-terraform">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

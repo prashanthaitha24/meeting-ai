@@ -1,0 +1,261 @@
+{
+  "id": "ai-serving",
+  "minutes": 35,
+  "intro": "A model in a notebook is an experiment. A model that answers production traffic is a service, with all the obligations that the SRE track described: an SLO, capacity, rollouts, and someone on call. Model serving has its own twist on each of them. The scarce resource is GPU memory and not CPU. Instances take minutes to start instead of seconds. And a \"deploy\" can change behaviour without changing a line of code. This module is where the three tracks of this site meet: you will serve a model behind an API, run it on Kubernetes, scale it on the right signal, and roll out model changes as carefully as any other release.",
+  "objectives": [
+    "Weigh a hosted model API against self-hosting, on data control, cost, operations and latency",
+    "Explain what makes inference different from web serving: GPU memory, the KV cache, batching, and throughput against latency",
+    "Package a model as a service with health checks that respect its slow start-up",
+    "Schedule GPU workloads on Kubernetes, and autoscale them on queue depth or concurrency instead of CPU",
+    "Roll out model changes safely, with version pinning, shadow traffic, canaries and rollback"
+  ],
+  "sections": [
+    {
+      "heading": "Hosted API or self-hosted?",
+      "blocks": [
+        { "type": "p", "text": "The first decision is whether to run the model at all. Calling a provider's API and operating your own inference fleet are very different commitments, and for most teams, most of the time, the API is the right answer." },
+        { "type": "table", "headers": ["", "Hosted API", "Self-hosted open-weight model"], "rows": [
+          ["Time to first result", "Minutes", "Days to weeks"],
+          ["Model quality", "Access to the most capable models", "Limited to open-weight models; often enough for narrow tasks"],
+          ["Cost model", "Pay per token; nothing when idle", "Pay per GPU-hour, whether busy or not; cheaper only at high, steady utilisation"],
+          ["Operations", "The provider's problem", "Yours: drivers, scheduling, scaling, upgrades, on-call"],
+          ["Data control", "Data leaves your network, under the provider's terms", "Data stays in your environment"],
+          ["Latency", "Network round trip, plus the provider's queue", "Under your control; can sit next to your application"],
+          ["Customisation", "Prompts, and the provider's fine-tuning options", "Full: fine-tune, quantise, change the serving stack"],
+          ["Dependency", "Rate limits, price changes, model retirement", "GPU supply, and your own team's capacity"]
+        ]},
+        { "type": "p", "text": "Self-hosting is justified by specific needs: data that may not leave your environment for legal or contractual reasons, very high and steady volume where your own GPUs work out cheaper, strict latency requirements, operation without internet access, or a small fine-tuned model that does one narrow job well. It is not justified by a vague wish for control. Be honest about the full cost, which includes idle GPUs at night and the engineers who keep the stack running." },
+        { "type": "p", "text": "Classical models are another matter. A gradient-boosted tree, or a small neural network that scores a fraud risk, is cheap to run on CPUs, has no hosted equivalent, and is nearly always served by your own team. The serving principles in the rest of this module apply to both kinds, and the GPU material applies to large models." },
+        { "type": "callout", "kind": "tip", "text": "Many teams settle on a hybrid: a hosted API for the hard, general tasks, and a small self-hosted model for a high-volume, narrow, latency-sensitive step such as classification or embedding. Put both behind one internal interface, so that you can move a task between them by changing configuration." }
+      ]
+    },
+    {
+      "heading": "Why inference is not web serving",
+      "blocks": [
+        { "type": "p", "text": "A typical web service is limited by CPU and I/O, starts in seconds, and handles each request independently. Large-model inference breaks all three of those assumptions." },
+        { "type": "list", "items": [
+          "**GPU memory is the constraint.** The model's weights have to fit in GPU memory, and they are large: roughly two bytes per parameter at 16-bit precision, so a model with 7 billion parameters needs about 14 GB for its weights alone. On top of that comes the **KV cache**, the memory that holds the attention state of every token of every request being processed. It grows with the length of the context and with the number of concurrent requests, and it is what usually limits how many users one GPU can serve.",
+          "**Two phases with different characters.** **Prefill** processes the whole prompt in parallel, and is limited by computation. It determines the **time to first token**. **Decode** then generates one token at a time, and is limited by memory bandwidth. It determines the **tokens per second** that a user sees.",
+          "**Batching is essential.** A GPU processing one request at a time is mostly idle. Serving engines group requests, so that a single pass through the model advances many of them together. **Continuous batching** goes further: requests join and leave the batch at every step, without waiting for the others to finish, which raises throughput enormously.",
+          "**Throughput trades against latency.** Bigger batches serve more users per GPU, and make each user's tokens arrive a little more slowly. You choose a point on that curve, guided by your latency SLO.",
+          "**Start-up is slow.** Pulling an image of several gigabytes, loading tens of gigabytes of weights into GPU memory and warming up can take minutes. That changes how you scale, how you roll out, and how much headroom you keep."
+        ]},
+        { "type": "code", "lang": "text", "code": "GPU memory needed  ~  weights + KV cache + activations and overhead\n\nweights            ~  parameters x bytes per parameter\n                      7B params x 2 bytes (16-bit)  = about 14 GB\n                      7B params x 1 byte  (8-bit)   = about  7 GB\n                      7B params x 0.5 byte (4-bit)  = about  3.5 GB\n\nKV cache           grows with: concurrent requests x tokens per request x layers x hidden size\n                   -> long contexts and high concurrency are what exhaust memory" },
+        { "type": "p", "text": "**Quantisation** stores the weights at lower precision, in 8 or 4 bits instead of 16. It cuts the memory and often raises the speed, at some cost in quality, which you must measure on your own evals instead of assuming. It is frequently what allows a model to fit on a smaller, cheaper GPU at all. Models too large for one GPU are split across several with tensor or pipeline parallelism, which the serving engine handles, at a cost in complexity and in communication between GPUs." },
+        { "type": "p", "text": "You rarely write this machinery yourself. Open-source **inference servers** such as vLLM, Hugging Face Text Generation Inference, and NVIDIA Triton implement continuous batching, efficient management of the KV cache, quantisation and streaming, and several of them expose an HTTP API compatible with the common chat-completion format, so that the client code barely changes." }
+      ]
+    },
+    {
+      "heading": "Packaging a model as a service",
+      "blocks": [
+        { "type": "p", "text": "Whatever the model, the service around it follows the same rules. Load the model **once, at start-up**, never on each request. Validate the inputs. Expose health endpoints that tell the truth about whether the model is ready. Report the model version with every response. This example serves a classical scikit-learn pipeline of the kind built in the core ML module." },
+        { "type": "code", "lang": "python", "caption": "app.py", "code": "import os\nimport time\nfrom contextlib import asynccontextmanager\n\nimport joblib\nimport pandas as pd\nfrom fastapi import FastAPI, HTTPException\nfrom pydantic import BaseModel, Field\n\nMODEL_PATH = os.environ.get(\"MODEL_PATH\", \"/models/churn-pipeline.joblib\")\nMODEL_VERSION = os.environ.get(\"MODEL_VERSION\", \"unknown\")\nstate = {\"model\": None}\n\n\n@asynccontextmanager\nasync def lifespan(app: FastAPI):\n    state[\"model\"] = joblib.load(MODEL_PATH)      # load ONCE, before serving traffic\n    yield\n    state[\"model\"] = None\n\n\napp = FastAPI(lifespan=lifespan)\n\n\nclass Features(BaseModel):\n    tenure_months: int = Field(ge=0, le=600)\n    monthly_spend: float = Field(ge=0)\n    support_tickets_90d: int = Field(ge=0)\n    plan: str\n\n\n@app.get(\"/healthz\")\ndef liveness():\n    return {\"status\": \"alive\"}                    # the process is up; nothing more\n\n\n@app.get(\"/ready\")\ndef readiness():\n    if state[\"model\"] is None:\n        raise HTTPException(status_code=503, detail=\"model not loaded\")\n    return {\"status\": \"ready\", \"model_version\": MODEL_VERSION}\n\n\n@app.post(\"/predict\")\ndef predict(features: Features):\n    started = time.perf_counter()\n    frame = pd.DataFrame([features.model_dump()])\n    probability = float(state[\"model\"].predict_proba(frame)[0, 1])\n    return {\"churn_probability\": probability, \"model_version\": MODEL_VERSION,\n            \"latency_ms\": round((time.perf_counter() - started) * 1000, 1)}" },
+        { "type": "list", "items": [
+          "**Ship the whole pipeline**, with its preprocessing, as a single artifact, so that serving transforms the inputs exactly as training did. A mismatch between the two is **training-serving skew**, a classic and silent cause of bad predictions.",
+          "**Validate the inputs** with a schema. Values that are out of range or missing should be rejected, or at least counted, since they are often the first sign of a fault upstream.",
+          "**Return the model version** with every prediction, and log it. When the behaviour changes, you need to know which model produced which answer.",
+          "**Instrument it** with the golden signals from the SRE track, together with model-specific ones: the distribution of predictions, the distributions of the inputs, and, for LLMs, the time to first token, tokens per second, queue time and tokens per request.",
+          "**Keep the weights out of the image** when they are large. Pull them at start-up from object storage or a model registry, onto a cached volume, so that images stay small and one image can serve many versions of a model.",
+          "**Treat model files as untrusted code.** Pickle-based formats, including `joblib` files, can execute arbitrary code when they are loaded. Load only artifacts that your own pipeline produced, and prefer safe formats such as `safetensors` for neural network weights."
+        ]}
+      ]
+    },
+    {
+      "heading": "GPUs on Kubernetes",
+      "blocks": [
+        { "type": "p", "text": "Kubernetes schedules GPUs as an **extended resource**, which the vendor's device plugin advertises. A pod requests whole GPUs under `limits`, and the scheduler places it on a node that has one free. GPUs are not overcommitted: a GPU assigned to one pod is unavailable to every other, unless you deliberately configure a sharing mechanism." },
+        { "type": "code", "lang": "yaml", "code": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: llm-server\n  namespace: ml\nspec:\n  replicas: 2\n  strategy:\n    rollingUpdate:\n      maxSurge: 1\n      maxUnavailable: 0            # never reduce serving capacity during a rollout\n  selector:\n    matchLabels:\n      app: llm-server\n  template:\n    metadata:\n      labels:\n        app: llm-server\n    spec:\n      terminationGracePeriodSeconds: 120      # let in-flight generations finish\n      nodeSelector:\n        accelerator: nvidia-gpu\n      tolerations:\n        - key: nvidia.com/gpu\n          operator: Exists\n          effect: NoSchedule\n      containers:\n        - name: server\n          image: registry.example.com/ml/llm-server:1.8.0\n          env:\n            - name: MODEL_VERSION\n              value: \"support-assistant-2026-09-01\"\n          ports:\n            - containerPort: 8000\n          resources:\n            requests:\n              cpu: \"4\"\n              memory: 32Gi\n            limits:\n              nvidia.com/gpu: 1\n              memory: 32Gi\n          startupProbe:                        # loading weights takes minutes\n            httpGet:\n              path: /ready\n              port: 8000\n            periodSeconds: 10\n            failureThreshold: 60               # allow up to 10 minutes to start\n          readinessProbe:\n            httpGet:\n              path: /ready\n              port: 8000\n            periodSeconds: 5\n          livenessProbe:\n            httpGet:\n              path: /healthz\n              port: 8000\n            periodSeconds: 20\n          volumeMounts:\n            - name: model-cache\n              mountPath: /models\n      volumes:\n        - name: model-cache\n          persistentVolumeClaim:\n            claimName: model-cache" },
+        { "type": "list", "items": [
+          "The **startup probe** is essential. Without one, the liveness probe kills the container while it is still loading its weights, and the pod never becomes ready. This is the most common failure when a model is first deployed.",
+          "**Readiness must mean that the model is loaded**, not merely that the process has started, or traffic will arrive at a pod that cannot serve it.",
+          "**Taints and node selectors** keep GPU nodes for GPU workloads, so that expensive hardware is not filled with ordinary pods.",
+          "**`maxUnavailable: 0`** matters more than usual, because a replacement takes minutes to become ready, and removing a pod early leaves a long gap in capacity.",
+          "A generous **termination grace period** lets streaming responses complete before the pod is removed.",
+          "GPU nodes are expensive, and they are the natural target of the FinOps module: tag them, watch their utilisation, and scale them down when they are idle."
+        ]}
+      ]
+    },
+    {
+      "heading": "Scaling on the right signal",
+      "blocks": [
+        { "type": "p", "text": "The autoscaling habit of targeting CPU utilisation fails for inference. The CPU of a GPU server tells you nothing, and GPU utilisation is misleading as well, because a GPU can report itself as fully busy at very different levels of real load. Scale on what reflects demand against capacity: **queue depth, the number of requests in flight, or the time that requests spend waiting**." },
+        { "type": "code", "lang": "yaml", "code": "apiVersion: autoscaling/v2\nkind: HorizontalPodAutoscaler\nmetadata:\n  name: llm-server\n  namespace: ml\nspec:\n  scaleTargetRef:\n    apiVersion: apps/v1\n    kind: Deployment\n    name: llm-server\n  minReplicas: 2\n  maxReplicas: 8\n  metrics:\n    - type: Pods\n      pods:\n        metric:\n          name: inference_requests_in_flight     # exposed through a custom metrics adapter\n        target:\n          type: AverageValue\n          averageValue: \"12\"                     # tuned from a load test against the latency SLO\n  behavior:\n    scaleUp:\n      stabilizationWindowSeconds: 0\n    scaleDown:\n      stabilizationWindowSeconds: 600            # scale in slowly: a replacement costs minutes" },
+        { "type": "list", "items": [
+          "**Find the target with a load test**, as the capacity module described. Raise the concurrency until the time to first token, or the tokens per second, breaches your SLO. The target is somewhat below that point.",
+          "**Cold starts dominate.** If a new replica takes five minutes to serve, the autoscaler cannot rescue you from a spike that arrives in thirty seconds. Keep more headroom than you would for a web service, pre-scale before known peaks, and cache the weights on the node or on a fast volume.",
+          "**Bound the queue, and shed load.** When you are saturated, reject quickly with `429` or `503`, in preference to letting the queue grow without limit. A request that waits two minutes helps nobody. This is the backpressure of the failure-modes module.",
+          "**Limit the work per request**: a maximum input length, a maximum number of output tokens, and a timeout. One pathological request should not be able to occupy a GPU for minutes.",
+          "**Scale to zero** only for workloads that can tolerate a cold start of several minutes, such as internal batch tools. For interactive use, keep a warm minimum.",
+          "**Separate traffic by kind.** Interactive requests and bulk batch jobs have opposite needs. Give each its own pool, or a priority queue, so that a batch job cannot starve live users."
+        ]}
+      ]
+    },
+    {
+      "heading": "Rolling out model changes",
+      "blocks": [
+        { "type": "p", "text": "A new model is a release that changes behaviour, and it is more dangerous than a code release because the failure is quiet. Nothing crashes, and no error rate rises. The answers simply become worse for some kinds of input. The same applies to a changed prompt, a new version of a provider's model, a different quantisation, or an upgraded serving engine. Apply the progressive delivery of the SRE track, with checks adapted to quality." },
+        { "type": "steps", "items": [
+          "**Pin versions.** Refer to an exact version of the model, or of the provider's snapshot, and never to a moving alias such as \"latest\". An unannounced change in a model is an unannounced production deploy.",
+          "**Pass the offline gate.** The candidate must meet the thresholds of your eval suite, on quality, safety, latency and cost, before it goes near any traffic.",
+          "**Shadow it.** Send a copy of real production requests to the candidate, discard its responses, and compare them offline with those of the current model. Users are not affected, and the traffic is real. This suits models well, because most predictions have no side effects.",
+          "**Canary it.** Route a small share of users to the new model. Watch the system metrics, together with the quality signals: user feedback, the rate at which users retry or rephrase, the escalation rate, scores from a sampled judge, and the distribution of outputs.",
+          "**A/B test** when the question is whether it is better for the business, and not only whether it is safe. Assign users consistently to one arm, and measure the outcome that you care about.",
+          "**Keep rollback instant.** Leave the previous model loaded, or quick to load, and make switching a change of configuration. With start-up times of several minutes, a rollback that needs a cold start is too slow."
+        ]},
+        { "type": "callout", "kind": "warning", "text": "Providers retire old model versions on a published schedule. Track the deprecation dates of every model you depend on, and rehearse the migration before the deadline, with your eval suite as the judge. A forced migration in the final week, with no evals, is how regressions in quality reach production." },
+        { "type": "p", "text": "Record the model version, the prompt version and the serving configuration with every prediction. When someone asks why the assistant said something last Tuesday, that record is the only route to an answer, and it is the starting point for the observability module that follows." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Serve a model like a production service",
+    "steps": [
+      "Take the scikit-learn pipeline from the core ML module. Save it with `joblib`, and wrap it in the FastAPI service from this module, with `/healthz`, `/ready` and `/predict`, and with the model version in every response.",
+      "Containerise it with a multi-stage build and a non-root user. Supply the model file through a mounted volume or an environment variable, and not baked into the image.",
+      "Add a Prometheus histogram for prediction latency, a counter for requests by status, and a histogram of the predicted probability. Confirm that they appear at `/metrics`.",
+      "Deploy it to your cluster with separate startup, readiness and liveness probes. Add a ten-second sleep before the model loads, to simulate a slow start. Remove the startup probe, watch the pod get killed in a loop, and then put the probe back.",
+      "Load test it with an open-model tool, as in the capacity module. Find the concurrency at which p99 latency breaches your target, and set an autoscaling target below it.",
+      "Train a second, slightly different model. Deploy it as a shadow: send each request to both, return only the current model's answer, and log both. Compare the two distributions of predictions.",
+      "Route 10% of traffic to the new model as a canary. Define in advance which metrics would cause you to roll back, then practise the rollback, and time it.",
+      "Optional, if you have access to a GPU: serve a small open-weight language model with an inference server such as vLLM. Measure the time to first token and the tokens per second at concurrency 1, 8 and 32, and observe the trade-off between throughput and latency."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Default to a hosted API. Self-host only for data control, steady high volume, strict latency, or a narrow fine-tuned model.",
+      "GPU memory is the constraint: weights plus the KV cache, which grows with context length and concurrency.",
+      "Prefill sets the time to first token, decode sets the tokens per second. Continuous batching trades a little latency for much more throughput.",
+      "Load the model once at start-up. Readiness means the model is loaded, and a startup probe covers the minutes of loading.",
+      "Ship preprocessing and model as one artifact, to avoid training-serving skew. Return the model version with every prediction.",
+      "Scale on queue depth or in-flight requests, not on CPU. Keep headroom, because cold starts take minutes.",
+      "Bound the queue, and limit input length, output tokens and time per request.",
+      "A model change is a release: pin versions, gate on evals, shadow, canary, and keep rollback instant."
+    ],
+    "groups": [
+      {
+        "title": "Sizing rules of thumb",
+        "items": [
+          { "syntax": "weights ~ params x bytes per param", "desc": "16-bit: 2 bytes. 8-bit: 1 byte. 4-bit: 0.5 byte." },
+          { "syntax": "7B at 16-bit ~ 14 GB", "desc": "Before the KV cache and overhead" },
+          { "syntax": "KV cache ~ requests x tokens x layers x hidden size", "desc": "What limits the concurrency on a GPU" },
+          { "syntax": "latency = TTFT + output tokens / tokens per second", "desc": "Prefill, then decode" },
+          { "syntax": "larger batch = more throughput, slower per user", "desc": "Choose the point from your latency SLO" },
+          { "syntax": "GPU cost = GPU-hours x price, busy or idle", "desc": "Utilisation decides whether self-hosting pays" }
+        ]
+      },
+      {
+        "title": "Service essentials",
+        "items": [
+          { "syntax": "load the model in the lifespan / start-up hook", "desc": "Once per process, never per request" },
+          { "syntax": "GET /healthz", "desc": "Liveness: the process is running" },
+          { "syntax": "GET /ready -> 503 until the model is loaded", "desc": "Readiness: safe to receive traffic" },
+          { "syntax": "pydantic BaseModel with Field(ge=, le=)", "desc": "Validate every input" },
+          { "syntax": "\"model_version\" in every response", "desc": "Traceability" },
+          { "syntax": "joblib.load / safetensors", "desc": "Load only trusted artifacts; pickles can execute code" },
+          { "syntax": "weights from object storage + a cached volume", "desc": "Small images and quicker restarts" }
+        ]
+      },
+      {
+        "title": "Kubernetes for inference",
+        "items": [
+          { "syntax": "resources.limits: nvidia.com/gpu: 1", "desc": "Request a whole GPU; GPUs are not overcommitted" },
+          { "syntax": "startupProbe: failureThreshold x periodSeconds", "desc": "The time allowed for loading the weights" },
+          { "syntax": "readinessProbe -> /ready", "desc": "No traffic until the model is loaded" },
+          { "syntax": "nodeSelector + tolerations", "desc": "Keep GPU nodes for GPU workloads" },
+          { "syntax": "maxUnavailable: 0", "desc": "Replacements take minutes; never drop capacity" },
+          { "syntax": "terminationGracePeriodSeconds: 120", "desc": "Let streaming responses finish" },
+          { "syntax": "kubectl describe node NAME | grep -A5 nvidia", "desc": "See the allocatable and the allocated GPUs" }
+        ]
+      },
+      {
+        "title": "Metrics to expose",
+        "items": [
+          { "syntax": "time to first token (histogram)", "desc": "Responsiveness as the user perceives it" },
+          { "syntax": "tokens per second, per request", "desc": "The speed of generation" },
+          { "syntax": "requests in flight / queue depth", "desc": "The signal for autoscaling" },
+          { "syntax": "queue wait time", "desc": "Saturation" },
+          { "syntax": "input and output tokens per request", "desc": "Cost, and detection of abuse" },
+          { "syntax": "GPU memory used, KV cache usage", "desc": "Closeness to the real limit" },
+          { "syntax": "distribution of predictions", "desc": "Detects behavioural drift" },
+          { "syntax": "requests by model_version", "desc": "Essential during rollouts" }
+        ]
+      },
+      {
+        "title": "Rollout ladder",
+        "items": [
+          { "syntax": "1. pin exact versions", "desc": "No moving aliases" },
+          { "syntax": "2. offline eval gate", "desc": "Quality, safety, latency, cost" },
+          { "syntax": "3. shadow traffic", "desc": "Real inputs, responses discarded, compared offline" },
+          { "syntax": "4. canary at a small percentage", "desc": "System metrics together with quality signals" },
+          { "syntax": "5. A/B test", "desc": "Is it better for the business?" },
+          { "syntax": "6. instant rollback", "desc": "Previous model kept warm; a change of configuration" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Self-hosting for the sake of control, then paying for idle GPUs and for an on-call rotation.",
+      "Loading the model inside the request handler, so that every request pays the loading time.",
+      "Omitting the startup probe, so that the liveness probe kills the pod while it is loading its weights.",
+      "Autoscaling on CPU utilisation, which says nothing about the load on a GPU inference server.",
+      "Letting the request queue grow without limit, instead of shedding load when saturated.",
+      "Pointing at a \"latest\" alias of a model, and receiving a behaviour change that nobody chose."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A start-up handles customer data that may be processed by approved third parties, has modest and spiky traffic, and needs strong reasoning. Which serving option fits best?",
+      "options": [
+        "A hosted model API, since it needs no operations and costs nothing when idle",
+        "A self-hosted cluster of GPUs, sized for the largest expected peak",
+        "A self-hosted model on CPUs, to avoid the cost of GPU hardware",
+        "A model embedded in the mobile application, to avoid any servers at all"
+      ],
+      "answer": 0,
+      "explain": "Nothing here calls for self-hosting: the data may go to approved providers, the volume is low and uneven, and the most capable models are available through APIs. Owning GPUs would mean paying for idle hardware and for the operations around it."
+    },
+    {
+      "q": "A GPU inference server works well with 8 concurrent users, and runs out of memory at 40, although the model itself has not changed. What is consuming the memory?",
+      "options": [
+        "The KV cache, which grows with the number of concurrent requests and their length",
+        "The model's weights, which are loaded again for each additional user",
+        "The container image, which is duplicated in GPU memory for every request",
+        "The Python interpreter, which needs a separate copy for each connection"
+      ],
+      "answer": 0,
+      "explain": "The weights are loaded once and stay constant. The KV cache holds the attention state of every token of every active request, so it scales with concurrency and with context length, and it is usually what limits the capacity."
+    },
+    {
+      "q": "A model server takes four minutes to load its weights. After deployment, the pods restart for ever, and never become ready. What is the most likely cause?",
+      "options": [
+        "There is no startup probe, so the liveness probe kills the container during loading",
+        "The readiness probe points at /ready, when it ought to point at /healthz",
+        "The Deployment requests a GPU under limits, when it should be under requests",
+        "maxUnavailable is set to 0, which prevents new pods from being created"
+      ],
+      "answer": 0,
+      "explain": "Without a startup probe, liveness checks begin at once and fail while the model is still loading, so Kubernetes restarts the container before it can finish. A startup probe holds the other probes back until it has succeeded."
+    },
+    {
+      "q": "Which metric is the best basis for autoscaling a GPU-backed LLM service?",
+      "options": [
+        "The number of requests in flight, or the depth of the queue, per replica",
+        "The average CPU utilisation of the pods",
+        "The GPU utilisation percentage that the driver reports",
+        "The number of HTTP 200 responses returned per minute"
+      ],
+      "answer": 0,
+      "explain": "In-flight requests and queue depth reflect demand against capacity directly. CPU is irrelevant for GPU inference, and GPU utilisation can read as fully busy across very different levels of real load."
+    },
+    {
+      "q": "You want to find out whether a new version of a model gives worse answers, without any user seeing those answers. Which technique fits?",
+      "options": [
+        "Shadow traffic: send copies of real requests to it, and compare the outputs offline",
+        "A canary release, sending five percent of users to the new model",
+        "An A/B test, with users divided evenly between the two models",
+        "A rolling update, with maxUnavailable set to zero"
+      ],
+      "answer": 0,
+      "explain": "Shadowing exercises the candidate on real production inputs while its responses are discarded, so no user is exposed. Canaries and A/B tests both serve the new model's answers to real users."
+    }
+  ]
+}

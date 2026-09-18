@@ -1,0 +1,223 @@
+{
+  "id": "sre-slo",
+  "minutes": 35,
+  "intro": "Ask five people whether a service is reliable enough and you will get five opinions, usually shaped by whoever was paged last. Service level objectives replace the opinions with a number that product, engineering and operations agree on in advance. The error budget that falls out of that number is the most useful idea in SRE: it tells you, objectively, when to ship faster and when to slow down. This module teaches you to choose indicators, set targets, and run an error budget policy.",
+  "objectives": [
+    "Distinguish SLIs, SLOs and SLAs, and explain how they relate",
+    "Choose SLIs that reflect what users experience, expressed as a ratio of good events to valid events",
+    "Set a realistic SLO target and window, starting from historical data",
+    "Calculate an error budget, the budget consumed, and the burn rate",
+    "Write an error budget policy that changes what the team does when the budget is exhausted"
+  ],
+  "sections": [
+    {
+      "heading": "SLI, SLO, SLA",
+      "blocks": [
+        { "type": "table", "headers": ["Term", "What it is", "Example"], "rows": [
+          ["**SLI** (indicator)", "A measurement of some aspect of the service as users experience it", "The proportion of checkout requests that succeed in under 500 ms"],
+          ["**SLO** (objective)", "A target value for an SLI, over a time window", "99.9% of checkout requests succeed in under 500 ms, over 28 days"],
+          ["**SLA** (agreement)", "A contract with a customer, with consequences if it is missed", "Below 99.5% monthly availability, the customer receives service credits"]
+        ]},
+        { "type": "p", "text": "SLIs are what you measure, SLOs are what you aim for, and SLAs are what you promise. An SLA is a business and legal document, and most internal services have none. Where one exists, set the internal **SLO stricter than the SLA**, so that you get a warning, and time to react, well before you owe anybody money." },
+        { "type": "p", "text": "The subtle point is that an SLO is both a floor and a ceiling. Falling below it means users are unhappy and reliability work takes priority. But greatly exceeding it also carries a cost: you could have shipped faster or spent less, and users come to depend on a level of service you never promised. Google has deliberately taken down an over-reliable internal service for short periods so that its consumers could not quietly build a dependency on it never failing." }
+      ]
+    },
+    {
+      "heading": "Choosing good SLIs",
+      "blocks": [
+        { "type": "p", "text": "A good SLI rises and falls with user happiness. CPU utilisation is not an SLI: users do not care about it, and it can be at ninety percent while everyone is perfectly happy. \"Did my page load, quickly and correctly?\" is what they care about. The Google SRE Workbook recommends expressing every SLI the same way, as a ratio:" },
+        { "type": "code", "lang": "text", "code": "SLI = good events / valid events x 100%\n\nvalid events : everything that should count   (e.g. all HTTP requests except health checks)\ngood events  : those that met the criterion   (e.g. status below 500 AND served in < 500 ms)" },
+        { "type": "p", "text": "That form has real advantages. It always runs from 0 to 100%, where 100% is perfect. It is easy to reason about, the error budget drops straight out of it, and the same alerting logic works for every SLI you define. Which indicators to use depends on the kind of system." },
+        { "type": "table", "headers": ["System type", "Useful SLIs"], "rows": [
+          ["Request-driven (APIs, websites)", "**Availability**: proportion of requests that succeed. **Latency**: proportion faster than a threshold. **Quality**: proportion served without degradation."],
+          ["Data pipelines, batch", "**Freshness**: proportion of data updated more recently than a threshold. **Correctness**: proportion of records producing the right output. **Coverage**: proportion of data processed."],
+          ["Storage", "**Durability**: proportion of written data that can be read back intact."]
+        ]},
+        { "type": "list", "items": [
+          "**Measure as close to the user as you can.** Server-side metrics are easy but miss failures in the load balancer, DNS or the network. Load balancer logs see more; synthetic probes and real-user monitoring see the most. Start with what you have and move outward.",
+          "**Define latency as a proportion under a threshold**, not as an average. Averages hide the slow tail, and \"99% of requests under 500 ms\" fits the good-over-valid form. Use two thresholds if needed, for example 90% under 200 ms and 99% under 1 s.",
+          "**Decide what is valid.** Exclude health checks and traffic from your own load tests. Think carefully about `4xx` responses: a `404` for a page that does not exist is the service working correctly, while a wave of `401` errors caused by a broken auth deploy is not.",
+          "**Keep the number small.** Two to four SLIs per user journey, for the journeys that matter most: log in, search, check out. Not one for every endpoint."
+        ]},
+        { "type": "code", "lang": "promql", "caption": "Availability and latency SLIs for a checkout service, over 28 days", "code": "# availability: proportion of requests that did not fail server-side\nsum(rate(http_requests_total{job=\"checkout\", code!~\"5..\"}[28d]))\n/\nsum(rate(http_requests_total{job=\"checkout\"}[28d]))\n\n# latency: proportion of requests served in under 500 ms (histogram bucket le=\"0.5\")\nsum(rate(http_request_duration_seconds_bucket{job=\"checkout\", le=\"0.5\"}[28d]))\n/\nsum(rate(http_request_duration_seconds_count{job=\"checkout\"}[28d]))" }
+      ]
+    },
+    {
+      "heading": "Setting the target",
+      "blocks": [
+        { "type": "p", "text": "Do not start from what sounds impressive. Start from two questions: what do users need, and what does the system do today?" },
+        { "type": "steps", "items": [
+          "**Measure current performance** over the last month or quarter. If the service has delivered 99.7%, an SLO of 99.99% is fiction that will be in breach from its first day and ignored by the second week.",
+          "**Set the first target at or slightly below what you already achieve**, as long as users are reasonably happy at that level. An achievable SLO that people act on is worth more than an ambitious one nobody believes.",
+          "**Check it against your dependencies.** A service cannot be more available than the critical things it depends on, unless you add redundancy, caching or graceful degradation. If every request needs a database with a 99.95% objective, promising 99.99% is not credible.",
+          "**Choose a window.** A rolling window of 28 or 30 days is the common choice. Four weeks always contains the same number of weekends, which makes periods comparable. Calendar months suit reporting to the business but reset abruptly.",
+          "**Agree it with the product owner, in writing.** The SLO is a product decision about how reliable the feature needs to be. Engineering cannot set it alone.",
+          "**Review it** every quarter or so. Tighten it if users complain while you are meeting it, and loosen it if you keep missing it while nobody notices."
+        ]},
+        { "type": "callout", "kind": "tip", "text": "A useful test of whether an SLO is right: when you are just meeting it, are users broadly happy? When you are missing it, do they complain? If both answers are yes, the SLO is measuring the right thing at the right level." },
+        { "type": "code", "lang": "yaml", "caption": "An SLO recorded as code, in the OpenSLO style", "code": "apiVersion: openslo/v1\nkind: SLO\nmetadata:\n  name: checkout-availability\n  displayName: Checkout requests succeed\nspec:\n  service: checkout\n  description: Proportion of checkout API requests that do not fail with a 5xx\n  budgetingMethod: Occurrences\n  timeWindow:\n    - duration: 28d\n      isRolling: true\n  objectives:\n    - displayName: Successful requests\n      target: 0.999" }
+      ]
+    },
+    {
+      "heading": "Error budgets",
+      "blocks": [
+        { "type": "p", "text": "If the target is 99.9%, then 0.1% of events are **allowed to fail**. That allowance is the **error budget**. It is not a number to minimise. It is a resource to spend, on releases, migrations, experiments, chaos tests and planned maintenance, all of which carry some risk of failure." },
+        { "type": "code", "lang": "text", "code": "error budget (fraction)  = 1 - SLO                         99.9%  ->  0.1%\nerror budget (events)    = (1 - SLO) x valid events        10,000,000 requests  ->  10,000 may fail\nerror budget (time)      = (1 - SLO) x window              28 days  ->  40.3 minutes of full outage\n\nbudget consumed          = bad events so far / error budget in events\nbudget remaining         = 1 - budget consumed" },
+        { "type": "p", "text": "Work an example. A service receives 10 million requests in 28 days with a 99.9% SLO, so the budget is 10,000 failed requests. A bad deploy causes 2,500 errors, a dependency outage another 1,500. That is 4,000 bad events, so 40% of the budget is consumed and 60% remains. An incident in which 20% of requests fail for two hours costs far less than a total outage of the same length, and a request-based budget accounts for that correctly, which is why it is better than counting minutes of downtime." },
+        { "type": "p", "text": "**Burn rate** tells you how fast the budget is being spent, relative to the rate that would use it up exactly at the end of the window." },
+        { "type": "code", "lang": "text", "code": "burn rate = observed error rate / (1 - SLO)\n\nSLO 99.9%  ->  allowed error rate 0.1%\n  error rate 0.1%   ->  burn rate 1     budget lasts exactly the window (28 days)\n  error rate 0.2%   ->  burn rate 2     budget gone in 14 days\n  error rate 1.44%  ->  burn rate 14.4  budget gone in under 2 days\n  error rate 100%   ->  burn rate 1000  budget gone in about 40 minutes\n\ntime to exhaustion = window / burn rate" },
+        { "type": "code", "lang": "python", "code": "def error_budget_report(slo: float, valid: int, bad: int, window_days: int = 28) -> dict:\n    \"\"\"slo as a fraction, e.g. 0.999. valid/bad are event counts so far in the window.\"\"\"\n    budget_events = (1 - slo) * valid\n    consumed = bad / budget_events\n    return {\n        \"sli\": 1 - bad / valid,\n        \"budget_events\": round(budget_events),\n        \"budget_consumed\": round(consumed, 3),\n        \"budget_remaining\": round(1 - consumed, 3),\n        \"full_outage_minutes_allowed\": round((1 - slo) * window_days * 24 * 60, 1),\n    }\n\n\nprint(error_budget_report(slo=0.999, valid=10_000_000, bad=4_000))\n# sli 0.9996, budget 10000 events, 0.4 consumed, 0.6 remaining, 40.3 minutes" },
+        { "type": "p", "text": "Burn rate is the basis of good alerting, which the alerting module covers: a high burn rate for a short time deserves a page, and a modest burn rate sustained for days deserves a ticket." }
+      ]
+    },
+    {
+      "heading": "The error budget policy",
+      "blocks": [
+        { "type": "p", "text": "An SLO that changes nobody's behaviour is just a dashboard. The **error budget policy** is a short document, agreed in advance by engineering, product and management, that says what happens as the budget is spent. Agreeing it before the crisis is the point: during an incident nobody negotiates well." },
+        { "type": "code", "lang": "text", "caption": "A minimal error budget policy", "code": "Service: checkout          SLO: 99.9% availability, rolling 28 days\nOwners: checkout team (engineering), J. Rivera (product)\n\nBudget remaining > 50%\n  Normal operation. Releases proceed at will. Risky work (migrations,\n  chaos experiments) is encouraged while there is budget to absorb it.\n\nBudget remaining 0-50%\n  Releases continue. Reliability items from recent postmortems move to\n  the top of the next sprint. Risky work needs the on-call's agreement.\n\nBudget exhausted (SLO missed over the window)\n  Feature releases stop. Only reliability fixes, security patches and\n  changes required by law ship until the service is back within SLO.\n  The team spends its time on the causes identified in postmortems.\n\nA single incident consuming > 20% of the budget\n  A postmortem is mandatory, with at least one priority action item.\n\nExceptions and disputes\n  Escalate to the engineering director, who decides.\n  Outages caused by another team's service are attributed to that service." },
+        { "type": "p", "text": "Notice what the policy does to incentives. Developers want to ship, and now the way to keep shipping is to keep the service reliable, so they start asking for canaries and better tests themselves. Operators who wanted to block risky changes have no grounds to do so while budget remains. The argument about whether it is safe to release has been replaced by a number both sides accepted beforehand." },
+        { "type": "callout", "kind": "warning", "text": "A release freeze needs management backing that was secured in advance. If the first time the budget runs out someone senior overrides the policy for a deadline, everyone learns that the SLO is decoration. Better a looser SLO that is enforced than a strict one that is waived." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Write your first SLO and its budget",
+    "steps": [
+      "Choose one user journey on a service you know, such as \"log in\" or \"load the dashboard\". Describe in one sentence what success looks like to the user.",
+      "Define an availability SLI and a latency SLI for it in good-over-valid form. State explicitly which events are valid and which are good, including how you treat `4xx` responses and health checks.",
+      "From your metrics, logs or load balancer data, measure both SLIs over the last 28 days. If you have no data, state where you would measure, and why that point is close enough to the user.",
+      "Propose targets based on what you measured, and check them against the availability of the service's critical dependencies.",
+      "Calculate the error budget in events and in minutes of full outage. Then take a recent incident and work out how much of the budget it consumed.",
+      "Write a half-page error budget policy with three thresholds and a named decision-maker for disputes.",
+      "Present the SLO and the policy to a product owner or a colleague acting as one, and record what they pushed back on."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "SLI is what you measure, SLO is what you aim for, SLA is what you promise. Keep the SLO stricter than any SLA.",
+      "SLI = good events / valid events. Measure what users experience, as close to them as you can.",
+      "Latency SLIs are proportions under a threshold, never averages.",
+      "Start targets from measured history and users' needs, not from what sounds impressive.",
+      "A service cannot beat the availability of its hard dependencies without redundancy or degradation.",
+      "Error budget = 1 - SLO. It is a resource to spend on change, not a number to minimise.",
+      "Burn rate = error rate / (1 - SLO). Burn rate 1 spends the budget exactly over the window.",
+      "An SLO without an agreed, enforced error budget policy changes nothing."
+    ],
+    "groups": [
+      {
+        "title": "Formulas",
+        "items": [
+          { "syntax": "SLI = good events / valid events", "desc": "Always 0-100%, higher is better" },
+          { "syntax": "error budget = 1 - SLO", "desc": "99.9% gives 0.1%" },
+          { "syntax": "budget in events = (1 - SLO) x valid events", "desc": "10M requests at 99.9% gives 10,000" },
+          { "syntax": "budget in time = (1 - SLO) x window", "desc": "99.9% over 28 days gives 40.3 minutes" },
+          { "syntax": "budget consumed = bad events / budget in events", "desc": "4,000 / 10,000 = 40%" },
+          { "syntax": "burn rate = error rate / (1 - SLO)", "desc": "1% errors at 99.9% is a burn rate of 10" },
+          { "syntax": "time to exhaustion = window / burn rate", "desc": "28 days at burn rate 14 is 2 days" }
+        ]
+      },
+      {
+        "title": "Budget in minutes of full outage",
+        "items": [
+          { "syntax": "99% over 28 d", "desc": "403 minutes (6.7 hours)" },
+          { "syntax": "99.5% over 28 d", "desc": "201.6 minutes" },
+          { "syntax": "99.9% over 28 d", "desc": "40.3 minutes" },
+          { "syntax": "99.95% over 28 d", "desc": "20.2 minutes" },
+          { "syntax": "99.99% over 28 d", "desc": "4.03 minutes" }
+        ]
+      },
+      {
+        "title": "SLI menu",
+        "items": [
+          { "syntax": "Availability", "desc": "Proportion of valid requests served successfully" },
+          { "syntax": "Latency", "desc": "Proportion of valid requests served faster than a threshold" },
+          { "syntax": "Quality", "desc": "Proportion served without degraded content" },
+          { "syntax": "Freshness", "desc": "Proportion of data updated more recently than a threshold" },
+          { "syntax": "Correctness", "desc": "Proportion of records that produced correct output" },
+          { "syntax": "Coverage", "desc": "Proportion of input data that was processed" },
+          { "syntax": "Durability", "desc": "Proportion of stored data that can be read back" }
+        ]
+      },
+      {
+        "title": "PromQL patterns",
+        "items": [
+          { "syntax": "sum(rate(http_requests_total{code!~\"5..\"}[28d])) / sum(rate(http_requests_total[28d]))", "desc": "Availability SLI" },
+          { "syntax": "sum(rate(..._bucket{le=\"0.5\"}[28d])) / sum(rate(..._count[28d]))", "desc": "Latency SLI: proportion under 500 ms" },
+          { "syntax": "1 - SLI", "desc": "Observed error ratio" },
+          { "syntax": "(1 - SLI) / (1 - 0.999)", "desc": "Budget consumed over the same window, as a fraction" }
+        ]
+      },
+      {
+        "title": "Error budget policy skeleton",
+        "items": [
+          { "syntax": "scope", "desc": "Service, SLO, window, owners in engineering and product" },
+          { "syntax": "budget healthy", "desc": "Ship freely; risky work encouraged" },
+          { "syntax": "budget low", "desc": "Reliability items prioritised; more caution" },
+          { "syntax": "budget exhausted", "desc": "Feature freeze; only reliability and security changes" },
+          { "syntax": "large single incident", "desc": "Mandatory postmortem with priority actions" },
+          { "syntax": "escalation", "desc": "A named person who settles disputes" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Using CPU, memory or uptime of a server as an SLI, none of which users experience.",
+      "Setting 99.99% because it sounds professional, when the service has never achieved it.",
+      "Measuring latency as an average, which hides the slow requests that make users leave.",
+      "Defining dozens of SLOs, so that none of them gets attention.",
+      "Counting only minutes of total outage, which ignores partial failures affecting some users.",
+      "Writing an error budget policy that leadership overrides the first time it is triggered."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "Which of these is the best SLI for a web shop's checkout?",
+      "options": [
+        "The proportion of checkout requests that complete successfully within one second",
+        "The average CPU utilisation of the checkout servers",
+        "The number of checkout pods in the Running state",
+        "The uptime of the database server behind the checkout"
+      ],
+      "answer": 0,
+      "explain": "An SLI should track what users experience, as a ratio of good to valid events. The other three are internal signals that can look healthy while users fail, or look alarming while users are fine."
+    },
+    {
+      "q": "A service has a 99.9% SLO and serves 50 million requests in the window. How many failed requests does the error budget allow?",
+      "options": ["50,000", "5,000", "500,000", "49,950,000"],
+      "answer": 0,
+      "explain": "The budget is 1 minus 0.999, which is 0.1% of valid events. 0.001 times 50,000,000 is 50,000."
+    },
+    {
+      "q": "With a 99.9% SLO, the service is currently failing 0.5% of requests. What is the burn rate, and what does it mean?",
+      "options": [
+        "5: the budget for the whole window would be gone in a fifth of the window",
+        "0.5: the budget is being spent at half the allowed rate",
+        "50: the budget will be exhausted within a few hours",
+        "0.2: the service is five times more reliable than required"
+      ],
+      "answer": 0,
+      "explain": "Burn rate is the error rate divided by the allowed error rate: 0.5% divided by 0.1% is 5. At that rate a 28-day budget lasts 28 divided by 5, about 5.6 days."
+    },
+    {
+      "q": "A team has an SLA with customers promising 99.5% monthly availability. What should their internal SLO be?",
+      "options": [
+        "Stricter than the SLA, such as 99.9%, so there is warning before the contract is breached",
+        "Exactly the same as the SLA, so the two numbers never disagree",
+        "Looser than the SLA, such as 99%, so the team is rarely in breach internally",
+        "There is no need for an SLO once an SLA has been signed"
+      ],
+      "answer": 0,
+      "explain": "The SLO is the internal early warning. If it matched the SLA, the first sign of trouble would be owing customers compensation."
+    },
+    {
+      "q": "A team's error budget is exhausted two weeks before a planned feature launch. The agreed policy says feature releases stop. A director asks for an exception. What does SRE practice recommend?",
+      "options": [
+        "Follow the agreed policy and escalation path; routine overrides make the SLO meaningless",
+        "Grant it quietly, since launches matter more than internal metrics",
+        "Raise the SLO target temporarily so that the budget appears to recover",
+        "Stop measuring the SLI until the launch has completed"
+      ],
+      "answer": 0,
+      "explain": "The policy exists so that this decision is made calmly in advance. Exceptions should go through the named escalation path and be rare. If they are routine, everyone learns that the SLO does not matter."
+    }
+  ]
+}

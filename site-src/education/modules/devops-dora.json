@@ -1,0 +1,396 @@
+{
+  "id": "devops-dora",
+  "minutes": 25,
+  "intro": "Everything in this track, from small pull requests to pipelines to GitOps, is supposed to make delivery faster and safer. How do you know whether it is working? The DORA research programme has studied software teams for over a decade and identified a small set of metrics that reliably distinguish high-performing teams, and that predict organisational outcomes. This module explains what they measure, how to compute them from data you already have, and how to improve them without turning them into targets that people game.",
+  "objectives": [
+    "Define the four key DORA metrics and explain why throughput and stability rise together",
+    "Compute each metric from deployment and incident records you already have",
+    "Diagnose which constraint a poor metric points at, and choose the right improvement",
+    "Use the metrics to guide a team's improvement without turning them into individual targets",
+    "Recognise common ways the metrics are gamed or misread"
+  ],
+  "sections": [
+    {
+      "heading": "The four keys",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "DORA stands for DevOps Research and Assessment, the group behind the annual State of DevOps reports and the book **Accelerate**. Its central finding is a set of four metrics, in two pairs."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Metric",
+            "Measures",
+            "Question it answers"
+          ],
+          "rows": [
+            [
+              "**Deployment frequency**",
+              "Throughput",
+              "How often do we release to production?"
+            ],
+            [
+              "**Lead time for changes**",
+              "Throughput",
+              "How long from a commit to that commit running in production?"
+            ],
+            [
+              "**Change failure rate**",
+              "Stability",
+              "What fraction of deployments cause a failure that needs remediation?"
+            ],
+            [
+              "**Time to restore service**",
+              "Stability",
+              "When a deployment fails, how long until service is restored?"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "The research's most important result contradicts a deeply held intuition: **speed and stability are not a trade-off**. The teams that deploy most often are also the ones with the lowest failure rates and fastest recovery. The cause runs in one direction. Deploying often forces changes to be small, and small changes are easy to review, easy to test, unlikely to fail, and quick to diagnose and revert when they do. Large, infrequent releases bundle hundreds of changes, so something always breaks, and finding it takes a long time."
+        },
+        {
+          "type": "p",
+          "text": "Recent reports have refined the stability measures, renaming time to restore as **failed deployment recovery time** and adding a measure of unplanned **rework**. They have also discussed **reliability**, meaning whether a service meets its operational targets, as a related outcome. That last one is the subject of the SRE track. The exact benchmark figures shift from year to year, so read the current report for them and do not memorise numbers."
+        },
+        {
+          "type": "callout",
+          "kind": "note",
+          "text": "The metrics describe a **team and a service**, not individual people. Used per person they measure nothing meaningful and cause real harm."
+        }
+      ]
+    },
+    {
+      "heading": "Computing them from data you already have",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "You need only two kinds of event. A **deployment** record has a service, a timestamp, the commit that was deployed and, ideally, whether it later needed remediation. An **incident** record has a start time, a restore time and, where known, the deployment that caused it. Your pipeline and your incident tool already produce both."
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "code": "deployment frequency   = production deployments / time period\n\nlead time for changes  = median( deploy time - commit time )\n                         over every commit included in each deployment\n\nchange failure rate    = deployments needing remediation / total deployments\n                         (remediation = rollback, hotfix, forward fix, patch)\n\ntime to restore        = median( restored time - failure start time )\n                         over failures caused by a change"
+        },
+        {
+          "type": "code",
+          "lang": "sql",
+          "caption": "With a deployments table and an incidents table",
+          "code": "-- deployment frequency: deployments per week, per service\nSELECT service, date_trunc('week', deployed_at) AS week, count(*) AS deployments\nFROM deployments\nWHERE environment = 'production'\nGROUP BY service, week\nORDER BY week;\n\n-- lead time for changes: median hours from commit to production\nSELECT d.service,\n       percentile_cont(0.5) WITHIN GROUP (\n         ORDER BY extract(epoch FROM d.deployed_at - c.committed_at) / 3600\n       ) AS median_lead_time_hours\nFROM deployments d\nJOIN deployment_commits c ON c.deployment_id = d.id\nWHERE d.environment = 'production'\nGROUP BY d.service;\n\n-- change failure rate\nSELECT service,\n       avg(CASE WHEN caused_failure THEN 1.0 ELSE 0.0 END) AS change_failure_rate\nFROM deployments\nWHERE environment = 'production'\nGROUP BY service;"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Use the **median**, not the mean. One change that sat for three weeks, or one twelve-hour outage, distorts an average and hides the typical experience. Track a high percentile alongside it to see the bad cases.",
+            "Measure lead time from **commit**, not from when the ticket was created. The time before coding starts is product and planning work, which is a different and much noisier thing.",
+            "Be strict and consistent about what counts as a **failure**: a deployment that led to degraded service for users and required remediation. A failed pipeline run that never reached production is not a change failure; it is the pipeline doing its job.",
+            "Start with a spreadsheet if necessary. A rough number tracked consistently every month is far more useful than a perfect dashboard that is never built."
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "Instrumenting the pipeline",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "The most reliable source for deployment data is the pipeline itself. Emit one event at the end of every production deploy. With Git, you can list exactly which commits are new in this deployment by comparing with the previously deployed commit."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "#!/usr/bin/env bash\nset -euo pipefail\n\nservice=\"orders\"\nnew_sha=\"$(git rev-parse HEAD)\"\nprev_sha=\"$(cat .last-deployed-sha)\"          # recorded by the previous deployment\ndeployed_at=\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"\n\n# every commit that is new in this deployment, with its commit timestamp\ngit log --format='%H %cI' \"${prev_sha}..${new_sha}\" > commits.txt\n\njq -n --arg service \"$service\" --arg sha \"$new_sha\" --arg at \"$deployed_at\" \\\n  --rawfile commits commits.txt \\\n  '{service: $service, sha: $sha, deployed_at: $at, commits: ($commits | split(\"\\n\") | map(select(. != \"\")))}' \\\n  > deployment-event.json\n\ncurl -fsS -X POST -H 'Content-Type: application/json' \\\n  --data @deployment-event.json \"$METRICS_ENDPOINT\"\n\necho \"$new_sha\" > .last-deployed-sha"
+        },
+        {
+          "type": "p",
+          "text": "Tag each deployment with the commit SHA, as the artifacts module recommended, and the link from a production incident back to the change that caused it becomes a lookup instead of an investigation. Several open-source projects and most delivery platforms can compute the four keys from your Git host and incident tool directly, which is worth evaluating before you build your own."
+        }
+      ]
+    },
+    {
+      "heading": "Reading the numbers: which constraint is it?",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A metric tells you where to look, not what to do. Break lead time into its stages to find where a change spends its life. In most teams the great majority of lead time is **waiting**, not working."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Symptom",
+            "Likely constraint",
+            "What helps"
+          ],
+          "rows": [
+            [
+              "Long wait for first review",
+              "Large PRs, review is nobody's priority",
+              "Smaller PRs, a team norm for review time, pairing"
+            ],
+            [
+              "Long pipeline stage",
+              "Slow or serial tests, no caching",
+              "Caching, parallel jobs, a faster test pyramid"
+            ],
+            [
+              "Merged code waits days to ship",
+              "Manual release process, release windows, change board",
+              "Automated deploys, trunk-based development, feature flags"
+            ],
+            [
+              "Low deployment frequency",
+              "Deploys are painful or risky, so they are batched",
+              "Make deploys boring: automate, canary, fast rollback"
+            ],
+            [
+              "High change failure rate",
+              "Large changes, weak tests, staging unlike production",
+              "Smaller changes, better test coverage, progressive delivery"
+            ],
+            [
+              "Long time to restore",
+              "Slow detection, no quick rollback, unclear ownership",
+              "Alerting on symptoms, one-command rollback, runbooks, on-call"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "DORA's research also identifies the **capabilities** that drive the metrics. The technical ones are the contents of this track: version control for everything, trunk-based development, continuous integration, test automation, deployment automation, loosely coupled architecture, and monitoring. The cultural ones matter just as much: a generative, blameless culture, small batch sizes, and limited work in progress. A heavyweight external change-approval board, notably, was found to slow delivery without improving stability."
+        },
+        {
+          "type": "callout",
+          "kind": "tip",
+          "text": "Work on one constraint at a time, and re-measure. Improving a stage that is not the bottleneck changes nothing: a build that is five minutes faster is invisible if changes then wait four days for a release window."
+        }
+      ]
+    },
+    {
+      "heading": "Using the metrics without abusing them",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Goodhart's law says that when a measure becomes a target, it ceases to be a good measure. Every one of the four keys can be gamed, and will be, if people are rewarded or punished for the number."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Deployment frequency rises if you deploy empty changes, or split one release into ten.",
+            "Change failure rate falls if you stop recording incidents, or redefine \"failure\".",
+            "Time to restore falls if incidents are closed before the problem is really fixed.",
+            "Lead time falls if people commit late, keeping work hidden on their own machines."
+          ]
+        },
+        {
+          "type": "p",
+          "text": "The defences are structural. Look at **all four together**, because gaming one usually damages another: a push for frequency alone shows up as a rising failure rate. Compare a team **with its own past**, not with other teams, whose systems, constraints and definitions differ. Let teams own their numbers and choose their improvements. And never attach the metrics to individual performance reviews or bonuses."
+        },
+        {
+          "type": "p",
+          "text": "Keep them in proportion, too. The four keys measure **delivery** performance: how well you ship. They say nothing about whether you are building the right thing, whether users are happy, or whether the team is burning out. Pair them with product metrics, with the SLOs from the SRE track, and with regular conversations with the people doing the work."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Measure your own delivery, then find the bottleneck",
+    "steps": [
+      "Pick one service you work on, or a public open-source project with visible releases. Write down your team's definition of \"deployment\" and of \"change failure\" before you look at any data.",
+      "From the pipeline history or release tags, count production deployments per week for the last eight weeks.",
+      "For the last ten deployments, use `git log PREVIOUS..CURRENT --format='%H %cI'` to list the commits in each one, and compute the median time from commit to deploy.",
+      "From the incident tracker, chat history or postmortems, work out how many of those deployments needed a rollback or hotfix, and how long each restoration took.",
+      "For five recent pull requests, record the timestamps of open, first review, approval, merge and deploy. Find the stage with the longest wait.",
+      "Propose one change aimed at that stage, predict which metric it should move, and set a date to re-measure.",
+      "Add a step to your pipeline that emits a deployment event as JSON with service, SHA and timestamp, even if it only writes to a file for now."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Four keys: deployment frequency and lead time measure throughput; change failure rate and time to restore measure stability.",
+      "Speed and stability improve together. Small, frequent changes are the mechanism.",
+      "Measure from commit to production, use medians, and keep definitions consistent.",
+      "Most lead time is waiting. Find the longest wait before optimising anything.",
+      "A failed pipeline run is not a change failure; a production deployment that needed remediation is.",
+      "Metrics describe a team and a service. Never use them to rank people or compare unlike teams.",
+      "Read all four together, since gaming one shows up in another.",
+      "They measure delivery, not value. Pair them with product metrics and SLOs."
+    ],
+    "groups": [
+      {
+        "title": "Definitions",
+        "items": [
+          {
+            "syntax": "Deployment frequency",
+            "desc": "Production deployments per unit of time"
+          },
+          {
+            "syntax": "Lead time for changes",
+            "desc": "Median time from commit to running in production"
+          },
+          {
+            "syntax": "Change failure rate",
+            "desc": "Deployments needing remediation divided by all deployments"
+          },
+          {
+            "syntax": "Time to restore (failed deployment recovery time)",
+            "desc": "Median time from failure to restored service"
+          },
+          {
+            "syntax": "Throughput = frequency + lead time",
+            "desc": "How fast change flows"
+          },
+          {
+            "syntax": "Stability = failure rate + restore time",
+            "desc": "How safely change flows"
+          }
+        ]
+      },
+      {
+        "title": "Formulas",
+        "items": [
+          {
+            "syntax": "DF = count(prod deploys) / period",
+            "desc": "Report per service, per week"
+          },
+          {
+            "syntax": "LT = median(deployed_at - committed_at)",
+            "desc": "Over every commit in each deployment"
+          },
+          {
+            "syntax": "CFR = failed deploys / total deploys",
+            "desc": "Failed means it needed rollback, hotfix or patch"
+          },
+          {
+            "syntax": "MTTR = median(restored_at - failure_started_at)",
+            "desc": "Over change-induced failures"
+          },
+          {
+            "syntax": "batch size ~ commits per deployment",
+            "desc": "A useful leading indicator; smaller is safer"
+          }
+        ]
+      },
+      {
+        "title": "Getting the data",
+        "items": [
+          {
+            "syntax": "git log PREV..NEW --format='%H %cI'",
+            "desc": "Commits new in a deployment, with commit time"
+          },
+          {
+            "syntax": "git describe --tags --abbrev=0",
+            "desc": "Most recent release tag"
+          },
+          {
+            "syntax": "gh run list --workflow deploy.yml --json conclusion,createdAt",
+            "desc": "Deployment runs from GitHub Actions"
+          },
+          {
+            "syntax": "gh pr view NUMBER --json createdAt,mergedAt,reviews",
+            "desc": "Timestamps for the stages of a pull request"
+          },
+          {
+            "syntax": "percentile_cont(0.5) WITHIN GROUP (ORDER BY x)",
+            "desc": "Median in PostgreSQL"
+          },
+          {
+            "syntax": "date_trunc('week', ts)",
+            "desc": "Bucket events by week"
+          }
+        ]
+      },
+      {
+        "title": "Symptom to improvement",
+        "items": [
+          {
+            "syntax": "slow review pickup",
+            "desc": "Smaller PRs; agreed review-time norm"
+          },
+          {
+            "syntax": "slow pipeline",
+            "desc": "Cache, parallelise, trim slow tests"
+          },
+          {
+            "syntax": "merged but not shipped",
+            "desc": "Automate deployment; remove release windows; feature flags"
+          },
+          {
+            "syntax": "high failure rate",
+            "desc": "Smaller changes, better tests, canary releases"
+          },
+          {
+            "syntax": "slow restore",
+            "desc": "Symptom-based alerts, one-command rollback, runbooks"
+          }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Setting a target for one metric, which people then hit at the expense of the other three.",
+      "Using the metrics to rank individuals or to compare teams that run very different systems.",
+      "Averaging lead time, so that a single stale branch hides a healthy typical flow, or the reverse.",
+      "Counting failed CI runs as change failures, which punishes the pipeline for working.",
+      "Optimising a stage that is not the bottleneck, such as build speed when changes wait days for approval.",
+      "Treating good delivery metrics as proof that the product is succeeding."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "What did DORA's research find about the relationship between delivery speed and stability?",
+      "options": [
+        "They improve together: teams that deploy more often also fail less and recover faster",
+        "They trade off: every increase in deployment frequency raises the failure rate",
+        "They are unrelated: speed depends on tooling and stability depends on testing",
+        "Stability must be achieved first, and only then can speed be increased safely"
+      ],
+      "answer": 0,
+      "explain": "High performers do well on all four keys at once. Frequent deployment forces small batches, and small changes are easier to test, less likely to fail, and quicker to diagnose and revert."
+    },
+    {
+      "q": "A team made 40 production deployments last month. Six were rolled back and two more needed an urgent hotfix. What was the change failure rate?",
+      "options": [
+        "20%",
+        "15%",
+        "5%",
+        "25%"
+      ],
+      "answer": 0,
+      "explain": "Both rollbacks and hotfixes count as remediation, so 8 of 40 deployments failed, which is 20%."
+    },
+    {
+      "q": "Lead time for changes is a median of nine days. Breaking it down shows: coding one day, waiting for review half a day, pipeline 20 minutes, and seven days waiting for the fortnightly release window. What should the team work on?",
+      "options": [
+        "Releasing more often, by automating deploys and removing the release window",
+        "Making the pipeline faster with better caching and parallel tests",
+        "Asking reviewers to pick up pull requests within the hour",
+        "Asking developers to commit their work in smaller pieces"
+      ],
+      "answer": 0,
+      "explain": "Seven of the nine days are spent waiting for the release window. Improving any other stage cannot move the total meaningfully until that constraint is removed."
+    },
+    {
+      "q": "Management announces that teams will be ranked by deployment frequency, with bonuses attached. What is the most likely result?",
+      "options": [
+        "Teams inflate the number with trivial deployments, and it stops reflecting real delivery",
+        "All teams adopt trunk-based development and quality improves everywhere",
+        "Change failure rate falls because more deployments means more practice",
+        "Lead time rises because more approvals are needed for each deployment"
+      ],
+      "answer": 0,
+      "explain": "This is Goodhart's law. A measure tied to rewards gets gamed. The metrics work as a team's own feedback, read together, and compared with its own past."
+    },
+    {
+      "q": "Why should lead time for changes be reported as a median instead of a mean?",
+      "options": [
+        "A few extreme values would distort a mean and hide the typical experience",
+        "The median is always smaller, which makes the team's numbers look better",
+        "A mean cannot be calculated from timestamps without losing precision",
+        "DORA's definitions prohibit any statistic other than the median"
+      ],
+      "answer": 0,
+      "explain": "Delivery durations are heavily skewed: most changes are quick and a few take weeks. The median describes the typical change, and a high percentile alongside it exposes the long tail."
+    }
+  ]
+}

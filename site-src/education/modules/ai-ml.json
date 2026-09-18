@@ -1,0 +1,271 @@
+{
+  "id": "ai-ml",
+  "minutes": 35,
+  "intro": "Machine learning is a different way of writing software. Instead of coding the rules, you show the computer examples and let it work the rules out. That is powerful, and it fails in ways that ordinary programs do not: a model can score 99% in your notebook and be useless in production, and nothing crashes to warn you. This module covers the concepts that separate models that work from models that only appear to: how to split data, how to recognise overfitting and leakage, and how to choose a metric that measures what you care about.",
+  "objectives": [
+    "Describe the supervised learning workflow, and distinguish classification from regression",
+    "Split data into training, validation and test sets correctly, and explain what each is for",
+    "Diagnose underfitting and overfitting, and apply the standard remedies",
+    "Identify data leakage and prevent it with pipelines",
+    "Choose evaluation metrics that suit the problem, especially with imbalanced classes"
+  ],
+  "sections": [
+    {
+      "heading": "Learning from examples",
+      "blocks": [
+        { "type": "p", "text": "In **supervised learning** you have examples for which the right answer is known. Each example has **features**, the inputs, usually written `X`, and a **label** or target, the output, written `y`. Training finds a function that maps `X` to `y` well enough to be useful on examples it has never seen. That last clause is the entire point. Reproducing the training data is easy, and it is called a lookup table." },
+        { "type": "table", "headers": ["Task", "Predicts", "Examples"], "rows": [
+          ["**Classification**", "A category", "Spam or not; which of five failure types; will this customer churn?"],
+          ["**Regression**", "A number", "Delivery time; next hour's request rate; house price"],
+          ["**Unsupervised**", "Structure, with no labels", "Clustering similar incidents; anomaly detection; embeddings"]
+        ]},
+        { "type": "p", "text": "Most of the effort, and most of the gain, lies outside the model. Deciding what to predict, obtaining reliable labels, and building informative features usually matter far more than which algorithm you pick. A simple model on good features beats a sophisticated model on poor ones." },
+        { "type": "steps", "items": [
+          "**Frame the problem.** What decision will the prediction drive? What would a wrong answer cost, in each direction?",
+          "**Get and understand the data**, using the tools from the previous two modules. Look hard at how the labels were produced.",
+          "**Establish a baseline.** How well does a trivial rule do: always predict the majority class, or predict the same value as yesterday?",
+          "**Split the data** before doing anything else with it.",
+          "**Train** a simple model first, then more complex ones if they are needed.",
+          "**Evaluate** on data the model has never seen, with a metric that reflects the real cost.",
+          "**Deploy and monitor**, because the world changes and the model does not."
+        ]},
+        { "type": "callout", "kind": "tip", "text": "Always build the baseline. If 97% of transactions are legitimate, a model that says \"legitimate\" every time is 97% accurate and completely useless. Without that number in front of you, a 97.5% result looks like a success." }
+      ]
+    },
+    {
+      "heading": "Train, validation, test",
+      "blocks": [
+        { "type": "p", "text": "You cannot judge a model on the data it learned from, for the same reason you cannot assess a student with the exact questions they revised. Hold some data back." },
+        { "type": "table", "headers": ["Set", "Typical share", "Used for", "Rule"], "rows": [
+          ["**Training**", "60-80%", "Fitting the model's parameters", "The model sees this"],
+          ["**Validation**", "10-20%", "Comparing models and tuning settings", "You see the results, repeatedly"],
+          ["**Test**", "10-20%", "One final, honest estimate", "Touched once, at the very end"]
+        ]},
+        { "type": "p", "text": "The validation set exists because tuning is itself a form of learning. If you try fifty configurations and keep whichever scores best on the test set, you have fitted your choices to that set, and its score is no longer an honest estimate. Keep the test set locked away until you have finished making decisions." },
+        { "type": "code", "lang": "python", "code": "from sklearn.model_selection import train_test_split\n\n# first carve off the test set, then split the remainder\nX_rest, X_test, y_rest, y_test = train_test_split(\n    X, y, test_size=0.2, stratify=y, random_state=42\n)\nX_train, X_val, y_train, y_val = train_test_split(\n    X_rest, y_rest, test_size=0.25, stratify=y_rest, random_state=42\n)\n# result: 60% train, 20% validation, 20% test" },
+        { "type": "list", "items": [
+          "**`stratify=y`** keeps the class proportions the same in every split, which is essential when one class is rare.",
+          "**`random_state`** fixes the shuffle, so that results can be reproduced.",
+          "**Time-ordered data must be split by time**, not at random. Train on the past, test on the future. A random split lets the model look ahead, and produces wonderful scores that vanish in production.",
+          "**Keep groups together.** If one customer, host or patient has many rows, all of them belong in the same split. Otherwise the model recognises the individual instead of learning the pattern. Use `GroupKFold` or `GroupShuffleSplit`."
+        ]},
+        { "type": "p", "text": "With limited data, a single validation split is noisy. **k-fold cross-validation** divides the training data into k parts, trains k times, each time validating on a different part, and averages the scores. It costs k times the computation and gives a much more stable estimate, along with a sense of its variance." },
+        { "type": "code", "lang": "python", "code": "from sklearn.linear_model import LogisticRegression\nfrom sklearn.model_selection import cross_val_score\n\nscores = cross_val_score(LogisticRegression(max_iter=1000), X_rest, y_rest, cv=5, scoring=\"f1\")\nprint(f\"F1: {scores.mean():.3f} +/- {scores.std():.3f}\")" }
+      ]
+    },
+    {
+      "heading": "Underfitting and overfitting",
+      "blocks": [
+        { "type": "p", "text": "A model can fail in two opposite ways. It **underfits** when it is too simple to capture the pattern, like a straight line through curved data. It is poor on the training data and poor on new data. It **overfits** when it is flexible enough to memorise the training examples, noise included. It is excellent on the training data and poor on new data. The goal is **generalisation**, which lies between the two." },
+        { "type": "table", "headers": ["Training score", "Validation score", "Diagnosis", "Try"], "rows": [
+          ["Low", "Low", "Underfitting (high bias)", "A more flexible model, better features, less regularisation, longer training"],
+          ["High", "Much lower", "Overfitting (high variance)", "More data, a simpler model, regularisation, fewer features, early stopping"],
+          ["High", "High, close to training", "A good fit", "Confirm once on the test set"],
+          ["Suspiciously perfect", "Suspiciously perfect", "Probably leakage", "Audit the features and the split"]
+        ]},
+        { "type": "p", "text": "This is the **bias-variance trade-off**. Simple models are consistently wrong in the same way, which is bias. Flexible models are sensitive to the particular sample they were given, which is variance. The most reliable cure for overfitting is **more data**. Where that is not possible, **regularisation** penalises complexity: L2 regularisation shrinks weights towards zero, L1 drives some to exactly zero, limiting the depth of a tree stops it from carving out one leaf per example, and dropout and early stopping do the equivalent job for neural networks." },
+        { "type": "code", "lang": "python", "code": "from sklearn.metrics import f1_score\nfrom sklearn.tree import DecisionTreeClassifier\n\nfor depth in (2, 5, 10, None):\n    model = DecisionTreeClassifier(max_depth=depth, random_state=42).fit(X_train, y_train)\n    train_f1 = f1_score(y_train, model.predict(X_train))\n    val_f1 = f1_score(y_val, model.predict(X_val))\n    print(f\"depth={depth!s:>4}  train={train_f1:.3f}  val={val_f1:.3f}\")\n\n# typical pattern: training score climbs to 1.000 as depth grows,\n# while the validation score peaks and then falls. The peak is the depth to use." },
+        { "type": "p", "text": "Always compare the two scores side by side. A training score alone tells you nothing, and the gap between the two tells you nearly everything." }
+      ]
+    },
+    {
+      "heading": "Data leakage",
+      "blocks": [
+        { "type": "p", "text": "**Leakage** means that information which will not be available at prediction time has found its way into training. The model learns to exploit it, scores brilliantly in evaluation, and fails in production. It is the most common reason that impressive results do not survive deployment, and it is hard to spot because nothing looks broken." },
+        { "type": "list", "items": [
+          "**Target leakage.** A feature that is a consequence of the label. Predicting whether an incident will be severe, using a `postmortem_written` column. Predicting churn, using `account_closed_date`.",
+          "**Preprocessing leakage.** Calculating a scaler's mean, or an imputer's fill value, on the whole dataset before splitting it. The test set's statistics have leaked into training.",
+          "**Temporal leakage.** Using data from after the moment of prediction, or splitting a time series at random.",
+          "**Duplicate and group leakage.** The same record, or the same customer, appearing in both the training and the test set.",
+          "**Selection leakage.** Choosing features by their correlation with the label, using all the data, before cross-validating."
+        ]},
+        { "type": "p", "text": "The test for any feature is a single question: **would I know this value at the moment I need to make the prediction?** The structural defence against preprocessing leakage is a **pipeline**, which bundles the preprocessing with the model. Calling `fit` learns the preprocessing statistics from the training data only, and the identical transformation is then applied to validation, test and production data." },
+        { "type": "code", "lang": "python", "code": "from sklearn.compose import ColumnTransformer\nfrom sklearn.impute import SimpleImputer\nfrom sklearn.linear_model import LogisticRegression\nfrom sklearn.pipeline import Pipeline\nfrom sklearn.preprocessing import OneHotEncoder, StandardScaler\n\nnumeric = [\"latency_ms\", \"payload_kb\", \"requests_last_hour\"]\ncategorical = [\"plan\", \"region\"]\n\npreprocess = ColumnTransformer([\n    (\"num\", Pipeline([(\"impute\", SimpleImputer(strategy=\"median\")),\n                      (\"scale\", StandardScaler())]), numeric),\n    (\"cat\", OneHotEncoder(handle_unknown=\"ignore\"), categorical),\n])\n\nmodel = Pipeline([\n    (\"preprocess\", preprocess),\n    (\"classifier\", LogisticRegression(max_iter=1000, class_weight=\"balanced\")),\n])\n\nmodel.fit(X_train, y_train)            # statistics learned from training data ONLY\nval_predictions = model.predict(X_val) # the same transformation is applied, not re-fitted" },
+        { "type": "p", "text": "A pipeline has an operational benefit too. It is a single object that you save and deploy, so the preprocessing in production is guaranteed to match training. A mismatch between the two, known as **training-serving skew**, is a classic production failure, and the MLOps module returns to it." }
+      ]
+    },
+    {
+      "heading": "Choosing the metric",
+      "blocks": [
+        { "type": "p", "text": "**Accuracy**, the share of predictions that are correct, is the natural first metric and frequently the wrong one. When classes are imbalanced it rewards ignoring the rare class, which is usually the one you care about. Look instead at the **confusion matrix**, which counts each kind of outcome." },
+        { "type": "code", "lang": "text", "code": "                    predicted positive     predicted negative\nactually positive   TP  true positive      FN  false negative  (missed)\nactually negative   FP  false positive     TN  true negative\n                        (false alarm)\n\nprecision = TP / (TP + FP)      of everything flagged, how much was real?\nrecall    = TP / (TP + FN)      of everything real, how much was caught?\nF1        = 2 x precision x recall / (precision + recall)\naccuracy  = (TP + TN) / total\n\nExample: 1,000 transactions, 20 of them fraud. The model flags 30, of which 15 are fraud.\n  TP = 15   FP = 15   FN = 5   TN = 965\n  precision = 15 / 30 = 0.50      recall = 15 / 20 = 0.75\n  F1 = 2 x 0.50 x 0.75 / 1.25 = 0.60      accuracy = 980 / 1000 = 0.98" },
+        { "type": "p", "text": "Accuracy of 98% sounds excellent, and \"never flag anything\" would also score 98%. Precision and recall tell the real story: half the alarms are false, and a quarter of the fraud gets through. This is the base-rate effect from the maths module, and it is the same trade-off as alert precision and recall in the SRE track." },
+        { "type": "p", "text": "Precision and recall pull against each other. Most classifiers output a probability, and you choose the **threshold** above which to call something positive. Lower it and you catch more, which raises recall, while raising more false alarms, which lowers precision. **Which one matters more is a business decision about the cost of each kind of error.** Missing a cancer is worse than a false alarm, so favour recall. Blocking a legitimate customer's payment is costly, so favour precision." },
+        { "type": "code", "lang": "python", "code": "from sklearn.metrics import (average_precision_score, classification_report,\n                             confusion_matrix, roc_auc_score)\n\nproba = model.predict_proba(X_val)[:, 1]          # probability of the positive class\n\nprint(confusion_matrix(y_val, proba >= 0.5))\nprint(classification_report(y_val, proba >= 0.5, digits=3))\n\nprint(\"ROC AUC:\", roc_auc_score(y_val, proba))              # threshold-free ranking quality\nprint(\"PR AUC: \", average_precision_score(y_val, proba))    # better when positives are rare\n\nfor threshold in (0.3, 0.5, 0.7):                 # choose the operating point deliberately\n    print(threshold, confusion_matrix(y_val, proba >= threshold).ravel())" },
+        { "type": "table", "headers": ["Metric", "Use when"], "rows": [
+          ["Accuracy", "Classes are balanced and all errors cost the same"],
+          ["Precision, recall, F1", "Classes are imbalanced, or the two kinds of error cost differently"],
+          ["ROC AUC", "Comparing how well models rank, independent of any threshold"],
+          ["PR AUC (average precision)", "The positive class is rare; more informative than ROC AUC there"],
+          ["MAE (mean absolute error)", "Regression; robust, and in the target's own units"],
+          ["RMSE (root mean squared error)", "Regression, where large errors are disproportionately bad"],
+          ["R squared", "Regression; share of variance explained, relative to predicting the mean"]
+        ]},
+        { "type": "callout", "kind": "warning", "text": "A model's score on a frozen test set is a snapshot. In production, the data **drifts**: user behaviour changes, a new product launches, an upstream system changes a field's format. Performance decays silently, with no error and no crash. Monitoring predictions and input distributions is part of the job, and the final stage of this track covers it." }
+      ]
+    },
+    {
+      "heading": "Which model?",
+      "blocks": [
+        { "type": "p", "text": "Start simple, and add complexity only when validation results justify it." },
+        { "type": "table", "headers": ["Model", "Good for", "Notes"], "rows": [
+          ["Linear / logistic regression", "A strong, fast, interpretable baseline", "Needs scaled features; cannot learn interactions unless you add them"],
+          ["Decision tree", "Explainable rules", "Overfits badly alone; limit the depth"],
+          ["Random forest", "Tabular data, with little tuning", "Averages many trees; robust; gives feature importances"],
+          ["Gradient boosting (XGBoost, LightGBM)", "The best results on most tabular data", "Builds trees one after another, each fixing the last one's errors; needs tuning"],
+          ["k-nearest neighbours", "Small data; similarity search", "Slow at prediction time; sensitive to scaling"],
+          ["Neural networks", "Images, audio, text and very large datasets", "Data-hungry and expensive; the next module"]
+        ]},
+        { "type": "p", "text": "For structured, tabular data, which is most business and operational data, gradient-boosted trees remain the usual winner, and deep learning rarely helps. For images, audio and language, neural networks dominate, and in practice you will seldom train one from scratch. You will adapt a pretrained model, which is where the next module begins." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Build an honest classifier",
+    "steps": [
+      "Choose a binary classification dataset with imbalanced classes. scikit-learn's `load_breast_cancer` works, as does any public churn or fraud dataset. State what a false positive and a false negative would each cost.",
+      "Compute the baseline: the accuracy of always predicting the majority class. Write it down where you will see it.",
+      "Split into 60% training, 20% validation and 20% test, with `stratify` and a fixed `random_state`. Put the test set aside.",
+      "Build a `Pipeline` with imputation, scaling and logistic regression. Fit it, and report precision, recall, F1 and PR AUC on the validation set.",
+      "Train decision trees with `max_depth` of 2, 5, 10 and unlimited. Tabulate the training and validation F1 for each, and identify where overfitting begins.",
+      "Create leakage on purpose, twice. First add a feature that is the label plus a little random noise, observe the perfect score, and explain how you would catch it in a real project. Then scale the whole dataset before splitting, and compare the validation score with the scaler inside the pipeline.",
+      "Print the confusion matrix at thresholds 0.3, 0.5 and 0.7. Choose the threshold that suits the costs you stated in step one, and justify it.",
+      "Evaluate your final model on the test set, once. Compare the result with the validation score and with the baseline."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "The goal is generalisation: performance on data the model has never seen.",
+      "Always compute a trivial baseline first. A score means nothing without one.",
+      "Train to fit, validate to choose, test once at the very end.",
+      "Split by time for time series, keep groups together, and stratify rare classes.",
+      "Compare training and validation scores. A large gap is overfitting; two low scores are underfitting; perfection is probably leakage.",
+      "For every feature, ask whether you would know it at prediction time. Put preprocessing inside a pipeline.",
+      "Accuracy misleads on imbalanced data. Use precision, recall, F1 and PR AUC.",
+      "The threshold is a business decision about the cost of each kind of error."
+    ],
+    "groups": [
+      {
+        "title": "Metric formulas",
+        "items": [
+          { "syntax": "accuracy = (TP + TN) / total", "desc": "Share correct; misleading with rare classes" },
+          { "syntax": "precision = TP / (TP + FP)", "desc": "Of those flagged, how many were real" },
+          { "syntax": "recall = TP / (TP + FN)", "desc": "Of the real ones, how many were caught" },
+          { "syntax": "F1 = 2PR / (P + R)", "desc": "Harmonic mean of precision and recall" },
+          { "syntax": "false positive rate = FP / (FP + TN)", "desc": "Share of negatives wrongly flagged" },
+          { "syntax": "MAE = mean(|y - y_hat|)", "desc": "Regression error in the target's units" },
+          { "syntax": "RMSE = sqrt(mean((y - y_hat)^2))", "desc": "Regression error that punishes large misses" }
+        ]
+      },
+      {
+        "title": "Splitting and validation",
+        "items": [
+          { "syntax": "train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)", "desc": "Reproducible, stratified split" },
+          { "syntax": "cross_val_score(model, X, y, cv=5, scoring=\"f1\")", "desc": "k-fold cross-validation" },
+          { "syntax": "StratifiedKFold(n_splits=5)", "desc": "Folds that keep the class proportions" },
+          { "syntax": "TimeSeriesSplit(n_splits=5)", "desc": "Always train on the past and validate on the future" },
+          { "syntax": "GroupKFold(n_splits=5)", "desc": "Keep all rows of one group in the same fold" },
+          { "syntax": "GridSearchCV(model, param_grid, cv=5)", "desc": "Tune settings with cross-validation" }
+        ]
+      },
+      {
+        "title": "scikit-learn workflow",
+        "items": [
+          { "syntax": "model.fit(X_train, y_train)", "desc": "Learn from the training data" },
+          { "syntax": "model.predict(X)", "desc": "Predicted classes or values" },
+          { "syntax": "model.predict_proba(X)[:, 1]", "desc": "Probability of the positive class" },
+          { "syntax": "Pipeline([(\"scale\", StandardScaler()), (\"clf\", LogisticRegression())])", "desc": "Preprocessing and model as one object" },
+          { "syntax": "ColumnTransformer([...])", "desc": "Different preprocessing for different columns" },
+          { "syntax": "OneHotEncoder(handle_unknown=\"ignore\")", "desc": "Encode categories; tolerate unseen ones" },
+          { "syntax": "class_weight=\"balanced\"", "desc": "Weight rare classes more heavily in training" },
+          { "syntax": "joblib.dump(model, \"model.joblib\")", "desc": "Save the whole fitted pipeline" }
+        ]
+      },
+      {
+        "title": "Evaluation",
+        "items": [
+          { "syntax": "confusion_matrix(y_true, y_pred)", "desc": "[[TN, FP], [FN, TP]] for binary labels 0 and 1" },
+          { "syntax": "classification_report(y_true, y_pred)", "desc": "Precision, recall and F1 for each class" },
+          { "syntax": "roc_auc_score(y_true, proba)", "desc": "Ranking quality; 0.5 is random" },
+          { "syntax": "average_precision_score(y_true, proba)", "desc": "PR AUC; better for rare positives" },
+          { "syntax": "proba >= threshold", "desc": "Choose your own operating point; 0.5 is only a default" }
+        ]
+      },
+      {
+        "title": "Diagnosis",
+        "items": [
+          { "syntax": "train low, val low", "desc": "Underfit: add capacity, features or training time" },
+          { "syntax": "train high, val low", "desc": "Overfit: more data, simpler model, regularisation" },
+          { "syntax": "both nearly perfect", "desc": "Suspect leakage before celebrating" },
+          { "syntax": "val good, production poor", "desc": "Leakage, training-serving skew, or drift" },
+          { "syntax": "val varies a lot between folds", "desc": "Too little data, or an unstable model" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Reporting accuracy on an imbalanced problem without comparing it with the majority-class baseline.",
+      "Tuning against the test set until it stops being an honest estimate.",
+      "Splitting time-ordered data at random, so that the model trains on the future.",
+      "Fitting a scaler or an imputer on all the data before splitting.",
+      "Including a feature that is only known after the outcome has happened.",
+      "Accepting the default 0.5 threshold without considering what each kind of error costs."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "In a dataset, 99% of servers are healthy and 1% will fail within a day. A model predicts \"healthy\" for every server. What are its accuracy and its recall for failures?",
+      "options": [
+        "Accuracy 99%, recall 0%",
+        "Accuracy 1%, recall 100%",
+        "Accuracy 99%, recall 99%",
+        "Accuracy 50%, recall 50%"
+      ],
+      "answer": 0,
+      "explain": "It is right about every healthy server, so accuracy is 99%. It never predicts a failure, so it catches none of them. This is why accuracy misleads when the important class is rare."
+    },
+    {
+      "q": "A model scores 0.99 F1 on the training set and 0.71 on the validation set. What is the diagnosis, and what should you try?",
+      "options": [
+        "Overfitting: get more data, simplify the model, or add regularisation",
+        "Underfitting: use a more complex model and train it for longer",
+        "A good fit: evaluate it on the test set and then deploy it",
+        "Data leakage: remove the features that correlate with the label"
+      ],
+      "answer": 0,
+      "explain": "A large gap between training and validation means the model has memorised the training data. Underfitting would show two low scores, and leakage would normally inflate the validation score too."
+    },
+    {
+      "q": "You want to predict whether a support ticket will be escalated. Which feature would leak the target?",
+      "options": [
+        "The number of escalation notes added to the ticket",
+        "The customer's subscription plan at the time of creation",
+        "The length of the ticket's initial description in words",
+        "The hour of the day at which the ticket was opened"
+      ],
+      "answer": 0,
+      "explain": "Escalation notes exist only after an escalation has happened, so they would not be available when the prediction is needed. The other three are known at the moment the ticket is created."
+    },
+    {
+      "q": "Why should a `StandardScaler` be placed inside a scikit-learn `Pipeline`, and not applied to the whole dataset before splitting?",
+      "options": [
+        "So its mean and spread come from training data only, not from validation or test data",
+        "So the scaler runs faster, because it then processes fewer rows at a time",
+        "Because scikit-learn models refuse any data that was scaled outside a pipeline",
+        "So the test data ends up on a different scale, which makes the evaluation harder"
+      ],
+      "answer": 0,
+      "explain": "Fitting the scaler on everything lets statistics from the held-out data influence training, which is preprocessing leakage. In a pipeline, `fit` uses training data only, and the same transformation is applied elsewhere."
+    },
+    {
+      "q": "A cancer screening model can be tuned with its decision threshold. Missing a cancer is far worse than sending a healthy person for a second test. How should the threshold be set?",
+      "options": [
+        "Lower, to raise recall, accepting more false positives",
+        "Higher, to raise precision, accepting more missed cases",
+        "Exactly 0.5, since that is the statistically correct value",
+        "At whatever value gives the highest overall accuracy"
+      ],
+      "answer": 0,
+      "explain": "When false negatives are the costly error, you favour recall, which means flagging more cases by lowering the threshold. The right operating point follows from the costs, not from a default."
+    }
+  ]
+}

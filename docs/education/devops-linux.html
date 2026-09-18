@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Linux &amp; the command line — DevOps | ThavionAI Education</title>
+  <meta name="description" content="Filesystems, processes, permissions, systemd, and living comfortably in a shell." />
+  <meta property="og:title" content="Linux &amp; the command line — ThavionAI Education" />
+  <meta property="og:description" content="Filesystems, processes, permissions, systemd, and living comfortably in a shell." />
+  <meta property="og:type" content="article" />
+  <link rel="canonical" href="https://thavionai.com/education/devops-linux.html" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-devops" data-module="devops-linux">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><div class="nav-logo-icon">T</div>ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html#features">Features</a>
+    <a href="../index.html#products">Products</a>
+    <a href="../education.html" class="active">Education</a>
+    <a href="../index.html#about">About</a>
+    <a href="../index.html#pricing">Pricing</a>
+    <a href="../index.html#contact" class="nav-cta">Contact Us</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#devops">DevOps</a> › Stage 1: Foundations</div>
+    <h1>Linux &amp; the command line</h1>
+    <p class="lede">Filesystems, processes, permissions, systemd, and living comfortably in a shell.</p>
+    <div class="meta">
+      <span class="chip">Beginner</span>
+      <span class="chip">~30 min read</span>
+      <span class="chip">Module 1 of 17</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">Almost everything you will deploy runs on Linux: containers, Kubernetes nodes, CI runners, and most cloud servers. When a deployment fails at 2 a.m. there is no GUI, only a shell. This module gives you the working model of a Linux system that every later module assumes: where things live, who is allowed to touch them, what is running, and how to find out why it broke.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Navigate the filesystem and know what belongs in <code>/etc</code>, <code>/var</code>, <code>/usr</code>, <code>/home</code> and <code>/tmp</code></li><li>Read and change file permissions and ownership, in both symbolic and octal form</li><li>Inspect, signal, and background processes, and manage long-running services with <code>systemctl</code></li><li>Combine small tools with pipes and redirection to answer real questions about a system</li><li>Find the cause of a failing service from its logs using <code>journalctl</code></li></ul>
+    </div>
+    <section id="the-filesystem-is-a-single-tree"><h2>The filesystem is a single tree</h2>
+    <p>Linux has no drive letters. Everything hangs off one root directory, <code>/</code>, and extra disks, network shares, and even kernel information are <strong>mounted</strong> somewhere inside that tree. The layout is a convention called the Filesystem Hierarchy Standard, and learning it means you can sit down at any server and know where to look.</p>
+    <div class="table-wrap"><table><thead><tr><th>Path</th><th>What lives there</th></tr></thead><tbody><tr><td><code>/etc</code></td><td>System-wide configuration, as plain text. The first place to look when behaviour is wrong.</td></tr><tr><td><code>/var</code></td><td>Data that changes while the system runs: logs in <code>/var/log</code>, package caches, databases.</td></tr><tr><td><code>/usr</code></td><td>Installed programs and libraries (<code>/usr/bin</code>, <code>/usr/lib</code>). Read-only in normal operation.</td></tr><tr><td><code>/home</code></td><td>One directory per human user. <code>root</code>'s home is <code>/root</code>.</td></tr><tr><td><code>/tmp</code></td><td>Scratch space, usually wiped on reboot. Never store anything you need here.</td></tr><tr><td><code>/proc</code>, <code>/sys</code></td><td>Not real files: a live view into the kernel and hardware.</td></tr></tbody></table></div>
+    <p>Paths that start with <code>/</code> are <strong>absolute</strong>; anything else is <strong>relative</strong> to your current directory. Scripts and cron jobs should use absolute paths, because you cannot be sure which directory they start in.</p>
+    <div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>pwd                       # where am I?
+ls -lah /var/log          # long listing, all files, human-readable sizes
+cd /etc &amp;&amp; ls | head      # move, then peek at the first ten entries
+df -h                     # free space per mounted filesystem
+du -sh /var/log/* | sort -h | tail -5   # the five biggest things in /var/log</code></pre></div>
+    <div class="callout callout-tip"><strong>Tip</strong><p>A full disk is one of the most common causes of mysterious outages. <code>df -h</code> to find the full filesystem, then <code>du -sh * | sort -h</code> to walk down to the culprit, is a routine worth memorising.</p></div></section>
+  <section id="users-permissions-and-ownership"><h2>Users, permissions, and ownership</h2>
+    <p>Every file has an owning <strong>user</strong>, an owning <strong>group</strong>, and three sets of permission bits: for the user, the group, and everyone else. Each set can grant <strong>r</strong>ead, <strong>w</strong>rite, and e<strong>x</strong>ecute. <code>ls -l</code> shows them as a ten-character string such as <code>-rwxr-x---</code>: a type flag, then three triplets.</p>
+    <p>The octal form is the same information as numbers: read is 4, write is 2, execute is 1, and you add them up per triplet. So <code>rwx</code> is 7, <code>r-x</code> is 5, <code>r--</code> is 4, and <code>-rwxr-x---</code> is <code>750</code>. On a directory, execute means permission to enter it and read means permission to list it, which is why a directory with <code>r--</code> alone is nearly useless.</p>
+    <div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>ls -l deploy.sh                 # -rw-r--r-- 1 alice dev 412 Mar  3 10:12 deploy.sh
+chmod u+x deploy.sh             # symbolic: add execute for the owning user
+chmod 640 secrets.env           # octal: owner rw, group r, others nothing
+chown alice:dev secrets.env     # change owner and group (needs root)
+chmod -R g+rX /srv/app          # capital X: execute only on directories
+id                              # which user am I, and which groups am I in?</code></pre></div>
+    <p>The <code>root</code> user bypasses all of these checks, which is exactly why you should not work as root. Use <code>sudo</code> to run one command with elevated rights: it is logged, it can be limited per user, and it forces a moment of thought.</p>
+    <div class="callout callout-warning"><strong>Watch out</strong><p><code>chmod 777</code> makes a permission error disappear by letting every user on the machine modify the file. It is almost never the right fix. Work out which user the process runs as (<code>ps -o user= -p PID</code>) and grant that user, or its group, the minimum it needs.</p></div></section>
+  <section id="processes-and-signals"><h2>Processes and signals</h2>
+    <p>A running program is a <strong>process</strong> with a numeric ID (PID), a parent, an owning user, and an exit code when it finishes. An exit code of <code>0</code> means success and anything else means failure. CI pipelines, shell <code>&amp;&amp;</code> chains, and Kubernetes probes all depend on that one convention.</p>
+    <div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>ps aux | head                   # every process, with owner, CPU and memory
+ps -ef --forest | less          # the same, drawn as a parent/child tree
+pgrep -a nginx                  # PIDs and command lines matching a name
+top                             # live view; press q to quit (htop is friendlier)
+ss -tulpn                       # which process is listening on which port
+echo $?                         # exit code of the last command</code></pre></div>
+    <p>You do not kill a process, you send it a <strong>signal</strong>. <code>SIGTERM</code> (15) is a polite request to shut down, and a well-written program catches it, finishes in-flight work, and exits. <code>SIGKILL</code> (9) cannot be caught: the kernel removes the process immediately, with no chance to flush data or release locks. Always try <code>SIGTERM</code> first.</p>
+    <div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>kill 4242            # SIGTERM by default
+kill -9 4242         # SIGKILL: last resort only
+kill -HUP 4242       # many daemons reload their config on SIGHUP
+sleep 600 &amp;          # trailing &amp; runs a job in the background
+jobs                 # list background jobs of this shell
+fg %1                # bring job 1 back to the foreground</code></pre></div>
+    <div class="callout callout-note"><strong>Note</strong><p>This matters directly for containers. When Kubernetes stops a pod it sends <code>SIGTERM</code>, waits for the grace period (30 seconds by default), then sends <code>SIGKILL</code>. An app that ignores <code>SIGTERM</code> drops requests on every deploy.</p></div></section>
+  <section id="services-with-systemd"><h2>Services with systemd</h2>
+    <p>On nearly every modern distribution, long-running services are supervised by <strong>systemd</strong>. It starts them at boot in dependency order, restarts them when they crash, and captures their output. You talk to it with <code>systemctl</code>, and each service is described by a <strong>unit file</strong> ending in <code>.service</code>.</p>
+    <div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>systemctl status nginx          # running? since when? last log lines
+sudo systemctl restart nginx    # stop, then start
+sudo systemctl reload nginx     # re-read config without dropping connections
+sudo systemctl enable --now nginx   # start at boot AND start right now
+systemctl list-units --type=service --state=failed
+systemctl cat nginx             # show the unit file that is actually in effect</code></pre></div>
+    <p><code>start</code> and <code>enable</code> are different things. <code>start</code> affects this moment; <code>enable</code> affects the next boot. A service that was started but never enabled works perfectly until the server reboots, a classic cause of an outage after routine patching.</p>
+    <div class="code"><div class="code-cap">A minimal unit file: /etc/systemd/system/myapp.service</div><div class="code-head"><span>ini</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>[Unit]
+Description=My web app
+After=network-online.target
+
+[Service]
+User=myapp
+WorkingDirectory=/srv/myapp
+EnvironmentFile=/etc/myapp/env
+ExecStart=/srv/myapp/bin/server --port 8080
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target</code></pre></div>
+    <p>After creating or editing a unit file, run <code>sudo systemctl daemon-reload</code> so systemd re-reads it. Note the <code>User=</code> line: the service runs as an unprivileged account, not as root.</p></section>
+  <section id="pipes-redirection-and-the-text-toolkit"><h2>Pipes, redirection, and the text toolkit</h2>
+    <p>The Unix design idea is many small programs that each do one thing, connected by <strong>pipes</strong>. Every process has three standard streams: stdin (0), stdout (1), and stderr (2). The <code>|</code> operator connects one program's stdout to the next one's stdin; <code>&gt;</code> and <code>&gt;&gt;</code> send a stream to a file.</p>
+    <figure class="diagram" id="fig-pipes-streams"><div class="diagram-scroll"><svg viewBox="0 0 910 248" role="img" aria-label="A pipeline of three processes: awk, sort and uniq. The terminal or a file provides stdin to awk. awk&#x27;s stdout is piped into sort, sort&#x27;s stdout into uniq, and uniq&#x27;s stdout goes to the terminal or a file. Each process&#x27;s stderr goes separately to the terminal." style="width:100%;max-width:910px;min-width:540px;height:auto;display:block"><defs><marker id="pipes-streams-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="pipes-streams-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="pipes-streams-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="pipes-streams-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="pipes-streams-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><polyline points="171.0,70.0 201.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#pipes-streams-arrow-default)"/><rect x="177.9" y="24.0" width="16.1" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">&lt;</text><polyline points="341.0,70.0 371.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#pipes-streams-arrow-default)"/><rect x="299.1" y="24.0" width="113.7" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">| stdout to stdin</text><polyline points="511.0,70.0 541.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#pipes-streams-arrow-default)"/><rect x="518.0" y="24.0" width="16.1" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">|</text><polyline points="681.0,70.0 711.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#pipes-streams-arrow-default)"/><rect x="669.6" y="24.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="696.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">&gt; or &gt;&gt;</text><polyline points="291.0,98.0 291.0,198.0 371.0,198.0" fill="none" style="stroke:rgba(148,163,184,0.55)" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#pipes-streams-arrow-muted)"/><rect x="294.0" y="140.0" width="46.6" height="16" rx="4" class="dg-label-bg"/><text x="298.0" y="148.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">errors</text><polyline points="591.0,98.0 591.0,158.0 511.0,158.0" fill="none" style="stroke:rgba(148,163,184,0.55)" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#pipes-streams-arrow-muted)"/><path d="M31,49.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M31,49.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">access.log</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">stdin (0)</text><rect x="201" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">awk</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">&#x27;{print $1}&#x27;</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="441.0" y="70.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">sort</text><rect x="541" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="611.0" y="70.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">uniq -c</text><rect x="711" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="781.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Terminal or file</text><text x="781.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">stdout (1)</text><rect x="371" y="150.0" width="140" height="56" rx="8" class="dg-node dg-muted"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text2)">Terminal</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">stderr (2), unless 2&gt;</text></svg></div><figcaption>Every process has three streams, and a pipeline connects one process's stdout to the next one's stdin, while stderr from each still reaches the terminal unless it is redirected.</figcaption></figure>
+    <div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>grep -ri "timeout" /etc/nginx/          # recursive, case-insensitive search
+grep -c " 500 " access.log               # count matching lines
+tail -f /var/log/syslog                  # follow a file as it grows
+
+# top 5 client IPs in a web access log
+awk '{print $1}' access.log | sort | uniq -c | sort -rn | head -5
+
+./backup.sh &gt; backup.log 2&gt;&amp;1            # stdout AND stderr into one file
+./backup.sh 2&gt; /dev/null                 # discard errors only
+find /var/log -name "*.gz" -mtime +30    # files older than 30 days</code></pre></div>
+    <p>Read that log pipeline left to right: take column one, sort so identical lines sit together, collapse them with a count, sort numerically in reverse, keep five. Nearly every investigation you do on a server is some variation of <strong>filter, extract, count, sort</strong>.</p>
+    <div class="callout callout-tip"><strong>Tip</strong><p>Order matters in <code>&gt; file 2&gt;&amp;1</code>. It means: point stdout at the file, then point stderr at wherever stdout currently goes. Written the other way round, <code>2&gt;&amp;1 &gt; file</code>, stderr still goes to the terminal.</p></div></section>
+  <section id="finding-out-why-it-broke"><h2>Finding out why it broke</h2>
+    <p>systemd collects the output of every service in the <strong>journal</strong>. <code>journalctl</code> queries it, and its filters are what turn a wall of text into an answer.</p>
+    <div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>journalctl -u nginx --since "10 min ago"   # one service, recent window
+journalctl -u nginx -f                      # follow live
+journalctl -p err -b                        # errors and worse, since this boot
+journalctl -k | tail -50                    # kernel messages (OOM kills show here)
+dmesg -T | grep -i "out of memory"          # did the kernel kill something?</code></pre></div>
+    <p>A reliable order of attack for "the service is down":</p>
+    <ol><li><code>systemctl status NAME</code>: is it running, failed, or restarting in a loop? Note the exit code.</li><li><code>journalctl -u NAME --since "15 min ago"</code>: read the last lines before it stopped. The real error is usually the first one, not the last.</li><li>Check resources: <code>df -h</code> for disk, <code>free -h</code> for memory, <code>journalctl -k</code> for OOM kills.</li><li>Check the network: is it listening (<code>ss -tulpn</code>), and can you reach it locally (<code>curl -v localhost:8080</code>)?</li><li>Only then change something, one thing at a time, and watch the log while you do it.</li></ol></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Run and break your own service</h2>
+    <ol><li>Get a Linux shell you can safely damage: a cloud free-tier VM, or locally with <code>docker run -it --rm ubuntu bash</code> (for the systemd steps use a VM or Multipass).</li><li>Create a user <code>myapp</code> with <code>sudo useradd --system --create-home myapp</code>, and a directory <code>/srv/myapp</code> owned by it with mode <code>750</code>.</li><li>Write a unit file that runs <code>python3 -m http.server 8080</code> as <code>myapp</code> from <code>/srv/myapp</code>. Run <code>daemon-reload</code>, then <code>enable --now</code>, and prove it works with <code>curl localhost:8080</code>.</li><li>Find its PID with <code>pgrep</code>, send it <code>SIGKILL</code>, and watch systemd restart it. Find the restart in <code>journalctl -u myapp</code>.</li><li>Break it on purpose: change <code>User=</code> to a user that does not exist, restart, and diagnose it using only <code>systemctl status</code> and <code>journalctl</code>.</li><li>Write a one-line pipeline that lists the five largest files under <code>/var</code>, and another that counts how many processes each user is running.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Linux &amp; the command line — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>The filesystem map: config in <code>/etc</code>, changing data and logs in <code>/var</code>, programs in <code>/usr</code>.</li><li>Permission triplets and octal: r=4, w=2, x=1, so <code>750</code> is <code>rwxr-x---</code>. On directories, x means "may enter".</li><li>Exit code <code>0</code> is success, anything else is failure. All automation is built on this.</li><li><code>SIGTERM</code> asks, <code>SIGKILL</code> forces. Always try <code>SIGTERM</code> first.</li><li><code>systemctl start</code> is for now, <code>systemctl enable</code> is for the next boot. You usually want both.</li><li>Debugging order: status, then logs, then disk and memory, then network, then change one thing.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Navigate and inspect</h3><table><tbody><tr><td><code>ls -lah PATH</code></td><td>Long listing including hidden files, human-readable sizes</td></tr><tr><td><code>df -h</code></td><td>Free space per filesystem</td></tr><tr><td><code>du -sh * | sort -h</code></td><td>Size of each item here, smallest to largest</td></tr><tr><td><code>find PATH -name "*.log" -mtime +7</code></td><td>Files by name pattern, modified more than 7 days ago</td></tr><tr><td><code>less FILE</code></td><td>Page through a file; <code>/text</code> searches, <code>q</code> quits</td></tr><tr><td><code>tail -f FILE</code></td><td>Follow a file as new lines arrive</td></tr></tbody></table></div><div class="cheat-group"><h3>Permissions and users</h3><table><tbody><tr><td><code>chmod u+x FILE</code></td><td>Add execute for the owner (symbolic form)</td></tr><tr><td><code>chmod 640 FILE</code></td><td>Owner rw, group r, others none (octal form)</td></tr><tr><td><code>chown USER:GROUP FILE</code></td><td>Change owner and group; add <code>-R</code> for a whole tree</td></tr><tr><td><code>id</code></td><td>Current user, UID, and group memberships</td></tr><tr><td><code>sudo -u USER CMD</code></td><td>Run one command as another user</td></tr></tbody></table></div><div class="cheat-group"><h3>Processes</h3><table><tbody><tr><td><code>ps aux</code></td><td>Every process with owner, CPU, memory</td></tr><tr><td><code>pgrep -a NAME</code></td><td>PIDs and command lines matching a name</td></tr><tr><td><code>kill PID</code></td><td>Send <code>SIGTERM</code> (graceful)</td></tr><tr><td><code>kill -9 PID</code></td><td>Send <code>SIGKILL</code> (cannot be caught; last resort)</td></tr><tr><td><code>ss -tulpn</code></td><td>Listening TCP/UDP ports and the owning process</td></tr><tr><td><code>echo $?</code></td><td>Exit code of the previous command</td></tr></tbody></table></div><div class="cheat-group"><h3>Services and logs</h3><table><tbody><tr><td><code>systemctl status NAME</code></td><td>State, uptime, and last log lines</td></tr><tr><td><code>systemctl enable --now NAME</code></td><td>Start now and at every boot</td></tr><tr><td><code>systemctl daemon-reload</code></td><td>Re-read unit files after editing them</td></tr><tr><td><code>journalctl -u NAME -f</code></td><td>Follow one service's logs</td></tr><tr><td><code>journalctl -u NAME --since "1 hour ago"</code></td><td>Logs for a time window</td></tr><tr><td><code>journalctl -p err -b</code></td><td>Errors and worse since the last boot</td></tr></tbody></table></div><div class="cheat-group"><h3>Pipes and redirection</h3><table><tbody><tr><td><code>CMD1 | CMD2</code></td><td>stdout of CMD1 becomes stdin of CMD2</td></tr><tr><td><code>CMD &gt; FILE</code></td><td>Write stdout to FILE, replacing it (<code>&gt;&gt;</code> appends)</td></tr><tr><td><code>CMD &gt; FILE 2&gt;&amp;1</code></td><td>stdout and stderr both into FILE</td></tr><tr><td><code>CMD 2&gt; /dev/null</code></td><td>Throw away error output</td></tr><tr><td><code>sort | uniq -c | sort -rn</code></td><td>Count duplicates, most frequent first</td></tr><tr><td><code>grep -ri TEXT PATH</code></td><td>Recursive, case-insensitive search</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Fixing a permission error with <code>chmod 777</code> instead of finding out which user the process runs as.</li><li>Starting a service but never enabling it, so it silently stays down after the next reboot.</li><li>Reaching for <code>kill -9</code> first, which skips cleanup and can corrupt data or leave stale lock files.</li><li>Editing a unit file and forgetting <code>systemctl daemon-reload</code>, then wondering why nothing changed.</li><li>Using relative paths in scripts and cron jobs, which run from a directory you did not expect.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "A file shows `-rw-r-----` in `ls -l`. Which octal mode is that?", "options": ["640", "644", "460", "750"], "answer": 0, "explain": "Owner `rw-` is 4+2=6, group `r--` is 4, others `---` is 0, giving 640."}, {"q": "You ran `sudo systemctl start myapp` and it works. After the server reboots for patching, the app is down. What is the most likely cause?", "options": ["The service was never enabled, so it does not start at boot", "The unit file was deleted by the reboot", "systemd only restarts services that crashed, never after a reboot", "The journal filled the disk during shutdown"], "answer": 0, "explain": "`start` only affects the current boot. `systemctl enable` (or `enable --now`) is what links the unit into the boot sequence."}, {"q": "Why should you send `SIGTERM` before resorting to `SIGKILL`?", "options": ["`SIGTERM` can be caught, so the process can finish work and clean up before exiting", "`SIGKILL` only works on processes owned by root", "`SIGTERM` is faster because the kernel handles it directly", "`SIGKILL` restarts the process instead of stopping it"], "answer": 0, "explain": "A program can handle `SIGTERM` to drain requests, flush data and release locks. `SIGKILL` is never delivered to the program at all; the kernel just removes it."}, {"q": "What does `./job.sh > out.log 2>&1` do?", "options": ["Writes both normal output and error output to out.log", "Writes normal output to out.log and discards errors", "Runs the job twice and logs the second run", "Writes errors to out.log and normal output to the terminal"], "answer": 0, "explain": "`> out.log` points stdout at the file, then `2>&1` points stderr at the same place stdout is going."}, {"q": "A web service is reported down. Which is the best first step?", "options": ["Run `systemctl status` on it, then read its recent `journalctl` output", "Reboot the server so everything starts fresh", "Run `chmod -R 777` on the application directory", "Send `kill -9` to every process owned by the app user"], "answer": 0, "explain": "Observe before you change anything. Status and logs tell you whether it crashed, is crash-looping, or is running but unreachable, and each of those has a different fix. Rebooting destroys the evidence."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <span class="pager-link pager-prev is-empty"></span>
+    <a class="pager-up" href="../education.html#devops">All DevOps modules</a>
+    <a class="pager-link pager-next" href="devops-git.html"><span>Next →</span><strong>Git &amp; collaborative workflow</strong></a>
+  </nav>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="mailto:support@thavionai.com?subject=Education%20feedback%3A%20devops-linux">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

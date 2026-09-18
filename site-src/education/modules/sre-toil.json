@@ -1,0 +1,241 @@
+{
+  "id": "sre-toil",
+  "minutes": 25,
+  "intro": "Every operations team has a list of chores: restart the stuck worker, extend the certificate, add the new user to six systems, clear the disk on the log server. Each takes ten minutes, and together they eat the week. SRE calls this toil, gives it a precise definition, measures it, and caps it, because a team buried in toil never has time to fix the causes and the load only grows. This module teaches you to recognise toil, measure it honestly, and decide what is worth automating.",
+  "objectives": [
+    "Define toil using its six characteristics, and distinguish it from overhead and from engineering work",
+    "Explain why unchecked toil is harmful to both the service and the people running it",
+    "Measure a team's toil with lightweight tracking and compare it with the 50% cap",
+    "Evaluate whether automating a task pays off, including the costs people forget",
+    "Apply a progression from documented procedure to fully autonomous system, with safe automation practices"
+  ],
+  "sections": [
+    {
+      "heading": "What toil is, and what it is not",
+      "blocks": [
+        { "type": "p", "text": "In everyday speech, toil means any work you dislike. In SRE it has a specific meaning. The Google SRE book defines **toil** as work tied to running a production service that tends to have the following characteristics. The more of them a task has, the more clearly it is toil." },
+        { "type": "table", "headers": ["Characteristic", "Meaning"], "rows": [
+          ["**Manual**", "A person has to do it, including running a script by hand"],
+          ["**Repetitive**", "You have done it before and will do it again. The first time solving a new problem is not toil."],
+          ["**Automatable**", "A machine could do it as well. If it needs human judgement, it is not toil."],
+          ["**Tactical**", "It is interrupt-driven and reactive, not planned and strategic"],
+          ["**No enduring value**", "The service is in the same state afterwards. Nothing was permanently improved."],
+          ["**Scales linearly with the service**", "Twice the traffic, users or servers means twice the work"]
+        ]},
+        { "type": "p", "text": "The last characteristic is the dangerous one. Work that grows in step with the service will eventually consume any team, however large, and hiring only buys time." },
+        { "type": "p", "text": "Two things are often confused with toil. **Overhead** is administrative work not tied to running a service: meetings, planning, reviews, training, expenses. It may be tedious, but it is not toil. **Engineering work** is the opposite of toil: it requires human judgement, produces a permanent improvement, and lets the team handle a larger service with the same effort. Writing the automation is engineering. Running the automation by hand every Tuesday is toil." },
+        { "type": "callout", "kind": "note", "text": "Dull is not the same as toil. Writing a postmortem is tedious and valuable, and it needs judgement. Handling a genuinely novel incident is reactive but not toil. Handling the same alert for the fifth time this month, with the same fix, certainly is." }
+      ]
+    },
+    {
+      "heading": "Why it matters",
+      "blocks": [
+        { "type": "p", "text": "Some toil is unavoidable, and a little can even be pleasant: quick, predictable tasks give a sense of progress. The problem is quantity. The SRE guideline is that toil, together with other operational work such as on-call, should stay **below 50% of each engineer's time**, leaving at least half for engineering projects. That number is a ceiling, not a target." },
+        { "type": "list", "items": [
+          "**It crowds out the fix.** Every hour spent restarting the worker is an hour not spent finding out why it hangs. Teams above the cap get slower at everything, permanently.",
+          "**It grows.** Because toil scales with the service, a team that is comfortable today is underwater after a year of growth.",
+          "**It causes errors.** Humans performing repetitive manual procedures make mistakes. A large share of outages trace back to a manual step done slightly wrong.",
+          "**It damages careers and morale.** Engineers who spend their time on chores do not develop, become frustrated, and leave. The people who remain inherit more toil.",
+          "**It sets a precedent.** A team that reliably absorbs manual work gets handed more of it, and developers lose the incentive to build systems that do not need it."
+        ]},
+        { "type": "p", "text": "The cap is what makes the SRE model sustainable. When a team exceeds it, the response is structural: redirect some operational load back to the development team, pause new service onboarding, or dedicate a sprint to the largest sources. Simply working harder is not on the list." }
+      ]
+    },
+    {
+      "heading": "Measuring toil",
+      "blocks": [
+        { "type": "p", "text": "You cannot manage what you have not measured, and intuition about toil is poor: people underestimate frequent small interruptions and overestimate the rare dramatic ones. Measurement does not need to be elaborate." },
+        { "type": "steps", "items": [
+          "**Tag the work.** Add a `toil` label in your ticket system, and a category such as `cert-renewal`, `access-request`, `manual-deploy`, `disk-cleanup`. Include on-call interrupts.",
+          "**Record time roughly.** Fifteen-minute granularity is plenty. Include the cost of the interruption itself: a five-minute task that breaks your concentration costs far more than five minutes.",
+          "**Survey the team.** Once a quarter, ask everyone to estimate their split between toil, on-call, overhead and engineering. It takes two minutes and the trend is what matters.",
+          "**Aggregate by category** and rank by total hours per month, not by how annoying each task feels.",
+          "**Review monthly** against the cap, and pick the top one or two categories to attack."
+        ]},
+        { "type": "code", "lang": "python", "code": "import csv\nfrom collections import defaultdict\n\n# toil_log.csv columns: date,engineer,category,minutes\nTEAM_SIZE = 5\nWORK_MINUTES_PER_MONTH = 160 * 60          # one engineer\n\nminutes_by_category: dict[str, int] = defaultdict(int)\nwith open(\"toil_log.csv\", newline=\"\") as f:\n    for row in csv.DictReader(f):\n        minutes_by_category[row[\"category\"]] += int(row[\"minutes\"])\n\ntotal = sum(minutes_by_category.values())\nshare = total / (TEAM_SIZE * WORK_MINUTES_PER_MONTH)\nprint(f\"Toil: {total / 60:.0f} hours this month = {share:.0%} of team capacity\\n\")\n\nfor category, minutes in sorted(minutes_by_category.items(), key=lambda kv: -kv[1]):\n    print(f\"{category:<20} {minutes / 60:6.1f} h   {minutes / total:5.0%} of toil\")" },
+        { "type": "p", "text": "The output almost always follows a Pareto pattern: two or three categories account for most of the hours. That is good news, because it tells you exactly where a small amount of engineering will return the most time." }
+      ]
+    },
+    {
+      "heading": "Is it worth automating?",
+      "blocks": [
+        { "type": "p", "text": "Not everything should be automated. Automation is software: it has to be written, tested, documented, secured, monitored and maintained, and it can fail in ways a human would not. A simple comparison keeps you honest." },
+        { "type": "code", "lang": "text", "code": "time saved per year = occurrences per year x minutes per occurrence\n\npayback period      = build cost / time saved per year\n\nExample: certificate renewal\n  occurrences        40 per year\n  time each          45 minutes (including the context switch)\n  time saved         40 x 45 = 1,800 minutes = 30 hours per year\n  build cost         16 hours to set up automated renewal\n  maintenance        about 2 hours per year\n  payback            16 / (30 - 2) = 0.57 years, about 7 months" },
+        { "type": "p", "text": "Time saved is only part of the value, and often the smaller part. Weigh these as well." },
+        { "type": "list", "items": [
+          "**Consistency.** Automation performs the step identically every time. If a mistake in the manual procedure could cause an outage, as an expired certificate does, that alone can justify the work.",
+          "**Speed.** A machine reacts in seconds. For anything on an incident's critical path, such as failover, that matters more than the hours saved.",
+          "**Growth.** A task that happens 40 times this year may happen 400 times next year. Decide using where the service is going.",
+          "**Interruption cost.** Removing a task that arrives at random times returns more focus than its minutes suggest.",
+          "**Frequency of change.** If the procedure changes every month, the automation will be permanently out of date. Stabilise the process first."
+        ]},
+        { "type": "p", "text": "Before automating anything, ask a better question: **can the task be eliminated?** Disk cleanup disappears if logs are shipped off the machine with a retention policy. Access requests disappear if access derives from group membership in the identity provider. Manual deploys disappear with the pipelines from the DevOps track. Removing the need is cheaper and more reliable than automating the response, and it never needs maintenance." }
+      ]
+    },
+    {
+      "heading": "From runbook to autonomous system",
+      "blocks": [
+        { "type": "p", "text": "Automation is not all or nothing. The SRE book describes a progression, and moving up even one level is a win. The example is a database failover." },
+        { "type": "table", "headers": ["Level", "What it looks like"], "rows": [
+          ["0. No automation", "Someone works out the failover by hand, from memory, under pressure"],
+          ["1. Documented procedure", "A runbook lists the exact steps and commands"],
+          ["2. Operator-maintained script", "One engineer has a script for it on their own laptop"],
+          ["3. Shared, reviewed automation", "The script lives in version control, is tested, and anyone on call can run it"],
+          ["4. Triggered automatically", "The system detects the failure and runs the failover without being asked"],
+          ["5. Autonomous", "The platform needs no failover step at all; the design handles it internally"]
+        ]},
+        { "type": "p", "text": "Level 1 is a real and underrated step. Writing the procedure down makes it repeatable, lets anyone perform it, and is the specification for the script that follows. Do not skip it." },
+        { "type": "p", "text": "Automation acts faster and at a greater scale than any human, which includes making mistakes faster and at a greater scale. Build the safety in from the start." },
+        { "type": "code", "lang": "bash", "code": "#!/usr/bin/env bash\n# Remove build caches older than N days. Safe to run repeatedly.\nset -euo pipefail\n\ndays=\"${1:-14}\"\ntarget=\"/var/cache/builds\"\ndry_run=\"${DRY_RUN:-true}\"                     # safe by default\n\n[[ -d \"$target\" ]] || { echo \"no such directory: $target\" >&2; exit 1; }\n\ncount=\"$(find \"$target\" -mindepth 1 -maxdepth 1 -mtime +\"$days\" | wc -l)\"\necho \"$(date -u +%FT%TZ) candidates=$count older_than_days=$days dry_run=$dry_run\"\n\nif (( count > 500 )); then                     # sanity limit: refuse surprising work\n  echo \"refusing: $count entries exceeds the safety limit\" >&2\n  exit 2\nfi\n\nif [[ \"$dry_run\" == \"false\" ]]; then\n  find \"$target\" -mindepth 1 -maxdepth 1 -mtime +\"$days\" -exec rm -rf {} +\nfi" },
+        { "type": "list", "items": [
+          "**Idempotent**, so that running it twice, or after a partial failure, does no harm.",
+          "**Dry run by default** for anything destructive, with the real action requiring an explicit flag.",
+          "**Sanity limits.** Automation that is about to touch far more than expected should stop and ask. Many famous outages were scripts faithfully applying a bad input to the whole fleet.",
+          "**Logged and observable.** Record what it did and why, and alert when it fails or has not run.",
+          "**Gradual.** Roll automated changes across a fleet in stages, as you would a release.",
+          "**Keep the manual path alive.** People must still be able to do the task when the automation is broken, so keep the runbook current and practise it occasionally."
+        ]}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Run a two-week toil audit",
+    "steps": [
+      "Create a shared spreadsheet or a ticket label with columns for date, person, category, minutes, and whether it was an interruption. Agree on five to eight categories with your team.",
+      "Log every piece of operational work for two weeks, to the nearest fifteen minutes. Include on-call pages and the tasks people think are too small to mention.",
+      "Classify each category against the six characteristics. Remove anything that is really overhead or engineering.",
+      "Total the hours by category and calculate toil as a percentage of the team's capacity. Compare it with the 50% cap.",
+      "For the top three categories, first ask whether the task can be eliminated. For what remains, calculate the payback period, including maintenance, and note non-time benefits such as error reduction.",
+      "Take the best candidate up one level on the automation ladder: write the runbook if there is none, or turn an existing runbook into a reviewed, idempotent script with a dry-run mode.",
+      "Present the numbers and the plan to the team, and schedule a repeat of the measurement in three months."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Toil is manual, repetitive, automatable, tactical, without enduring value, and scales linearly with the service.",
+      "Overhead such as meetings is not toil. Work that needs judgement or leaves a permanent improvement is engineering.",
+      "Keep toil and other operational work under 50% of each engineer's time. It is a ceiling, not a goal.",
+      "Measure before acting. A few categories usually account for most of the hours.",
+      "Ask first whether the task can be eliminated, then whether it should be automated.",
+      "Payback = build cost / (time saved per year - maintenance per year). Also weigh consistency, speed and growth.",
+      "Automation must be idempotent, dry-run by default, limited, logged, and rolled out gradually.",
+      "Keep the manual procedure documented and practised for the day the automation fails."
+    ],
+    "groups": [
+      {
+        "title": "Toil test: how many apply?",
+        "items": [
+          { "syntax": "Manual", "desc": "A human has to perform it or start it" },
+          { "syntax": "Repetitive", "desc": "Done before, will be done again" },
+          { "syntax": "Automatable", "desc": "Needs no human judgement" },
+          { "syntax": "Tactical", "desc": "Reactive and interrupt-driven" },
+          { "syntax": "No enduring value", "desc": "Service is no better afterwards" },
+          { "syntax": "O(n) with service growth", "desc": "More users or servers means more of it" }
+        ]
+      },
+      {
+        "title": "Formulas",
+        "items": [
+          { "syntax": "toil share = toil hours / total working hours", "desc": "Per person and per team; cap at 50% including on-call" },
+          { "syntax": "time saved per year = occurrences x minutes each", "desc": "Include the context-switch cost in minutes each" },
+          { "syntax": "payback = build cost / (saved per year - maintenance per year)", "desc": "In years; under one year is usually an easy yes" },
+          { "syntax": "future load = current load x expected growth", "desc": "Decide using next year's volume, not this year's" }
+        ]
+      },
+      {
+        "title": "Automation ladder",
+        "items": [
+          { "syntax": "0 none", "desc": "From memory, under pressure" },
+          { "syntax": "1 runbook", "desc": "Exact documented steps" },
+          { "syntax": "2 personal script", "desc": "Works on one laptop" },
+          { "syntax": "3 shared automation", "desc": "Versioned, reviewed, tested, anyone can run it" },
+          { "syntax": "4 auto-triggered", "desc": "The system starts it itself" },
+          { "syntax": "5 autonomous", "desc": "The design makes the task unnecessary" }
+        ]
+      },
+      {
+        "title": "Safe automation checklist",
+        "items": [
+          { "syntax": "set -euo pipefail", "desc": "Stop on the first failure" },
+          { "syntax": "DRY_RUN=true by default", "desc": "Destructive action needs an explicit opt-in" },
+          { "syntax": "idempotent", "desc": "Safe to re-run after a partial failure" },
+          { "syntax": "sanity limit", "desc": "Refuse when the scope is far larger than expected" },
+          { "syntax": "structured log line per run", "desc": "What, when, how many, outcome" },
+          { "syntax": "alert on failure and on absence", "desc": "A job that silently stopped running is a failure too" },
+          { "syntax": "staged rollout", "desc": "One host, then a few, then the fleet" }
+        ]
+      },
+      {
+        "title": "Common toil and its real fix",
+        "items": [
+          { "syntax": "manual deploys", "desc": "CI/CD pipeline and GitOps" },
+          { "syntax": "certificate renewals", "desc": "Automated issuance and renewal, plus expiry alerts" },
+          { "syntax": "access requests", "desc": "Group-based access from the identity provider" },
+          { "syntax": "disk cleanup", "desc": "Ship logs off the host; retention and lifecycle policies" },
+          { "syntax": "restarting a stuck process", "desc": "Fix the hang; liveness probe as a stopgap" },
+          { "syntax": "the same alert every week", "desc": "Fix the cause, or delete the alert if no action is needed" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Calling every unpleasant task toil, which makes the measurement meaningless.",
+      "Responding to rising toil by hiring, which scales the cost instead of removing it.",
+      "Automating a task that should not exist at all.",
+      "Spending weeks automating something that happens twice a year and changes each time.",
+      "Writing automation with no dry run and no limits, then watching it apply a mistake to the whole fleet.",
+      "Letting the manual procedure rot, so that nobody can do the task when the automation breaks."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "Which of these is toil in the SRE sense?",
+      "options": [
+        "Running the same script by hand each week to rotate API keys for new customers",
+        "Writing the postmortem for last week's outage",
+        "Attending the quarterly planning meeting",
+        "Investigating an unfamiliar failure mode during an incident"
+      ],
+      "answer": 0,
+      "explain": "It is manual, repetitive, automatable, leaves nothing improved, and grows with the number of customers. Postmortems and novel incidents need judgement, and meetings are overhead."
+    },
+    {
+      "q": "A team measures its toil at 65% of capacity. Which response best fits SRE practice?",
+      "options": [
+        "Shift some operational load back to developers and spend the time on the biggest toil sources",
+        "Ask everyone to work longer hours until the backlog is cleared",
+        "Hire two more engineers to share the manual workload",
+        "Stop tracking toil, since measuring it is also a form of overhead"
+      ],
+      "answer": 0,
+      "explain": "Exceeding the cap calls for a structural response that removes causes. More hours or more people leaves the toil in place, and it keeps growing with the service."
+    },
+    {
+      "q": "A task happens 60 times a year and takes 30 minutes each time. Automating it would take 20 hours, plus about 5 hours of maintenance a year. What is the payback period?",
+      "options": ["About 10 months", "About 2 months", "About 3 years", "It never pays back"],
+      "answer": 0,
+      "explain": "Time saved is 60 times 30 minutes, which is 30 hours a year. Net of 5 hours maintenance that is 25 hours. 20 divided by 25 is 0.8 years, roughly 10 months."
+    },
+    {
+      "q": "On-call engineers clear a full disk on the log server about twice a week. What is the best long-term fix?",
+      "options": [
+        "Eliminate the cause by shipping logs off the host with a retention policy",
+        "Write a cron job that deletes the oldest files whenever the disk fills",
+        "Add a second on-call engineer to share the disk-cleaning pages",
+        "Raise the alert threshold so that the page fires less often"
+      ],
+      "answer": 0,
+      "explain": "Removing the need for the task beats automating the response. A cleanup cron job is better than doing it by hand, but it is still machinery to maintain, and it can delete something it should not."
+    },
+    {
+      "q": "Why should destructive automation have a sanity limit, such as refusing to act on more than a set number of items?",
+      "options": [
+        "A bad input would otherwise be applied to everything, faster than any human could stop it",
+        "Operating systems cannot delete more than a few hundred files in one command",
+        "Limits make the script run faster by keeping its work in memory",
+        "Without a limit the script cannot be made idempotent"
+      ],
+      "answer": 0,
+      "explain": "Automation multiplies mistakes as efficiently as it multiplies good work. A limit converts a fleet-wide disaster into a refused run and an alert for a human to look at."
+    }
+  ]
+}

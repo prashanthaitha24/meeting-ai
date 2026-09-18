@@ -1,0 +1,248 @@
+{
+  "id": "sre-failure",
+  "minutes": 35,
+  "intro": "In a distributed system something is always failing: a network hiccup, a slow disk, a node being replaced, a dependency having a bad minute. None of that is an outage. The outage comes from how the rest of the system reacts. A slow database that makes callers retry harder, which slows it further, until every service in the chain is down, is a cascading failure, and well-meant code causes most of them. This module teaches the defensive patterns that contain failure: timeouts, careful retries, backpressure and circuit breakers.",
+  "objectives": [
+    "Explain why slow is worse than down, and how resource exhaustion turns a local fault into a cascading failure",
+    "Set timeouts and propagate deadlines so that no caller waits longer than is useful",
+    "Implement retries safely with exponential backoff, jitter, retry budgets and idempotency keys",
+    "Apply backpressure and load shedding so that an overloaded service degrades instead of collapsing",
+    "Use circuit breakers and bulkheads to isolate a failing dependency"
+  ],
+  "sections": [
+    {
+      "heading": "Slow is worse than down",
+      "blocks": [
+        { "type": "p", "text": "A dependency that is completely down fails fast: connections are refused, errors return in milliseconds, and callers can react. A dependency that is **slow** is far more dangerous, because every call to it holds resources while it waits: a thread, a connection from the pool, memory for the request, a slot in a queue." },
+        { "type": "p", "text": "Follow what happens. Service A calls service B, which has become slow. A's worker threads block waiting for B. New requests keep arriving at A, and soon every thread is waiting on B. Now A cannot serve **any** request, including those that never needed B. A's callers see A as slow, and the same thing happens to them. The fault travels **up** the call graph until the whole product is down because of one struggling component several layers deep. This is a **cascading failure**." },
+        { "type": "p", "text": "Several mechanisms feed it, and they reinforce one another." },
+        { "type": "list", "items": [
+          "**Resource exhaustion**: threads, connection pools, file descriptors and memory are consumed by waiting requests.",
+          "**Retries** multiply the load on the component that is already struggling.",
+          "**Load redistribution**: when one overloaded instance dies, its traffic moves to the others, which pushes them over too.",
+          "**Cold start**: instances that restart have empty caches and unopened connections, so they are slowest exactly when demand is highest.",
+          "**Health checks that kill**: liveness probes fail on overloaded instances, the orchestrator restarts them, and capacity falls further."
+        ]},
+        { "type": "p", "text": "The defensive goal is always the same. **Fail fast, bound every resource, and never let one dependency's problem consume everything you have.**" }
+      ]
+    },
+    {
+      "heading": "Timeouts and deadlines",
+      "blocks": [
+        { "type": "p", "text": "Every call that crosses a process boundary needs a timeout. Many client libraries default to **no timeout at all**, which means that a hung dependency holds your thread for ever. Set two: a **connection timeout**, which is short because establishing a connection should take milliseconds, and a **request timeout** for the whole exchange." },
+        { "type": "code", "lang": "python", "code": "import requests\n\n# (connect timeout, read timeout) in seconds. Never call without one.\nresp = requests.get(\"https://inventory.internal/stock/SKU-9917\", timeout=(0.5, 2.0))" },
+        { "type": "p", "text": "Choose the value from data, not from instinct. Look at the dependency's latency distribution and set the timeout a little above its normal high percentile, for example its p99.9. If the p99 is 200 ms, a 30-second timeout protects nothing: by the time it fires, the user has long since gone, and you held a thread the whole time. A timeout that is too tight, on the other hand, turns ordinary slowness into errors, so check how often it fires." },
+        { "type": "p", "text": "Timeouts should also get **shorter as you go down** the call chain. If the edge gives a request 3 seconds, a service two layers down that allows itself 10 seconds is doing work nobody will ever see. **Deadline propagation** makes this exact: the first service sets an absolute deadline, passes it along with the request, and each service checks the time remaining before starting expensive work and uses it to bound its own outgoing calls. gRPC does this natively, and with HTTP you can pass a header." },
+        { "type": "code", "lang": "python", "code": "import time\n\n\nclass DeadlineExceeded(Exception):\n    pass\n\n\ndef remaining(deadline: float, reserve: float = 0.05) -> float:\n    \"\"\"Seconds left before an absolute deadline (time.monotonic based).\"\"\"\n    left = deadline - time.monotonic() - reserve\n    if left <= 0:\n        raise DeadlineExceeded(\"no time left; not starting more work\")\n    return left\n\n\ndef handle_checkout(order, deadline: float):\n    stock = call_inventory(order, timeout=min(1.0, remaining(deadline)))\n    payment = call_payments(order, timeout=min(2.0, remaining(deadline)))\n    return confirm(order, stock, payment)" },
+        { "type": "callout", "kind": "tip", "text": "When a request is cancelled or times out, **stop working on it**. Cancel the downstream calls and abandon the query. Work done for a caller who has already given up is pure waste, and during an overload it is the waste that kills you." }
+      ]
+    },
+    {
+      "heading": "Retries that help instead of harm",
+      "blocks": [
+        { "type": "p", "text": "Retries hide transient faults, such as a dropped packet, a pod being replaced or a brief leader election. They are also the most common way a small problem becomes a large one, because a retry is **extra load, applied at the moment the system can least bear it**." },
+        { "type": "p", "text": "The arithmetic is unforgiving. If three layers of services each make up to 3 attempts, one user request can become 3 x 3 x 3 = **27** requests at the bottom layer. A database that was 20% over capacity is suddenly facing many times its normal load, and it can never recover while the retries continue." },
+        { "type": "code", "lang": "python", "code": "import random\nimport time\n\nRETRYABLE = (ConnectionError, TimeoutError)\n\n\ndef call_with_retries(fn, max_attempts: int = 3, base: float = 0.1, cap: float = 2.0):\n    \"\"\"Exponential backoff with full jitter.\"\"\"\n    for attempt in range(max_attempts):\n        try:\n            return fn()\n        except RETRYABLE:\n            if attempt == max_attempts - 1:\n                raise\n            # full jitter: a random wait between 0 and the exponential ceiling\n            time.sleep(random.uniform(0, min(cap, base * 2 ** attempt)))" },
+        { "type": "list", "items": [
+          "**Exponential backoff** doubles the wait ceiling after each failure, which gives the dependency room to recover.",
+          "**Jitter** randomises the wait. Without it, every client that failed at the same moment retries at the same moment, and the dependency is hit by synchronised waves. This is the **thundering herd**. Full jitter, a uniform random wait between zero and the ceiling, spreads them out.",
+          "**Few attempts.** Two or three in total. If three attempts failed, a fourth is very unlikely to succeed and certain to add load.",
+          "**Retry only what can succeed.** Connection errors, timeouts, `503` and `429` are candidates. A `400`, `401`, `403` or `404` will fail identically every time. Honour a `Retry-After` header when the server sends one.",
+          "**Retry at one layer only**, normally the one closest to the failure. If every layer retries, the counts multiply."
+        ]},
+        { "type": "p", "text": "A **retry budget** puts a hard limit on the damage. Instead of bounding attempts per request, bound retries as a share of all traffic, for example no more than 10% of requests. In healthy times that allows every transient fault to be retried. In an outage, where everything is failing, it caps the extra load at 10% instead of 200%." },
+        { "type": "p", "text": "Retrying is only safe if the operation is **idempotent**, meaning that doing it twice has the same effect as doing it once. Reads are. \"Charge this card\" is not: a timeout tells you nothing about whether the charge went through. The fix is an **idempotency key**. The client generates a unique ID for the operation and sends it with every attempt, and the server records the keys it has processed and returns the stored result for a repeat instead of acting again." },
+        { "type": "code", "lang": "bash", "code": "curl -fsS -X POST https://payments.internal/v1/charges \\\n  -H 'Content-Type: application/json' \\\n  -H 'Idempotency-Key: 7c1f3e9a-2b44-4c1e-9d07-5a6e8b1f0c33' \\\n  -d '{\"order_id\": \"o-1842\", \"amount\": 4999, \"currency\": \"EUR\"}'" }
+      ]
+    },
+    {
+      "heading": "Backpressure and load shedding",
+      "blocks": [
+        { "type": "p", "text": "Every service has a limit. What matters is what happens beyond it. A service with no protection accepts everything, queues it, slows down for everyone, runs out of memory, and dies, after which it serves nobody. A protected service recognises its limit and **refuses the excess quickly and cheaply**, so that the work it does accept is still served well. Serving 80% of users properly is far better than serving 100% of them a timeout." },
+        { "type": "list", "items": [
+          "**Bound every queue.** An unbounded queue hides overload and converts it into latency and then into memory exhaustion. When a bounded queue is full, reject.",
+          "**Limit concurrency.** Cap the number of in-flight requests to what the service can handle, and return `503` or `429` at once beyond that. Rejecting costs microseconds; accepting a request you cannot finish costs a thread and the client's time.",
+          "**Shed by priority.** Drop the least valuable work first: background refreshes, recommendations and analytics before checkout, and unauthenticated traffic before paying customers.",
+          "**Degrade gracefully.** Serve cached or simplified responses, and switch off expensive features, before refusing outright.",
+          "**Prefer newer requests under sustained overload.** If the queue is long, the oldest requests have probably been abandoned by callers who timed out. Serving them is wasted work. Dropping the oldest, or serving last-in first-out, keeps the work useful."
+        ]},
+        { "type": "code", "lang": "python", "code": "import threading\n\n\nclass Overloaded(Exception):\n    \"\"\"Translate to HTTP 503 with a Retry-After header.\"\"\"\n\n\nclass ConcurrencyLimiter:\n    def __init__(self, max_in_flight: int):\n        self._slots = threading.BoundedSemaphore(max_in_flight)\n\n    def run(self, fn):\n        if not self._slots.acquire(blocking=False):     # never wait for a slot\n            raise Overloaded(\"at capacity; shedding load\")\n        try:\n            return fn()\n        finally:\n            self._slots.release()\n\n\nlimiter = ConcurrencyLimiter(max_in_flight=64)" },
+        { "type": "p", "text": "**Backpressure** is the same idea applied between components: a consumer that cannot keep up signals the producer to slow down, instead of letting work pile up in between. Bounded queues that block the producer, flow control in TCP and in gRPC streams, and `429` responses with `Retry-After` are all forms of it. Rate limiting per client, often with a token bucket, additionally stops one noisy client from consuming capacity that belongs to everyone." },
+        { "type": "callout", "kind": "warning", "text": "Make health checks overload-aware. If a liveness probe shares the saturated request pool, an overloaded but otherwise healthy instance fails its probe, gets restarted, and returns with cold caches. Keep liveness checks trivial and independent of load, and use readiness to take an instance out of rotation without killing it." }
+      ]
+    },
+    {
+      "heading": "Circuit breakers and bulkheads",
+      "blocks": [
+        { "type": "p", "text": "When a dependency is clearly failing, continuing to call it wastes your resources and prevents its recovery. A **circuit breaker** wraps the calls and tracks failures. It has three states." },
+        { "type": "table", "headers": ["State", "Behaviour", "Moves when"], "rows": [
+          ["**Closed**", "Calls pass through as normal; failures are counted", "The failure rate crosses a threshold: it opens"],
+          ["**Open**", "Calls fail at once, without touching the dependency; a fallback is used", "A cool-down period elapses: it becomes half-open"],
+          ["**Half-open**", "A small number of trial calls are let through", "They succeed: it closes. They fail: it opens again"]
+        ]},
+        { "type": "code", "lang": "python", "code": "import time\n\n\nclass CircuitOpen(Exception):\n    pass\n\n\nclass CircuitBreaker:\n    def __init__(self, failure_threshold: int = 5, cooldown: float = 30.0):\n        self.failure_threshold = failure_threshold\n        self.cooldown = cooldown\n        self.failures = 0\n        self.opened_at = None                 # None means closed\n\n    def call(self, fn):\n        if self.opened_at is not None:\n            if time.monotonic() - self.opened_at < self.cooldown:\n                raise CircuitOpen(\"failing fast; dependency is unhealthy\")\n            # cool-down over: half-open, let this one trial call through\n        try:\n            result = fn()\n        except Exception:\n            self.failures += 1\n            if self.opened_at is not None or self.failures >= self.failure_threshold:\n                self.opened_at = time.monotonic()      # open, or re-open after a failed trial\n            raise\n        self.failures = 0\n        self.opened_at = None                          # success closes the circuit\n        return result" },
+        { "type": "p", "text": "That sketch shows the state machine. In production, use a maintained library or a service mesh, which add rolling failure-rate windows, limits on concurrent trial calls, thread safety and metrics. Whatever you use, export the breaker's state as a metric and alert when it stays open, because an open breaker means a feature is degraded." },
+        { "type": "p", "text": "A breaker is only as good as its **fallback**. Decide in advance what each caller does when the dependency is unavailable: serve a cached value, return a sensible default, hide the feature, or queue the work for later. If the honest answer is \"return an error\", the dependency is a hard one, and its reliability limits yours, as the embracing-risk module calculated." },
+        { "type": "p", "text": "**Bulkheads**, named after the watertight compartments of a ship, stop one failure from flooding everything. Give each dependency its **own** bounded connection pool or concurrency limit, instead of one shared pool. When the recommendations service hangs, it can exhaust only its own twenty connections, and checkout carries on untouched. The same principle applies at larger scale: separate worker pools for critical and background work, separate clusters or **cells** for groups of customers, so that a bad deploy or a poisoned request takes out one cell and not the whole fleet." }
+      ]
+    },
+    {
+      "heading": "Putting it together",
+      "blocks": [
+        { "type": "p", "text": "These patterns are layers of one defence, and each covers a gap left by the others." },
+        { "type": "table", "headers": ["Pattern", "Protects against", "Without it"], "rows": [
+          ["Timeouts and deadlines", "Slow dependencies holding resources", "One hang consumes every thread"],
+          ["Backoff, jitter, retry budget", "Transient faults, without amplification", "Retries multiply load and block recovery"],
+          ["Idempotency keys", "Duplicate side effects from retries", "Double charges, duplicate orders"],
+          ["Concurrency limits, load shedding", "Overload", "The service collapses instead of degrading"],
+          ["Circuit breaker with fallback", "A persistently failing dependency", "Resources wasted on calls that are doomed"],
+          ["Bulkheads and cells", "One failure spreading", "A minor feature takes down the critical path"]
+        ]},
+        { "type": "p", "text": "You rarely need to write these by hand. A **service mesh** such as Istio or Linkerd, or a proxy such as Envoy, applies timeouts, retries with budgets, circuit breaking and outlier detection uniformly, outside the application, and resilience libraries exist for every major language. What no tool can decide for you is the policy: which timeout, which calls are idempotent, which dependencies are soft, and what the fallback is. Those are design decisions, and they belong in the production readiness review." },
+        { "type": "p", "text": "Finally, none of this can be trusted until it has been exercised. A timeout that was never triggered and a fallback that was never used are hopes, not defences. The chaos engineering module shows how to test them on purpose." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Break a dependency and watch the caller survive",
+    "steps": [
+      "Build two small HTTP services. A calls B on every request. Give B an endpoint that can be told to sleep for a configurable time or to fail a configurable share of requests.",
+      "Give A a small, fixed worker pool and no timeout on its calls to B. Make B sleep 30 seconds, send steady load to A, and watch A stop serving even an endpoint that never calls B. You have produced a cascading failure.",
+      "Add connect and read timeouts to A, chosen from B's measured p99. Repeat the test and compare A's behaviour and thread usage.",
+      "Add retries to A with no backoff, make B fail 50% of requests, and measure how much extra load B receives. Then add exponential backoff with full jitter and a 10% retry budget, and measure again.",
+      "Make B's write endpoint non-idempotent, such as incrementing a counter. Show that a retried timeout double-counts, then fix it with an idempotency key.",
+      "Add a concurrency limiter to A that returns `503` when full. Push load beyond capacity and compare the success rate and latency of accepted requests with and without it.",
+      "Wrap the call to B in a circuit breaker with a cached fallback. Take B down entirely and confirm that A keeps serving, quickly, in degraded mode, and that the breaker closes again when B returns.",
+      "Give the call to B its own connection pool, separate from A's other dependencies, and show that exhausting it leaves the rest of A healthy."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Slow is worse than down: waiting calls hold threads, connections and memory, and the failure travels up the call graph.",
+      "Every remote call has a connect timeout and a request timeout, chosen from measured latency, shorter at each layer down.",
+      "Propagate deadlines, and stop working on requests that the caller has abandoned.",
+      "Retries add load at the worst moment. Few attempts, exponential backoff, full jitter, one layer only, plus a retry budget.",
+      "Three layers times three attempts is 27 times the load at the bottom.",
+      "Retry only idempotent operations, and make writes idempotent with an idempotency key.",
+      "Bound every queue and shed load early and cheaply. Serving 80% well beats serving 100% a timeout.",
+      "Circuit breakers need a fallback, and bulkheads keep one dependency from consuming every resource."
+    ],
+    "groups": [
+      {
+        "title": "Formulas and numbers",
+        "items": [
+          { "syntax": "sleep = random(0, min(cap, base * 2^attempt))", "desc": "Exponential backoff with full jitter" },
+          { "syntax": "load amplification = attempts ^ layers", "desc": "3 attempts over 3 layers = 27x" },
+          { "syntax": "retry budget: retries <= 10% of requests", "desc": "Caps extra load during an outage at 10%" },
+          { "syntax": "timeout ~ dependency p99.9 + margin", "desc": "From data, never the library default" },
+          { "syntax": "downstream timeout < upstream timeout", "desc": "Never work past the caller's patience" },
+          { "syntax": "remaining = deadline - now - reserve", "desc": "Budget for each outgoing call" }
+        ]
+      },
+      {
+        "title": "What to retry",
+        "items": [
+          { "syntax": "connection error, timeout", "desc": "Retry, if the operation is idempotent" },
+          { "syntax": "503 Service Unavailable", "desc": "Retry with backoff; honour Retry-After" },
+          { "syntax": "429 Too Many Requests", "desc": "Retry later; honour Retry-After" },
+          { "syntax": "500 Internal Server Error", "desc": "Sometimes; often a bug that will repeat" },
+          { "syntax": "400, 401, 403, 404, 422", "desc": "Never; the request itself is wrong" },
+          { "syntax": "Idempotency-Key: UUID", "desc": "Makes a non-idempotent write safe to retry" }
+        ]
+      },
+      {
+        "title": "Circuit breaker states",
+        "items": [
+          { "syntax": "Closed", "desc": "Normal operation; failures counted" },
+          { "syntax": "Closed -> Open", "desc": "Failure rate crosses the threshold" },
+          { "syntax": "Open", "desc": "Fail fast, use the fallback, do not call the dependency" },
+          { "syntax": "Open -> Half-open", "desc": "After the cool-down period" },
+          { "syntax": "Half-open", "desc": "A few trial calls: success closes, failure re-opens" },
+          { "syntax": "Fallback options", "desc": "Cached value, default, hide the feature, queue for later" }
+        ]
+      },
+      {
+        "title": "Overload defences",
+        "items": [
+          { "syntax": "bounded queue", "desc": "Reject when full instead of growing" },
+          { "syntax": "concurrency limit", "desc": "Cap in-flight requests; 503 beyond it" },
+          { "syntax": "priority shedding", "desc": "Drop background and optional work first" },
+          { "syntax": "graceful degradation", "desc": "Cached or simplified responses before refusal" },
+          { "syntax": "rate limit per client (token bucket)", "desc": "One noisy client cannot starve the rest" },
+          { "syntax": "drop oldest / serve newest", "desc": "Old queued requests have probably been abandoned" },
+          { "syntax": "load-independent liveness probe", "desc": "Overload must not trigger restarts" }
+        ]
+      },
+      {
+        "title": "Isolation",
+        "items": [
+          { "syntax": "pool per dependency", "desc": "A hung dependency exhausts only its own connections" },
+          { "syntax": "separate worker pools", "desc": "Critical and background work do not compete" },
+          { "syntax": "cells / shards", "desc": "A bad deploy or request affects one slice of users" },
+          { "syntax": "soft dependency", "desc": "The request succeeds without it" },
+          { "syntax": "service mesh policies", "desc": "Timeouts, retries, breakers and outlier detection outside the app" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Relying on a client library's default timeout, which is often no timeout at all.",
+      "Retrying immediately, without backoff or jitter, and hammering a service that is trying to recover.",
+      "Retrying at every layer of the stack, so that attempts multiply.",
+      "Retrying a non-idempotent write after a timeout and charging the customer twice.",
+      "Using unbounded queues, which turn overload into latency and then into an out-of-memory crash.",
+      "A liveness probe that fails under load, so that the orchestrator restarts overloaded instances and deepens the outage."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "Service A has 50 worker threads and calls service B with no timeout. B starts taking 60 seconds per request. What happens to A?",
+      "options": [
+        "All threads block on B, so A stops serving every request, even unrelated ones",
+        "A returns errors quickly for the calls to B and serves the rest as normal",
+        "A is unaffected, because the slowness is confined to B's own processes",
+        "A scales up automatically until it has enough threads for the slow calls"
+      ],
+      "answer": 0,
+      "explain": "Each call to B holds a thread for a minute, so the pool is soon exhausted and nothing else can be served. A timeout, a per-dependency pool and a circuit breaker each would have contained it."
+    },
+    {
+      "q": "Four layers of services each make up to 3 attempts on failure. In the worst case, how many requests reach the bottom layer for one user request?",
+      "options": ["81", "12", "27", "7"],
+      "answer": 0,
+      "explain": "Attempts multiply across layers: 3 to the power of 4 is 81. This is why retries belong at one layer, with a budget, and not at every layer."
+    },
+    {
+      "q": "Why is jitter added to exponential backoff?",
+      "options": [
+        "To spread retries out in time, so that clients do not all retry in synchronised waves",
+        "To make each retry faster than the last, so that recovery is detected sooner",
+        "To make the waiting time predictable, which helps when setting timeouts",
+        "To raise the number of retry attempts that fit in the same overall time"
+      ],
+      "answer": 0,
+      "explain": "Clients that failed together would otherwise retry together, hitting the recovering service with repeated spikes. Randomising the wait turns those spikes into a smooth, lower load."
+    },
+    {
+      "q": "A client's call to `POST /charges` times out. Is it safe to retry?",
+      "options": [
+        "Only with an idempotency key, since the charge may already have been made",
+        "Yes, always, because a timeout means that the server never got the request",
+        "No, never, because a POST request must not be retried in any circumstances",
+        "Yes, provided that the retry is delayed with exponential backoff and jitter"
+      ],
+      "answer": 0,
+      "explain": "A timeout says nothing about whether the server acted. With an idempotency key the server recognises the repeat and returns the original result instead of charging again. Backoff does not make a write idempotent."
+    },
+    {
+      "q": "A service is receiving twice the traffic it can handle. Which behaviour gives users the best outcome?",
+      "options": [
+        "Reject the excess at once with 503, and serve the accepted requests at normal speed",
+        "Accept everything into an unbounded queue, so that no request is ever refused",
+        "Slow every response down equally, so that the load is shared fairly by all users",
+        "Restart the instances one after another to clear the accumulated backlog"
+      ],
+      "answer": 0,
+      "explain": "Load shedding keeps the accepted half well served, and rejection is cheap. An unbounded queue makes every request slow, then times them all out, then exhausts memory. Restarting removes capacity when it is most needed."
+    }
+  ]
+}

@@ -1,0 +1,439 @@
+{
+  "id": "ai-rag",
+  "minutes": 35,
+  "intro": "A language model knows what was in its training data up to a cutoff date. It knows nothing about your runbooks, your contracts, your product documentation or last night's incident. Retrieval-augmented generation solves that without retraining anything: find the passages relevant to the question, put them into the prompt, and have the model answer from them. It is the most widely deployed LLM pattern in business, and it is where most of the quality comes from retrieval, not from the model. This module builds the pipeline and shows where it usually breaks.",
+  "objectives": [
+    "Decide when RAG is the right tool, compared with a long context, fine-tuning or a plain prompt",
+    "Build the indexing pipeline: load, chunk, embed and store, with metadata",
+    "Build the query pipeline: retrieve, rerank, assemble a grounded prompt, and answer with citations",
+    "Improve retrieval with chunking choices, hybrid search, metadata filters and query rewriting",
+    "Evaluate retrieval and generation separately, so that you know which part to fix"
+  ],
+  "sections": [
+    {
+      "heading": "What RAG is, and when to use it",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "**Retrieval-augmented generation** (RAG) has two phases. Ahead of time, you process your documents into a searchable index. At question time, you search that index for the passages most relevant to the question, place them in the prompt, and instruct the model to answer using only that material. The model's role changes from reciting from memory to reading and summarising, which it does far more reliably."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Approach",
+            "Good for",
+            "Limits"
+          ],
+          "rows": [
+            [
+              "**Prompt only**",
+              "General knowledge and reasoning",
+              "Knows nothing private or recent; may hallucinate specifics"
+            ],
+            [
+              "**Whole document in the context**",
+              "A small, fixed body of material that fits the window",
+              "Every token is paid for on every call; does not scale to a large corpus"
+            ],
+            [
+              "**RAG**",
+              "Large or changing knowledge, where sources and access control matter",
+              "Only as good as its retrieval; more components to build and run"
+            ],
+            [
+              "**Fine-tuning**",
+              "Style, format, a specialised skill",
+              "Poor at adding facts; expensive to update; cannot cite a source"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "The rule of thumb is that **RAG supplies knowledge, and fine-tuning supplies behaviour**. If the problem is that the model does not know your facts, retrieve them. RAG has three further advantages that matter in production. Updating knowledge is just re-indexing a document. Every answer can cite the passage it came from, so a person can verify it. And you can enforce **access control**, by retrieving only documents that the asking user is permitted to see. That last point is impossible once the facts have been baked into model weights."
+        },
+        {
+          "type": "callout",
+          "kind": "tip",
+          "text": "If your whole knowledge base fits comfortably in the context window and changes rarely, begin by putting all of it in the prompt, with prompt caching to control the cost. It is simpler, and has no retrieval step to get wrong. Move to RAG when the corpus outgrows that."
+        }
+      ]
+    },
+    {
+      "heading": "Indexing: load, chunk, embed, store",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "**Loading** means turning sources such as PDFs, wiki pages, tickets and code into clean text. It is unglamorous, and it determines your quality ceiling: tables flattened into nonsense, repeated page headers and footers, and navigation menus embedded as if they were content are the quiet causes of many poor RAG systems. Keep the **metadata** as you go: the source URL, title, section heading, last-modified date, owner and access permissions."
+        },
+        {
+          "type": "p",
+          "text": "**Chunking** splits the text into passages, because an embedding represents one idea well and ten ideas badly, and because you want to retrieve the relevant paragraph and not a forty-page manual. It is the design decision with the greatest effect on results."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Choice",
+            "Trade-off"
+          ],
+          "rows": [
+            [
+              "Chunks too small",
+              "Precise matching, but the chunk lacks the context needed to understand or answer"
+            ],
+            [
+              "Chunks too large",
+              "Several topics blur into one vector, retrieval gets vague, and prompt tokens are wasted"
+            ],
+            [
+              "Fixed size with overlap",
+              "Simple and predictable. Overlap prevents an idea from being cut at a boundary."
+            ],
+            [
+              "Structure-aware",
+              "Splitting on headings, paragraphs or functions keeps ideas whole. Usually better, when the documents have structure."
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "code": "def chunk_text(text: str, max_chars: int = 1200, overlap: int = 200) -> list[str]:\n    \"\"\"Split on paragraphs, packing them into chunks of up to max_chars with overlap.\n    A simple illustration: a single paragraph longer than max_chars is kept whole.\"\"\"\n    paragraphs = [p.strip() for p in text.split(\"\\n\\n\") if p.strip()]\n    chunks, current = [], \"\"\n    for para in paragraphs:\n        if current and len(current) + len(para) + 2 > max_chars:\n            chunks.append(current)\n            current = current[-overlap:]          # carry the tail into the next chunk\n        current = f\"{current}\\n\\n{para}\" if current else para\n    if current:\n        chunks.append(current)\n    return chunks"
+        },
+        {
+          "type": "p",
+          "text": "A chunk cut out of its document frequently loses its meaning. \"Set it to 30 seconds\" is useless without knowing what \"it\" is. A cheap and effective remedy is to **put context at the front of each chunk before embedding it**: the document title and the section heading, or a one-sentence description of where the chunk sits within the document."
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "code": "import numpy as np\n\n# embed is a stand-in: list[str] -> np.ndarray of shape (n, dimension)\n\n\ndef build_index(documents: list[dict]) -> dict:\n    records = []\n    for doc in documents:\n        for i, chunk in enumerate(chunk_text(doc[\"text\"])):\n            records.append({\n                \"id\": f\"{doc['id']}#{i}\",\n                \"text\": chunk,\n                \"embed_text\": f\"{doc['title']}\\n\\n{chunk}\",   # context added for embedding\n                \"source\": doc[\"url\"],\n                \"updated\": doc[\"updated\"],\n                \"team\": doc[\"team\"],\n            })\n    vectors = embed([r[\"embed_text\"] for r in records])\n    vectors = vectors / np.linalg.norm(vectors, axis=1, keepdims=True)   # normalise once\n    return {\"records\": records, \"vectors\": vectors}"
+        },
+        {
+          "type": "p",
+          "text": "For a few thousand chunks, a NumPy array held in memory is a perfectly good vector store. Beyond that, use a **vector database**, or the vector extension of a database you already run, such as pgvector for PostgreSQL. These use approximate nearest-neighbour indexes, commonly HNSW, that trade a little accuracy for a very large gain in speed, and they give you filtering, persistence and updates. Whichever you use, plan for **re-indexing**: documents change and get deleted, and if you ever change the embedding model, every vector must be regenerated."
+        }
+      ]
+    },
+    {
+      "heading": "Querying: retrieve, assemble, answer",
+      "blocks": [
+        {
+          "type": "code",
+          "lang": "python",
+          "code": "import numpy as np\n\n\ndef retrieve(index: dict, question: str, k: int = 5, team: str | None = None) -> list[dict]:\n    query = embed([question])[0]\n    query = query / np.linalg.norm(query)\n    scores = index[\"vectors\"] @ query                      # cosine similarity to every chunk\n\n    if team is not None:                                   # metadata filter\n        allowed = np.array([r[\"team\"] == team for r in index[\"records\"]])\n        scores = np.where(allowed, scores, -np.inf)\n\n    top = np.argsort(-scores)[:k]\n    return [{**index[\"records\"][i], \"score\": float(scores[i])}\n            for i in top if np.isfinite(scores[i])]"
+        },
+        {
+          "type": "p",
+          "text": "The prompt that assembles the results matters as much as the search does. It should tell the model to answer only from the supplied passages, to cite them, and to say so when they do not contain the answer."
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "code": "SYSTEM = \"\"\"You answer questions for on-call engineers, using only the passages provided\nin <passages>. Each passage has an id.\n\n- Base every statement on the passages, and cite the id in square brackets after it, like [kb-12#3].\n- If the passages do not contain the answer, say that you could not find it in the\n  documentation, and suggest what to search for. Do not answer from general knowledge.\n- If passages disagree, say so, and prefer the most recently updated one.\n- Be concise. Give commands exactly as they are written in the passages.\"\"\"\n\n\ndef answer(index: dict, question: str) -> dict:\n    passages = retrieve(index, question, k=5)\n    block = \"\\n\\n\".join(\n        f'<passage id=\"{p[\"id\"]}\" source=\"{p[\"source\"]}\" updated=\"{p[\"updated\"]}\">\\n{p[\"text\"]}\\n</passage>'\n        for p in passages\n    )\n    messages = [\n        {\"role\": \"system\", \"content\": SYSTEM},\n        {\"role\": \"user\", \"content\": f\"<passages>\\n{block}\\n</passages>\\n\\nQuestion: {question}\"},\n    ]\n    text = call_llm(messages, temperature=0, max_tokens=600)   # stand-in for your provider\n    return {\"answer\": text, \"sources\": [p[\"source\"] for p in passages]}"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Citations make answers checkable.** Show the sources to the user, and in code confirm that every cited id was among the passages you supplied. A citation of a passage that does not exist is a hallucination you can detect automatically.",
+            "**k is a trade-off.** Too few passages, and the answer may not be among them. Too many, and you pay for noise that can distract the model. Five to ten is a common starting range, and a reranker lets you cast a wider net safely.",
+            "**Retrieved text is untrusted input.** If anyone can write to a document that you index, they can plant instructions there. Keep the passages inside tags, state that they are reference material, and give a RAG system no ability to act that it does not need. The agents module covers prompt injection in detail.",
+            "**Apply permissions at retrieval time**, by filtering on the asking user's access rights, and never rely on the model to withhold something it has been shown."
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "Making retrieval better",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "When a RAG system gives a bad answer, the cause is usually that the right passage was never retrieved. The model cannot use what it was not given. These are the improvements that pay off most often, roughly in order."
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Hybrid search.** Embeddings capture meaning, and are weak on exact terms: error codes, product names, function names, ticket numbers. Classic keyword search, usually the BM25 algorithm, is the reverse. Run both and merge the rankings. This often gives the largest single improvement, particularly for technical content.",
+            "**Reranking.** Retrieve a generous set of candidates, say 50, with fast vector search, then use a **reranker**, a model that reads the question and each passage together and scores their relevance much more accurately than a comparison of vectors can. Keep the best 5. It costs some latency, and usually improves precision noticeably.",
+            "**Metadata filters.** Restrict the search by product, version, language, team or date before ranking. \"How do I configure TLS in version 3?\" should not retrieve the documentation for version 1.",
+            "**Query rewriting.** Users write short, vague, context-dependent questions. In a conversation, \"and how do I roll it back?\" is unsearchable by itself. Use a cheap model call to rewrite the question as a standalone query, using the conversation history, before you search.",
+            "**Better chunks.** Revisit the chunk size, follow the structure of the documents, and add contextual headers. Inspect what is actually in your index; you will find rubbish.",
+            "**Freshness and duplicates.** Remove near-identical chunks. Prefer recent documents when several match, and delete or mark documents that have been superseded."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "code": "def reciprocal_rank_fusion(rankings: list[list[str]], k: int = 60) -> list[str]:\n    \"\"\"Merge several ranked lists of chunk ids into one. A common way to combine\n    keyword and vector results without having to compare their raw scores.\"\"\"\n    scores: dict[str, float] = {}\n    for ranking in rankings:\n        for rank, chunk_id in enumerate(ranking):\n            scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (k + rank + 1)\n    return sorted(scores, key=scores.get, reverse=True)\n\n\n# fused = reciprocal_rank_fusion([vector_ids, keyword_ids])[:50]   -> then rerank to the top 5"
+        },
+        {
+          "type": "callout",
+          "kind": "note",
+          "text": "Not every question suits retrieval. \"How many incidents did we have last quarter?\" is an aggregation over structured data, and the right tool is a database query, not a similarity search. \"Summarise everything we know about customer X\" needs many documents, not the top five. Recognising which kind of question you are facing, and routing it accordingly, is part of the design."
+        }
+      ]
+    },
+    {
+      "heading": "Evaluating a RAG system",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A RAG pipeline has two components that fail independently, so measure them separately. If you judge only the final answers, you cannot tell whether to work on the search or on the prompt."
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "code": "RETRIEVAL: was the right passage found?\n  recall@k     = share of questions where a relevant chunk appears in the top k\n  precision@k  = share of the top k chunks that are relevant\n  MRR          = mean of 1 / (rank of the first relevant chunk)\n\n  Example: for three questions, the first relevant chunk is at rank 1, rank 3, and not in the top 5\n    recall@5 = 2 / 3 = 0.67\n    MRR      = (1/1 + 1/3 + 0) / 3 = 0.44\n\nGENERATION: given the passages, was the answer good?\n  faithfulness  is every claim supported by the retrieved passages?  (the hallucination check)\n  relevance     does it actually answer the question that was asked?\n  correctness   does it match a known-good reference answer?\n  abstention    when the answer is not in the documents, does it say so?"
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "code": "def recall_at_k(index: dict, cases: list[dict], k: int = 5) -> float:\n    \"\"\"cases: [{'question': ..., 'relevant_ids': ['kb-12#3', ...]}, ...]\"\"\"\n    hits = 0\n    for case in cases:\n        retrieved = {p[\"id\"] for p in retrieve(index, case[\"question\"], k=k)}\n        hits += bool(retrieved & set(case[\"relevant_ids\"]))\n    return hits / len(cases)\n\n\ndef mean_reciprocal_rank(index: dict, cases: list[dict], k: int = 10) -> float:\n    total = 0.0\n    for case in cases:\n        ids = [p[\"id\"] for p in retrieve(index, case[\"question\"], k=k)]\n        ranks = [i + 1 for i, cid in enumerate(ids) if cid in case[\"relevant_ids\"]]\n        total += 1.0 / ranks[0] if ranks else 0.0\n    return total / len(cases)"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Build a test set of **real questions**, each labelled with the chunks that answer it. Thirty to fifty are enough to begin with. Take them from support tickets, search logs and chat history, not from your imagination.",
+            "Include questions whose answer is **not in the corpus**, to test that the system admits as much.",
+            "**Fix retrieval first.** If recall@k is low, no prompt will rescue the answers. If recall is high and the answers are still poor, work on the prompt, on k, or on the model.",
+            "Faithfulness and relevance are usually graded by another model call with a rubric. The next module explains how to do that reliably.",
+            "Re-run the evaluation whenever you change the chunking, the embedding model, k, the reranker or the prompt. Every one of them moves the numbers.",
+            "In production, log the question, the ids retrieved, the answer and the user's feedback. Questions that retrieve nothing useful tell you which documentation is missing."
+          ]
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Build a question-answering system over your own documents",
+    "steps": [
+      "Collect twenty to fifty documents that you know well: runbooks, internal wiki pages, or the documentation of an open-source project. Convert them to clean text, keeping the title, URL and last-modified date.",
+      "Implement chunking with overlap, put each document's title at the front of its chunks, embed them with any embedding model, and store normalised vectors in a NumPy array.",
+      "Implement `retrieve` with cosine similarity. Ask ten questions, and read the chunks that come back before you generate anything. Note how often the right passage is in the top five.",
+      "Write thirty test questions labelled with the ids of the relevant chunks, including five that the corpus cannot answer. Compute recall@5 and MRR.",
+      "Add the generation step with the grounded system prompt. In code, check that every cited id was really among the passages supplied.",
+      "Vary the chunk size (try 500, 1,200 and 3,000 characters) and k (3, 5, 10), and measure recall each time. Record which settings win on your data.",
+      "Add keyword search, for example with the `rank_bm25` package, merge it with the vector results by reciprocal rank fusion, and measure again. Look especially at questions that contain exact identifiers.",
+      "Ask a follow-up question that depends on the previous turn, watch the retrieval fail, then add a query-rewriting step and try again."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "RAG supplies knowledge; fine-tuning supplies behaviour. RAG is updatable, citable, and can enforce access control.",
+      "If the whole corpus fits in the context and rarely changes, start there. Use RAG when it does not.",
+      "Most bad answers are retrieval failures. The model cannot use a passage that it was never given.",
+      "Chunking has the biggest effect on quality. Keep ideas whole, overlap the boundaries, and prefix each chunk with its document context.",
+      "Hybrid search (keyword plus vector) and reranking are the two most dependable improvements.",
+      "Ground the prompt: answer only from the passages, cite ids, and say when the answer is not there.",
+      "Retrieved text is untrusted input. Filter by the user's permissions at retrieval time.",
+      "Evaluate retrieval (recall@k, MRR) and generation (faithfulness, relevance) separately."
+    ],
+    "groups": [
+      {
+        "title": "Pipeline",
+        "items": [
+          {
+            "syntax": "load -> clean -> chunk -> embed -> store",
+            "desc": "Indexing; repeat when documents change"
+          },
+          {
+            "syntax": "rewrite -> embed -> search -> filter -> rerank",
+            "desc": "Retrieval, per question"
+          },
+          {
+            "syntax": "passages in tags + grounded instructions",
+            "desc": "Prompt assembly"
+          },
+          {
+            "syntax": "answer + citations -> verify the citations",
+            "desc": "Generation and checking"
+          },
+          {
+            "syntax": "log question, ids, answer, feedback",
+            "desc": "The raw material for improvement"
+          }
+        ]
+      },
+      {
+        "title": "Vector search in NumPy",
+        "items": [
+          {
+            "syntax": "V = V / np.linalg.norm(V, axis=1, keepdims=True)",
+            "desc": "Normalise the document vectors once"
+          },
+          {
+            "syntax": "q = q / np.linalg.norm(q)",
+            "desc": "Normalise the query vector"
+          },
+          {
+            "syntax": "scores = V @ q",
+            "desc": "Cosine similarity to every chunk"
+          },
+          {
+            "syntax": "top = np.argsort(-scores)[:k]",
+            "desc": "Indices of the k best"
+          },
+          {
+            "syntax": "np.where(mask, scores, -np.inf)",
+            "desc": "Apply a metadata filter before ranking"
+          }
+        ]
+      },
+      {
+        "title": "Starting values to tune",
+        "items": [
+          {
+            "syntax": "chunk size: a few hundred tokens",
+            "desc": "Roughly 1,000-1,500 characters; tune on your own data"
+          },
+          {
+            "syntax": "overlap: 10-20% of the chunk",
+            "desc": "Stops an idea from being cut at a boundary"
+          },
+          {
+            "syntax": "k = 5 to 10",
+            "desc": "Passages placed in the prompt"
+          },
+          {
+            "syntax": "candidates = 50, rerank to 5",
+            "desc": "A wide net first, then precision"
+          },
+          {
+            "syntax": "temperature = 0",
+            "desc": "Answers should be faithful, not creative"
+          },
+          {
+            "syntax": "RRF constant k = 60",
+            "desc": "Conventional value for reciprocal rank fusion"
+          }
+        ]
+      },
+      {
+        "title": "Metrics",
+        "items": [
+          {
+            "syntax": "recall@k",
+            "desc": "Share of questions with a relevant chunk in the top k"
+          },
+          {
+            "syntax": "precision@k",
+            "desc": "Share of the top k that is relevant"
+          },
+          {
+            "syntax": "MRR = mean(1 / rank of first relevant)",
+            "desc": "Rewards placing the right chunk near the top"
+          },
+          {
+            "syntax": "faithfulness",
+            "desc": "Every claim is supported by the retrieved passages"
+          },
+          {
+            "syntax": "answer relevance",
+            "desc": "Addresses the question that was asked"
+          },
+          {
+            "syntax": "abstention rate on unanswerable questions",
+            "desc": "Says \"not found\" when it should"
+          }
+        ]
+      },
+      {
+        "title": "Symptom to fix",
+        "items": [
+          {
+            "syntax": "right passage never retrieved",
+            "desc": "Chunking, contextual headers, hybrid search, query rewriting"
+          },
+          {
+            "syntax": "exact codes and names are missed",
+            "desc": "Add keyword (BM25) search and fuse the rankings"
+          },
+          {
+            "syntax": "retrieved, but ranked too low",
+            "desc": "Add a reranker; retrieve more candidates"
+          },
+          {
+            "syntax": "wrong version or product",
+            "desc": "Metadata filters"
+          },
+          {
+            "syntax": "good passages, poor answer",
+            "desc": "Prompt, k, or a more capable model"
+          },
+          {
+            "syntax": "answers from general knowledge",
+            "desc": "Strengthen the grounding; give it a way to say \"not found\""
+          },
+          {
+            "syntax": "follow-up questions fail",
+            "desc": "Rewrite into a standalone query using the history"
+          }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Judging only the final answers, so that you cannot tell whether retrieval or generation is at fault.",
+      "Indexing text that was extracted badly, full of headers, menus and mangled tables.",
+      "Using large chunks that mix topics, or tiny ones that lose the context needed to answer.",
+      "Relying on vector search alone for content that is full of exact identifiers and error codes.",
+      "Letting the model fall back on general knowledge when retrieval finds nothing.",
+      "Changing the embedding model without re-embedding the whole corpus."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A company wants its assistant to answer questions about internal policies that change every month, and to show where each answer came from. Which approach fits best?",
+      "options": [
+        "RAG, since knowledge is updated by re-indexing, and answers can cite sources",
+        "Fine-tuning every month, since it writes the policies into the weights",
+        "A longer system prompt that describes the general spirit of the policies",
+        "A higher temperature, so that the model recalls more of its training data"
+      ],
+      "answer": 0,
+      "explain": "Frequently changing facts, with a need for citations, is the core case for RAG. Fine-tuning is poor at adding facts, expensive to repeat, and cannot point to a source."
+    },
+    {
+      "q": "Users search for the error code `E4417`, and the vector search keeps returning passages about errors in general, but not the one that contains that code. What is the most effective fix?",
+      "options": [
+        "Add keyword search, and fuse it with the vector results",
+        "Increase the embedding dimension, so that codes are represented",
+        "Raise the temperature used for the generation step",
+        "Make the chunks much larger, so that each covers more error codes"
+      ],
+      "answer": 0,
+      "explain": "Embeddings capture meaning, and handle exact rare strings poorly. Keyword search such as BM25 matches them exactly, and hybrid search combines the strengths of both."
+    },
+    {
+      "q": "In evaluation, recall@5 is 0.45, and the answers are often wrong. What should you work on first?",
+      "options": [
+        "Retrieval, since over half the time the right passage is never supplied",
+        "The system prompt, since better instructions will produce the missing facts",
+        "The generation model, since a larger one will know the answers anyway",
+        "The output format, since the citations are probably being parsed wrongly"
+      ],
+      "answer": 0,
+      "explain": "With recall at 0.45, the model lacks the needed passage for most questions, and no prompt or model can use text that it was not given. Fix retrieval until recall is high, then look at generation."
+    },
+    {
+      "q": "For three test questions, the first relevant chunk appears at rank 2, at rank 1, and at rank 4. What is the MRR?",
+      "options": [
+        "About 0.58",
+        "About 0.43",
+        "About 2.33",
+        "About 0.75"
+      ],
+      "answer": 0,
+      "explain": "MRR is the mean of the reciprocal ranks: (1/2 + 1/1 + 1/4) divided by 3, which is 1.75 divided by 3, or about 0.58."
+    },
+    {
+      "q": "A RAG assistant indexes a shared wiki that any employee can edit. Why must retrieved passages be treated as untrusted input?",
+      "options": [
+        "Someone could plant instructions in a page, which the model might then follow",
+        "Wiki pages are usually too long to fit within the context window",
+        "Embedding models cannot process text that has been written by employees",
+        "Retrieved passages are deleted from the index once they have been used"
+      ],
+      "answer": 0,
+      "explain": "Anything placed in the prompt can influence the model, including text that an attacker wrote into an indexed document. This is indirect prompt injection, and it is why such systems need clear delimiters and minimal privileges."
+    }
+  ]
+}

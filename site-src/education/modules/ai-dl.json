@@ -1,0 +1,259 @@
+{
+  "id": "ai-dl",
+  "minutes": 40,
+  "intro": "Deep learning is the technology behind image recognition, speech transcription, translation and every large language model. Beneath the scale there is a small set of ideas you have already met: a neural network is layers of matrix multiplications with simple non-linear functions between them, trained by gradient descent. This module shows how a network learns, in real PyTorch. It then explains the transformer, the architecture behind modern AI, at the level you need in order to use it well, and finishes with fine-tuning, which is how you will actually work with these models.",
+  "objectives": [
+    "Describe a neural network as stacked layers of weights, biases and activation functions",
+    "Write and explain a PyTorch training loop: forward pass, loss, backward pass, optimiser step",
+    "Recognise and control overfitting in deep networks, and read training and validation curves",
+    "Explain tokens, embeddings, self-attention and positional information in a transformer, without heavy mathematics",
+    "Choose between prompting, fine-tuning and training from scratch, and explain freezing layers and LoRA"
+  ],
+  "sections": [
+    {
+      "heading": "From a neuron to a network",
+      "blocks": [
+        { "type": "p", "text": "A single **neuron** takes several numbers as input, multiplies each by a **weight**, adds them up together with a **bias**, and passes the result through an **activation function**. That is a dot product followed by a simple non-linear step, which you met in the maths module. A **layer** is many neurons looking at the same inputs, which is one matrix multiplication. A **network** is layers stacked so that each feeds the next." },
+        { "type": "code", "lang": "text", "code": "one layer:    h = activation(x @ W + b)\n\ninput (10 features) -> [Linear 10->64] -> ReLU -> [Linear 64->32] -> ReLU -> [Linear 32->2] -> logits\n\nparameters: (10x64 + 64) + (64x32 + 32) + (32x2 + 2) = 704 + 2,080 + 66 = 2,850" },
+        { "type": "p", "text": "The activation function matters more than it looks. Without it, stacking layers would achieve nothing, because several matrix multiplications in a row collapse into a single one, and the network could only ever draw straight lines. The non-linearity lets each layer bend the space, and stacking layers lets the network compose simple bends into very complex shapes. **ReLU**, which is simply `max(0, x)`, is the usual default. GELU is a smoother relative used in transformers." },
+        { "type": "p", "text": "The \"deep\" in deep learning refers to having many layers. What makes depth useful is that layers build on one another. In an image model, early layers respond to edges, middle layers to textures and shapes, and late layers to whole objects. Nobody programmed those features. They emerged because they reduced the loss. That is the central difference from the classical machine learning of the previous module, where you engineer the features by hand: **a deep network learns its own features from raw data**, which is why it dominates for images, audio and text, and why it needs so much data and computation." }
+      ]
+    },
+    {
+      "heading": "The training loop",
+      "blocks": [
+        { "type": "p", "text": "Training repeats four steps: run the inputs through the network to get predictions, which is the **forward pass**; measure how wrong they are with a **loss function**; calculate how each weight contributed to that error, which is the **backward pass**; and nudge every weight slightly in the direction that reduces the loss, which is the **optimiser step**. The backward pass uses **backpropagation**, the chain rule applied layer by layer from the output back to the input. PyTorch records the operations of the forward pass and calculates all the gradients for you." },
+        { "type": "code", "lang": "python", "code": "import torch\nfrom torch import nn\nfrom torch.utils.data import DataLoader, TensorDataset\n\ntorch.manual_seed(0)\ndevice = \"cuda\" if torch.cuda.is_available() else \"cpu\"\n\n\nclass Classifier(nn.Module):\n    def __init__(self, n_features: int, n_classes: int):\n        super().__init__()\n        self.net = nn.Sequential(\n            nn.Linear(n_features, 64), nn.ReLU(), nn.Dropout(0.2),\n            nn.Linear(64, 32), nn.ReLU(),\n            nn.Linear(32, n_classes),          # raw logits; no softmax here\n        )\n\n    def forward(self, x):\n        return self.net(x)\n\n\nmodel = Classifier(n_features=10, n_classes=2).to(device)\nloss_fn = nn.CrossEntropyLoss()                # applies softmax internally\noptimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)\n\n# X_train: float32 tensor (N, 10).  y_train: int64 tensor (N,) of class indices\ntrain_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=64, shuffle=True)\n\nfor epoch in range(20):\n    model.train()                              # enables dropout\n    for xb, yb in train_loader:\n        xb, yb = xb.to(device), yb.to(device)\n        optimizer.zero_grad()                  # 1. clear gradients from the last step\n        logits = model(xb)                     # 2. forward pass\n        loss = loss_fn(logits, yb)             # 3. how wrong?\n        loss.backward()                        # 4. backward pass: compute gradients\n        optimizer.step()                       # 5. update the weights\n\n    model.eval()                               # disables dropout\n    with torch.no_grad():                      # no gradients needed for evaluation\n        val_logits = model(X_val.to(device))\n        val_loss = loss_fn(val_logits, y_val.to(device)).item()\n        val_acc = (val_logits.argmax(dim=1).cpu() == y_val).float().mean().item()\n    print(f\"epoch {epoch:2d}  train_loss={loss.item():.3f}  val_loss={val_loss:.3f}  val_acc={val_acc:.3f}\")" },
+        { "type": "table", "headers": ["Term", "Meaning"], "rows": [
+          ["**Epoch**", "One complete pass over the training data"],
+          ["**Batch**", "The handful of examples used for one weight update. Larger batches give smoother gradients and need more memory."],
+          ["**Learning rate**", "The size of each update. The most important setting; too high diverges, too low crawls."],
+          ["**Optimiser**", "The update rule. Adam, or AdamW, is the usual default."],
+          ["**Tensor**", "PyTorch's array type: like a NumPy array, but it can live on a GPU and track gradients"]
+        ]},
+        { "type": "callout", "kind": "warning", "text": "Three lines cause most beginner bugs. Forgetting `optimizer.zero_grad()` makes gradients accumulate across steps, so training goes haywire. Forgetting `model.eval()` leaves dropout active during evaluation, which makes the results noisy and pessimistic. And forgetting `torch.no_grad()` during evaluation wastes memory by recording gradients nobody needs." },
+        { "type": "p", "text": "Deep learning runs on **GPUs** because the work is overwhelmingly matrix multiplication, which a GPU performs thousands of times in parallel. The practical constraint is usually GPU memory, which has to hold the weights, the gradients, the optimiser's state and the activations of the current batch. \"CUDA out of memory\" is the error you will meet most often, and the first remedy is a smaller batch size." }
+      ]
+    },
+    {
+      "heading": "Keeping a deep network honest",
+      "blocks": [
+        { "type": "p", "text": "A network with millions of parameters can memorise a training set with ease, so everything the previous module said about overfitting applies with extra force. The essential habit is to plot the **training loss and the validation loss together** as training proceeds." },
+        { "type": "table", "headers": ["What the curves show", "Meaning", "Try"], "rows": [
+          ["Both fall and then level off close together", "Healthy", "Stop; more epochs will not help"],
+          ["Training keeps falling while validation turns upward", "Overfitting from that point on", "Early stopping, more data, dropout, weight decay, augmentation"],
+          ["Both stay high", "Underfitting, or a bug", "A larger model, a higher learning rate, check the data and labels"],
+          ["Loss swings wildly or becomes `NaN`", "Learning rate too high, or bad input values", "Lower the learning rate, normalise the inputs, clip gradients"],
+          ["Loss does not move at all", "Learning rate far too low, or gradients not flowing", "Check the learning rate, and that the loss is connected to the parameters"]
+        ]},
+        { "type": "list", "items": [
+          "**Early stopping**: keep the weights from the epoch with the best validation loss, and stop when it has not improved for several epochs. It is simple and effective.",
+          "**Dropout** randomly zeroes a share of activations during training, so that the network cannot depend on any single path.",
+          "**Weight decay** is L2 regularisation: it gently pulls weights towards zero.",
+          "**Data augmentation** creates plausible variations of the training examples, such as flipped or cropped images, or noise added to audio. It is effectively free data.",
+          "**Normalise the inputs**, and use normalisation layers such as LayerNorm or BatchNorm inside deep networks, which makes training much more stable.",
+          "**Overfit one batch first.** Before a long run, check that the model can drive the loss to nearly zero on a single small batch. If it cannot, there is a bug in the model or the data pipeline, and no amount of training will fix it."
+        ]}
+      ]
+    },
+    {
+      "heading": "Transformers at a glance",
+      "blocks": [
+        { "type": "p", "text": "The **transformer**, introduced in 2017, is the architecture behind essentially all modern language models, and increasingly behind vision and audio models too. You do not need to be able to implement one. You do need its vocabulary, because it explains how language models behave, what they cost, and where their limits come from." },
+        { "type": "steps", "items": [
+          "**Tokens.** Text is cut into pieces called tokens: common words, fragments of rarer words, punctuation. Each token is an integer ID from a fixed vocabulary of tens of thousands of entries. The model never sees letters or words, only token IDs.",
+          "**Embeddings.** Each token ID is looked up in a table that gives a vector of several hundred or several thousand numbers. These vectors are learned during training, and tokens used in similar ways end up with similar vectors.",
+          "**Positional information.** Attention, the next step, has no built-in sense of order, so information about each token's position is added. Without it, \"dog bites man\" and \"man bites dog\" would look the same.",
+          "**Self-attention.** For each token, the model calculates how relevant every other token is to it, and builds a new vector for that token as a weighted mix of the others. In \"the server crashed because **it** ran out of memory\", attention is what lets the vector for \"it\" draw mostly on \"server\". The relevance scores are dot products, turned into weights by a softmax. **Multi-head** attention runs several of these in parallel, each free to track a different kind of relationship.",
+          "**Feed-forward layer.** Each token's vector then passes through a small ordinary network, such as you built above.",
+          "**Repeat.** Attention plus feed-forward is one **block**. Large models stack dozens of blocks, with residual connections and normalisation to keep training stable.",
+          "**Output.** A final layer turns the last vector into a score for every token in the vocabulary, and a softmax makes those scores probabilities. A language model is a classifier that predicts the next token."
+        ]},
+        { "type": "p", "text": "Two consequences are worth holding on to. First, a transformer processes all the tokens of its input **in parallel** during training, unlike the older recurrent networks that read one token at a time. That is what made it practical to train on enormous amounts of text. Second, because every token attends to every other token, the cost of attention grows roughly with the **square** of the sequence length. That is the root of the **context window** limit, and of the way cost and latency rise as prompts get longer, both of which the next stage examines." },
+        { "type": "table", "headers": ["Family", "Attention sees", "Typical use"], "rows": [
+          ["**Encoder-only** (BERT-style)", "The whole input in both directions", "Classification, search, producing embeddings"],
+          ["**Decoder-only** (GPT-style)", "Only the tokens to the left", "Generating text one token at a time; most LLMs"],
+          ["**Encoder-decoder** (T5-style)", "Encoder: everything; decoder: left only, plus the encoder", "Translation, summarisation"]
+        ]}
+      ]
+    },
+    {
+      "heading": "Fine-tuning a pretrained model",
+      "blocks": [
+        { "type": "p", "text": "Training a large model from scratch requires vast data and computation, and almost nobody does it. **Transfer learning** is the normal route. A **pretrained** model has already learned general features from an enormous dataset: what edges and textures look like, or how language works. You adapt it to your task with a comparatively tiny dataset, because most of what it needs to know is already there." },
+        { "type": "table", "headers": ["Approach", "What changes", "Data needed", "When"], "rows": [
+          ["**Prompting**", "Nothing; you instruct the model in its input", "A few examples or none", "Try this first, always. The next stage covers it."],
+          ["**Retrieval (RAG)**", "Nothing; relevant documents are added to the prompt", "Your documents", "The model lacks knowledge, as opposed to skill"],
+          ["**Feature extraction**", "Train only a new final layer on top of a frozen model", "Hundreds to thousands of examples", "A small dataset whose task resembles pretraining"],
+          ["**Full fine-tuning**", "All the weights, gently", "Thousands upwards", "Enough data and computation; the largest quality gain"],
+          ["**LoRA and other PEFT**", "Small added matrices; the original weights stay frozen", "Thousands upwards", "Large models on modest hardware"],
+          ["**From scratch**", "Everything, from random initialisation", "Millions upwards", "Almost never"]
+        ]},
+        { "type": "code", "lang": "python", "code": "import torch\nfrom torch import nn\n\n# `backbone` is any pretrained model whose final layer has been removed,\n# returning a feature vector of size `feature_dim` for each input.\n\nfor param in backbone.parameters():\n    param.requires_grad = False                # freeze: these weights will not change\n\nhead = nn.Linear(feature_dim, n_classes)       # new, randomly initialised, trainable\nmodel = nn.Sequential(backbone, head)\n\n# pass ONLY the trainable parameters to the optimiser\noptimizer = torch.optim.AdamW(head.parameters(), lr=1e-3)\n\n# Later, to fine-tune everything: unfreeze, and use a much smaller learning rate\nfor param in backbone.parameters():\n    param.requires_grad = True\noptimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)" },
+        { "type": "list", "items": [
+          "**Use a small learning rate** when fine-tuning pretrained weights, often a hundred times smaller than for training from scratch. Large updates destroy what the model already knows, which is called **catastrophic forgetting**.",
+          "**Freeze first, then unfreeze.** Train the new head by itself until it is sensible, then unfreeze the rest. Otherwise the random head sends large, meaningless gradients back through the good weights.",
+          "**Preprocess exactly as the pretrained model expects**: the same tokeniser, the same image size and normalisation. A mismatch degrades results silently.",
+          "**LoRA** (low-rank adaptation) keeps the original weight matrices frozen and learns a pair of small matrices alongside each one, whose product is added to it. Only a tiny fraction of the parameters is trained, so memory needs drop sharply and the result is a small adapter file instead of a full copy of the model. It is the most widely used member of the family called **parameter-efficient fine-tuning** (PEFT).",
+          "**Evaluate against the simple alternatives.** Fine-tuning a language model is rarely the right first step. Prompting and retrieval are cheaper, faster to iterate on, and need no retraining when the base model improves. Fine-tune when you need a consistent style or format, a specialised skill, or a smaller and cheaper model that matches a larger one on a narrow task."
+        ]},
+        { "type": "callout", "kind": "note", "text": "Model hubs distribute pretrained weights for thousands of models. Treat a downloaded model like any other dependency from the supply chain module: check its licence, prefer the `safetensors` format to pickled files, which can execute code when loaded, and pin the exact revision you tested." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Train, overfit, and fine-tune",
+    "steps": [
+      "Install PyTorch. Convert a small tabular dataset, such as the one from the previous module, into `float32` feature tensors and `int64` label tensors, split into training and validation sets.",
+      "Build the classifier from this module. Before training properly, take a single batch of 16 examples and train on it alone until the loss is close to zero. If it will not get there, find the bug.",
+      "Train for 50 epochs, recording the training and validation loss each epoch, and plot both curves. Find the epoch where the validation loss is lowest.",
+      "Remove dropout and weight decay, and enlarge the hidden layers to 512 units. Retrain, and watch the gap between the two curves open up. Put the regularisation back, and add early stopping.",
+      "Set the learning rate to 1.0 and observe what happens, then set it to 1e-6 and observe that. Describe both in a sentence.",
+      "Delete `optimizer.zero_grad()` and see how training behaves. Put it back.",
+      "Count the model's parameters with `sum(p.numel() for p in model.parameters())`, and check the figure by hand from the layer sizes.",
+      "Load any small pretrained image or text model. Freeze it, add a new linear head, and train only the head on a small dataset of your own. Then unfreeze it with a learning rate around 2e-5, and compare the results."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "A network is stacked layers of `activation(x @ W + b)`. The non-linearity is what makes depth useful.",
+      "Deep networks learn their own features, which is why they win on images, audio and text, and why they need data and GPUs.",
+      "The loop: `zero_grad`, forward, loss, `backward`, `step`. Use `model.train()` and `model.eval()` with `no_grad()` in the right places.",
+      "Plot training and validation loss together. Divergence between them means overfitting; stop early.",
+      "Overfit a single batch first, to prove that the model and the data pipeline work.",
+      "Transformer: tokens, embeddings, position, self-attention, feed-forward, repeated, then a softmax over the vocabulary.",
+      "Attention cost grows with the square of sequence length, which is where context limits come from.",
+      "Do not train from scratch. Prompt first, then retrieve, then fine-tune, with a small learning rate, and with LoRA for large models."
+    ],
+    "groups": [
+      {
+        "title": "PyTorch building blocks",
+        "items": [
+          { "syntax": "class Net(nn.Module): def forward(self, x): ...", "desc": "Define a model" },
+          { "syntax": "nn.Linear(in_features, out_features)", "desc": "A fully connected layer: x @ W.T + b" },
+          { "syntax": "nn.ReLU() / nn.GELU()", "desc": "Activation functions" },
+          { "syntax": "nn.Dropout(0.2)", "desc": "Zero 20% of activations during training" },
+          { "syntax": "nn.Sequential(layer1, layer2, ...)", "desc": "Chain layers together" },
+          { "syntax": "nn.CrossEntropyLoss()", "desc": "Classification loss; takes raw logits and class indices" },
+          { "syntax": "nn.MSELoss()", "desc": "Regression loss" },
+          { "syntax": "torch.optim.AdamW(model.parameters(), lr=1e-3)", "desc": "The usual default optimiser" },
+          { "syntax": "DataLoader(dataset, batch_size=64, shuffle=True)", "desc": "Batches and shuffling" }
+        ]
+      },
+      {
+        "title": "The training step",
+        "items": [
+          { "syntax": "model.train()", "desc": "Training mode: dropout on, batch norm updating" },
+          { "syntax": "optimizer.zero_grad()", "desc": "Clear the old gradients" },
+          { "syntax": "loss = loss_fn(model(xb), yb)", "desc": "Forward pass and loss" },
+          { "syntax": "loss.backward()", "desc": "Backpropagation: compute every gradient" },
+          { "syntax": "optimizer.step()", "desc": "Update the weights" },
+          { "syntax": "model.eval(); with torch.no_grad(): ...", "desc": "Evaluation: no dropout, no gradient tracking" },
+          { "syntax": "torch.save(model.state_dict(), \"model.pt\")", "desc": "Save the weights" },
+          { "syntax": "model.load_state_dict(torch.load(\"model.pt\"))", "desc": "Load the weights" }
+        ]
+      },
+      {
+        "title": "Tensors and devices",
+        "items": [
+          { "syntax": "torch.tensor(data, dtype=torch.float32)", "desc": "Create a tensor" },
+          { "syntax": "torch.from_numpy(array)", "desc": "Share memory with a NumPy array" },
+          { "syntax": "x.shape / x.dtype / x.device", "desc": "Inspect a tensor" },
+          { "syntax": "x.to(device)", "desc": "Move to the GPU or CPU; model and data must be on the same device" },
+          { "syntax": "logits.argmax(dim=1)", "desc": "Predicted class per row" },
+          { "syntax": "loss.item()", "desc": "A plain Python number from a one-element tensor" },
+          { "syntax": "sum(p.numel() for p in model.parameters())", "desc": "Count the parameters" }
+        ]
+      },
+      {
+        "title": "Reading loss curves",
+        "items": [
+          { "syntax": "both fall, then level off together", "desc": "Healthy; stop" },
+          { "syntax": "train falls, validation rises", "desc": "Overfitting; early stopping and regularisation" },
+          { "syntax": "both stay high", "desc": "Underfitting or a bug; try overfitting one batch" },
+          { "syntax": "NaN or wild swings", "desc": "Lower the learning rate; normalise inputs; clip gradients" },
+          { "syntax": "completely flat", "desc": "Learning rate too low, or gradients not flowing" },
+          { "syntax": "CUDA out of memory", "desc": "Reduce the batch size first" }
+        ]
+      },
+      {
+        "title": "Transformer and fine-tuning vocabulary",
+        "items": [
+          { "syntax": "token", "desc": "A piece of text mapped to an integer ID" },
+          { "syntax": "embedding", "desc": "A learned vector for each token" },
+          { "syntax": "self-attention", "desc": "Each token becomes a relevance-weighted mix of all the tokens" },
+          { "syntax": "context window", "desc": "Maximum number of tokens the model can attend over" },
+          { "syntax": "param.requires_grad = False", "desc": "Freeze a parameter" },
+          { "syntax": "lr ~ 1e-5 to 5e-5", "desc": "Typical learning rates for fine-tuning pretrained weights" },
+          { "syntax": "LoRA / PEFT", "desc": "Train small added matrices; keep the original weights frozen" },
+          { "syntax": "safetensors", "desc": "A weight file format that cannot execute code on loading" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Forgetting `optimizer.zero_grad()`, so that gradients pile up from one step to the next.",
+      "Evaluating with the model still in training mode, leaving dropout active.",
+      "Putting a softmax before `nn.CrossEntropyLoss`, which already applies one.",
+      "Watching only the training loss and never noticing that the validation loss turned upward.",
+      "Fine-tuning pretrained weights with a from-scratch learning rate and wiping out what they knew.",
+      "Reaching for fine-tuning, or for training from scratch, before trying a prompt or retrieval."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "Why does a neural network need non-linear activation functions between its layers?",
+      "options": [
+        "Without them, stacked linear layers collapse into a single linear transformation",
+        "They make the matrix multiplications run faster on a GPU",
+        "They prevent the weights from ever becoming negative numbers",
+        "They convert the network's outputs into valid probabilities"
+      ],
+      "answer": 0,
+      "explain": "A product of matrices is just another matrix, so a purely linear deep network could only represent what one layer can. Non-linearities let the layers compose into complex functions. Probabilities come from softmax at the output."
+    },
+    {
+      "q": "What happens if `optimizer.zero_grad()` is left out of a PyTorch training loop?",
+      "options": [
+        "Gradients accumulate across steps, so updates grow wrong and training misbehaves",
+        "Nothing, because PyTorch clears gradients automatically after every step",
+        "The model stops learning, because the gradients are fixed at zero",
+        "The validation loss is computed incorrectly, while training is unaffected"
+      ],
+      "answer": 0,
+      "explain": "`backward()` adds to the existing gradients by design. Without clearing them, every update uses the sum of all previous gradients, and the loss typically becomes unstable."
+    },
+    {
+      "q": "During training, the training loss keeps falling while the validation loss reaches a minimum at epoch 12 and then rises. What should you do?",
+      "options": [
+        "Use the weights from around epoch 12, and consider more regularisation or data",
+        "Keep training, since the validation loss will come back down eventually",
+        "Raise the learning rate, so that the validation loss falls more quickly",
+        "Switch to evaluating on the training set, which gives a smoother curve"
+      ],
+      "answer": 0,
+      "explain": "The curves separating means the model has begun to memorise the training data. Early stopping keeps the best checkpoint, and dropout, weight decay, augmentation or more data address the cause."
+    },
+    {
+      "q": "In a transformer, what does self-attention do?",
+      "options": [
+        "It rebuilds each token's vector as a relevance-weighted mix of all the tokens",
+        "It splits the input text into tokens and assigns each an integer ID",
+        "It records the order of tokens, since the model otherwise ignores position",
+        "It picks the next token by sampling from the output probabilities"
+      ],
+      "answer": 0,
+      "explain": "Attention scores the relevance of every token to every other, and mixes their vectors accordingly, which is how context flows between words. Tokenising, positional information and sampling are separate steps."
+    },
+    {
+      "q": "You have 2,000 labelled examples and a large pretrained model, and want to adapt it. Which approach is most appropriate?",
+      "options": [
+        "Freeze most of the model and train a small head or LoRA adapter, at a low learning rate",
+        "Train the same architecture from random weights, using only your 2,000 examples",
+        "Fine-tune every weight with the learning rate used for training from scratch",
+        "Train on the test set as well, since 2,000 examples are too few otherwise"
+      ],
+      "answer": 0,
+      "explain": "The pretrained weights already hold general knowledge that 2,000 examples could never teach. Small, gentle updates adapt it without overfitting or forgetting. Training from scratch needs vastly more data, and a high learning rate destroys the pretrained features."
+    }
+  ]
+}

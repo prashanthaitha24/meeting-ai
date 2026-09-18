@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Safe releases — Site Reliability | ThavionAI Education</title>
+  <meta name="description" content="Canaries, progressive delivery, feature flags, and automatic rollback." />
+  <meta property="og:title" content="Safe releases — ThavionAI Education" />
+  <meta property="og:description" content="Canaries, progressive delivery, feature flags, and automatic rollback." />
+  <meta property="og:type" content="article" />
+  <link rel="canonical" href="https://thavionai.com/education/sre-release.html" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-sre" data-module="sre-release">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><div class="nav-logo-icon">T</div>ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html#features">Features</a>
+    <a href="../index.html#products">Products</a>
+    <a href="../education.html" class="active">Education</a>
+    <a href="../index.html#about">About</a>
+    <a href="../index.html#pricing">Pricing</a>
+    <a href="../index.html#contact" class="nav-cta">Contact Us</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#sre">Site Reliability</a> › Stage 4: Engineering for resilience</div>
+    <h1>Safe releases</h1>
+    <p class="lede">Canaries, progressive delivery, feature flags, and automatic rollback.</p>
+    <div class="meta">
+      <span class="chip">Advanced</span>
+      <span class="chip">~30 min read</span>
+      <span class="chip">Module 15 of 16</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">Most outages are self-inflicted. Study after study, and your own postmortems, will show that the majority of incidents begin with a change: a deploy, a config push, a flag flip, a migration. Yet stopping change is not an option, and the DORA research shows that the teams who release most often are also the most stable. The way out of that apparent paradox is to make every change small, gradual, observable and reversible. This module covers the release strategies and the supporting techniques that make that possible.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Compare rolling, blue-green and canary releases, and choose one for a given service</li><li>Design a progressive rollout with stages, bake times and automated analysis against SLIs</li><li>Separate deployment from release using feature flags, and manage the debt they create</li><li>Decide between rolling back and rolling forward, and make rollback fast and rehearsed</li><li>Change database schemas without downtime using the expand and contract pattern</li></ul>
+    </div>
+    <section id="change-is-the-main-source-of-risk"><h2>Change is the main source of risk</h2>
+    <p>If change causes most incidents, there are two possible responses. The traditional one is to change less: release monthly, behind a change advisory board, in a maintenance window. It fails for a reason the DORA module explained. Infrequent releases are large, a large release contains hundreds of changes, something in it will break, and finding which of the hundreds is responsible takes hours. Caution of that kind produces exactly the big, risky events it was meant to avoid.</p>
+    <p>The SRE response is to keep changing, and to make each change <strong>safe by construction</strong>. Four properties do the work.</p>
+    <ul><li><strong>Small.</strong> A release containing one change has one suspect. It is easy to review, easy to reason about, and easy to revert.</li><li><strong>Gradual.</strong> Expose the change to a small share of traffic first. If it is bad, most users never see it, and the error budget barely notices.</li><li><strong>Observable.</strong> You can tell, from metrics split by version, whether the new code is behaving worse than the old.</li><li><strong>Reversible.</strong> Undoing the change is quick, tested, and needs nobody's heroics.</li></ul>
+    <p>Treat every kind of change this way, not only code. Configuration pushes, feature flag changes, infrastructure changes and data migrations cause at least as many outages as deploys do, and they often bypass the pipeline and its safeguards entirely. A configuration value that takes effect globally and instantly is one of the most dangerous things in a modern system.</p></section>
+  <section id="rolling-blue-green-canary"><h2>Rolling, blue-green, canary</h2>
+    <div class="table-wrap"><table><thead><tr><th>Strategy</th><th>How it works</th><th>Strength</th><th>Weakness</th></tr></thead><tbody><tr><td><strong>Recreate</strong></td><td>Stop the old version, start the new</td><td>Simple; never two versions at once</td><td>Downtime</td></tr><tr><td><strong>Rolling</strong></td><td>Replace instances a few at a time</td><td>No downtime; no extra capacity; the Kubernetes default</td><td>Proceeds on readiness alone, and ends up at 100% whether the code is good or not</td></tr><tr><td><strong>Blue-green</strong></td><td>Run a full second environment, test it, switch all traffic at once</td><td>Instant switch and instant rollback; tested before any user sees it</td><td>Double the capacity; every user is exposed at the same moment</td></tr><tr><td><strong>Canary</strong></td><td>Send a small share of real traffic to the new version, compare, and widen in steps</td><td>Real traffic, limited blast radius, decisions from data</td><td>Needs traffic splitting, per-version metrics and automation</td></tr></tbody></table></div>
+    <p>A Kubernetes <strong>rolling update</strong> is controlled by two settings. <code>maxUnavailable</code> is how many pods may be missing during the update, and <code>maxSurge</code> is how many extra may be created. Setting <code>maxUnavailable: 0</code> means capacity never drops below the desired count, which matters if you have sized your fleet as tightly as the capacity module warned against.</p>
+    <div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout
+  namespace: shop
+spec:
+  replicas: 12
+  minReadySeconds: 30            # a pod must stay ready this long before it counts
+  progressDeadlineSeconds: 600   # mark the rollout failed if it stalls
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: checkout
+  template:
+    metadata:
+      labels:
+        app: checkout
+    spec:
+      containers:
+        - name: checkout
+          image: ghcr.io/acme/checkout:1.9.0
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000</code></pre></div>
+    <p>The weakness of a plain rolling update is what it checks. It waits for each new pod to pass its <strong>readiness probe</strong>, and nothing else. A version that starts cleanly and then returns errors for 5% of requests, or is twice as slow, passes readiness and rolls out to everyone. Readiness tells you that the process is up, not that the release is good. For that you need to compare the new version's SLIs with the old, which is what a canary does.</p></section>
+  <section id="progressive-delivery"><h2>Progressive delivery</h2>
+    <p>A <strong>canary release</strong> is named after the birds once carried into coal mines as an early warning. A small share of real production traffic goes to the new version while the rest stays on the old. Both are measured on the same SLIs at the same time, under the same conditions. If the canary is no worse, its share grows. If it is worse, traffic returns to the old version automatically.</p>
+    <div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>deploy canary
+  -&gt; 1% of traffic     bake 10 min   compare error ratio and p99 with the baseline
+  -&gt; 5%                bake 10 min   compare
+  -&gt; 25%               bake 15 min   compare
+  -&gt; 50%               bake 15 min   compare
+  -&gt; 100%              keep the old version available for quick rollback
+
+any comparison fails -&gt; traffic back to 0% automatically, release marked failed</code></pre></div>
+    <figure class="diagram" id="fig-canary-release"><div class="diagram-scroll"><svg viewBox="0 0 910 356" role="img" aria-label="Traffic arrives at an ingress or mesh, which sends 95 percent of requests to the stable version and 5 percent to the canary. Both versions report metrics to Prometheus. An analysis step compares the canary&#x27;s error ratio and latency with the stable baseline, and either promotes the canary to a larger share or aborts and returns all traffic to stable." style="width:100%;max-width:910px;min-width:540px;height:auto;display:block"><defs><marker id="canary-release-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="canary-release-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="canary-release-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="canary-release-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="canary-release-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><polyline points="171.0,178.0 201.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#canary-release-arrow-default)"/><polyline points="251.0,150.0 251.0,50.0 371.0,50.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#canary-release-arrow-default)"/><rect x="296.9" y="31.0" width="28.3" height="16" rx="4" class="dg-label-bg"/><text x="311.0" y="39.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">95%</text><polyline points="291.0,206.0 291.0,306.0 371.0,306.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#canary-release-arrow-default)"/><rect x="294.0" y="248.0" width="22.2" height="16" rx="4" class="dg-label-bg"/><text x="298.0" y="256.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">5%</text><polyline points="511.0,90.0 631.0,90.0 631.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#canary-release-arrow-default)"/><rect x="517.2" y="71.0" width="107.6" height="16" rx="4" class="dg-label-bg"/><text x="571.0" y="79.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">error ratio, p99</text><polyline points="511.0,306.0 631.0,306.0 631.0,206.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#canary-release-arrow-default)"/><polyline points="681.0,178.0 711.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#canary-release-arrow-default)"/><rect x="669.6" y="132.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="696.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">compare</text><polyline points="781.0,206.0 781.0,228.0 271.0,228.0 271.0,206.0" fill="none" style="stroke:var(--accent)" stroke-width="1.6" marker-end="url(#canary-release-arrow-accent)"/><rect x="456.9" y="231.0" width="138.1" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="239.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--accent)">widen, or abort to 0%</text><rect x="31" y="150.0" width="140" height="56" rx="28.0" class="dg-node dg-actor"/><text x="101.0" y="178.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Traffic</text><rect x="201" y="150.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="271.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Ingress or mesh</text><text x="271.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">weighted routing</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-ok"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#6ee7b7">Stable v1</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">95% of requests</text><rect x="371" y="258.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="441.0" y="279.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Canary v2</text><text x="441.0" y="297.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">5% of requests</text><path d="M541,157.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M541,157.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="611.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Prometheus</text><text x="611.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">metrics by version</text><rect x="711" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="781.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Analysis</text><text x="781.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">canary vs baseline</text></svg></div><figcaption>A canary release: a small share of real traffic goes to the new version, both versions are measured on the same SLIs at the same time, and the analysis either widens the canary or sends every request back to the stable version.</figcaption></figure>
+    <ul><li><strong>Compare against a baseline, not a fixed threshold.</strong> "Error ratio under 1%" passes a canary that is five times worse than the old version on a quiet day. "No worse than the current version, measured now" does not. Ideally the baseline is a freshly started set of old-version pods, so that cold-start effects cancel out.</li><li><strong>Bake long enough to see the problem.</strong> Memory leaks, cache effects and hourly jobs do not show in two minutes. Enough requests must flow through the canary for the comparison to mean something, which at 1% of a low-traffic service can take a long time.</li><li><strong>Use the SLIs from your SLOs</strong>, split by a version label. If your metrics cannot be split by version, fix that first. Add saturation, such as CPU and memory per pod, and watch downstream dependencies too.</li><li><strong>Order the stages by blast radius</strong>: internal users or staff first, then one region or cell, then a small percentage, then everyone. Multi-region services should release one region at a time and never all at once.</li><li><strong>Make the decision automatic.</strong> A human watching graphs at each stage is slow and inconsistent, and will stop looking.</li></ul>
+    <div class="code"><div class="code-cap">A canary with Argo Rollouts, which replaces the Deployment object</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: checkout
+  namespace: shop
+spec:
+  replicas: 12
+  selector:
+    matchLabels:
+      app: checkout
+  template:
+    metadata:
+      labels:
+        app: checkout
+    spec:
+      containers:
+        - name: checkout
+          image: ghcr.io/acme/checkout:1.9.0
+  strategy:
+    canary:
+      steps:
+        - setWeight: 5
+        - pause: {duration: 10m}
+        - setWeight: 25
+        - pause: {duration: 15m}
+        - setWeight: 50
+        - pause: {duration: 15m}</code></pre></div>
+    <p>Argo Rollouts and Flagger both implement this on Kubernetes, and both can run automated <strong>analysis</strong> between steps, querying Prometheus and aborting the rollout when a metric fails. Without a service mesh or an ingress that can split traffic, the weight is approximated by the ratio of canary pods to stable pods, so a precise 1% needs real traffic routing.</p>
+    <div class="callout callout-tip"><strong>Tip</strong><p>A canary limits the blast radius for whoever lands on it, and those users still get the broken version. For changes where even a few failures are unacceptable, add <strong>shadow traffic</strong> first: copy real requests to the new version and discard its responses, comparing them with the old version's. It only works safely for requests without side effects.</p></div></section>
+  <section id="feature-flags-deploy-is-not-release"><h2>Feature flags: deploy is not release</h2>
+    <p><strong>Deploying</strong> is putting new code on servers. <strong>Releasing</strong> is exposing new behaviour to users. A <strong>feature flag</strong> separates the two: the code ships switched off, and is turned on later, at runtime, for whoever you choose, without another deploy. This is what makes trunk-based development workable, because unfinished work can be merged daily and stay dark.</p>
+    <div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>def checkout(user, basket):
+    if flags.is_enabled("new_pricing_engine", user=user, default=False):
+        try:
+            return new_pricing_checkout(user, basket)
+        except Exception:
+            metrics.increment("new_pricing_engine.fallback")
+            # fall through to the proven path
+    return legacy_checkout(user, basket)</code></pre></div>
+    <div class="table-wrap"><table><thead><tr><th>Kind of flag</th><th>Purpose</th><th>Lifetime</th></tr></thead><tbody><tr><td><strong>Release flag</strong></td><td>Hide unfinished work; roll a feature out gradually</td><td>Days to weeks. Remove once fully rolled out.</td></tr><tr><td><strong>Ops flag (kill switch)</strong></td><td>Turn off an expensive or risky feature during an incident</td><td>Long-lived, and deliberately so</td></tr><tr><td><strong>Experiment flag</strong></td><td>A/B test two behaviours</td><td>The length of the experiment</td></tr><tr><td><strong>Permission flag</strong></td><td>Enable features for certain plans or customers</td><td>Permanent; really part of the product</td></tr></tbody></table></div>
+    <p>For reliability, the <strong>kill switch</strong> is the valuable one. Turning a flag off takes seconds, affects only the feature in question, and needs no build, which makes it the fastest mitigation available, faster than any rollback. Build one into every risky new feature and every expensive optional one, and list them in the runbook.</p>
+    <ul><li><strong>Flags are production changes.</strong> A flag flip can take a site down as thoroughly as a deploy. Roll flag changes out gradually, record who changed what, and show flag changes as annotations on dashboards, next to deploys.</li><li><strong>Default to safe.</strong> If the flag service is unreachable, the code must fall back to a sensible default, normally the old behaviour. The flag system must never be a hard dependency of the request path.</li><li><strong>Flags are debt.</strong> Each one doubles the number of code paths, and old flags combine in ways nobody tests. Give every release flag an owner and an expiry date, and delete the flag and the dead code once the rollout is complete.</li><li><strong>Test both states</strong>, and the combinations that matter. A well-known trading firm lost hundreds of millions of dollars in under an hour when a reused flag activated long-dead code on one server that had missed a deploy.</li></ul></section>
+  <section id="rollback-and-the-changes-that-cannot-be-rolled-back"><h2>Rollback, and the changes that cannot be rolled back</h2>
+    <p>When a release goes wrong, the default is to <strong>roll back first and understand later</strong>, as the incident response module insisted. Rolling <strong>forward</strong>, meaning writing and shipping a fix, is slower, is done under pressure, and risks a second bad release on top of the first. Roll forward only when rolling back is impossible or clearly more dangerous.</p>
+    <div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>kubectl rollout status deployment/checkout -n shop --timeout=5m
+kubectl rollout history deployment/checkout -n shop
+kubectl rollout undo deployment/checkout -n shop                    # previous revision
+kubectl rollout undo deployment/checkout -n shop --to-revision=41
+kubectl rollout pause deployment/checkout -n shop                   # stop a rollout midway
+
+kubectl argo rollouts get rollout checkout -n shop --watch          # Argo Rollouts plugin
+kubectl argo rollouts abort checkout -n shop                        # back to the stable version
+kubectl argo rollouts promote checkout -n shop                      # continue past a pause</code></pre></div>
+    <p>A rollback is only useful if it is fast, and it is only fast if it has been practised. Time it. If it takes twenty minutes because the old image has to be rebuilt, fix that: keep previous artifacts in the registry, and deploy by immutable tag, as the artifacts module described. In a GitOps setup the rollback is a <code>git revert</code>, and the agent applies it.</p>
+    <p>The hard part is state. Code can be rolled back, but data cannot. If version 2 has written records in a new format, or dropped a column, then rolling the code back to version 1 leaves it facing a database it does not understand. The answer is to make every schema change <strong>backwards compatible</strong>, in phases, using <strong>expand and contract</strong>, also called parallel change.</p>
+    <div class="code"><div class="code-cap">Renaming a column, customer_name to full_name, with zero downtime</div><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>1. EXPAND    Add the new column full_name, nullable. Old code is unaffected.
+2. DUAL WRITE Deploy code that writes to BOTH columns and still reads the old one.
+3. BACKFILL  Copy existing data into full_name, in small batches, off-peak.
+4. SWITCH    Deploy code that reads full_name (still writing both).
+5. VERIFY    Run for a while. Rollback to step 2 or 3 is still safe.
+6. CONTRACT  Deploy code that ignores customer_name. Then, separately and much
+             later, drop the column.
+
+Every step is its own release, and each can be rolled back by itself.</code></pre></div>
+    <ul><li><strong>Never couple a schema change to the code that needs it</strong> in one release. During a rolling update both versions run at once, so the schema must suit both.</li><li><strong>Additive changes are safe</strong>: a new table, a new nullable column, a new index built concurrently. <strong>Destructive changes are dangerous</strong>: dropping or renaming a column, changing a type, adding a <code>NOT NULL</code> constraint without a default.</li><li><strong>Watch for locks.</strong> On a large table, an innocent-looking <code>ALTER TABLE</code> can take a lock that blocks all traffic for minutes. Learn which operations your database can perform online, and use its tooling for the rest.</li><li>The same reasoning applies to <strong>APIs and message formats</strong>. Consumers and producers are deployed at different times, so add fields without removing any, tolerate fields you do not recognise, and version anything that must break.</li></ul></section>
+  <section id="putting-it-into-the-pipeline"><h2>Putting it into the pipeline</h2>
+    <p>Safe release practice is the delivery pipeline from the DevOps track with reliability built in. A mature flow looks like this.</p>
+    <ol><li>A small change is merged to the trunk behind a flag, after review and automated tests.</li><li>The artifact is built once, scanned and signed, and promoted unchanged.</li><li>It deploys to staging, where smoke tests and a short load test run.</li><li>It deploys to production as a canary. Automated analysis compares it with the baseline at each step and aborts on regression.</li><li>Deploy and flag events appear as annotations on every dashboard.</li><li>The feature is released by flag, to staff first, then to a growing share of users, again watching the SLIs.</li><li>The flag and the old code path are removed.</li></ol>
+    <p>The <strong>error budget</strong> is the governor of this machine. With budget in hand, releases flow continuously. When the budget is exhausted, the policy from the SLO module slows feature releases until reliability recovers. Release freezes before peak events are a legitimate use of the same idea, but keep them short: a long freeze builds up a large batch of changes, and the release that follows the freeze is the riskiest of the year.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Ship a bad release and have the system catch it</h2>
+    <ol><li>Take a service running in your cluster with at least four replicas and per-version metrics. If metrics cannot be split by version, add a <code>version</code> label first.</li><li>Configure the rolling update with <code>maxUnavailable: 0</code>, a <code>maxSurge</code>, <code>minReadySeconds</code> and a readiness probe. Deploy a new version while sending load, and confirm that no requests fail.</li><li>Build a version that starts correctly and returns errors for 20% of requests. Deploy it with a plain rolling update and observe that it reaches 100%. Roll back with <code>kubectl rollout undo</code> and time it.</li><li>Install Argo Rollouts or Flagger. Convert the Deployment to a canary strategy with steps at 5%, 25% and 50%, with pauses.</li><li>Add automated analysis that queries Prometheus for the canary's error ratio. Deploy the bad version again and watch the rollout abort by itself. Note what share of requests were affected, compared with step three.</li><li>Wrap a feature in a flag with a safe default. Deploy with the flag off, turn it on for a small share of users, then use it as a kill switch and time how long that takes compared with the rollback.</li><li>Plan an expand and contract migration for a column rename in a test database. Carry out each phase as a separate deploy, and roll one phase back to prove that it is safe.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Safe releases — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Most incidents start with a change. Make changes small, gradual, observable and reversible instead of rare.</li><li>Config pushes, flag flips and migrations are changes too, and they deserve the same safeguards as deploys.</li><li>A rolling update checks readiness only. It cannot tell a bad release from a good one.</li><li>Canary: a small share of real traffic, compared with a baseline on your SLIs, widened in steps, aborted automatically.</li><li>Deploy is not release. Feature flags separate them, and a kill switch is the fastest mitigation you have.</li><li>Flags are production changes and technical debt: safe defaults, an owner, an expiry date, and removal.</li><li>Roll back first, understand later. Time your rollback, and keep old artifacts ready.</li><li>Data cannot be rolled back. Use expand and contract so that every schema step suits both old and new code.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Strategies</h3><table><tbody><tr><td><code>Recreate</code></td><td>Stop old, start new; downtime</td></tr><tr><td><code>Rolling</code></td><td>Replace in batches; gated by readiness only</td></tr><tr><td><code>Blue-green</code></td><td>Two full environments; switch and roll back instantly; 2x capacity</td></tr><tr><td><code>Canary</code></td><td>Small share of real traffic, compared and widened</td></tr><tr><td><code>Shadow / mirroring</code></td><td>Copy traffic to the new version, discard its responses</td></tr><tr><td><code>Ring / cell rollout</code></td><td>Staff, then one region or cell, then a percentage, then all</td></tr></tbody></table></div><div class="cheat-group"><h3>Deployment settings</h3><table><tbody><tr><td><code>strategy.rollingUpdate.maxUnavailable: 0</code></td><td>Never drop below the desired replica count</td></tr><tr><td><code>strategy.rollingUpdate.maxSurge: 25%</code></td><td>Extra pods allowed during the update</td></tr><tr><td><code>minReadySeconds: 30</code></td><td>A pod must stay ready this long before it counts</td></tr><tr><td><code>progressDeadlineSeconds: 600</code></td><td>Mark a stalled rollout as failed</td></tr><tr><td><code>readinessProbe</code></td><td>Gates traffic and the progress of the rollout</td></tr><tr><td><code>revisionHistoryLimit: 10</code></td><td>How many old ReplicaSets are kept for rollback</td></tr></tbody></table></div><div class="cheat-group"><h3>Rollout commands</h3><table><tbody><tr><td><code>kubectl rollout status deploy/NAME</code></td><td>Wait for the result; non-zero exit on failure</td></tr><tr><td><code>kubectl rollout history deploy/NAME</code></td><td>List revisions</td></tr><tr><td><code>kubectl rollout undo deploy/NAME</code></td><td>Back to the previous revision</td></tr><tr><td><code>kubectl rollout undo deploy/NAME --to-revision=N</code></td><td>Back to a specific revision</td></tr><tr><td><code>kubectl rollout pause|resume deploy/NAME</code></td><td>Hold or continue a rollout</td></tr><tr><td><code>kubectl argo rollouts abort NAME</code></td><td>Return all traffic to the stable version</td></tr><tr><td><code>kubectl argo rollouts promote NAME</code></td><td>Continue past a pause step</td></tr></tbody></table></div><div class="cheat-group"><h3>Canary design</h3><table><tbody><tr><td><code>steps: 1% -&gt; 5% -&gt; 25% -&gt; 50% -&gt; 100%</code></td><td>Widen as confidence grows</td></tr><tr><td><code>bake time per step</code></td><td>Long enough for volume, leaks and periodic jobs</td></tr><tr><td><code>compare with a live baseline</code></td><td>No worse than the current version, measured now</td></tr><tr><td><code>metrics: error ratio, p99, saturation</code></td><td>The SLIs from your SLOs, split by version</td></tr><tr><td><code>automatic abort</code></td><td>No human watching graphs</td></tr><tr><td><code>one region at a time</code></td><td>Never everywhere at once</td></tr></tbody></table></div><div class="cheat-group"><h3>Expand and contract</h3><table><tbody><tr><td><code>1. Expand</code></td><td>Add the new column or table; old code unaffected</td></tr><tr><td><code>2. Dual write</code></td><td>New code writes both, reads old</td></tr><tr><td><code>3. Backfill</code></td><td>Copy existing data in small batches</td></tr><tr><td><code>4. Switch reads</code></td><td>Read new, still write both</td></tr><tr><td><code>5. Verify</code></td><td>Run for a while; rollback still safe</td></tr><tr><td><code>6. Contract</code></td><td>Stop using the old column, then drop it much later</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Releasing rarely, in large batches, in the belief that it is safer.</li><li>Trusting a rolling update's readiness check to catch a version that runs but returns errors.</li><li>Judging a canary against a fixed threshold instead of against the version that is currently serving.</li><li>Pushing a configuration or flag change to every instance instantly, with no gradual rollout.</li><li>Leaving release flags in the code for years, until an old one is reused or combined disastrously.</li><li>Shipping a destructive schema change together with the code that depends on it, making rollback impossible.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "A new version starts correctly and passes its readiness probe, but returns HTTP 500 for 8% of requests. What does a standard Kubernetes rolling update do?", "options": ["It rolls out to every pod, since readiness is the only thing it checks", "It stops at the first pod, because the error rate is above normal", "It rolls back automatically once the error rate passes five percent", "It sends the failing requests to the old pods until they are removed"], "answer": 0, "explain": "A rolling update proceeds when new pods report ready. It knows nothing about error ratios or latency. Catching a release that runs but misbehaves needs a canary with analysis of real SLIs."}, {"q": "Why should canary analysis compare the new version against a live baseline instead of a fixed threshold such as \"error ratio under 1%\"?", "options": ["A canary far worse than the current version could still pass a fixed threshold", "Fixed thresholds cannot be expressed in the Prometheus query language at all", "A baseline lets the canary take more traffic from the very first step", "Fixed thresholds only work when the service has more than one replica"], "answer": 0, "explain": "If the current version runs at 0.05% errors, a canary at 0.6% is twelve times worse and still passes a 1% threshold. Comparing both versions under the same conditions reveals the regression."}, {"q": "During an incident, a newly released recommendation feature is overloading the database. Which mitigation is normally fastest?", "options": ["Switching the feature off with its kill-switch flag", "Rolling the whole service back to the previous image", "Writing and deploying a fix for the inefficient query", "Scaling the database up to a larger instance type"], "answer": 0, "explain": "A flag change takes effect in seconds, needs no build or deploy, and affects only that feature. A rollback is next fastest. A fix under pressure is slow and risky, and resizing a database takes time and may not help."}, {"q": "Version 2 of a service renames a database column in the same release as the code that uses the new name. What is the main problem?", "options": ["During and after the rollout, old-version pods and any rollback break on the new schema", "Renaming a column always requires the database to be restarted first", "The release will be slower, because migrations run before the pods start", "Kubernetes refuses to roll out a Deployment while a migration is running"], "answer": 0, "explain": "Both versions run at once during a rolling update, and a rollback returns to code that expects the old column. Expand and contract keeps the schema compatible with both versions at every step."}, {"q": "A team announces a six-week release freeze before its busiest season, to be safe. What is the main risk of this approach?", "options": ["Changes pile up, so the first release after the freeze is large and risky", "The error budget cannot be measured while no releases are happening", "Feature flags stop working if no deploy happens for more than a month", "Autoscaling is disabled automatically for the length of any freeze"], "answer": 0, "explain": "A long freeze creates exactly the big batch that makes releases dangerous, and security fixes wait too. Short freezes, with small safe releases and flags kept off, carry less overall risk."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="sre-capacity.html"><span>← Previous</span><strong>Capacity planning &amp; load testing</strong></a>
+    <a class="pager-up" href="../education.html#sre">All Site Reliability modules</a>
+    <a class="pager-link pager-next" href="sre-chaos.html"><span>Next →</span><strong>Chaos engineering</strong></a>
+  </nav>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="mailto:support@thavionai.com?subject=Education%20feedback%3A%20sre-release">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

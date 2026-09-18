@@ -1,0 +1,250 @@
+{
+  "id": "sre-chaos",
+  "minutes": 30,
+  "intro": "You have added timeouts, retries, circuit breakers, redundancy across zones, burn-rate alerts and runbooks. Do they work? The honest answer, for most teams, is that nobody knows, because those mechanisms only run when something breaks, and the first real test is a real outage at a time you did not choose. Chaos engineering is the practice of choosing the time yourself. You inject a failure deliberately, in a controlled way, to find out whether the system behaves as you believe it does.",
+  "objectives": [
+    "Explain chaos engineering as controlled experimentation, and distinguish it from breaking things at random",
+    "Design an experiment with a steady state, a hypothesis, a bounded blast radius and abort conditions",
+    "Inject common faults using standard Linux and Kubernetes tooling: latency, packet loss, process and node failure, resource pressure",
+    "Plan and run a game day that tests people and process as well as the system",
+    "Decide when a team is ready for chaos engineering, and progress safely from staging to production"
+  ],
+  "sections": [
+    {
+      "heading": "Experiments, not vandalism",
+      "blocks": [
+        { "type": "p", "text": "The name is unfortunate. **Chaos engineering** is not about causing chaos. It is the disciplined use of experiments to build confidence that a system can withstand turbulent conditions in production. Netflix popularised it when it moved to the cloud and built Chaos Monkey, a tool that terminated production instances at random during working hours. The purpose was not destruction. It was to make instance failure so routine that every team had to build services that survived it." },
+        { "type": "p", "text": "The difference from testing is one of intent. A **test** checks a known property and returns pass or fail: given this input, is that the output? An **experiment** explores something you are unsure of, and produces new knowledge: if the cache disappears, what actually happens? Complex distributed systems have behaviours that nobody designed and nobody can predict from reading code, such as retry storms, failovers that take four minutes instead of four seconds, and a fallback that calls the very dependency it is supposed to replace. Experiments are how you find them before your users do." },
+        { "type": "p", "text": "Every experiment has one of two outcomes, and both are good. Either the system behaves as predicted, and you have earned justified confidence. Or it does not, and you have found a weakness at a time of your choosing, with everyone awake, a rollback ready and the blast radius limited. The only bad outcome is the one you were heading for anyway: discovering the weakness in a real incident." },
+        { "type": "callout", "kind": "note", "text": "If you already know that an experiment will cause an outage, do not run it. You have nothing to learn, only damage to do. Fix the known weakness first, and then run the experiment to confirm the fix." }
+      ]
+    },
+    {
+      "heading": "The method",
+      "blocks": [
+        { "type": "p", "text": "The Principles of Chaos Engineering describe a method close to any scientific experiment." },
+        { "type": "steps", "items": [
+          "**Define the steady state.** Choose a measurable output that shows the system is healthy from the user's point of view. Your SLIs are exactly this: checkout success ratio, p99 latency, orders per minute. Not CPU.",
+          "**Form a hypothesis** that the steady state will continue under a specific failure. \"If one of three cache nodes is terminated, checkout success ratio stays above 99.9% and p99 stays under 500 ms.\"",
+          "**Introduce a real-world event**: a server dies, a dependency slows down, a zone becomes unreachable, a disk fills, a certificate expires, a clock drifts.",
+          "**Limit the blast radius.** Begin with the smallest scope that can teach you something: one instance, one percent of traffic, one test customer.",
+          "**Define abort conditions and a stop button** before starting. If the steady-state metric falls below a stated level, the experiment stops at once and the fault is removed.",
+          "**Run it, observe, and compare** what happened with the hypothesis.",
+          "**Fix what you found, then run it again.** Once it passes reliably, widen the scope, and eventually automate it so that it runs continuously."
+        ]},
+        { "type": "code", "lang": "markdown", "caption": "Experiment plan template", "code": "# Chaos experiment: loss of one cache node\nOwner: Priya S.      Date: 2026-09-24 10:00 UTC      Environment: production\nObservers: checkout on-call, platform on-call        Channel: #chaos-2026-09-24\n\n## Steady state\n- Checkout success ratio >= 99.9% (5 min window)\n- Checkout p99 latency < 500 ms\n\n## Hypothesis\nTerminating 1 of 3 cache nodes causes a brief rise in latency (p99 < 800 ms\nfor under 2 minutes) and no rise in errors. Clients reconnect automatically.\n\n## Method\nDelete pod cache-1. Observe for 15 minutes.\n\n## Blast radius\nOne cache node. All checkout traffic may see higher latency. No data at risk.\n\n## Abort conditions (any one)\n- Success ratio < 99.5% for 2 minutes\n- p99 > 2 s for 2 minutes\n- Any unrelated incident is declared\n\n## Rollback\nThe StatefulSet recreates the pod automatically. If it has not recovered in\n5 minutes: scale to 4 replicas. Runbook: cache-node-down.md\n\n## Result\n(observed behaviour, deviations from hypothesis, action items with owners)" },
+        { "type": "p", "text": "Writing the plan is half the value. Teams regularly discover while filling in the hypothesis that nobody knows what is supposed to happen, or while filling in the rollback section that there is no way to undo the fault. Both are findings, and they cost nothing." }
+      ]
+    },
+    {
+      "heading": "What to break, and how",
+      "blocks": [
+        { "type": "p", "text": "Choose experiments from evidence, not imagination. The best sources are your own postmortems (would we survive that again?), the dependency map from the embracing-risk module (what happens when each hard dependency fails?), and the defences from the failure-modes module that have never been exercised." },
+        { "type": "table", "headers": ["Fault", "What it tests", "Typical finding"], "rows": [
+          ["Kill a process, pod or instance", "Redundancy, restart behaviour, load redistribution", "Slow start-up; dropped in-flight requests; survivors overloaded"],
+          ["Add network latency", "Timeouts, deadlines, user experience when slow", "No timeout configured; threads exhausted; slow is worse than down"],
+          ["Drop packets or block a dependency", "Retries, circuit breakers, fallbacks", "Retry storm; the fallback was never implemented"],
+          ["Exhaust CPU, memory or disk", "Limits, autoscaling, alerting, eviction", "Alerts do not fire; noisy neighbour takes down the node"],
+          ["Drain a node, or fail a zone", "Scheduling, capacity headroom, zone independence", "Not enough capacity; everything depended on one zone"],
+          ["Expire a certificate, revoke a credential", "Rotation, monitoring of expiry", "Nobody knew where the certificate was used"],
+          ["Return errors or bad data from a dependency", "Validation and error handling", "One malformed response crashes the consumer"]
+        ]},
+        { "type": "code", "lang": "bash", "caption": "Kubernetes faults with kubectl alone", "code": "kubectl delete pod cache-1 -n shop                                   # abrupt pod loss\nkubectl delete pod -n shop -l app=checkout --field-selector spec.nodeName=node-a\nkubectl cordon node-a                                                # no new pods here\nkubectl drain node-a --ignore-daemonsets --delete-emptydir-data      # evict everything\nkubectl uncordon node-a                                              # undo\nkubectl scale deployment/recommendations --replicas=0 -n shop        # dependency gone" },
+        { "type": "code", "lang": "bash", "caption": "Network and resource faults on a Linux host (requires root)", "code": "tc qdisc add dev eth0 root netem delay 200ms 50ms      # 200 ms latency, 50 ms jitter\ntc qdisc change dev eth0 root netem loss 5%            # switch to 5% packet loss\ntc qdisc show dev eth0                                 # what is active?\ntc qdisc del dev eth0 root                             # REMOVE the fault\n\niptables -A OUTPUT -p tcp --dport 5432 -j DROP         # black-hole the database\niptables -D OUTPUT -p tcp --dport 5432 -j DROP         # undo\n\nstress-ng --cpu 4 --timeout 120s                       # burn 4 cores for 2 minutes\nstress-ng --vm 2 --vm-bytes 1G --timeout 120s          # memory pressure\nfallocate -l 10G /var/tmp/fill.img                     # fill a disk (rm the file to undo)" },
+        { "type": "callout", "kind": "warning", "text": "Know how to undo every fault **before** you inject it, and write the undo command into the plan. `tc` and `iptables` rules persist until they are removed or the machine reboots, and a forgotten packet-loss rule is a baffling incident three days later. Prefer faults with a built-in time limit, such as `--timeout`, wherever you can." },
+        { "type": "p", "text": "Purpose-built tools make this safer and repeatable. Chaos Mesh and LitmusChaos are open-source projects that define experiments as Kubernetes resources, with scheduling, scoping by label and automatic clean-up. Service meshes can inject delays and errors into a chosen share of requests, which gives very precise control over blast radius, and the large cloud providers offer managed fault-injection services. Learn the mechanics with the basic commands first, so that you understand what the tools are doing on your behalf." }
+      ]
+    },
+    {
+      "heading": "Game days",
+      "blocks": [
+        { "type": "p", "text": "A **game day** is a scheduled exercise in which a team practises responding to failure. It tests more than the software: it tests whether alerts fire and reach the right person, whether the dashboards show the problem, whether the runbook is correct, whether people can get access, and whether the incident process from the earlier module holds up. Those are the parts that most often fail, and no automated experiment exercises them." },
+        { "type": "steps", "items": [
+          "**Plan.** Choose one or two scenarios and write experiment plans for them. Pick a date in working hours, not before a weekend, holiday or launch. Tell everyone who could be affected, including support and the owners of dependencies.",
+          "**Assign roles.** A coordinator runs the day and holds the stop button. An operator injects the faults. Responders handle the incident as if it were real. Observers take notes on what happens, including timings.",
+          "**Decide what the responders know.** In an announced exercise they know the scenario. In a surprise exercise they know only that something will happen. Surprise teaches more about detection, and should come only after the team is comfortable.",
+          "**Run it.** Inject the fault, and let the normal process work: the alert, the page, the declaration, the roles, the runbook. The coordinator watches the abort conditions throughout.",
+          "**Debrief straight away**, while it is fresh, in the blameless style of a postmortem. What did we expect, and what happened? How long did detection take? What was confusing? What would have gone badly at 03:00?",
+          "**Turn findings into tickets** with owners, and schedule a re-run of anything that failed."
+        ]},
+        { "type": "p", "text": "Game days are also the best training there is. They are where new on-call engineers gain experience safely, where the reverse shadowing from the on-call module happens, and where runbooks get tested by someone other than their author. A lighter format that needs no infrastructure is the **tabletop exercise**: a facilitator describes a scenario and reveals information as the team asks for it, and the team talks through what it would do." },
+        { "type": "p", "text": "Do not limit the scenarios to software. Practise the loss of a key person: can the team restore from backup when the one engineer who has done it before is on holiday? Practise the loss of a tool: can you respond when the chat system or the monitoring is itself what has failed?" }
+      ]
+    },
+    {
+      "heading": "Readiness, and the road to production",
+      "blocks": [
+        { "type": "p", "text": "Chaos engineering is not where reliability work begins. It verifies defences, so there must be some. A team that is already losing the battle against ordinary incidents has nothing to gain by adding artificial ones. Check the prerequisites first." },
+        { "type": "list", "items": [
+          "**Observability.** You can see the steady state in near real time. Without it you cannot tell what the experiment did, or when to stop.",
+          "**Known weaknesses fixed.** Do not spend an experiment proving what you already know.",
+          "**A way to stop and undo** every fault, quickly.",
+          "**Basic resilience in place**: more than one instance, health probes, timeouts. Otherwise the result is certain.",
+          "**An incident process** that works, because an experiment can become a real incident.",
+          "**Agreement from the people affected**: management, neighbouring teams, support. Surprising your colleagues with an outage, even a deliberate one, destroys the trust the practice depends on.",
+          "**Error budget to spend.** An experiment that goes wrong consumes budget, which is a legitimate use of it. If the budget is exhausted, wait."
+        ]},
+        { "type": "p", "text": "Then progress gradually, widening the scope only as each stage passes." },
+        { "type": "table", "headers": ["Stage", "Where", "Why"], "rows": [
+          ["1", "Tabletop", "Finds gaps in understanding and process at no risk"],
+          ["2", "Development or staging", "Learn the tooling; find the obvious failures"],
+          ["3", "Production, one instance or a sliver of traffic, in working hours", "Staging never matches production's scale, data, configuration and traffic"],
+          ["4", "Production, wider scope: a node, a zone, a dependency", "Tests capacity headroom and zone independence for real"],
+          ["5", "Automated and continuous", "Guards against regression, because systems change every day"]
+        ]},
+        { "type": "p", "text": "The move to production makes people nervous, with reason. But production is the only environment with production's traffic patterns, data volumes, configuration and dependencies, so it is the only place where some weaknesses can be seen. A controlled experiment on one percent of traffic, at ten in the morning, with the team watching and a stop button in hand, is far safer than the uncontrolled version that the same weakness will otherwise deliver." },
+        { "type": "p", "text": "The final stage matters because resilience decays. A fallback that worked in March is broken by an unrelated refactor in June, and nobody notices, because it never runs. Experiments that run continuously, in the pipeline or on a schedule, turn resilience from a belief into a property that is checked, in the same way that unit tests do for correctness." },
+        { "type": "callout", "kind": "tip", "text": "Start smaller than feels useful. The first experiment can be deleting one pod of a stateless service in staging and watching the dashboard. It takes ten minutes, it is almost certain to reveal something, such as a few dropped requests during shutdown, and it builds the habit and the trust that make the ambitious experiments possible later." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Run your first three experiments",
+    "steps": [
+      "Pick a service in a test cluster that has several replicas and a dashboard for its SLIs. Write the steady state as two measurable statements.",
+      "Experiment one: write a plan, using the template, for deleting one pod under steady load. State the hypothesis precisely, including what you expect to happen to in-flight requests. Run it, and count failed requests. If any failed, fix graceful shutdown and the readiness probe, then run it again.",
+      "Experiment two: add 300 ms of latency to a dependency, using `tc netem` on its host or a mesh fault rule. Predict what the caller will do, then observe its latency, thread or connection usage and error ratio. Write down whether the timeouts from the failure-modes module worked as intended.",
+      "Remove the fault and confirm, with `tc qdisc show` or the equivalent, that nothing is left behind.",
+      "Experiment three: make a soft dependency completely unavailable by scaling it to zero. Confirm that the fallback works, that the circuit breaker opens, and that users still succeed.",
+      "For each experiment, record hypothesis, observation and action items. At least one hypothesis should have turned out to be wrong.",
+      "Plan a one-hour game day around the most interesting result. Assign a coordinator, an operator, responders and an observer, define abort conditions, run it with the real alerting and incident process, and hold a blameless debrief.",
+      "Choose one experiment to automate on a schedule in staging, with an alert if the steady state is violated."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Chaos engineering is controlled experimentation to build confidence. It is not breaking things at random.",
+      "Steady state is a user-facing SLI. The hypothesis says it will hold under a specific fault.",
+      "Smallest useful blast radius, abort conditions and a stop button defined before starting.",
+      "Know the undo command before injecting any fault. Prefer faults that time out by themselves.",
+      "If you already know it will break, fix it first. Do not run the experiment.",
+      "Game days test people, alerts, dashboards, runbooks and process, which automated experiments do not.",
+      "Prerequisites: observability, basic resilience, an incident process, agreement from those affected, and error budget to spend.",
+      "Progress from tabletop to staging to a sliver of production, then widen, then automate, because resilience decays."
+    ],
+    "groups": [
+      {
+        "title": "Experiment plan",
+        "items": [
+          { "syntax": "Steady state", "desc": "Measurable, user-facing: success ratio, p99, orders per minute" },
+          { "syntax": "Hypothesis", "desc": "Steady state holds when fault X is applied to scope Y" },
+          { "syntax": "Method", "desc": "The exact fault, target, duration and tool" },
+          { "syntax": "Blast radius", "desc": "Who and what could be affected, and how many" },
+          { "syntax": "Abort conditions", "desc": "Metric thresholds that stop the experiment at once" },
+          { "syntax": "Rollback", "desc": "The undo command, and the runbook if it does not recover" },
+          { "syntax": "Result", "desc": "Observation versus hypothesis; actions with owners" }
+        ]
+      },
+      {
+        "title": "Kubernetes faults",
+        "items": [
+          { "syntax": "kubectl delete pod NAME -n NS", "desc": "Abrupt loss of one instance" },
+          { "syntax": "kubectl delete pod NAME --grace-period=0 --force", "desc": "No graceful shutdown at all" },
+          { "syntax": "kubectl cordon NODE / kubectl uncordon NODE", "desc": "Stop or resume scheduling on a node" },
+          { "syntax": "kubectl drain NODE --ignore-daemonsets --delete-emptydir-data", "desc": "Evict everything from a node" },
+          { "syntax": "kubectl scale deploy/NAME --replicas=0", "desc": "Make a dependency disappear" },
+          { "syntax": "kubectl get pdb -n NS", "desc": "Disruption budgets that may limit a drain" }
+        ]
+      },
+      {
+        "title": "Network faults (Linux, root)",
+        "items": [
+          { "syntax": "tc qdisc add dev eth0 root netem delay 200ms", "desc": "Add fixed latency" },
+          { "syntax": "tc qdisc add dev eth0 root netem delay 200ms 50ms", "desc": "Latency with jitter" },
+          { "syntax": "tc qdisc add dev eth0 root netem loss 5%", "desc": "Random packet loss" },
+          { "syntax": "tc qdisc show dev eth0", "desc": "See what is currently applied" },
+          { "syntax": "tc qdisc del dev eth0 root", "desc": "Remove the fault" },
+          { "syntax": "iptables -A OUTPUT -p tcp --dport PORT -j DROP", "desc": "Black-hole traffic to a port" },
+          { "syntax": "iptables -D OUTPUT -p tcp --dport PORT -j DROP", "desc": "Remove that rule" }
+        ]
+      },
+      {
+        "title": "Resource faults",
+        "items": [
+          { "syntax": "stress-ng --cpu 4 --timeout 120s", "desc": "CPU pressure for two minutes" },
+          { "syntax": "stress-ng --vm 2 --vm-bytes 1G --timeout 120s", "desc": "Memory pressure" },
+          { "syntax": "stress-ng --io 4 --timeout 120s", "desc": "I/O pressure" },
+          { "syntax": "fallocate -l 10G /var/tmp/fill.img", "desc": "Fill a disk; delete the file to undo" },
+          { "syntax": "kill -STOP PID / kill -CONT PID", "desc": "Freeze and resume a process: a hang, not a crash" },
+          { "syntax": "kill -9 PID", "desc": "Crash with no clean-up" }
+        ]
+      },
+      {
+        "title": "Game day roles and flow",
+        "items": [
+          { "syntax": "Coordinator", "desc": "Runs the day; holds the stop button; watches abort conditions" },
+          { "syntax": "Operator", "desc": "Injects and removes the faults" },
+          { "syntax": "Responders", "desc": "Handle it with the real alerting and incident process" },
+          { "syntax": "Observers", "desc": "Record what happens, with timings" },
+          { "syntax": "Plan -> announce -> run -> debrief -> tickets -> re-run", "desc": "The cycle" },
+          { "syntax": "Tabletop", "desc": "Talk through a scenario; needs no infrastructure" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Injecting failures with no hypothesis, so that nothing is learned whatever happens.",
+      "Using CPU or pod count as the steady state, instead of something users experience.",
+      "Starting in production, at full scope, without having run anything in staging first.",
+      "Forgetting to remove a `tc` or `iptables` rule, and causing a mystery incident days later.",
+      "Surprising other teams, support or management with a deliberate outage, and losing their trust.",
+      "Running an experiment once, declaring the system resilient, and never checking again."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "Which of these is the best steady-state definition for a chaos experiment on a web shop?",
+      "options": [
+        "Checkout success ratio stays above 99.9%, with p99 latency under 500 ms",
+        "CPU utilisation on all the checkout pods remains below 70% throughout",
+        "All the pods in the shop namespace stay in the Running state",
+        "No error-level log lines are written by any service during the test"
+      ],
+      "answer": 0,
+      "explain": "Steady state should reflect what users experience, which is what your SLIs measure. Pods can restart and CPU can spike while users are perfectly fine, and the reverse is also true."
+    },
+    {
+      "q": "A team is certain that killing the primary database will cause a ten-minute outage, because failover is not configured. Should they run that experiment in production?",
+      "options": [
+        "No: fix the known weakness first, then test the fix",
+        "Yes: experiments must always be run in production",
+        "Yes: a real outage will motivate the team to fix it",
+        "No: databases should never be part of any chaos experiment"
+      ],
+      "answer": 0,
+      "explain": "An experiment is for learning something you do not know. If the outcome is certain, running it only causes damage. Configure failover, then run the experiment to verify it."
+    },
+    {
+      "q": "What must be decided before any fault is injected?",
+      "options": [
+        "The abort conditions, and the exact way to remove the fault",
+        "Which engineer will be held responsible if things go wrong",
+        "The root cause that the postmortem is expected to identify",
+        "How the results will be presented to senior management"
+      ],
+      "answer": 0,
+      "explain": "A controlled experiment needs a stop button. Abort thresholds on the steady-state metric, and a known undo command, are what separate an experiment from an incident you caused."
+    },
+    {
+      "q": "What does a game day test that an automated fault-injection tool does not?",
+      "options": [
+        "Whether alerts reach people, and whether runbooks and the incident process work",
+        "Whether pods are rescheduled onto healthy nodes after a node has failed",
+        "Whether a circuit breaker opens when a dependency starts returning errors",
+        "Whether the service's latency stays within its SLO under added delay"
+      ],
+      "answer": 0,
+      "explain": "Automated experiments exercise software. A game day exercises the human side: detection, paging, access, dashboards, runbooks, roles and communication, which is where many real responses break down."
+    },
+    {
+      "q": "A fallback path passed a chaos experiment in March. Why should the experiment keep running on a schedule?",
+      "options": [
+        "Systems change constantly, and unexercised defences break without anyone noticing",
+        "Scheduled experiments are required in order to keep an error budget valid",
+        "A passed experiment only remains valid for thirty days by convention",
+        "Running it regularly reduces the latency of the fallback path over time"
+      ],
+      "answer": 0,
+      "explain": "Code, configuration and dependencies change every day. A fallback that never runs in normal operation can be broken by an unrelated change, and only a repeated experiment will reveal it."
+    }
+  ]
+}

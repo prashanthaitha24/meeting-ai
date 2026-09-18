@@ -1,0 +1,229 @@
+{
+  "id": "devops-k8s",
+  "minutes": 40,
+  "intro": "Docker runs a container on one machine. Production needs many copies across many machines, restarted when they die, replaced without downtime, and found by other services wherever they land. Kubernetes does that, and it has become the common platform that the rest of this track builds on. This module teaches the handful of objects that make up ninety percent of daily work, and the debugging loop you will use every day.",
+  "objectives": [
+    "Explain the declarative model: desired state, controllers and the reconciliation loop",
+    "Write manifests for a Deployment, a Service and an Ingress, and explain how labels connect them",
+    "Inject configuration with ConfigMaps and Secrets",
+    "Configure liveness, readiness and startup probes, and resource requests and limits",
+    "Diagnose a failing pod with `kubectl get`, `describe`, `logs` and events"
+  ],
+  "sections": [
+    {
+      "heading": "Desired state and the reconciliation loop",
+      "blocks": [
+        { "type": "p", "text": "You do not tell Kubernetes what to do; you tell it what you **want**, and it works continuously to make reality match. You submit a **manifest**, a YAML description of an object, to the **API server**, which stores it in `etcd`. **Controllers** watch for differences between desired and actual state and act to close the gap. If a node dies and takes two of your three replicas with it, the controller notices \"want 3, have 1\" and starts two more elsewhere. Nobody gets paged." },
+        { "type": "p", "text": "A cluster has a **control plane** (API server, scheduler, controller manager, `etcd`) and **worker nodes**, each running a `kubelet` that starts containers and reports back. The **scheduler** decides which node each new pod runs on. **Namespaces** divide a cluster into named scopes for teams or environments." },
+        { "type": "code", "lang": "bash", "code": "kubectl config get-contexts             # which cluster am I talking to?\nkubectl get nodes\nkubectl get pods -n shop -o wide        # pods in one namespace, with node and IP\nkubectl get all -n shop\nkubectl apply -f k8s/                   # create or update everything in a directory\nkubectl diff -f k8s/                    # what would apply change?" },
+        { "type": "callout", "kind": "warning", "text": "Check your context before every destructive command. Applying a manifest to the production cluster because it was the last context you used is one of the most common self-inflicted outages." }
+      ]
+    },
+    {
+      "heading": "Pods and Deployments",
+      "blocks": [
+        { "type": "p", "text": "A **Pod** is the smallest unit: one or more containers that share a network address and can share volumes. Most pods hold one container. Pods are disposable and get a new IP each time, so you almost never create them directly. You create a **Deployment**, which manages a **ReplicaSet**, which keeps the requested number of identical pods running." },
+        { "type": "code", "lang": "yaml", "code": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: orders\n  namespace: shop\nspec:\n  replicas: 3\n  selector:\n    matchLabels:\n      app: orders\n  template:\n    metadata:\n      labels:\n        app: orders\n    spec:\n      containers:\n        - name: orders\n          image: ghcr.io/acme/orders-api:1.4.2\n          ports:\n            - containerPort: 8000\n          envFrom:\n            - configMapRef:\n                name: orders-config\n            - secretRef:\n                name: orders-secrets" },
+        { "type": "p", "text": "**Labels** are the glue. The Deployment's `selector` finds its pods by label, and must match the labels in the pod `template`. When you change the template, typically the image tag, the Deployment performs a **rolling update**: it starts new pods, waits for them to become ready, and only then removes old ones. If the new version never becomes ready, the rollout stalls with the old pods still serving." },
+        { "type": "code", "lang": "bash", "code": "kubectl set image deployment/orders orders=ghcr.io/acme/orders-api:1.4.3 -n shop\nkubectl rollout status deployment/orders -n shop\nkubectl rollout history deployment/orders -n shop\nkubectl rollout undo deployment/orders -n shop      # back to the previous revision\nkubectl scale deployment/orders --replicas=5 -n shop" }
+      ]
+    },
+    {
+      "heading": "Services and Ingress",
+      "blocks": [
+        { "type": "p", "text": "Pods come and go, so nothing should talk to a pod IP. A **Service** provides a stable virtual IP and DNS name, and load-balances across every ready pod matching its selector. Inside the cluster, the Service below is reachable as `orders` from the same namespace, or as `orders.shop.svc.cluster.local` from anywhere." },
+        { "type": "code", "lang": "yaml", "code": "apiVersion: v1\nkind: Service\nmetadata:\n  name: orders\n  namespace: shop\nspec:\n  selector:\n    app: orders\n  ports:\n    - port: 80            # the Service's port\n      targetPort: 8000    # the container's port" },
+        { "type": "table", "headers": ["Service type", "Reachable from", "Typical use"], "rows": [
+          ["`ClusterIP` (default)", "Inside the cluster only", "Service-to-service traffic"],
+          ["`NodePort`", "A fixed port on every node", "Simple external access, local clusters"],
+          ["`LoadBalancer`", "A cloud load balancer with a public IP", "Exposing one service directly"]
+        ]},
+        { "type": "p", "text": "One cloud load balancer per service gets expensive. An **Ingress** routes HTTP traffic for many services through a single entry point, by hostname and path, and usually terminates TLS. The Ingress object is only a set of rules; an **ingress controller** such as ingress-nginx or Traefik must be installed to implement them." },
+        { "type": "code", "lang": "yaml", "code": "apiVersion: networking.k8s.io/v1\nkind: Ingress\nmetadata:\n  name: shop\n  namespace: shop\nspec:\n  ingressClassName: nginx\n  tls:\n    - hosts: [shop.example.com]\n      secretName: shop-tls\n  rules:\n    - host: shop.example.com\n      http:\n        paths:\n          - path: /api/orders\n            pathType: Prefix\n            backend:\n              service:\n                name: orders\n                port:\n                  number: 80" },
+        { "type": "callout", "kind": "tip", "text": "If a Service seems dead, run `kubectl get endpointslices -n shop` or `kubectl describe service orders -n shop`. No endpoints means the selector matches no **ready** pods: either the labels do not match or the readiness probe is failing." }
+      ]
+    },
+    {
+      "heading": "ConfigMaps and Secrets",
+      "blocks": [
+        { "type": "p", "text": "This is factor 3 of the twelve-factor app, implemented by the platform. A **ConfigMap** holds non-sensitive settings and a **Secret** holds sensitive ones. Both can be injected as environment variables, as in the Deployment above, or mounted as files." },
+        { "type": "code", "lang": "yaml", "code": "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: orders-config\n  namespace: shop\ndata:\n  LOG_LEVEL: info\n  PAYMENTS_URL: http://payments.shop.svc.cluster.local\n---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: orders-secrets\n  namespace: shop\ntype: Opaque\nstringData:\n  DATABASE_URL: postgres://orders:CHANGE_ME@db.shop.svc.cluster.local:5432/orders" },
+        { "type": "callout", "kind": "warning", "text": "Secret values are base64-**encoded**, not encrypted. Anyone who can read the object can decode it, so never commit Secret manifests with real values to Git. Restrict access with RBAC, enable encryption at rest, and source values from a secret manager, which the secrets module covers." },
+        { "type": "p", "text": "Pods read environment variables once, at start. Changing a ConfigMap does not restart anything, so trigger a new rollout with `kubectl rollout restart deployment/orders`. Tools such as Helm and Kustomize can automate that by changing the pod template whenever the config changes." }
+      ]
+    },
+    {
+      "heading": "Probes, requests and limits",
+      "blocks": [
+        { "type": "p", "text": "Kubernetes can only manage your app well if it knows whether the app is healthy and how much it needs. **Probes** answer the first question." },
+        { "type": "table", "headers": ["Probe", "Question", "On failure"], "rows": [
+          ["`readinessProbe`", "Can this pod take traffic right now?", "Removed from Service endpoints; not restarted"],
+          ["`livenessProbe`", "Is this container stuck beyond recovery?", "The container is restarted"],
+          ["`startupProbe`", "Has the app finished starting?", "Holds off the other probes until it passes"]
+        ]},
+        { "type": "code", "lang": "yaml", "caption": "Inside the container spec", "code": "readinessProbe:\n  httpGet:\n    path: /ready\n    port: 8000\n  periodSeconds: 5\n  failureThreshold: 3\nlivenessProbe:\n  httpGet:\n    path: /healthz\n    port: 8000\n  periodSeconds: 10\n  failureThreshold: 3\nresources:\n  requests:\n    cpu: 250m\n    memory: 256Mi\n  limits:\n    memory: 512Mi" },
+        { "type": "p", "text": "Readiness is what makes rolling updates safe, and it may check dependencies the pod needs in order to serve. Liveness should check only the process itself. A liveness probe that fails when the database is down makes Kubernetes restart every pod during a database outage, turning one problem into two." },
+        { "type": "p", "text": "**Requests** are what the scheduler reserves: a pod is only placed on a node with that much unallocated capacity. **Limits** are enforced ceilings. CPU is measured in millicores (`250m` is a quarter of a core) and is compressible: exceed the limit and the container is **throttled**. Memory is not: exceed the limit and the container is killed with `OOMKilled`. Always set requests; without them the scheduler is guessing and one greedy pod can starve its neighbours." }
+      ]
+    },
+    {
+      "heading": "The debugging loop",
+      "blocks": [
+        { "type": "p", "text": "Almost every problem yields to the same four commands, in this order." },
+        { "type": "code", "lang": "bash", "code": "kubectl get pods -n shop                        # 1. what state is it in?\nkubectl describe pod orders-7d9f8c6b5-x2k4q -n shop   # 2. read Events at the bottom\nkubectl logs orders-7d9f8c6b5-x2k4q -n shop --previous  # 3. logs of the crashed container\nkubectl get events -n shop --sort-by=.lastTimestamp     # 4. everything that happened\n\nkubectl exec -it deploy/orders -n shop -- sh    # look around inside\nkubectl port-forward svc/orders 8080:80 -n shop # reach a Service from your laptop\nkubectl top pods -n shop                        # live CPU and memory (needs metrics-server)" },
+        { "type": "table", "headers": ["Status", "Meaning", "Look at"], "rows": [
+          ["`Pending`", "Not scheduled onto any node", "`describe` events: insufficient CPU or memory, unbound volume, node selectors"],
+          ["`ImagePullBackOff`", "The image cannot be pulled", "Typo in name or tag, missing registry credentials"],
+          ["`CrashLoopBackOff`", "The container starts, exits, and is restarted with growing delays", "`logs --previous`, exit code in `describe`, missing config"],
+          ["`OOMKilled`", "Memory limit exceeded", "Raise the limit or fix the leak; check `kubectl top`"],
+          ["`Running` but `0/1` ready", "Readiness probe failing", "Probe path and port, dependency the app is waiting for"]
+        ]},
+        { "type": "p", "text": "Use `kubectl explain deployment.spec.strategy` to read the documentation for any field without leaving the terminal, and `kubectl get deployment orders -o yaml` to see the object as the cluster actually holds it, defaults included." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Deploy, break and repair on a local cluster",
+    "steps": [
+      "Install `kubectl` and a local cluster such as kind or minikube. Create a namespace `shop` and confirm `kubectl get nodes` shows a Ready node.",
+      "Write a Deployment with three replicas of your image from the earlier modules, plus a ClusterIP Service. Apply them and reach the app with `kubectl port-forward`.",
+      "Delete one pod and watch with `kubectl get pods -w` as the ReplicaSet replaces it. Compare the old and new pod names and IPs.",
+      "Add a ConfigMap and inject it with `envFrom`. Change a value, observe that running pods do not see it, then run `kubectl rollout restart`.",
+      "Add readiness and liveness probes and resource requests. Then set the image to a tag that does not exist, watch the rollout stall with old pods still serving, read the reason in `describe`, and run `kubectl rollout undo`.",
+      "Set a memory limit far below what the app needs, find `OOMKilled` in `kubectl describe pod`, and fix it.",
+      "Change the Service selector so that it matches nothing. Find the problem using only `kubectl describe service`, then repair it."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Declarative model: you state desired state, controllers reconcile reality to it, forever.",
+      "Deployment manages ReplicaSet manages Pods. Never rely on an individual pod or its IP.",
+      "Labels and selectors connect everything. A Service with no endpoints means the selector matches no ready pods.",
+      "Readiness gates traffic; liveness restarts. Keep dependencies out of liveness probes.",
+      "Requests drive scheduling; limits are enforced. Over the CPU limit you are throttled, over the memory limit you are killed.",
+      "Secrets are base64-encoded, not encrypted.",
+      "Debug in order: `get`, `describe` (events), `logs --previous`, `get events`."
+    ],
+    "groups": [
+      {
+        "title": "Look around",
+        "items": [
+          { "syntax": "kubectl config use-context NAME", "desc": "Switch cluster; check before destructive commands" },
+          { "syntax": "kubectl get pods -n NS -o wide", "desc": "Pods with node and IP" },
+          { "syntax": "kubectl get pods -A", "desc": "Pods in every namespace" },
+          { "syntax": "kubectl get deploy,svc,ing -n NS", "desc": "Several resource types at once" },
+          { "syntax": "kubectl get RESOURCE NAME -o yaml", "desc": "The full live object" },
+          { "syntax": "kubectl explain RESOURCE.FIELD.PATH", "desc": "Built-in field documentation" },
+          { "syntax": "kubectl get pods -l app=orders", "desc": "Filter by label" }
+        ]
+      },
+      {
+        "title": "Change things",
+        "items": [
+          { "syntax": "kubectl apply -f FILE_OR_DIR", "desc": "Create or update from manifests" },
+          { "syntax": "kubectl diff -f FILE_OR_DIR", "desc": "Preview what apply would change" },
+          { "syntax": "kubectl delete -f FILE", "desc": "Remove the objects in a manifest" },
+          { "syntax": "kubectl scale deploy/NAME --replicas=N", "desc": "Change the replica count" },
+          { "syntax": "kubectl set image deploy/NAME CONTAINER=IMAGE", "desc": "Trigger a rolling update" },
+          { "syntax": "kubectl rollout restart deploy/NAME", "desc": "Recreate pods, e.g. to pick up new config" }
+        ]
+      },
+      {
+        "title": "Rollouts",
+        "items": [
+          { "syntax": "kubectl rollout status deploy/NAME", "desc": "Wait for a rollout and report success or failure" },
+          { "syntax": "kubectl rollout history deploy/NAME", "desc": "List revisions" },
+          { "syntax": "kubectl rollout undo deploy/NAME", "desc": "Return to the previous revision" },
+          { "syntax": "kubectl rollout undo deploy/NAME --to-revision=N", "desc": "Return to a specific revision" }
+        ]
+      },
+      {
+        "title": "Debug",
+        "items": [
+          { "syntax": "kubectl describe pod NAME", "desc": "State, exit codes, and Events at the bottom" },
+          { "syntax": "kubectl logs NAME --previous", "desc": "Logs from the container instance that crashed" },
+          { "syntax": "kubectl logs -f deploy/NAME", "desc": "Follow logs of a Deployment's pod" },
+          { "syntax": "kubectl get events --sort-by=.lastTimestamp", "desc": "Recent cluster events in order" },
+          { "syntax": "kubectl exec -it NAME -- sh", "desc": "Shell inside a container" },
+          { "syntax": "kubectl port-forward svc/NAME 8080:80", "desc": "Local port to a Service" },
+          { "syntax": "kubectl top pods", "desc": "Live usage (needs metrics-server)" }
+        ]
+      },
+      {
+        "title": "Manifest essentials",
+        "items": [
+          { "syntax": "apiVersion: apps/v1 / kind: Deployment", "desc": "Deployments, StatefulSets, DaemonSets" },
+          { "syntax": "apiVersion: v1", "desc": "Pod, Service, ConfigMap, Secret, Namespace" },
+          { "syntax": "apiVersion: networking.k8s.io/v1", "desc": "Ingress, NetworkPolicy" },
+          { "syntax": "spec.selector.matchLabels == template.metadata.labels", "desc": "Must match, or the Deployment is rejected" },
+          { "syntax": "cpu: 250m / memory: 256Mi", "desc": "Quarter of a core / 256 mebibytes" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Running `kubectl apply` or `delete` against the wrong context.",
+      "A liveness probe that checks the database, so a database blip restarts the entire fleet.",
+      "No resource requests, leaving the scheduler blind and nodes overcommitted.",
+      "Editing a ConfigMap and expecting running pods to pick up the new environment variables.",
+      "Committing Secret manifests to Git in the belief that base64 protects them.",
+      "Deploying the `latest` tag, which makes rollouts and rollbacks meaningless."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A rolling update to a new image is stuck: new pods show `Running` but `0/1` ready, and the old pods are still serving. What is happening?",
+      "options": [
+        "The new pods fail their readiness probe, so the rollout will not proceed",
+        "The scheduler has no node with enough free memory for them",
+        "The new image cannot be pulled from the registry",
+        "The liveness probe is restarting the old pods too quickly"
+      ],
+      "answer": 0,
+      "explain": "A Deployment waits for new pods to become ready before removing old ones. `Running` but not ready points at the readiness probe. Scheduling problems show as `Pending`, and pull problems as `ImagePullBackOff`."
+    },
+    {
+      "q": "A container's memory limit is 512Mi and the app grows to 600Mi. What does Kubernetes do?",
+      "options": [
+        "The container is killed and shows OOMKilled",
+        "The container is throttled and runs more slowly",
+        "The pod is moved to a node with more free memory",
+        "The limit is raised automatically to fit the usage"
+      ],
+      "answer": 0,
+      "explain": "Memory cannot be compressed, so exceeding the limit gets the container killed. Throttling is what happens when the CPU limit is exceeded."
+    },
+    {
+      "q": "`curl` to a Service returns connection errors. `kubectl describe service` shows no endpoints, although three pods are `Running` and `1/1` ready. What should you check first?",
+      "options": [
+        "Whether the Service selector matches the labels on the pods",
+        "Whether the Ingress controller is installed in the cluster",
+        "Whether the pods have resource limits configured",
+        "Whether the ConfigMap has been updated recently"
+      ],
+      "answer": 0,
+      "explain": "Endpoints are built from ready pods that match the selector. The pods are ready, so the selector and labels must disagree, often because of a typo or a renamed label."
+    },
+    {
+      "q": "Why is it a mistake for a liveness probe to call an endpoint that checks the database connection?",
+      "options": [
+        "A database outage would make Kubernetes restart every healthy app pod as well",
+        "Liveness probes are not permitted to make HTTP requests",
+        "The probe would expose the database credentials in pod events",
+        "Database checks only work in readiness probes on the control plane"
+      ],
+      "answer": 0,
+      "explain": "Liveness failure triggers a restart, which cannot fix an external dependency and adds a restart storm on top of the outage. Dependency checks belong in readiness, which only removes the pod from traffic."
+    },
+    {
+      "q": "A pod is `CrashLoopBackOff`. `kubectl logs POD` shows nothing useful because the container has just restarted. Which command shows why the last attempt died?",
+      "options": [
+        "kubectl logs POD --previous",
+        "kubectl rollout status deployment/NAME",
+        "kubectl get pods -o wide",
+        "kubectl top pod POD"
+      ],
+      "answer": 0,
+      "explain": "`--previous` returns the logs of the prior container instance, the one that crashed. Pair it with the exit code and events in `kubectl describe pod`."
+    }
+  ]
+}

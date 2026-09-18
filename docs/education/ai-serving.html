@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Serving models in production — AI Engineering | ThavionAI Education</title>
+  <meta name="description" content="APIs vs. self-hosting, GPUs, autoscaling, and rolling out model changes safely." />
+  <meta property="og:title" content="Serving models in production — ThavionAI Education" />
+  <meta property="og:description" content="APIs vs. self-hosting, GPUs, autoscaling, and rolling out model changes safely." />
+  <meta property="og:type" content="article" />
+  <link rel="canonical" href="https://thavionai.com/education/ai-serving.html" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-ai" data-module="ai-serving">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><div class="nav-logo-icon">T</div>ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html#features">Features</a>
+    <a href="../index.html#products">Products</a>
+    <a href="../education.html" class="active">Education</a>
+    <a href="../index.html#about">About</a>
+    <a href="../index.html#pricing">Pricing</a>
+    <a href="../index.html#contact" class="nav-cta">Contact Us</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#ai">AI Engineering</a> › Stage 4: MLOps &amp; AIOps</div>
+    <h1>Serving models in production</h1>
+    <p class="lede">APIs vs. self-hosting, GPUs, autoscaling, and rolling out model changes safely.</p>
+    <div class="meta">
+      <span class="chip">Advanced</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 13 of 16</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">A model in a notebook is an experiment. A model that answers production traffic is a service, with all the obligations that the SRE track described: an SLO, capacity, rollouts, and someone on call. Model serving has its own twist on each of them. The scarce resource is GPU memory and not CPU. Instances take minutes to start instead of seconds. And a "deploy" can change behaviour without changing a line of code. This module is where the three tracks of this site meet: you will serve a model behind an API, run it on Kubernetes, scale it on the right signal, and roll out model changes as carefully as any other release.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Weigh a hosted model API against self-hosting, on data control, cost, operations and latency</li><li>Explain what makes inference different from web serving: GPU memory, the KV cache, batching, and throughput against latency</li><li>Package a model as a service with health checks that respect its slow start-up</li><li>Schedule GPU workloads on Kubernetes, and autoscale them on queue depth or concurrency instead of CPU</li><li>Roll out model changes safely, with version pinning, shadow traffic, canaries and rollback</li></ul>
+    </div>
+    <section id="hosted-api-or-self-hosted"><h2>Hosted API or self-hosted?</h2>
+    <p>The first decision is whether to run the model at all. Calling a provider's API and operating your own inference fleet are very different commitments, and for most teams, most of the time, the API is the right answer.</p>
+    <div class="table-wrap"><table><thead><tr><th></th><th>Hosted API</th><th>Self-hosted open-weight model</th></tr></thead><tbody><tr><td>Time to first result</td><td>Minutes</td><td>Days to weeks</td></tr><tr><td>Model quality</td><td>Access to the most capable models</td><td>Limited to open-weight models; often enough for narrow tasks</td></tr><tr><td>Cost model</td><td>Pay per token; nothing when idle</td><td>Pay per GPU-hour, whether busy or not; cheaper only at high, steady utilisation</td></tr><tr><td>Operations</td><td>The provider's problem</td><td>Yours: drivers, scheduling, scaling, upgrades, on-call</td></tr><tr><td>Data control</td><td>Data leaves your network, under the provider's terms</td><td>Data stays in your environment</td></tr><tr><td>Latency</td><td>Network round trip, plus the provider's queue</td><td>Under your control; can sit next to your application</td></tr><tr><td>Customisation</td><td>Prompts, and the provider's fine-tuning options</td><td>Full: fine-tune, quantise, change the serving stack</td></tr><tr><td>Dependency</td><td>Rate limits, price changes, model retirement</td><td>GPU supply, and your own team's capacity</td></tr></tbody></table></div>
+    <p>Self-hosting is justified by specific needs: data that may not leave your environment for legal or contractual reasons, very high and steady volume where your own GPUs work out cheaper, strict latency requirements, operation without internet access, or a small fine-tuned model that does one narrow job well. It is not justified by a vague wish for control. Be honest about the full cost, which includes idle GPUs at night and the engineers who keep the stack running.</p>
+    <p>Classical models are another matter. A gradient-boosted tree, or a small neural network that scores a fraud risk, is cheap to run on CPUs, has no hosted equivalent, and is nearly always served by your own team. The serving principles in the rest of this module apply to both kinds, and the GPU material applies to large models.</p>
+    <div class="callout callout-tip"><strong>Tip</strong><p>Many teams settle on a hybrid: a hosted API for the hard, general tasks, and a small self-hosted model for a high-volume, narrow, latency-sensitive step such as classification or embedding. Put both behind one internal interface, so that you can move a task between them by changing configuration.</p></div></section>
+  <section id="why-inference-is-not-web-serving"><h2>Why inference is not web serving</h2>
+    <p>A typical web service is limited by CPU and I/O, starts in seconds, and handles each request independently. Large-model inference breaks all three of those assumptions.</p>
+    <ul><li><strong>GPU memory is the constraint.</strong> The model's weights have to fit in GPU memory, and they are large: roughly two bytes per parameter at 16-bit precision, so a model with 7 billion parameters needs about 14 GB for its weights alone. On top of that comes the <strong>KV cache</strong>, the memory that holds the attention state of every token of every request being processed. It grows with the length of the context and with the number of concurrent requests, and it is what usually limits how many users one GPU can serve.</li><li><strong>Two phases with different characters.</strong> <strong>Prefill</strong> processes the whole prompt in parallel, and is limited by computation. It determines the <strong>time to first token</strong>. <strong>Decode</strong> then generates one token at a time, and is limited by memory bandwidth. It determines the <strong>tokens per second</strong> that a user sees.</li><li><strong>Batching is essential.</strong> A GPU processing one request at a time is mostly idle. Serving engines group requests, so that a single pass through the model advances many of them together. <strong>Continuous batching</strong> goes further: requests join and leave the batch at every step, without waiting for the others to finish, which raises throughput enormously.</li><li><strong>Throughput trades against latency.</strong> Bigger batches serve more users per GPU, and make each user's tokens arrive a little more slowly. You choose a point on that curve, guided by your latency SLO.</li><li><strong>Start-up is slow.</strong> Pulling an image of several gigabytes, loading tens of gigabytes of weights into GPU memory and warming up can take minutes. That changes how you scale, how you roll out, and how much headroom you keep.</li></ul>
+    <div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>GPU memory needed  ~  weights + KV cache + activations and overhead
+
+weights            ~  parameters x bytes per parameter
+                      7B params x 2 bytes (16-bit)  = about 14 GB
+                      7B params x 1 byte  (8-bit)   = about  7 GB
+                      7B params x 0.5 byte (4-bit)  = about  3.5 GB
+
+KV cache           grows with: concurrent requests x tokens per request x layers x hidden size
+                   -&gt; long contexts and high concurrency are what exhaust memory</code></pre></div>
+    <p><strong>Quantisation</strong> stores the weights at lower precision, in 8 or 4 bits instead of 16. It cuts the memory and often raises the speed, at some cost in quality, which you must measure on your own evals instead of assuming. It is frequently what allows a model to fit on a smaller, cheaper GPU at all. Models too large for one GPU are split across several with tensor or pipeline parallelism, which the serving engine handles, at a cost in complexity and in communication between GPUs.</p>
+    <p>You rarely write this machinery yourself. Open-source <strong>inference servers</strong> such as vLLM, Hugging Face Text Generation Inference, and NVIDIA Triton implement continuous batching, efficient management of the KV cache, quantisation and streaming, and several of them expose an HTTP API compatible with the common chat-completion format, so that the client code barely changes.</p></section>
+  <section id="packaging-a-model-as-a-service"><h2>Packaging a model as a service</h2>
+    <p>Whatever the model, the service around it follows the same rules. Load the model <strong>once, at start-up</strong>, never on each request. Validate the inputs. Expose health endpoints that tell the truth about whether the model is ready. Report the model version with every response. This example serves a classical scikit-learn pipeline of the kind built in the core ML module.</p>
+    <div class="code"><div class="code-cap">app.py</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import os
+import time
+from contextlib import asynccontextmanager
+
+import joblib
+import pandas as pd
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+
+MODEL_PATH = os.environ.get("MODEL_PATH", "/models/churn-pipeline.joblib")
+MODEL_VERSION = os.environ.get("MODEL_VERSION", "unknown")
+state = {"model": None}
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    state["model"] = joblib.load(MODEL_PATH)      # load ONCE, before serving traffic
+    yield
+    state["model"] = None
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+class Features(BaseModel):
+    tenure_months: int = Field(ge=0, le=600)
+    monthly_spend: float = Field(ge=0)
+    support_tickets_90d: int = Field(ge=0)
+    plan: str
+
+
+@app.get("/healthz")
+def liveness():
+    return {"status": "alive"}                    # the process is up; nothing more
+
+
+@app.get("/ready")
+def readiness():
+    if state["model"] is None:
+        raise HTTPException(status_code=503, detail="model not loaded")
+    return {"status": "ready", "model_version": MODEL_VERSION}
+
+
+@app.post("/predict")
+def predict(features: Features):
+    started = time.perf_counter()
+    frame = pd.DataFrame([features.model_dump()])
+    probability = float(state["model"].predict_proba(frame)[0, 1])
+    return {"churn_probability": probability, "model_version": MODEL_VERSION,
+            "latency_ms": round((time.perf_counter() - started) * 1000, 1)}</code></pre></div>
+    <ul><li><strong>Ship the whole pipeline</strong>, with its preprocessing, as a single artifact, so that serving transforms the inputs exactly as training did. A mismatch between the two is <strong>training-serving skew</strong>, a classic and silent cause of bad predictions.</li><li><strong>Validate the inputs</strong> with a schema. Values that are out of range or missing should be rejected, or at least counted, since they are often the first sign of a fault upstream.</li><li><strong>Return the model version</strong> with every prediction, and log it. When the behaviour changes, you need to know which model produced which answer.</li><li><strong>Instrument it</strong> with the golden signals from the SRE track, together with model-specific ones: the distribution of predictions, the distributions of the inputs, and, for LLMs, the time to first token, tokens per second, queue time and tokens per request.</li><li><strong>Keep the weights out of the image</strong> when they are large. Pull them at start-up from object storage or a model registry, onto a cached volume, so that images stay small and one image can serve many versions of a model.</li><li><strong>Treat model files as untrusted code.</strong> Pickle-based formats, including <code>joblib</code> files, can execute arbitrary code when they are loaded. Load only artifacts that your own pipeline produced, and prefer safe formats such as <code>safetensors</code> for neural network weights.</li></ul></section>
+  <section id="gpus-on-kubernetes"><h2>GPUs on Kubernetes</h2>
+    <p>Kubernetes schedules GPUs as an <strong>extended resource</strong>, which the vendor's device plugin advertises. A pod requests whole GPUs under <code>limits</code>, and the scheduler places it on a node that has one free. GPUs are not overcommitted: a GPU assigned to one pod is unavailable to every other, unless you deliberately configure a sharing mechanism.</p>
+    <div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-server
+  namespace: ml
+spec:
+  replicas: 2
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0            # never reduce serving capacity during a rollout
+  selector:
+    matchLabels:
+      app: llm-server
+  template:
+    metadata:
+      labels:
+        app: llm-server
+    spec:
+      terminationGracePeriodSeconds: 120      # let in-flight generations finish
+      nodeSelector:
+        accelerator: nvidia-gpu
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: server
+          image: registry.example.com/ml/llm-server:1.8.0
+          env:
+            - name: MODEL_VERSION
+              value: "support-assistant-2026-09-01"
+          ports:
+            - containerPort: 8000
+          resources:
+            requests:
+              cpu: "4"
+              memory: 32Gi
+            limits:
+              nvidia.com/gpu: 1
+              memory: 32Gi
+          startupProbe:                        # loading weights takes minutes
+            httpGet:
+              path: /ready
+              port: 8000
+            periodSeconds: 10
+            failureThreshold: 60               # allow up to 10 minutes to start
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            periodSeconds: 20
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache</code></pre></div>
+    <figure class="diagram" id="fig-serving-k8s"><div class="diagram-scroll"><svg viewBox="0 0 740 356" role="img" aria-label="Users reach an ingress, which forwards to a Service in front of GPU inference pods. Each pod pulls the model weights from object storage onto a cached volume at start-up, and a startup probe holds traffic until loading completes. The pods export in-flight request counts, which the HorizontalPodAutoscaler uses to add or remove replicas within its bounds." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="serving-k8s-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="serving-k8s-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="serving-k8s-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="serving-k8s-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="serving-k8s-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><rect x="360" y="19" width="162" height="318" rx="10" class="dg-group"/><text x="370" y="330" font-size="10" font-weight="700" letter-spacing="1" class="dg-group-label">GPU PODS</text><polyline points="171.0,178.0 201.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#serving-k8s-arrow-default)"/><rect x="126.1" y="132.0" width="119.8" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">streamed responses</text><polyline points="341.0,178.0 360.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#serving-k8s-arrow-default)"/><rect x="299.8" y="132.0" width="101.5" height="16" rx="4" class="dg-label-bg"/><text x="350.5" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">readiness-gated</text><polyline points="541.0,286.0 511.0,286.0" fill="none" style="stroke:rgba(148,163,184,0.55)" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#serving-k8s-arrow-muted)"/><rect x="472.2" y="240.0" width="107.6" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="248.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">pull at start-up</text><polyline points="522.0,178.0 541.0,178.0" fill="none" style="stroke:rgba(148,163,184,0.55)" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#serving-k8s-arrow-muted)"/><rect x="502.1" y="132.0" width="58.8" height="16" rx="4" class="dg-label-bg"/><text x="531.5" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">/metrics</text><polyline points="611.0,150.0 611.0,98.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#serving-k8s-arrow-default)"/><rect x="614.0" y="116.0" width="89.3" height="16" rx="4" class="dg-label-bg"/><text x="618.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">custom metric</text><polyline points="541.0,54.0 522.0,54.0" fill="none" style="stroke:var(--accent)" stroke-width="1.6" marker-end="url(#serving-k8s-arrow-accent)"/><rect x="489.9" y="8.0" width="83.2" height="16" rx="4" class="dg-label-bg"/><text x="531.5" y="16.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--accent)">scale 2 to 8</text><rect x="31" y="150.0" width="140" height="56" rx="28.0" class="dg-node dg-actor"/><text x="101.0" y="178.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Users</text><rect x="201" y="150.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="271.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Service</text><text x="271.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">ready pods only</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-ok"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#6ee7b7">Inference pod</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">ready</text><rect x="371" y="150.0" width="140" height="56" rx="8" class="dg-node dg-ok"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#6ee7b7">Inference pod</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">ready</text><rect x="371" y="258.0" width="140" height="56" rx="8" class="dg-node dg-muted"/><text x="441.0" y="279.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text2)">Inference pod</text><text x="441.0" y="297.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">loading: 4 min</text><path d="M541,265.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M541,265.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="611.0" y="279.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Model weights</text><text x="611.0" y="297.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">object storage, cached</text><rect x="541" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Autoscaler</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">in-flight requests</text><path d="M541,157.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M541,157.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="611.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Prometheus</text><text x="611.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">TTFT, tokens/s, queue</text></svg></div><figcaption>Serving a model on Kubernetes: weights come from object storage onto a cached volume, GPU pods only receive traffic once a startup probe confirms the model is loaded, and the autoscaler watches requests in flight rather than CPU.</figcaption></figure>
+    <ul><li>The <strong>startup probe</strong> is essential. Without one, the liveness probe kills the container while it is still loading its weights, and the pod never becomes ready. This is the most common failure when a model is first deployed.</li><li><strong>Readiness must mean that the model is loaded</strong>, not merely that the process has started, or traffic will arrive at a pod that cannot serve it.</li><li><strong>Taints and node selectors</strong> keep GPU nodes for GPU workloads, so that expensive hardware is not filled with ordinary pods.</li><li><strong><code>maxUnavailable: 0</code></strong> matters more than usual, because a replacement takes minutes to become ready, and removing a pod early leaves a long gap in capacity.</li><li>A generous <strong>termination grace period</strong> lets streaming responses complete before the pod is removed.</li><li>GPU nodes are expensive, and they are the natural target of the FinOps module: tag them, watch their utilisation, and scale them down when they are idle.</li></ul></section>
+  <section id="scaling-on-the-right-signal"><h2>Scaling on the right signal</h2>
+    <p>The autoscaling habit of targeting CPU utilisation fails for inference. The CPU of a GPU server tells you nothing, and GPU utilisation is misleading as well, because a GPU can report itself as fully busy at very different levels of real load. Scale on what reflects demand against capacity: <strong>queue depth, the number of requests in flight, or the time that requests spend waiting</strong>.</p>
+    <div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: llm-server
+  namespace: ml
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: llm-server
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          name: inference_requests_in_flight     # exposed through a custom metrics adapter
+        target:
+          type: AverageValue
+          averageValue: "12"                     # tuned from a load test against the latency SLO
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+    scaleDown:
+      stabilizationWindowSeconds: 600            # scale in slowly: a replacement costs minutes</code></pre></div>
+    <ul><li><strong>Find the target with a load test</strong>, as the capacity module described. Raise the concurrency until the time to first token, or the tokens per second, breaches your SLO. The target is somewhat below that point.</li><li><strong>Cold starts dominate.</strong> If a new replica takes five minutes to serve, the autoscaler cannot rescue you from a spike that arrives in thirty seconds. Keep more headroom than you would for a web service, pre-scale before known peaks, and cache the weights on the node or on a fast volume.</li><li><strong>Bound the queue, and shed load.</strong> When you are saturated, reject quickly with <code>429</code> or <code>503</code>, in preference to letting the queue grow without limit. A request that waits two minutes helps nobody. This is the backpressure of the failure-modes module.</li><li><strong>Limit the work per request</strong>: a maximum input length, a maximum number of output tokens, and a timeout. One pathological request should not be able to occupy a GPU for minutes.</li><li><strong>Scale to zero</strong> only for workloads that can tolerate a cold start of several minutes, such as internal batch tools. For interactive use, keep a warm minimum.</li><li><strong>Separate traffic by kind.</strong> Interactive requests and bulk batch jobs have opposite needs. Give each its own pool, or a priority queue, so that a batch job cannot starve live users.</li></ul></section>
+  <section id="rolling-out-model-changes"><h2>Rolling out model changes</h2>
+    <p>A new model is a release that changes behaviour, and it is more dangerous than a code release because the failure is quiet. Nothing crashes, and no error rate rises. The answers simply become worse for some kinds of input. The same applies to a changed prompt, a new version of a provider's model, a different quantisation, or an upgraded serving engine. Apply the progressive delivery of the SRE track, with checks adapted to quality.</p>
+    <ol><li><strong>Pin versions.</strong> Refer to an exact version of the model, or of the provider's snapshot, and never to a moving alias such as "latest". An unannounced change in a model is an unannounced production deploy.</li><li><strong>Pass the offline gate.</strong> The candidate must meet the thresholds of your eval suite, on quality, safety, latency and cost, before it goes near any traffic.</li><li><strong>Shadow it.</strong> Send a copy of real production requests to the candidate, discard its responses, and compare them offline with those of the current model. Users are not affected, and the traffic is real. This suits models well, because most predictions have no side effects.</li><li><strong>Canary it.</strong> Route a small share of users to the new model. Watch the system metrics, together with the quality signals: user feedback, the rate at which users retry or rephrase, the escalation rate, scores from a sampled judge, and the distribution of outputs.</li><li><strong>A/B test</strong> when the question is whether it is better for the business, and not only whether it is safe. Assign users consistently to one arm, and measure the outcome that you care about.</li><li><strong>Keep rollback instant.</strong> Leave the previous model loaded, or quick to load, and make switching a change of configuration. With start-up times of several minutes, a rollback that needs a cold start is too slow.</li></ol>
+    <div class="callout callout-warning"><strong>Watch out</strong><p>Providers retire old model versions on a published schedule. Track the deprecation dates of every model you depend on, and rehearse the migration before the deadline, with your eval suite as the judge. A forced migration in the final week, with no evals, is how regressions in quality reach production.</p></div>
+    <p>Record the model version, the prompt version and the serving configuration with every prediction. When someone asks why the assistant said something last Tuesday, that record is the only route to an answer, and it is the starting point for the observability module that follows.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Serve a model like a production service</h2>
+    <ol><li>Take the scikit-learn pipeline from the core ML module. Save it with <code>joblib</code>, and wrap it in the FastAPI service from this module, with <code>/healthz</code>, <code>/ready</code> and <code>/predict</code>, and with the model version in every response.</li><li>Containerise it with a multi-stage build and a non-root user. Supply the model file through a mounted volume or an environment variable, and not baked into the image.</li><li>Add a Prometheus histogram for prediction latency, a counter for requests by status, and a histogram of the predicted probability. Confirm that they appear at <code>/metrics</code>.</li><li>Deploy it to your cluster with separate startup, readiness and liveness probes. Add a ten-second sleep before the model loads, to simulate a slow start. Remove the startup probe, watch the pod get killed in a loop, and then put the probe back.</li><li>Load test it with an open-model tool, as in the capacity module. Find the concurrency at which p99 latency breaches your target, and set an autoscaling target below it.</li><li>Train a second, slightly different model. Deploy it as a shadow: send each request to both, return only the current model's answer, and log both. Compare the two distributions of predictions.</li><li>Route 10% of traffic to the new model as a canary. Define in advance which metrics would cause you to roll back, then practise the rollback, and time it.</li><li>Optional, if you have access to a GPU: serve a small open-weight language model with an inference server such as vLLM. Measure the time to first token and the tokens per second at concurrency 1, 8 and 32, and observe the trade-off between throughput and latency.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Serving models in production — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Default to a hosted API. Self-host only for data control, steady high volume, strict latency, or a narrow fine-tuned model.</li><li>GPU memory is the constraint: weights plus the KV cache, which grows with context length and concurrency.</li><li>Prefill sets the time to first token, decode sets the tokens per second. Continuous batching trades a little latency for much more throughput.</li><li>Load the model once at start-up. Readiness means the model is loaded, and a startup probe covers the minutes of loading.</li><li>Ship preprocessing and model as one artifact, to avoid training-serving skew. Return the model version with every prediction.</li><li>Scale on queue depth or in-flight requests, not on CPU. Keep headroom, because cold starts take minutes.</li><li>Bound the queue, and limit input length, output tokens and time per request.</li><li>A model change is a release: pin versions, gate on evals, shadow, canary, and keep rollback instant.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Sizing rules of thumb</h3><table><tbody><tr><td><code>weights ~ params x bytes per param</code></td><td>16-bit: 2 bytes. 8-bit: 1 byte. 4-bit: 0.5 byte.</td></tr><tr><td><code>7B at 16-bit ~ 14 GB</code></td><td>Before the KV cache and overhead</td></tr><tr><td><code>KV cache ~ requests x tokens x layers x hidden size</code></td><td>What limits the concurrency on a GPU</td></tr><tr><td><code>latency = TTFT + output tokens / tokens per second</code></td><td>Prefill, then decode</td></tr><tr><td><code>larger batch = more throughput, slower per user</code></td><td>Choose the point from your latency SLO</td></tr><tr><td><code>GPU cost = GPU-hours x price, busy or idle</code></td><td>Utilisation decides whether self-hosting pays</td></tr></tbody></table></div><div class="cheat-group"><h3>Service essentials</h3><table><tbody><tr><td><code>load the model in the lifespan / start-up hook</code></td><td>Once per process, never per request</td></tr><tr><td><code>GET /healthz</code></td><td>Liveness: the process is running</td></tr><tr><td><code>GET /ready -&gt; 503 until the model is loaded</code></td><td>Readiness: safe to receive traffic</td></tr><tr><td><code>pydantic BaseModel with Field(ge=, le=)</code></td><td>Validate every input</td></tr><tr><td><code>"model_version" in every response</code></td><td>Traceability</td></tr><tr><td><code>joblib.load / safetensors</code></td><td>Load only trusted artifacts; pickles can execute code</td></tr><tr><td><code>weights from object storage + a cached volume</code></td><td>Small images and quicker restarts</td></tr></tbody></table></div><div class="cheat-group"><h3>Kubernetes for inference</h3><table><tbody><tr><td><code>resources.limits: nvidia.com/gpu: 1</code></td><td>Request a whole GPU; GPUs are not overcommitted</td></tr><tr><td><code>startupProbe: failureThreshold x periodSeconds</code></td><td>The time allowed for loading the weights</td></tr><tr><td><code>readinessProbe -&gt; /ready</code></td><td>No traffic until the model is loaded</td></tr><tr><td><code>nodeSelector + tolerations</code></td><td>Keep GPU nodes for GPU workloads</td></tr><tr><td><code>maxUnavailable: 0</code></td><td>Replacements take minutes; never drop capacity</td></tr><tr><td><code>terminationGracePeriodSeconds: 120</code></td><td>Let streaming responses finish</td></tr><tr><td><code>kubectl describe node NAME | grep -A5 nvidia</code></td><td>See the allocatable and the allocated GPUs</td></tr></tbody></table></div><div class="cheat-group"><h3>Metrics to expose</h3><table><tbody><tr><td><code>time to first token (histogram)</code></td><td>Responsiveness as the user perceives it</td></tr><tr><td><code>tokens per second, per request</code></td><td>The speed of generation</td></tr><tr><td><code>requests in flight / queue depth</code></td><td>The signal for autoscaling</td></tr><tr><td><code>queue wait time</code></td><td>Saturation</td></tr><tr><td><code>input and output tokens per request</code></td><td>Cost, and detection of abuse</td></tr><tr><td><code>GPU memory used, KV cache usage</code></td><td>Closeness to the real limit</td></tr><tr><td><code>distribution of predictions</code></td><td>Detects behavioural drift</td></tr><tr><td><code>requests by model_version</code></td><td>Essential during rollouts</td></tr></tbody></table></div><div class="cheat-group"><h3>Rollout ladder</h3><table><tbody><tr><td><code>1. pin exact versions</code></td><td>No moving aliases</td></tr><tr><td><code>2. offline eval gate</code></td><td>Quality, safety, latency, cost</td></tr><tr><td><code>3. shadow traffic</code></td><td>Real inputs, responses discarded, compared offline</td></tr><tr><td><code>4. canary at a small percentage</code></td><td>System metrics together with quality signals</td></tr><tr><td><code>5. A/B test</code></td><td>Is it better for the business?</td></tr><tr><td><code>6. instant rollback</code></td><td>Previous model kept warm; a change of configuration</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Self-hosting for the sake of control, then paying for idle GPUs and for an on-call rotation.</li><li>Loading the model inside the request handler, so that every request pays the loading time.</li><li>Omitting the startup probe, so that the liveness probe kills the pod while it is loading its weights.</li><li>Autoscaling on CPU utilisation, which says nothing about the load on a GPU inference server.</li><li>Letting the request queue grow without limit, instead of shedding load when saturated.</li><li>Pointing at a "latest" alias of a model, and receiving a behaviour change that nobody chose.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "A start-up handles customer data that may be processed by approved third parties, has modest and spiky traffic, and needs strong reasoning. Which serving option fits best?", "options": ["A hosted model API, since it needs no operations and costs nothing when idle", "A self-hosted cluster of GPUs, sized for the largest expected peak", "A self-hosted model on CPUs, to avoid the cost of GPU hardware", "A model embedded in the mobile application, to avoid any servers at all"], "answer": 0, "explain": "Nothing here calls for self-hosting: the data may go to approved providers, the volume is low and uneven, and the most capable models are available through APIs. Owning GPUs would mean paying for idle hardware and for the operations around it."}, {"q": "A GPU inference server works well with 8 concurrent users, and runs out of memory at 40, although the model itself has not changed. What is consuming the memory?", "options": ["The KV cache, which grows with the number of concurrent requests and their length", "The model's weights, which are loaded again for each additional user", "The container image, which is duplicated in GPU memory for every request", "The Python interpreter, which needs a separate copy for each connection"], "answer": 0, "explain": "The weights are loaded once and stay constant. The KV cache holds the attention state of every token of every active request, so it scales with concurrency and with context length, and it is usually what limits the capacity."}, {"q": "A model server takes four minutes to load its weights. After deployment, the pods restart for ever, and never become ready. What is the most likely cause?", "options": ["There is no startup probe, so the liveness probe kills the container during loading", "The readiness probe points at /ready, when it ought to point at /healthz", "The Deployment requests a GPU under limits, when it should be under requests", "maxUnavailable is set to 0, which prevents new pods from being created"], "answer": 0, "explain": "Without a startup probe, liveness checks begin at once and fail while the model is still loading, so Kubernetes restarts the container before it can finish. A startup probe holds the other probes back until it has succeeded."}, {"q": "Which metric is the best basis for autoscaling a GPU-backed LLM service?", "options": ["The number of requests in flight, or the depth of the queue, per replica", "The average CPU utilisation of the pods", "The GPU utilisation percentage that the driver reports", "The number of HTTP 200 responses returned per minute"], "answer": 0, "explain": "In-flight requests and queue depth reflect demand against capacity directly. CPU is irrelevant for GPU inference, and GPU utilisation can read as fully busy across very different levels of real load."}, {"q": "You want to find out whether a new version of a model gives worse answers, without any user seeing those answers. Which technique fits?", "options": ["Shadow traffic: send copies of real requests to it, and compare the outputs offline", "A canary release, sending five percent of users to the new model", "An A/B test, with users divided evenly between the two models", "A rolling update, with maxUnavailable set to zero"], "answer": 0, "explain": "Shadowing exercises the candidate on real production inputs while its responses are discarded, so no user is exposed. Canaries and A/B tests both serve the new model's answers to real users."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="ai-cost.html"><span>← Previous</span><strong>Cost, latency &amp; caching</strong></a>
+    <a class="pager-up" href="../education.html#ai">All AI Engineering modules</a>
+    <a class="pager-link pager-next" href="ai-mlops.html"><span>Next →</span><strong>MLOps pipelines</strong></a>
+  </nav>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="mailto:support@thavionai.com?subject=Education%20feedback%3A%20ai-serving">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

@@ -1,0 +1,221 @@
+{
+  "id": "devops-linux",
+  "minutes": 30,
+  "intro": "Almost everything you will deploy runs on Linux: containers, Kubernetes nodes, CI runners, and most cloud servers. When a deployment fails at 2 a.m. there is no GUI, only a shell. This module gives you the working model of a Linux system that every later module assumes: where things live, who is allowed to touch them, what is running, and how to find out why it broke.",
+  "objectives": [
+    "Navigate the filesystem and know what belongs in `/etc`, `/var`, `/usr`, `/home` and `/tmp`",
+    "Read and change file permissions and ownership, in both symbolic and octal form",
+    "Inspect, signal, and background processes, and manage long-running services with `systemctl`",
+    "Combine small tools with pipes and redirection to answer real questions about a system",
+    "Find the cause of a failing service from its logs using `journalctl`"
+  ],
+  "sections": [
+    {
+      "heading": "The filesystem is a single tree",
+      "blocks": [
+        { "type": "p", "text": "Linux has no drive letters. Everything hangs off one root directory, `/`, and extra disks, network shares, and even kernel information are **mounted** somewhere inside that tree. The layout is a convention called the Filesystem Hierarchy Standard, and learning it means you can sit down at any server and know where to look." },
+        { "type": "table", "headers": ["Path", "What lives there"], "rows": [
+          ["`/etc`", "System-wide configuration, as plain text. The first place to look when behaviour is wrong."],
+          ["`/var`", "Data that changes while the system runs: logs in `/var/log`, package caches, databases."],
+          ["`/usr`", "Installed programs and libraries (`/usr/bin`, `/usr/lib`). Read-only in normal operation."],
+          ["`/home`", "One directory per human user. `root`'s home is `/root`."],
+          ["`/tmp`", "Scratch space, usually wiped on reboot. Never store anything you need here."],
+          ["`/proc`, `/sys`", "Not real files: a live view into the kernel and hardware."]
+        ]},
+        { "type": "p", "text": "Paths that start with `/` are **absolute**; anything else is **relative** to your current directory. Scripts and cron jobs should use absolute paths, because you cannot be sure which directory they start in." },
+        { "type": "code", "lang": "bash", "code": "pwd                       # where am I?\nls -lah /var/log          # long listing, all files, human-readable sizes\ncd /etc && ls | head      # move, then peek at the first ten entries\ndf -h                     # free space per mounted filesystem\ndu -sh /var/log/* | sort -h | tail -5   # the five biggest things in /var/log" },
+        { "type": "callout", "kind": "tip", "text": "A full disk is one of the most common causes of mysterious outages. `df -h` to find the full filesystem, then `du -sh * | sort -h` to walk down to the culprit, is a routine worth memorising." }
+      ]
+    },
+    {
+      "heading": "Users, permissions, and ownership",
+      "blocks": [
+        { "type": "p", "text": "Every file has an owning **user**, an owning **group**, and three sets of permission bits: for the user, the group, and everyone else. Each set can grant **r**ead, **w**rite, and e**x**ecute. `ls -l` shows them as a ten-character string such as `-rwxr-x---`: a type flag, then three triplets." },
+        { "type": "p", "text": "The octal form is the same information as numbers: read is 4, write is 2, execute is 1, and you add them up per triplet. So `rwx` is 7, `r-x` is 5, `r--` is 4, and `-rwxr-x---` is `750`. On a directory, execute means permission to enter it and read means permission to list it, which is why a directory with `r--` alone is nearly useless." },
+        { "type": "code", "lang": "bash", "code": "ls -l deploy.sh                 # -rw-r--r-- 1 alice dev 412 Mar  3 10:12 deploy.sh\nchmod u+x deploy.sh             # symbolic: add execute for the owning user\nchmod 640 secrets.env           # octal: owner rw, group r, others nothing\nchown alice:dev secrets.env     # change owner and group (needs root)\nchmod -R g+rX /srv/app          # capital X: execute only on directories\nid                              # which user am I, and which groups am I in?" },
+        { "type": "p", "text": "The `root` user bypasses all of these checks, which is exactly why you should not work as root. Use `sudo` to run one command with elevated rights: it is logged, it can be limited per user, and it forces a moment of thought." },
+        { "type": "callout", "kind": "warning", "text": "`chmod 777` makes a permission error disappear by letting every user on the machine modify the file. It is almost never the right fix. Work out which user the process runs as (`ps -o user= -p PID`) and grant that user, or its group, the minimum it needs." }
+      ]
+    },
+    {
+      "heading": "Processes and signals",
+      "blocks": [
+        { "type": "p", "text": "A running program is a **process** with a numeric ID (PID), a parent, an owning user, and an exit code when it finishes. An exit code of `0` means success and anything else means failure. CI pipelines, shell `&&` chains, and Kubernetes probes all depend on that one convention." },
+        { "type": "code", "lang": "bash", "code": "ps aux | head                   # every process, with owner, CPU and memory\nps -ef --forest | less          # the same, drawn as a parent/child tree\npgrep -a nginx                  # PIDs and command lines matching a name\ntop                             # live view; press q to quit (htop is friendlier)\nss -tulpn                       # which process is listening on which port\necho $?                         # exit code of the last command" },
+        { "type": "p", "text": "You do not kill a process, you send it a **signal**. `SIGTERM` (15) is a polite request to shut down, and a well-written program catches it, finishes in-flight work, and exits. `SIGKILL` (9) cannot be caught: the kernel removes the process immediately, with no chance to flush data or release locks. Always try `SIGTERM` first." },
+        { "type": "code", "lang": "bash", "code": "kill 4242            # SIGTERM by default\nkill -9 4242         # SIGKILL: last resort only\nkill -HUP 4242       # many daemons reload their config on SIGHUP\nsleep 600 &          # trailing & runs a job in the background\njobs                 # list background jobs of this shell\nfg %1                # bring job 1 back to the foreground" },
+        { "type": "callout", "kind": "note", "text": "This matters directly for containers. When Kubernetes stops a pod it sends `SIGTERM`, waits for the grace period (30 seconds by default), then sends `SIGKILL`. An app that ignores `SIGTERM` drops requests on every deploy." }
+      ]
+    },
+    {
+      "heading": "Services with systemd",
+      "blocks": [
+        { "type": "p", "text": "On nearly every modern distribution, long-running services are supervised by **systemd**. It starts them at boot in dependency order, restarts them when they crash, and captures their output. You talk to it with `systemctl`, and each service is described by a **unit file** ending in `.service`." },
+        { "type": "code", "lang": "bash", "code": "systemctl status nginx          # running? since when? last log lines\nsudo systemctl restart nginx    # stop, then start\nsudo systemctl reload nginx     # re-read config without dropping connections\nsudo systemctl enable --now nginx   # start at boot AND start right now\nsystemctl list-units --type=service --state=failed\nsystemctl cat nginx             # show the unit file that is actually in effect" },
+        { "type": "p", "text": "`start` and `enable` are different things. `start` affects this moment; `enable` affects the next boot. A service that was started but never enabled works perfectly until the server reboots, a classic cause of an outage after routine patching." },
+        { "type": "code", "lang": "ini", "caption": "A minimal unit file: /etc/systemd/system/myapp.service", "code": "[Unit]\nDescription=My web app\nAfter=network-online.target\n\n[Service]\nUser=myapp\nWorkingDirectory=/srv/myapp\nEnvironmentFile=/etc/myapp/env\nExecStart=/srv/myapp/bin/server --port 8080\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target" },
+        { "type": "p", "text": "After creating or editing a unit file, run `sudo systemctl daemon-reload` so systemd re-reads it. Note the `User=` line: the service runs as an unprivileged account, not as root." }
+      ]
+    },
+    {
+      "heading": "Pipes, redirection, and the text toolkit",
+      "blocks": [
+        { "type": "p", "text": "The Unix design idea is many small programs that each do one thing, connected by **pipes**. Every process has three standard streams: stdin (0), stdout (1), and stderr (2). The `|` operator connects one program's stdout to the next one's stdin; `>` and `>>` send a stream to a file." },
+        { "type": "code", "lang": "bash", "code": "grep -ri \"timeout\" /etc/nginx/          # recursive, case-insensitive search\ngrep -c \" 500 \" access.log               # count matching lines\ntail -f /var/log/syslog                  # follow a file as it grows\n\n# top 5 client IPs in a web access log\nawk '{print $1}' access.log | sort | uniq -c | sort -rn | head -5\n\n./backup.sh > backup.log 2>&1            # stdout AND stderr into one file\n./backup.sh 2> /dev/null                 # discard errors only\nfind /var/log -name \"*.gz\" -mtime +30    # files older than 30 days" },
+        { "type": "p", "text": "Read that log pipeline left to right: take column one, sort so identical lines sit together, collapse them with a count, sort numerically in reverse, keep five. Nearly every investigation you do on a server is some variation of **filter, extract, count, sort**." },
+        { "type": "callout", "kind": "tip", "text": "Order matters in `> file 2>&1`. It means: point stdout at the file, then point stderr at wherever stdout currently goes. Written the other way round, `2>&1 > file`, stderr still goes to the terminal." }
+      ]
+    },
+    {
+      "heading": "Finding out why it broke",
+      "blocks": [
+        { "type": "p", "text": "systemd collects the output of every service in the **journal**. `journalctl` queries it, and its filters are what turn a wall of text into an answer." },
+        { "type": "code", "lang": "bash", "code": "journalctl -u nginx --since \"10 min ago\"   # one service, recent window\njournalctl -u nginx -f                      # follow live\njournalctl -p err -b                        # errors and worse, since this boot\njournalctl -k | tail -50                    # kernel messages (OOM kills show here)\ndmesg -T | grep -i \"out of memory\"          # did the kernel kill something?" },
+        { "type": "p", "text": "A reliable order of attack for \"the service is down\":" },
+        { "type": "steps", "items": [
+          "`systemctl status NAME`: is it running, failed, or restarting in a loop? Note the exit code.",
+          "`journalctl -u NAME --since \"15 min ago\"`: read the last lines before it stopped. The real error is usually the first one, not the last.",
+          "Check resources: `df -h` for disk, `free -h` for memory, `journalctl -k` for OOM kills.",
+          "Check the network: is it listening (`ss -tulpn`), and can you reach it locally (`curl -v localhost:8080`)?",
+          "Only then change something, one thing at a time, and watch the log while you do it."
+        ]}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Run and break your own service",
+    "steps": [
+      "Get a Linux shell you can safely damage: a cloud free-tier VM, or locally with `docker run -it --rm ubuntu bash` (for the systemd steps use a VM or Multipass).",
+      "Create a user `myapp` with `sudo useradd --system --create-home myapp`, and a directory `/srv/myapp` owned by it with mode `750`.",
+      "Write a unit file that runs `python3 -m http.server 8080` as `myapp` from `/srv/myapp`. Run `daemon-reload`, then `enable --now`, and prove it works with `curl localhost:8080`.",
+      "Find its PID with `pgrep`, send it `SIGKILL`, and watch systemd restart it. Find the restart in `journalctl -u myapp`.",
+      "Break it on purpose: change `User=` to a user that does not exist, restart, and diagnose it using only `systemctl status` and `journalctl`.",
+      "Write a one-line pipeline that lists the five largest files under `/var`, and another that counts how many processes each user is running."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "The filesystem map: config in `/etc`, changing data and logs in `/var`, programs in `/usr`.",
+      "Permission triplets and octal: r=4, w=2, x=1, so `750` is `rwxr-x---`. On directories, x means \"may enter\".",
+      "Exit code `0` is success, anything else is failure. All automation is built on this.",
+      "`SIGTERM` asks, `SIGKILL` forces. Always try `SIGTERM` first.",
+      "`systemctl start` is for now, `systemctl enable` is for the next boot. You usually want both.",
+      "Debugging order: status, then logs, then disk and memory, then network, then change one thing."
+    ],
+    "groups": [
+      {
+        "title": "Navigate and inspect",
+        "items": [
+          { "syntax": "ls -lah PATH", "desc": "Long listing including hidden files, human-readable sizes" },
+          { "syntax": "df -h", "desc": "Free space per filesystem" },
+          { "syntax": "du -sh * | sort -h", "desc": "Size of each item here, smallest to largest" },
+          { "syntax": "find PATH -name \"*.log\" -mtime +7", "desc": "Files by name pattern, modified more than 7 days ago" },
+          { "syntax": "less FILE", "desc": "Page through a file; `/text` searches, `q` quits" },
+          { "syntax": "tail -f FILE", "desc": "Follow a file as new lines arrive" }
+        ]
+      },
+      {
+        "title": "Permissions and users",
+        "items": [
+          { "syntax": "chmod u+x FILE", "desc": "Add execute for the owner (symbolic form)" },
+          { "syntax": "chmod 640 FILE", "desc": "Owner rw, group r, others none (octal form)" },
+          { "syntax": "chown USER:GROUP FILE", "desc": "Change owner and group; add `-R` for a whole tree" },
+          { "syntax": "id", "desc": "Current user, UID, and group memberships" },
+          { "syntax": "sudo -u USER CMD", "desc": "Run one command as another user" }
+        ]
+      },
+      {
+        "title": "Processes",
+        "items": [
+          { "syntax": "ps aux", "desc": "Every process with owner, CPU, memory" },
+          { "syntax": "pgrep -a NAME", "desc": "PIDs and command lines matching a name" },
+          { "syntax": "kill PID", "desc": "Send `SIGTERM` (graceful)" },
+          { "syntax": "kill -9 PID", "desc": "Send `SIGKILL` (cannot be caught; last resort)" },
+          { "syntax": "ss -tulpn", "desc": "Listening TCP/UDP ports and the owning process" },
+          { "syntax": "echo $?", "desc": "Exit code of the previous command" }
+        ]
+      },
+      {
+        "title": "Services and logs",
+        "items": [
+          { "syntax": "systemctl status NAME", "desc": "State, uptime, and last log lines" },
+          { "syntax": "systemctl enable --now NAME", "desc": "Start now and at every boot" },
+          { "syntax": "systemctl daemon-reload", "desc": "Re-read unit files after editing them" },
+          { "syntax": "journalctl -u NAME -f", "desc": "Follow one service's logs" },
+          { "syntax": "journalctl -u NAME --since \"1 hour ago\"", "desc": "Logs for a time window" },
+          { "syntax": "journalctl -p err -b", "desc": "Errors and worse since the last boot" }
+        ]
+      },
+      {
+        "title": "Pipes and redirection",
+        "items": [
+          { "syntax": "CMD1 | CMD2", "desc": "stdout of CMD1 becomes stdin of CMD2" },
+          { "syntax": "CMD > FILE", "desc": "Write stdout to FILE, replacing it (`>>` appends)" },
+          { "syntax": "CMD > FILE 2>&1", "desc": "stdout and stderr both into FILE" },
+          { "syntax": "CMD 2> /dev/null", "desc": "Throw away error output" },
+          { "syntax": "sort | uniq -c | sort -rn", "desc": "Count duplicates, most frequent first" },
+          { "syntax": "grep -ri TEXT PATH", "desc": "Recursive, case-insensitive search" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Fixing a permission error with `chmod 777` instead of finding out which user the process runs as.",
+      "Starting a service but never enabling it, so it silently stays down after the next reboot.",
+      "Reaching for `kill -9` first, which skips cleanup and can corrupt data or leave stale lock files.",
+      "Editing a unit file and forgetting `systemctl daemon-reload`, then wondering why nothing changed.",
+      "Using relative paths in scripts and cron jobs, which run from a directory you did not expect."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A file shows `-rw-r-----` in `ls -l`. Which octal mode is that?",
+      "options": ["640", "644", "460", "750"],
+      "answer": 0,
+      "explain": "Owner `rw-` is 4+2=6, group `r--` is 4, others `---` is 0, giving 640."
+    },
+    {
+      "q": "You ran `sudo systemctl start myapp` and it works. After the server reboots for patching, the app is down. What is the most likely cause?",
+      "options": [
+        "The service was never enabled, so it does not start at boot",
+        "The unit file was deleted by the reboot",
+        "systemd only restarts services that crashed, never after a reboot",
+        "The journal filled the disk during shutdown"
+      ],
+      "answer": 0,
+      "explain": "`start` only affects the current boot. `systemctl enable` (or `enable --now`) is what links the unit into the boot sequence."
+    },
+    {
+      "q": "Why should you send `SIGTERM` before resorting to `SIGKILL`?",
+      "options": [
+        "`SIGTERM` can be caught, so the process can finish work and clean up before exiting",
+        "`SIGKILL` only works on processes owned by root",
+        "`SIGTERM` is faster because the kernel handles it directly",
+        "`SIGKILL` restarts the process instead of stopping it"
+      ],
+      "answer": 0,
+      "explain": "A program can handle `SIGTERM` to drain requests, flush data and release locks. `SIGKILL` is never delivered to the program at all; the kernel just removes it."
+    },
+    {
+      "q": "What does `./job.sh > out.log 2>&1` do?",
+      "options": [
+        "Writes both normal output and error output to out.log",
+        "Writes normal output to out.log and discards errors",
+        "Runs the job twice and logs the second run",
+        "Writes errors to out.log and normal output to the terminal"
+      ],
+      "answer": 0,
+      "explain": "`> out.log` points stdout at the file, then `2>&1` points stderr at the same place stdout is going."
+    },
+    {
+      "q": "A web service is reported down. Which is the best first step?",
+      "options": [
+        "Run `systemctl status` on it, then read its recent `journalctl` output",
+        "Reboot the server so everything starts fresh",
+        "Run `chmod -R 777` on the application directory",
+        "Send `kill -9` to every process owned by the app user"
+      ],
+      "answer": 0,
+      "explain": "Observe before you change anything. Status and logs tell you whether it crashed, is crash-looping, or is running but unreachable, and each of those has a different fix. Rebooting destroys the evidence."
+    }
+  ]
+}

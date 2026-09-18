@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Traces &amp; logs with OpenTelemetry — Site Reliability | ThavionAI Education</title>
+  <meta name="description" content="Instrument once, export anywhere; context propagation and structured logging." />
+  <meta property="og:title" content="Traces &amp; logs with OpenTelemetry — ThavionAI Education" />
+  <meta property="og:description" content="Instrument once, export anywhere; context propagation and structured logging." />
+  <meta property="og:type" content="article" />
+  <link rel="canonical" href="https://thavionai.com/education/sre-otel.html" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-sre" data-module="sre-otel">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><div class="nav-logo-icon">T</div>ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html#features">Features</a>
+    <a href="../index.html#products">Products</a>
+    <a href="../education.html" class="active">Education</a>
+    <a href="../index.html#about">About</a>
+    <a href="../index.html#pricing">Pricing</a>
+    <a href="../index.html#contact" class="nav-cta">Contact Us</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#sre">Site Reliability</a> › Stage 2: Observability</div>
+    <h1>Traces &amp; logs with OpenTelemetry</h1>
+    <p class="lede">Instrument once, export anywhere; context propagation and structured logging.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 7 of 16</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">Metrics tell you that checkout latency doubled at 14:02. They cannot tell you why this particular customer's request took nine seconds, because a metric is an aggregate and the answer lies in one request's journey through six services. That is what traces and logs are for. OpenTelemetry is the vendor-neutral standard for producing all three signals, so that you instrument your code once and can send the data to any backend. This module covers how distributed tracing works, how to make logs useful, and how to run the OpenTelemetry Collector.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Explain what metrics, logs and traces are each good for, and how they connect during an investigation</li><li>Describe traces, spans and context propagation, including the W3C <code>traceparent</code> header</li><li>Instrument a service with OpenTelemetry using automatic and manual instrumentation</li><li>Write structured logs that carry trace and span IDs so that they correlate with traces</li><li>Configure an OpenTelemetry Collector pipeline with receivers, processors and exporters, and choose a sampling strategy</li></ul>
+    </div>
+    <section id="three-signals-one-investigation"><h2>Three signals, one investigation</h2>
+    <div class="table-wrap"><table><thead><tr><th>Signal</th><th>What it is</th><th>Strength</th><th>Weakness</th></tr></thead><tbody><tr><td><strong>Metrics</strong></td><td>Numbers aggregated over time</td><td>Cheap, fast, ideal for alerting and trends</td><td>No detail about any individual request</td></tr><tr><td><strong>Logs</strong></td><td>Timestamped records of discrete events</td><td>Rich detail, arbitrary context</td><td>Expensive at volume, hard to follow across services</td></tr><tr><td><strong>Traces</strong></td><td>The path of one request through every service it touched</td><td>Shows where time went and where it failed</td><td>Needs propagation everywhere; usually sampled</td></tr></tbody></table></div>
+    <p>A typical investigation uses all three, in order. A <strong>metric</strong>-based alert says the error budget is burning. The dashboard narrows it to one route. You open <strong>traces</strong> for slow or failed requests on that route and see that the time is spent in a call to the inventory service. You then read the <strong>logs</strong> for that exact span and find the cause: a timeout connecting to a replica. Each signal hands you to the next, provided they share identifiers.</p>
+    <p><strong>Monitoring</strong> answers questions you thought of in advance: is the error rate above the threshold? <strong>Observability</strong> is the ability to ask new questions about a system's behaviour from the outside, without shipping new code, which matters most for the failures nobody predicted. High-cardinality detail, such as customer ID, build version and feature flag state, is what makes that possible, and it lives in traces and logs because it cannot live in metric labels.</p>
+    <p><strong>OpenTelemetry</strong>, usually shortened to OTel, is a CNCF project that provides a specification, APIs and SDKs for most languages, a wire protocol called <strong>OTLP</strong>, and the Collector. It is not a backend: it does not store or display anything. You send its output to Jaeger, Tempo, Prometheus, Loki, Elasticsearch or a commercial vendor, and you can change your mind later without touching your application code. That freedom from lock-in is the reason it became the standard.</p></section>
+  <section id="traces-spans-and-context-propagation"><h2>Traces, spans and context propagation</h2>
+    <p>A <strong>trace</strong> represents one request end to end. It is made of <strong>spans</strong>, each representing one unit of work: handling an HTTP request, running a database query, calling another service. A span has a name, a start time and a duration, a <strong>status</strong>, a set of key-value <strong>attributes</strong>, optional timestamped <strong>events</strong>, and the ID of its <strong>parent span</strong>. The parent links assemble the spans into a tree, usually drawn as a waterfall.</p>
+    <div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>trace 4bf92f3577b34da6a3ce929d0e0e4736                          total 1,240 ms
+
+GET /checkout                 [==============================================] 1240 ms
+  auth.verify_token            [==]                                              38 ms
+  cart.load                       [====]                                         95 ms
+    SELECT cart_items                [==]                                        41 ms
+  POST inventory/reserve               [==============================]          870 ms  ERROR
+    SELECT stock ... FOR UPDATE           [==========================]           812 ms
+  payment.authorize                                                  [=======]  190 ms</code></pre></div>
+    <p>One glance shows what no metric could: the request spent 870 of its 1,240 milliseconds reserving inventory, nearly all of it waiting on one locking query. The waterfall also reveals structure, such as calls made one after another that could run in parallel, or a query executed forty times in a loop.</p>
+    <p>For this to work across processes, the trace identity must travel with the request. This is <strong>context propagation</strong>. When a service makes an outgoing call, the SDK injects the current trace and span IDs into the request headers, and the receiving service extracts them and continues the same trace. The standard header is W3C Trace Context:</p>
+    <div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+             |  |                                |                |
+             |  trace-id (32 hex chars)          |                trace-flags (01 = sampled)
+             version                             parent span-id (16 hex chars)</code></pre></div>
+    <div class="callout callout-warning"><strong>Watch out</strong><p>Propagation is only as good as its weakest link. One service, proxy or message queue that does not pass the context on splits the trace in two, and the most interesting part of the journey is usually on the far side. For queues and background jobs the context must be carried in the message metadata and extracted by the consumer.</p></div></section>
+  <section id="instrumenting-a-service"><h2>Instrumenting a service</h2>
+    <p>OpenTelemetry separates the <strong>API</strong>, which your code calls to create spans, from the <strong>SDK</strong>, which decides what happens to them. Libraries can depend on the lightweight API safely: if no SDK is configured, the calls do nothing. <strong>Automatic instrumentation</strong> gets you most of the value with no code changes, by patching common frameworks and clients, such as web servers, HTTP clients, database drivers and messaging libraries, to create spans and propagate context.</p>
+    <div class="code"><div class="code-cap">Zero-code instrumentation of a Python service</div><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>pip install opentelemetry-distro opentelemetry-exporter-otlp
+opentelemetry-bootstrap -a install          # adds instrumentation for the libraries it finds
+
+export OTEL_SERVICE_NAME=checkout
+export OTEL_RESOURCE_ATTRIBUTES=deployment.environment=staging,service.version=1.4.2
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+export OTEL_TRACES_SAMPLER=parentbased_traceidratio
+export OTEL_TRACES_SAMPLER_ARG=0.1
+
+opentelemetry-instrument python app.py</code></pre></div>
+    <p>The <code>OTEL_*</code> environment variables are standard across languages, which fits the twelve-factor approach to configuration. <code>service.name</code> is the most important <strong>resource attribute</strong>: it labels every span, metric and log from this process, and without it your backend shows a service called <code>unknown_service</code>. Java has an equivalent agent attached with <code>-javaagent</code>, and Node.js and .NET have their own auto-instrumentation packages. On Kubernetes, the OpenTelemetry Operator can inject instrumentation into pods by annotation.</p>
+    <p>Automatic instrumentation knows about HTTP and SQL, not about your business. Add <strong>manual spans</strong> around the operations that matter, and attach the attributes you will want to search by.</p>
+    <div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+
+tracer = trace.get_tracer(__name__)
+
+
+def reserve_stock(order_id: str, items: list[dict]) -&gt; None:
+    with tracer.start_as_current_span("inventory.reserve_stock") as span:
+        span.set_attribute("order.id", order_id)
+        span.set_attribute("order.item_count", len(items))
+        try:
+            for item in items:
+                lock_and_decrement(item["sku"], item["qty"])
+            span.add_event("stock reserved")
+        except StockUnavailable as exc:
+            span.record_exception(exc)
+            span.set_status(Status(StatusCode.ERROR, "stock unavailable"))
+            raise</code></pre></div>
+    <ul><li>Follow the <strong>semantic conventions</strong> for attribute names, such as <code>http.request.method</code>, <code>http.response.status_code</code>, <code>db.system</code> and <code>server.address</code>. Backends build their views on those names, and consistent names make queries work across services written in different languages.</li><li>Attributes can be high cardinality, which is the whole point. Customer ID, order ID and feature-flag state are exactly what you will want to filter by.</li><li>Never put secrets, tokens, passwords or unnecessary personal data in attributes. Trace data is widely readable and kept for a long time.</li><li>Name spans after the operation, not the instance: <code>GET /orders/{id}</code>, not <code>GET /orders/48213</code>.</li><li>Do not create a span for every function call. Spans cost memory and money; instrument boundaries and meaningful units of work.</li></ul></section>
+  <section id="logs-that-correlate"><h2>Logs that correlate</h2>
+    <p>Logs are the oldest signal and the most abused. Three rules make them useful. Write <strong>structured</strong> logs, one JSON object per line on stdout, as the twelve-factor module described, so that they can be filtered by field and not by regular expression. Use <strong>levels</strong> consistently. And include the <strong>trace ID and span ID</strong> in every line written while handling a request.</p>
+    <div class="code"><div class="code-head"><span>json</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>{
+  "timestamp": "2026-09-17T14:02:11.482Z",
+  "level": "error",
+  "message": "stock reservation failed",
+  "service": "inventory",
+  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "span_id": "00f067aa0ba902b7",
+  "order_id": "o-1842",
+  "sku": "SKU-9917",
+  "error": "lock wait timeout exceeded",
+  "duration_ms": 812
+}</code></pre></div>
+    <p>With the trace ID present, your tooling can jump from a span straight to the log lines written during it, and from any log line to the full trace of the request it belongs to. That single field turns a log search across six services into one click. OpenTelemetry's logging instrumentation can inject these IDs into your existing logger's records automatically, so you usually do not have to pass them around by hand.</p>
+    <div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import json
+import logging
+
+from opentelemetry import trace
+
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -&gt; str:
+        ctx = trace.get_current_span().get_span_context()
+        event = {
+            "timestamp": self.formatTime(record),
+            "level": record.levelname.lower(),
+            "message": record.getMessage(),
+            "logger": record.name,
+        }
+        if ctx.is_valid:
+            event["trace_id"] = format(ctx.trace_id, "032x")
+            event["span_id"] = format(ctx.span_id, "016x")
+        return json.dumps(event)</code></pre></div>
+    <div class="table-wrap"><table><thead><tr><th>Level</th><th>Use it for</th></tr></thead><tbody><tr><td><code>ERROR</code></td><td>An operation failed and someone may need to act. Include enough context to act on.</td></tr><tr><td><code>WARN</code></td><td>Something unexpected that the system recovered from: a retry, a fallback, a slow dependency</td></tr><tr><td><code>INFO</code></td><td>Significant business and lifecycle events: started, order created, config loaded</td></tr><tr><td><code>DEBUG</code></td><td>Detail for developers; off in production by default, switchable at runtime</td></tr></tbody></table></div>
+    <p>Log volume is a real cost, as the FinOps module noted. Log an event once, at the place that handles it, not at every layer it passes through. Do not log inside tight loops. And do not use logs to count things: that is a metric, and it is thousands of times cheaper.</p></section>
+  <section id="the-collector"><h2>The Collector</h2>
+    <p>Applications could export straight to a backend, but in practice you run the <strong>OpenTelemetry Collector</strong> in between. It is a standalone process that receives telemetry, processes it, and exports it to one or more destinations. It takes batching, retries, credentials and vendor-specific formats out of your applications, and gives operators one place to filter, redact and route. Its configuration is a set of components wired into <strong>pipelines</strong>, one pipeline per signal.</p>
+    <figure class="diagram" id="fig-otel-pipeline"><div class="diagram-scroll"><svg viewBox="0 0 740 356" role="img" aria-label="Two services with the OpenTelemetry SDK send traces, metrics and logs over OTLP to a Collector agent running on each node. The agents forward to a Collector gateway, which applies memory limits, redaction, tail sampling and batching, then exports traces to a trace backend, metrics to Prometheus and logs to a log store." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="otel-pipeline-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="otel-pipeline-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="otel-pipeline-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="otel-pipeline-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="otel-pipeline-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><rect x="20" y="19" width="162" height="210" rx="10" class="dg-group"/><text x="30" y="222" font-size="10" font-weight="700" letter-spacing="1" class="dg-group-label">SERVICES + SDK</text><rect x="530" y="19" width="162" height="318" rx="10" class="dg-group"/><text x="540" y="330" font-size="10" font-weight="700" letter-spacing="1" class="dg-group-label">BACKENDS: SWAPPABLE</text><polyline points="182.0,178.0 201.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#otel-pipeline-arrow-default)"/><rect x="156.0" y="132.0" width="71.0" height="16" rx="4" class="dg-label-bg"/><text x="191.5" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">OTLP :4317</text><polyline points="341.0,178.0 371.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#otel-pipeline-arrow-default)"/><rect x="311.4" y="132.0" width="89.3" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">OTLP, batched</text><polyline points="421.0,150.0 421.0,50.0 541.0,50.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#otel-pipeline-arrow-default)"/><rect x="457.7" y="31.0" width="46.6" height="16" rx="4" class="dg-label-bg"/><text x="481.0" y="39.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">traces</text><polyline points="511.0,178.0 541.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#otel-pipeline-arrow-default)"/><rect x="499.6" y="132.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">metrics</text><polyline points="461.0,206.0 461.0,306.0 541.0,306.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#otel-pipeline-arrow-default)"/><rect x="464.0" y="248.0" width="34.4" height="16" rx="4" class="dg-label-bg"/><text x="468.0" y="256.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">logs</text><rect x="31" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">checkout</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">auto + manual spans</text><rect x="31" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="101.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">inventory</text><text x="101.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">auto + manual spans</text><rect x="201" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="271.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Collector agent</text><text x="271.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">DaemonSet, per node</text><rect x="371" y="150.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Gateway</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">redact, tail-sample</text><path d="M541,49.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M541,49.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Trace backend</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">Jaeger, Tempo</text><path d="M541,157.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M541,157.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="611.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Prometheus</text><text x="611.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">metrics</text><path d="M541,265.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M541,265.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="611.0" y="279.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Log store</text><text x="611.0" y="297.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">Loki, Elasticsearch</text></svg></div><figcaption>Instrument once, export anywhere: the SDK in each service emits OTLP to a local Collector agent, a central Collector gateway does the heavy processing such as redaction and tail sampling, and only the gateway knows the backends and their credentials.</figcaption></figure>
+    <div class="code"><div class="code-cap">otel-collector.yaml</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+  batch:
+    timeout: 5s
+  attributes/redact:
+    actions:
+      - key: http.request.header.authorization
+        action: delete
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+  prometheus:
+    endpoint: 0.0.0.0:8889
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/redact, batch]
+      exporters: [otlp/tempo, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]</code></pre></div>
+    <ul><li>A component does nothing until it is listed in a pipeline under <code>service</code>. Defining an exporter and forgetting to reference it is the most common configuration mistake.</li><li><strong>Processor order matters.</strong> Put <code>memory_limiter</code> first, so the Collector sheds load instead of crashing, and <code>batch</code> last, so that data is grouped after all filtering.</li><li>The <code>type/name</code> form, as in <code>otlp/tempo</code>, lets you define several instances of one component type.</li><li>OTLP uses port <strong>4317 for gRPC</strong> and <strong>4318 for HTTP</strong>.</li><li>Two deployment patterns are common, often together. An <strong>agent</strong> runs next to the application, as a DaemonSet or sidecar, and collects locally. A <strong>gateway</strong> is a central, scaled pool that does the heavy processing and holds the backend credentials.</li></ul>
+    <p>The core distribution contains only the most stable components. The <strong>contrib</strong> distribution adds hundreds more, including receivers for Prometheus scraping, host metrics, log files and Kubernetes events, so check which distribution a component ships in before you copy a configuration.</p></section>
+  <section id="sampling-you-cannot-keep-everything"><h2>Sampling: you cannot keep everything</h2>
+    <p>A busy service produces millions of traces a day, and the great majority are identical, uneventful successes. Storing them all is expensive and pointless. <strong>Sampling</strong> keeps a subset, and the strategy determines which.</p>
+    <div class="table-wrap"><table><thead><tr><th>Strategy</th><th>Decision made</th><th>Pros</th><th>Cons</th></tr></thead><tbody><tr><td><strong>Head sampling</strong></td><td>At the start of the trace, in the SDK, for example keep 10%</td><td>Simple and cheap; unsampled requests cost almost nothing</td><td>Decides before it knows the outcome, so it discards most errors and slow requests too</td></tr><tr><td><strong>Tail sampling</strong></td><td>After the trace is complete, in the Collector</td><td>Can keep every error and every slow trace, plus a small share of the rest</td><td>Must buffer whole traces in memory, and all spans of a trace must reach the same Collector</td></tr></tbody></table></div>
+    <div class="code"><div class="code-cap">Tail sampling in the Collector (contrib distribution)</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>processors:
+  tail_sampling:
+    decision_wait: 10s
+    policies:
+      - name: keep-errors
+        type: status_code
+        status_code:
+          status_codes: [ERROR]
+      - name: keep-slow
+        type: latency
+        latency:
+          threshold_ms: 1000
+      - name: sample-the-rest
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 5</code></pre></div>
+    <p>With head sampling, use a <strong>parent-based</strong> sampler, as in the environment variables earlier. The first service makes the decision, records it in the <code>traceparent</code> flags, and every downstream service honours it. Without that, each service decides independently and you collect fragments of traces with no complete one among them.</p>
+    <div class="callout callout-tip"><strong>Tip</strong><p>Sampling applies to traces, not to the metrics you alert on. Derive request rate, error rate and latency from <strong>every</strong> request, either from metrics the application records or from a Collector component that computes them from spans before the sampling step. If you calculate an SLI from sampled traces, tail sampling that favours errors will make your error rate look terrible.</p></div></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Trace a request across two services</h2>
+    <ol><li>With Docker Compose, run an OpenTelemetry Collector and a trace backend such as Jaeger or Grafana Tempo. Give the Collector an OTLP receiver, the <code>batch</code> processor, an exporter to the backend, and the <code>debug</code> exporter.</li><li>Write two small services, where A calls B over HTTP and B queries a database or sleeps briefly. Run both under automatic instrumentation with <code>OTEL_SERVICE_NAME</code> and <code>OTEL_EXPORTER_OTLP_ENDPOINT</code> set.</li><li>Send a request to A. Find the trace in the backend and confirm that it contains spans from both services in one tree. Print the incoming headers in B and read the <code>traceparent</code> value.</li><li>Break propagation on purpose by making the call from A to B with a raw socket or a client that is not instrumented. Observe the two separate traces, then restore it.</li><li>Add a manual span in B around a business operation, with two attributes and an error status on failure. Find failing traces by filtering on that attribute.</li><li>Switch both services to JSON logging that includes <code>trace_id</code> and <code>span_id</code>. Pick an error in the logs and use the ID to find its trace.</li><li>Set head sampling to 10% and note how many error traces you lose. If you use the contrib Collector, replace it with a tail-sampling policy that keeps all errors and compare.</li><li>Add an <code>attributes</code> processor that deletes a sensitive header attribute, and confirm in the backend that it no longer appears.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Traces &amp; logs with OpenTelemetry — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Metrics say that something is wrong, traces show where, logs explain why. Shared IDs connect them.</li><li>A trace is a tree of spans. Context travels between services in the W3C <code>traceparent</code> header.</li><li>One component that drops the context breaks the trace. Queues and jobs need explicit propagation.</li><li>Start with automatic instrumentation, then add manual spans and attributes for business operations.</li><li>Always set <code>service.name</code>. Follow the semantic conventions. Never put secrets in attributes.</li><li>Structured JSON logs on stdout, with <code>trace_id</code> and <code>span_id</code> in every line.</li><li>Collector = receivers, processors, exporters, wired together in pipelines. <code>memory_limiter</code> first, <code>batch</code> last.</li><li>Head sampling is cheap but blind; tail sampling keeps errors and slow traces. Never compute SLIs from sampled data.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Concepts</h3><table><tbody><tr><td><code>Trace</code></td><td>One request end to end, identified by a 32-hex trace ID</td></tr><tr><td><code>Span</code></td><td>One unit of work: name, start, duration, status, attributes, parent</td></tr><tr><td><code>Attribute</code></td><td>Key-value detail on a span; high cardinality is fine</td></tr><tr><td><code>Event</code></td><td>Timestamped message inside a span</td></tr><tr><td><code>Resource</code></td><td>Attributes of the producing process, e.g. service.name</td></tr><tr><td><code>OTLP</code></td><td>OpenTelemetry's wire protocol: gRPC on 4317, HTTP on 4318</td></tr><tr><td><code>traceparent: 00-TRACEID-SPANID-FLAGS</code></td><td>W3C Trace Context header; flags 01 means sampled</td></tr></tbody></table></div><div class="cheat-group"><h3>Standard environment variables</h3><table><tbody><tr><td><code>OTEL_SERVICE_NAME</code></td><td>Sets service.name</td></tr><tr><td><code>OTEL_RESOURCE_ATTRIBUTES</code></td><td>Comma-separated key=value resource attributes</td></tr><tr><td><code>OTEL_EXPORTER_OTLP_ENDPOINT</code></td><td>Where to send telemetry, usually a Collector</td></tr><tr><td><code>OTEL_EXPORTER_OTLP_PROTOCOL</code></td><td>grpc or http/protobuf</td></tr><tr><td><code>OTEL_TRACES_SAMPLER</code></td><td>e.g. parentbased_traceidratio, always_on</td></tr><tr><td><code>OTEL_TRACES_SAMPLER_ARG</code></td><td>Argument for the sampler, e.g. 0.1 for 10%</td></tr><tr><td><code>OTEL_PROPAGATORS</code></td><td>Propagation formats; default tracecontext,baggage</td></tr></tbody></table></div><div class="cheat-group"><h3>Python API</h3><table><tbody><tr><td><code>opentelemetry-instrument python app.py</code></td><td>Run with automatic instrumentation</td></tr><tr><td><code>opentelemetry-bootstrap -a install</code></td><td>Install instrumentation for detected libraries</td></tr><tr><td><code>tracer = trace.get_tracer(__name__)</code></td><td>Obtain a tracer</td></tr><tr><td><code>with tracer.start_as_current_span("name") as span:</code></td><td>Create a span and make it current</td></tr><tr><td><code>span.set_attribute("key", value)</code></td><td>Attach searchable detail</td></tr><tr><td><code>span.add_event("message")</code></td><td>Timestamped note inside the span</td></tr><tr><td><code>span.record_exception(exc)</code></td><td>Attach an exception as an event</td></tr><tr><td><code>span.set_status(Status(StatusCode.ERROR))</code></td><td>Mark the span as failed</td></tr></tbody></table></div><div class="cheat-group"><h3>Collector configuration</h3><table><tbody><tr><td><code>receivers:</code></td><td>How data gets in: otlp, prometheus, filelog, hostmetrics</td></tr><tr><td><code>processors:</code></td><td>What happens in between: memory_limiter, batch, attributes, tail_sampling</td></tr><tr><td><code>exporters:</code></td><td>Where data goes: otlp, prometheus, debug, vendor exporters</td></tr><tr><td><code>service.pipelines.traces|metrics|logs</code></td><td>Wires components together; unused components do nothing</td></tr><tr><td><code>TYPE/NAME</code></td><td>A named instance of a component, e.g. otlp/tempo</td></tr><tr><td><code>otelcol validate --config FILE</code></td><td>Check a configuration before deploying</td></tr></tbody></table></div><div class="cheat-group"><h3>Logging rules</h3><table><tbody><tr><td><code>one JSON object per line on stdout</code></td><td>Structured and platform-routed</td></tr><tr><td><code>trace_id + span_id in every request log</code></td><td>Links logs to traces in both directions</td></tr><tr><td><code>ERROR / WARN / INFO / DEBUG</code></td><td>Failed / recovered / significant event / developer detail</td></tr><tr><td><code>log once, where it is handled</code></td><td>Not at every layer the error passes through</td></tr><tr><td><code>count with metrics, not logs</code></td><td>Orders of magnitude cheaper</td></tr><tr><td><code>never log secrets or needless personal data</code></td><td>Logs are widely readable and long-lived</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Leaving one service or queue without context propagation, so that every trace is cut in half there.</li><li>Forgetting to set <code>service.name</code>, leaving every span attributed to <code>unknown_service</code>.</li><li>Putting IDs in span names, which makes every request look like a different operation.</li><li>Defining a Collector exporter or processor and never adding it to a pipeline.</li><li>Using head sampling alone and discovering during an incident that the failing traces were discarded.</li><li>Computing error rates from tail-sampled traces, which are deliberately biased towards errors.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "An alert shows that p99 latency for `/checkout` doubled. Which signal is best suited to finding which downstream call is responsible?", "options": ["Traces, because they show where time was spent within individual requests", "Metrics, because they can be aggregated by any label at no cost", "Logs at DEBUG level, because they contain the most detail", "The Kubernetes events stream, because it records every change"], "answer": 0, "explain": "A trace breaks one request into timed spans across services, so the slow call is visible in the waterfall. Metrics showed that there is a problem; they cannot show the path of a single request."}, {"q": "Traces in your backend always stop at the message queue: the producer's spans and the consumer's spans appear as separate traces. What is the cause?", "options": ["Trace context is not being carried in the message and extracted by the consumer", "The sampling rate on the consumer is lower than on the producer", "The Collector's batch processor is splitting traces by service", "Message queues are not supported by distributed tracing"], "answer": 0, "explain": "Context propagation must cross every hop. For HTTP the `traceparent` header does it automatically; for messaging, the context must be injected into message metadata and extracted on the other side."}, {"q": "Why should every log line written during a request include the trace ID?", "options": ["It lets you jump between a trace and exactly the log lines from that request, across all services", "It makes the log lines smaller, because the message can be omitted", "It is required for the log collector to parse JSON correctly", "It guarantees that the log line is kept by the tail sampler"], "answer": 0, "explain": "The shared ID correlates the two signals in both directions. Without it, finding one request's logs across several services means guessing from timestamps."}, {"q": "A Collector configuration defines an exporter called `otlp/vendor`, but no data arrives at the vendor. The Collector logs no errors. What should you check first?", "options": ["Whether the exporter is listed in a pipeline under the service section", "Whether the exporter name contains a slash, which is not allowed", "Whether the batch processor appears before the memory limiter", "Whether the applications are using port 4318 instead of 4317"], "answer": 0, "explain": "Components are inert until a pipeline references them. Defining a component without wiring it in is valid configuration, so nothing complains, and nothing is sent."}, {"q": "You want to keep every failed and every slow trace, but only a small share of normal ones. Which approach achieves that?", "options": ["Tail sampling in the Collector, with policies for errors, latency and a probabilistic remainder", "Head sampling at 100% for errors and 5% for successes", "A lower log level on services that have more errors", "A shorter scrape interval on the services in question"], "answer": 0, "explain": "Only tail sampling decides after the trace has finished, when its status and duration are known. Head sampling decides at the start, before anyone knows whether the request will fail."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="sre-grafana.html"><span>← Previous</span><strong>Dashboards with Grafana</strong></a>
+    <a class="pager-up" href="../education.html#sre">All Site Reliability modules</a>
+    <a class="pager-link pager-next" href="sre-alerting.html"><span>Next →</span><strong>Alerting on symptoms</strong></a>
+  </nav>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="mailto:support@thavionai.com?subject=Education%20feedback%3A%20sre-otel">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

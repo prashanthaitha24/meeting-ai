@@ -1,0 +1,255 @@
+{
+  "id": "devops-cloud",
+  "minutes": 35,
+  "intro": "Every cloud provider offers hundreds of services, and that catalogue is what makes the cloud feel overwhelming. Underneath it, all three major providers are built from the same five ideas: identity, networking, compute, storage and managed databases. Learn those properly on one provider and the other two become a vocabulary exercise. This module teaches the concepts provider-neutrally, uses AWS for concrete examples, and gives you the mapping to Azure and Google Cloud.",
+  "objectives": [
+    "Explain the shared responsibility model, and regions and availability zones as units of failure",
+    "Design IAM access using roles, policies and least privilege instead of long-lived user keys",
+    "Lay out a virtual network with public and private subnets, routing, NAT and security groups",
+    "Choose between virtual machines, containers and functions, and between object, block and file storage",
+    "Decide when a managed database is worth it, and configure it for availability and recovery"
+  ],
+  "sections": [
+    {
+      "heading": "The ground rules",
+      "blocks": [
+        { "type": "p", "text": "The **shared responsibility model** draws the line between you and the provider. The provider secures the cloud itself: buildings, hardware, the hypervisor and the managed service's internals. You secure what you put **in** it: identities, network exposure, data, operating system patches on your VMs and application code. Nearly every cloud breach you read about is on the customer's side of that line, typically a public storage bucket or a leaked access key." },
+        { "type": "p", "text": "A **region** is a geographic area, such as Ireland or Virginia. Each region contains several **availability zones** (AZs), which are physically separate data centres with independent power and networking, linked by low-latency connections. An AZ is your unit of failure: a production system runs in at least two. Regions are your unit of data residency, latency to users, and disaster recovery." },
+        { "type": "table", "headers": ["Concept", "AWS", "Azure", "Google Cloud"], "rows": [
+          ["Identity", "IAM", "Microsoft Entra ID + RBAC", "Cloud IAM"],
+          ["Virtual network", "VPC", "Virtual Network (VNet)", "VPC"],
+          ["Virtual machines", "EC2", "Virtual Machines", "Compute Engine"],
+          ["Managed Kubernetes", "EKS", "AKS", "GKE"],
+          ["Functions", "Lambda", "Functions", "Cloud Run functions"],
+          ["Object storage", "S3", "Blob Storage", "Cloud Storage"],
+          ["Managed SQL", "RDS", "Azure SQL / Database for PostgreSQL", "Cloud SQL"],
+          ["Secrets", "Secrets Manager", "Key Vault", "Secret Manager"]
+        ]},
+        { "type": "callout", "kind": "tip", "text": "Pick one provider and go deep before going broad. Depth transfers: once you understand how IAM, networks and managed databases fit together on one cloud, learning a second takes weeks, not months." }
+      ]
+    },
+    {
+      "heading": "Identity and access management",
+      "blocks": [
+        { "type": "p", "text": "IAM answers one question for every API call: is this **principal** allowed to perform this **action** on this **resource**? A principal is a human user, a service, or a workload. Permissions are written as **policies** and attached to principals. Everything is **denied by default**, an explicit `Allow` grants access, and an explicit `Deny` always wins." },
+        { "type": "code", "lang": "json", "caption": "An AWS policy granting read-only access to one bucket", "code": "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [\n    {\n      \"Effect\": \"Allow\",\n      \"Action\": [\"s3:GetObject\", \"s3:ListBucket\"],\n      \"Resource\": [\n        \"arn:aws:s3:::acme-prod-artifacts\",\n        \"arn:aws:s3:::acme-prod-artifacts/*\"\n      ]\n    }\n  ]\n}" },
+        { "type": "p", "text": "The most important distinction is between **users** and **roles**. A user has long-lived credentials: a password or an access key that works until someone revokes it. A **role** has no credentials of its own. A trusted principal **assumes** it and receives temporary credentials that expire, usually within an hour. Roles are how workloads should get access: a VM, a Kubernetes pod or a CI job is granted a role, and the platform delivers short-lived credentials to it automatically. There is no key to leak, rotate or find in a Git history." },
+        { "type": "list", "items": [
+          "**Least privilege.** Grant specific actions on specific resources. `\"Action\": \"*\"` on `\"Resource\": \"*\"` is administrator access, whatever the policy is called.",
+          "**No root, no shared accounts.** Protect the account's root identity with MFA and do not use it. Humans sign in through single sign-on and assume roles.",
+          "**Separate accounts per environment.** A production account and a development account give you a hard boundary that no policy mistake can cross. Azure calls the equivalent a subscription, and Google Cloud a project.",
+          "**Audit everything.** API activity logs (CloudTrail on AWS) record who did what. Turn them on before you need them."
+        ]},
+        { "type": "code", "lang": "bash", "code": "aws sts get-caller-identity                 # who am I right now? run this first, always\naws configure list-profiles\naws s3 ls --profile prod-readonly\naws iam list-attached-role-policies --role-name orders-api" }
+      ]
+    },
+    {
+      "heading": "Networking: the virtual private cloud",
+      "blocks": [
+        { "type": "p", "text": "A **VPC** is your own isolated network inside the provider, defined by a CIDR block from the networking module, for example `10.20.0.0/16`. You divide it into **subnets**, each living in one availability zone. What makes a subnet public or private is nothing more than its **route table**." },
+        { "type": "table", "headers": ["Subnet", "Default route goes to", "What lives there"], "rows": [
+          ["**Public**", "An internet gateway", "Load balancers, NAT gateways, bastion hosts"],
+          ["**Private**", "A NAT gateway, for outbound traffic only", "Application servers, Kubernetes nodes"],
+          ["**Isolated**", "Nowhere outside the VPC", "Databases"]
+        ]},
+        { "type": "code", "lang": "text", "code": "VPC 10.20.0.0/16\n                 AZ a                      AZ b\n  public     10.20.0.0/24              10.20.1.0/24        <- load balancer, NAT\n  private    10.20.10.0/24             10.20.11.0/24       <- app servers / k8s nodes\n  isolated   10.20.20.0/24             10.20.21.0/24       <- databases\n\n  internet -> load balancer (public) -> app (private) -> database (isolated)" },
+        { "type": "p", "text": "Only the load balancer has a public address. Application servers can reach out through the **NAT gateway**, for example to download packages, but nothing on the internet can start a connection to them. Databases have no route out at all." },
+        { "type": "p", "text": "**Security groups** are stateful firewalls attached to resources. Stateful means that if a request is allowed in, its reply is automatically allowed out. The strongest pattern is to reference other security groups instead of IP ranges: the database's group allows port 5432 only from the application's group, so the rule stays correct however many app servers come and go." },
+        { "type": "callout", "kind": "warning", "text": "An inbound rule allowing `0.0.0.0/0` on port 22, 3389 or a database port exposes it to the entire internet, and automated scanners will find it within minutes. Reach private machines through a session manager service, a VPN or a bastion, never by opening them to the world." }
+      ]
+    },
+    {
+      "heading": "Compute: VMs, containers, functions",
+      "blocks": [
+        { "type": "table", "headers": ["Model", "You manage", "Good for", "Watch out for"], "rows": [
+          ["**Virtual machines**", "OS, patches, runtime, scaling", "Legacy software, special hardware, full control", "The most operational work"],
+          ["**Managed Kubernetes**", "Workloads, node pools, upgrades", "Many services, portability, a platform team", "Complexity; too much for a single app"],
+          ["**Serverless containers**", "Just the image", "HTTP services and jobs without cluster work", "Less control over networking and runtime"],
+          ["**Functions**", "Just the code", "Event handlers, glue, spiky or rare workloads", "Cold starts, time limits, hard local testing"]
+        ]},
+        { "type": "p", "text": "Whatever you choose, treat instances as **cattle, not pets**: built from an image or a template, never configured by hand, and replaced instead of repaired. Run them in an **auto scaling group** or its equivalent across at least two AZs, behind a load balancer whose health checks remove failed instances. That combination is what turns \"a server died\" from an incident into a non-event." },
+        { "type": "p", "text": "Pricing models matter as much as instance size. **On-demand** is flexible and the most expensive. **Commitments** (reserved capacity, savings plans, committed use) trade a one to three year promise for a substantial discount on steady load. **Spot** or preemptible capacity is heavily discounted but can be reclaimed at short notice, which suits stateless, fault-tolerant work such as CI runners and batch jobs. The FinOps module goes deeper." }
+      ]
+    },
+    {
+      "heading": "Storage",
+      "blocks": [
+        { "type": "table", "headers": ["Type", "Access", "Use for", "AWS example"], "rows": [
+          ["**Object**", "HTTP API; whole objects by key", "Backups, logs, images, static sites, data lakes", "S3"],
+          ["**Block**", "A disk attached to one VM", "Boot volumes, self-managed databases", "EBS"],
+          ["**File**", "A shared network filesystem", "Legacy apps that need a shared directory", "EFS"]
+        ]},
+        { "type": "p", "text": "**Object storage** is the cloud's workhorse: effectively unlimited, extremely durable, cheap, and reachable from anywhere. It is not a filesystem: you cannot modify part of an object, only replace it. It is the right home for the \"uploaded files\" that the twelve-factor module told you to keep off local disk." },
+        { "type": "code", "lang": "bash", "code": "aws s3 mb s3://acme-dev-uploads-7f3a                 # bucket names are globally unique\naws s3 cp report.pdf s3://acme-dev-uploads-7f3a/2026/report.pdf\naws s3 ls s3://acme-dev-uploads-7f3a/2026/\naws s3 sync ./site s3://acme-dev-site --delete\naws s3 presign s3://acme-dev-uploads-7f3a/2026/report.pdf --expires-in 3600" },
+        { "type": "list", "items": [
+          "**Block all public access** at the account level and make exceptions deliberately. Share private objects with time-limited **presigned URLs**.",
+          "Turn on **versioning** for anything important, so that an overwrite or delete can be undone, and **encryption at rest**, which is now the default on the major providers.",
+          "Use **lifecycle rules** to move old objects to colder, cheaper storage classes and to expire what you no longer need.",
+          "Block volumes live in **one AZ**. Snapshot them on a schedule, because a snapshot is what survives the loss of that zone."
+        ]}
+      ]
+    },
+    {
+      "heading": "Managed databases",
+      "blocks": [
+        { "type": "p", "text": "A managed database service runs PostgreSQL, MySQL and others for you. The provider handles provisioning, patching, backups, replication and failover; you keep responsibility for schema design, queries, indexes and access control. For most teams this is the clearest win in the whole cloud, because operating a database well by yourself takes real expertise and a lot of on-call time." },
+        { "type": "list", "items": [
+          "**Multi-AZ** keeps a synchronous standby in a second zone and fails over automatically. It is for **availability**, and the standby does not serve traffic.",
+          "**Read replicas** are asynchronous copies that serve read queries. They are for **scale**, and they can lag behind the primary.",
+          "**Automated backups with point-in-time recovery** let you restore to any second within the retention window. That is what saves you from a bad migration or an accidental `DELETE`, which replication would faithfully copy.",
+          "Place the database in **isolated subnets**, with a security group that admits only the application's security group, and take credentials from a secret manager.",
+          "A backup you have never restored is a hope, not a backup. Practise the restore, and time it."
+        ]},
+        { "type": "p", "text": "Two numbers frame every recovery conversation. **RPO**, the recovery point objective, is how much data you can afford to lose, measured in time. **RTO**, the recovery time objective, is how long you can afford to be down. Multi-AZ gives an RPO of roughly zero and an RTO of a minute or two for a zone failure. Restoring from last night's backup gives an RPO of up to a day. Choose by asking the business, not by guessing." },
+        { "type": "p", "text": "All of this should be created with Terraform from the earlier module, not in the console. The console is for learning and for looking; code is for anything that has to exist tomorrow." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Build a small, correct, cheap footprint",
+    "steps": [
+      "Create a free-tier account on one provider. Immediately enable MFA on the root identity, create a budget alert at a small amount, and create an admin identity for daily use so root is never used again.",
+      "Install the provider's CLI, configure a profile, and run the \"who am I\" command (`aws sts get-caller-identity` on AWS).",
+      "With Terraform, create a VPC with one public and one private subnet in each of two availability zones, an internet gateway, and route tables. Skip the NAT gateway unless you need it, because it bills by the hour.",
+      "Create a private storage bucket with versioning on and public access blocked. Upload a file, overwrite it, restore the earlier version, and share it with a presigned URL that expires in ten minutes.",
+      "Create a role that can only read that one bucket. Launch the smallest VM with that role attached and no access keys, and prove from the VM that it can read the bucket and cannot write to it.",
+      "Write a security group for a database that admits port 5432 only from the application's security group, and explain why that is better than an IP range.",
+      "Run `terraform destroy`, then check the billing console the next day to confirm that nothing is still running."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Shared responsibility: the provider secures the cloud, you secure what you put in it. Most breaches are misconfiguration on your side.",
+      "An availability zone is the unit of failure. Production spans at least two.",
+      "IAM is deny by default, and an explicit deny always wins. Prefer roles with temporary credentials to users with keys.",
+      "Least privilege means specific actions on specific resources. Separate accounts per environment.",
+      "A subnet is public only because its route table points to an internet gateway. Apps go in private subnets, databases in isolated ones.",
+      "Security groups are stateful. Reference other groups instead of IP ranges, and never open admin or database ports to `0.0.0.0/0`.",
+      "Object storage for files and backups, block for disks, file for shared directories.",
+      "Managed databases: Multi-AZ is availability, read replicas are scale, point-in-time recovery is protection from your own mistakes."
+    ],
+    "groups": [
+      {
+        "title": "Concept map",
+        "items": [
+          { "syntax": "IAM | Entra ID + RBAC | Cloud IAM", "desc": "Identity and access (AWS | Azure | GCP)" },
+          { "syntax": "VPC | VNet | VPC", "desc": "Private network" },
+          { "syntax": "EC2 | Virtual Machines | Compute Engine", "desc": "Virtual machines" },
+          { "syntax": "EKS | AKS | GKE", "desc": "Managed Kubernetes" },
+          { "syntax": "Lambda | Functions | Cloud Run functions", "desc": "Functions as a service" },
+          { "syntax": "S3 | Blob Storage | Cloud Storage", "desc": "Object storage" },
+          { "syntax": "RDS | Azure SQL | Cloud SQL", "desc": "Managed relational database" },
+          { "syntax": "Account | Subscription | Project", "desc": "The isolation and billing boundary" }
+        ]
+      },
+      {
+        "title": "IAM rules",
+        "items": [
+          { "syntax": "default = deny", "desc": "Nothing is allowed until a policy allows it" },
+          { "syntax": "explicit Deny > Allow", "desc": "A deny in any applicable policy wins" },
+          { "syntax": "Effect / Action / Resource / Condition", "desc": "The four parts of a policy statement" },
+          { "syntax": "role = temporary credentials", "desc": "Assumed by a trusted principal; expires automatically" },
+          { "syntax": "arn:aws:SERVICE:REGION:ACCOUNT:RESOURCE", "desc": "AWS resource identifier format" },
+          { "syntax": "aws sts get-caller-identity", "desc": "Show the identity your CLI is using" }
+        ]
+      },
+      {
+        "title": "Network layout",
+        "items": [
+          { "syntax": "public subnet: 0.0.0.0/0 -> internet gateway", "desc": "Load balancers, NAT, bastion" },
+          { "syntax": "private subnet: 0.0.0.0/0 -> NAT gateway", "desc": "Outbound only; app servers and nodes" },
+          { "syntax": "isolated subnet: no default route", "desc": "Databases" },
+          { "syntax": "security group: stateful, allow rules only", "desc": "Attached to a resource; replies are allowed automatically" },
+          { "syntax": "network ACL: stateless, allow and deny", "desc": "Attached to a subnet; rarely needed" },
+          { "syntax": "source = sg-APP, port 5432", "desc": "Admit a security group, not an IP range" }
+        ]
+      },
+      {
+        "title": "AWS CLI basics",
+        "items": [
+          { "syntax": "aws configure sso / aws configure --profile NAME", "desc": "Set up credentials for a named profile" },
+          { "syntax": "aws COMMAND --profile NAME --region REGION", "desc": "Choose identity and region per command" },
+          { "syntax": "aws ec2 describe-instances --query '...' --output table", "desc": "Filter and format output with JMESPath" },
+          { "syntax": "aws s3 cp SRC DST / aws s3 sync DIR s3://BUCKET", "desc": "Copy and synchronise objects" },
+          { "syntax": "aws s3 presign s3://BUCKET/KEY --expires-in 3600", "desc": "Time-limited link to a private object" },
+          { "syntax": "aws logs tail GROUP --follow", "desc": "Follow a CloudWatch log group" }
+        ]
+      },
+      {
+        "title": "Resilience vocabulary",
+        "items": [
+          { "syntax": "RPO", "desc": "Recovery point objective: how much data loss is tolerable, as time" },
+          { "syntax": "RTO", "desc": "Recovery time objective: how long an outage is tolerable" },
+          { "syntax": "Multi-AZ", "desc": "Synchronous standby in another zone; automatic failover" },
+          { "syntax": "Read replica", "desc": "Asynchronous copy for read scaling; may lag" },
+          { "syntax": "Point-in-time recovery", "desc": "Restore to any moment in the retention window" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Creating access keys for an application when an attached role would have given it temporary credentials.",
+      "Attaching an administrator policy \"for now\" and never narrowing it.",
+      "Putting a database in a public subnet, or opening its port to `0.0.0.0/0`, to make connecting easier.",
+      "Running production in one availability zone and learning about zones during an outage.",
+      "Assuming Multi-AZ is a backup: replication copies a mistaken `DELETE` instantly.",
+      "Leaving learning resources running with no budget alert, and meeting them on the invoice."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "An application on a VM needs to read from one storage bucket. What is the best way to give it access?",
+      "options": [
+        "Attach a role to the VM whose policy allows read on that one bucket",
+        "Create a user with an access key and store the key in the app's config file",
+        "Make the bucket public so that no credentials are required",
+        "Attach the administrator policy and restrict access in application code"
+      ],
+      "answer": 0,
+      "explain": "A role gives the workload automatically rotated, temporary credentials and nothing to leak. Scoping the policy to read on one bucket is least privilege."
+    },
+    {
+      "q": "What makes a subnet \"public\"?",
+      "options": [
+        "Its route table sends internet-bound traffic to an internet gateway",
+        "It was created with a CIDR range from the public IPv4 space",
+        "Its security group allows inbound traffic from 0.0.0.0/0",
+        "It is located in the provider's public availability zone"
+      ],
+      "answer": 0,
+      "explain": "Public or private is a routing property. Subnets in a VPC use private address ranges either way, and security groups control which traffic is admitted, not whether a route to the internet exists."
+    },
+    {
+      "q": "A database security group should allow connections from an auto-scaled group of application servers. What is the most robust rule?",
+      "options": [
+        "Allow the database port from the application servers' security group",
+        "Allow the database port from the VPC's entire CIDR range",
+        "Allow the database port from each server's current private IP",
+        "Allow the database port from 0.0.0.0/0 and rely on the password"
+      ],
+      "answer": 0,
+      "explain": "Referencing the security group stays correct as instances are added and replaced, and admits nothing else. IP lists go stale, and the whole VPC range admits far more than needed."
+    },
+    {
+      "q": "A developer runs a bad migration that deletes a table at 14:05. The database is Multi-AZ with automated backups. How do you recover the data?",
+      "options": [
+        "Restore to a point in time just before 14:05 from the automated backups",
+        "Fail over to the standby, which still has the table",
+        "Promote a read replica, which keeps the older data",
+        "Reboot the primary so that it reloads from the standby"
+      ],
+      "answer": 0,
+      "explain": "Replication copies changes, including destructive ones, to the standby and replicas almost at once. Only a backup with point-in-time recovery can take you to a moment before the mistake."
+    },
+    {
+      "q": "Under the shared responsibility model, which of these is the customer's job on a managed VM service?",
+      "options": [
+        "Patching the guest operating system on the virtual machines",
+        "Physical security of the data centre buildings",
+        "Replacing failed disks in the host servers",
+        "Securing the hypervisor that isolates tenants"
+      ],
+      "answer": 0,
+      "explain": "The provider is responsible for the facilities, hardware and virtualisation layer. With VMs you own everything from the guest OS upward, including patching, which is one reason managed services are attractive."
+    }
+  ]
+}

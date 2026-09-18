@@ -1,0 +1,265 @@
+{
+  "id": "sre-runbooks",
+  "minutes": 25,
+  "intro": "At three in the morning, half awake, with users failing and adrenaline running, even an expert thinks badly. A runbook is what you wrote at three in the afternoon, calm and fully informed, for that person. It is the difference between restoring service in eight minutes and spending forty rediscovering how the system works. This module covers writing runbooks that actually get used, keeping them alive, and the production readiness review that checks a service can be operated before it is launched.",
+  "objectives": [
+    "Explain what a runbook is for, and how it differs from documentation and from automation",
+    "Write a runbook for an alert that a tired engineer unfamiliar with the service can follow",
+    "Keep runbooks accurate through ownership, testing and links from every alert",
+    "Run a production readiness review covering observability, reliability, change management, security and operations",
+    "Identify the minimum a service needs before it carries production traffic"
+  ],
+  "sections": [
+    {
+      "heading": "What a runbook is",
+      "blocks": [
+        { "type": "p", "text": "A **runbook**, sometimes called a playbook, is a set of instructions for handling one specific operational situation: responding to a particular alert, performing a failover, restoring from backup, rotating a credential. It is written for the person who has to act, in the order they need to act." },
+        { "type": "p", "text": "It is not architecture documentation, which explains how the system works and is read at leisure. A runbook may link to that, but it must not make the reader wade through it. And it is not automation, although it is often the step just before it: the toil module described the ladder from \"no procedure\" to \"documented procedure\" to \"script\" to \"automatic\". A good runbook is the specification for the script that will eventually replace it." },
+        { "type": "table", "headers": ["Kind", "Answers", "Example"], "rows": [
+          ["**Alert runbook**", "This alert fired. What does it mean, and what do I do?", "CheckoutErrorBudgetFastBurn"],
+          ["**Procedure runbook**", "How do I perform this operation safely?", "Fail the database over to the replica"],
+          ["**Diagnostic guide**", "How do I investigate this class of symptom?", "Checkout is slow: where to look"],
+          ["**Emergency procedure**", "What do we do in a rare, severe situation?", "Restore from backup; respond to a credential leak"]
+        ]},
+        { "type": "p", "text": "The Google SRE book reports that thinking through and recording best practice ahead of time in a playbook gives roughly a threefold improvement in time to repair, compared with improvising. The reason is simple. Under stress people lose working memory and fall back on what is in front of them, so make sure that something good is in front of them." },
+        { "type": "callout", "kind": "note", "text": "Every alert that can page a human must link to a runbook. If you cannot write down what the responder should do when it fires, the alert is not actionable, and by the standard of the alerting module it should not be a page at all." }
+      ]
+    },
+    {
+      "heading": "Anatomy of an alert runbook",
+      "blocks": [
+        { "type": "code", "lang": "markdown", "caption": "runbooks/checkout/error-budget-fast-burn.md", "code": "# CheckoutErrorBudgetFastBurn\nOwner: checkout team (#team-checkout)     Last tested: 2026-08-12 (game day)\nSeverity: page     Dashboard: https://grafana.example.com/d/checkout\n\n## What this means\nCheckout is failing requests fast enough to spend 2% of its monthly error\nbudget in an hour (error ratio above 1.44%). Customers cannot complete\npurchases. Treat as SEV2 unless the error ratio is above 25%, then SEV1.\n\n## First: check for a recent change (2 minutes)\n1. Open the dashboard. Is there a deploy annotation within 15 minutes of the\n   start of the errors?\n2. If yes, ROLL BACK NOW. Do not investigate first.\n\n       kubectl rollout undo deployment/checkout -n shop\n       kubectl rollout status deployment/checkout -n shop\n\n   Expected: error ratio starts falling within 3 minutes.\n   If it does not fall, continue below.\n\n## Diagnose\n3. Which routes are failing? Dashboard row 'Breakdown', panel 'Errors by route'.\n4. Is one dependency responsible? Row 'Dependencies'.\n   - payment-provider errors high -> see runbook payment-provider-down.md\n   - database latency high        -> see runbook checkout-db-saturated.md\n5. Are the pods healthy?\n\n       kubectl get pods -n shop -l app=checkout\n       kubectl logs deploy/checkout -n shop --since=10m | grep -i error | tail -30\n\n## Mitigations\n- Dependency down: enable degraded mode (orders are queued, confirmed later):\n\n       kubectl set env deployment/checkout -n shop CHECKOUT_DEGRADED_MODE=true\n\n  REMEMBER to switch it off afterwards. Record it in the incident channel.\n- Saturated: scale out.  kubectl scale deployment/checkout -n shop --replicas=12\n\n## Escalate\nNo progress after 20 minutes, or error ratio above 25%: page the checkout\nsecondary, then the platform on-call (database, networking).\n\n## Afterwards\nUndo temporary changes. Open a postmortem if any budget threshold was crossed." },
+        { "type": "list", "items": [
+          "**Meaning and impact first.** The responder needs to know at once how bad it is, in users' terms, and what severity to declare.",
+          "**The most likely fix comes first**, before the diagnosis. Most incidents follow a change, so the rollback is step one and not the conclusion of an investigation.",
+          "**Commands are exact and can be pasted**, with real namespaces and names. Never \"restart the service\"; always the command that restarts it.",
+          "**Say what to expect** after each action, and what to do if that does not happen. Without it, the reader cannot tell whether the step worked.",
+          "**Branches point to other runbooks** instead of growing into one enormous document.",
+          "**Escalation is explicit**: when, and to whom.",
+          "**Temporary changes are flagged for reversal** at the point where they are made."
+        ]}
+      ]
+    },
+    {
+      "heading": "Writing for a tired stranger",
+      "blocks": [
+        { "type": "p", "text": "Write for someone who is competent in general but does not know this service, is reading on a laptop at night, and is under pressure. That reader is more common than you think: the newest member of the rotation, an engineer covering for a colleague, or you in a year's time." },
+        { "type": "list", "items": [
+          "**Numbered steps, one action each, in the imperative.** \"Check the queue depth\", not a paragraph describing the queueing subsystem.",
+          "**Put decision points in plain sight**: \"If X, go to step 6. Otherwise continue.\"",
+          "**Mark danger clearly.** Anything destructive or irreversible gets a warning immediately before the command, stating what it destroys and how to confirm the target first.",
+          "**Link directly** to the exact dashboard, log query or console page, not to a home page from which the reader must navigate.",
+          "**No secrets.** State where a credential is stored and how to obtain access, never the credential.",
+          "**Explain why, briefly**, where it helps judgement. A reader who understands that degraded mode queues orders can decide whether it fits a situation the author did not foresee.",
+          "**Keep it short.** A runbook that takes ten minutes to read will not be read. Move background into linked documents."
+        ]},
+        { "type": "p", "text": "A runbook is a guide for a thinking person and not a script for a machine. Real incidents seldom match the expected pattern exactly, so the best runbooks combine concrete steps for the common cases with enough explanation that the reader can adapt. If a procedure truly needs no judgement at all, it should not be a runbook for long. It should be automated." },
+        { "type": "p", "text": "Store runbooks where responders can find them in seconds: in a repository alongside the code, rendered somewhere searchable, with predictable names that match the alert names. Make sure they are reachable when the thing they describe is broken. A runbook for a wiki outage that lives only on the wiki is a classic trap." }
+      ]
+    },
+    {
+      "heading": "Keeping runbooks alive",
+      "blocks": [
+        { "type": "p", "text": "A wrong runbook is worse than none, because the reader trusts it. Commands refer to a cluster that was renamed, a dashboard that was deleted, a flag that no longer exists. Runbooks decay at the same speed as the system changes, so they need the same care as code." },
+        { "type": "list", "items": [
+          "**Own them.** Each runbook names an owning team. When the team changes a service, updating its runbooks is part of the change, reviewed in the same pull request.",
+          "**Date them.** Record when the runbook was last tested, as distinct from last edited. An old date is a warning to the reader and a prompt to the owner.",
+          "**Test them.** Follow the runbook step by step during game days and drills, ideally with someone who did not write it. Every place where they hesitate or have to ask is a defect.",
+          "**Fix them at the moment of use.** The on-call engineer who finds an error corrects it that day or files a ticket. Handoff notes and postmortems both have a standing section for runbook problems.",
+          "**Link from the alert**, through the `runbook_url` annotation. A CI check can fail the build when an alert has no runbook link, or when the link is dead.",
+          "**Retire them.** When a runbook has been fully automated, or its alert deleted, delete the runbook as well."
+        ]},
+        { "type": "code", "lang": "bash", "caption": "A CI check that every paging alert links to a runbook that exists", "code": "#!/usr/bin/env bash\nset -euo pipefail\n\nstatus=0\nwhile IFS=$'\\t' read -r alert url; do\n  if [[ -z \"$url\" || \"$url\" == \"null\" ]]; then\n    echo \"MISSING runbook_url: $alert\" >&2; status=1; continue\n  fi\n  file=\"runbooks/${url##*/runbooks/}.md\"\n  [[ -f \"$file\" ]] || { echo \"DEAD LINK: $alert -> $file\" >&2; status=1; }\ndone < <(yq -r '.groups[].rules[]\n               | select(.alert != null and .labels.severity == \"page\")\n               | [.alert, .annotations.runbook_url] | @tsv' rules/*.yml)\nexit \"$status\"" },
+        { "type": "callout", "kind": "tip", "text": "Use your runbooks as a toil radar. A runbook that is followed word for word several times a month, with no judgement needed, is a precise description of something that should be automated next." }
+      ]
+    },
+    {
+      "heading": "The production readiness review",
+      "blocks": [
+        { "type": "p", "text": "Runbooks cover what to do when things go wrong. A **production readiness review** (PRR) asks, before launch, whether the service can be operated at all. It began at Google as the gate a service had to pass before an SRE team would take on its pager, and it is just as useful for a team that runs its own services: a structured conversation, guided by a checklist, between the people who built the service and the people who will be woken by it." },
+        { "type": "table", "headers": ["Area", "Questions"], "rows": [
+          ["**Ownership**", "Who owns it? Who is on call? Is there an escalation path, and does everyone on it know?"],
+          ["**SLOs and observability**", "Are SLIs and SLOs defined and agreed? Dashboards for the golden signals? Structured logs, traces, a build-version metric?"],
+          ["**Alerting**", "Symptom-based alerts tied to the SLO? Does every page have a tested runbook?"],
+          ["**Failure handling**", "Timeouts and bounded retries on every outgoing call? What happens when each dependency is slow or down? Graceful shutdown and health probes?"],
+          ["**Capacity**", "Load tested to expected peak plus headroom? Resource requests and limits set? Autoscaling? Known bottleneck?"],
+          ["**Change management**", "Automated pipeline? Gradual rollout? Rollback rehearsed, and how long does it take? Are schema changes backwards compatible?"],
+          ["**Data**", "Backups taken, and a restore tested? RPO and RTO known? Retention and deletion defined?"],
+          ["**Security**", "Secrets in a manager? Least-privilege identities? Dependencies scanned? Data classified and encrypted?"],
+          ["**Dependencies**", "Hard and soft dependencies listed, with their SLOs? Do their owners know about the new load?"]
+        ]},
+        { "type": "p", "text": "Treat the outcome as a list of risks, not a pass or fail. Each gap is either fixed before launch, or accepted explicitly by a named person, with a date by which it will be fixed. That is risk management as the embracing-risk module described it: a deliberate decision, made in daylight, and written down." },
+        { "type": "p", "text": "Scale the process to the service. A new tier-one payment system deserves a formal review with several teams. An internal tool needs fifteen minutes with the checklist. The best long-term investment is to make the checklist unnecessary by building the answers into the platform: a service template that arrives with dashboards, SLO alerts, probes, a pipeline with canary rollout, and a runbook skeleton already in place, so that the ready path is also the easy one." }
+      ]
+    },
+    {
+      "heading": "The minimum before real traffic",
+      "blocks": [
+        { "type": "p", "text": "If time is short, these are the items that separate a survivable launch from a miserable one. Each takes hours, not weeks." },
+        { "type": "steps", "items": [
+          "**An owner and a pager.** Someone knows they are responsible, and alerts reach them.",
+          "**One SLO with a burn-rate alert** on the main user journey, and a dashboard showing rate, errors and latency.",
+          "**A rollback that has been performed for real**, and timed, by someone other than its author.",
+          "**Timeouts on every outgoing call**, so that a slow dependency cannot hang the whole service.",
+          "**Readiness and liveness probes**, and graceful shutdown, so that deploys and node changes do not drop requests.",
+          "**A restore from backup that has been tested**, if the service holds data.",
+          "**A runbook for each paging alert**, however short, and an entry for the service in the on-call handbook."
+        ]},
+        { "type": "code", "lang": "bash", "caption": "Quick readiness probes for a Kubernetes service", "code": "kubectl get deploy checkout -n shop \\\n  -o jsonpath='{.spec.template.spec.containers[0].readinessProbe}{\"\\n\"}'\nkubectl get deploy checkout -n shop \\\n  -o jsonpath='{.spec.template.spec.containers[0].resources}{\"\\n\"}'\nkubectl get pdb,hpa -n shop                      # disruption budget and autoscaler present?\nkubectl rollout history deployment/checkout -n shop   # is there a revision to roll back to?\nkubectl auth can-i --list -n shop --as system:serviceaccount:shop:checkout | head" },
+        { "type": "p", "text": "Readiness does not end at launch. Services change, traffic grows and teams turn over. Revisit the checklist yearly for important services, and whenever ownership moves to a new team. The next stage of this track turns to the engineering that makes the answers better: handling failure, planning capacity, releasing safely and testing resilience on purpose." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Write, test and gate a runbook",
+    "steps": [
+      "Choose the alert that pages your team most often, or the burn-rate alert from the alerting module. Write its runbook using the template: meaning, the check for recent changes, diagnosis, mitigations, escalation and afterwards.",
+      "Make every command exact, with real names, and add the expected result after each action. Mark anything destructive with a warning.",
+      "Give the runbook to a colleague who does not know the service. In a test environment, trigger the alert and have them follow it without your help. Write down every place where they pause, ask or go wrong.",
+      "Fix those places, then record the test date at the top.",
+      "Add the `runbook_url` annotation to the alert rule, and add a CI check that fails when a paging alert has no runbook or the link is dead.",
+      "Run the production readiness checklist against one service you own. Record each gap as fixed, to be fixed by a date, or accepted by a named person.",
+      "Perform a real rollback in staging and time it. If the service stores data, perform a real restore and time that as well. Compare both with your RTO."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "A runbook is for the person who must act, in the order they must act. It is not architecture documentation.",
+      "Every paging alert links to a runbook. If you cannot write what to do, the alert should not page.",
+      "Lead with meaning and impact, then the most likely fix. Rolling back a recent change comes before diagnosis.",
+      "Exact commands that can be pasted, the expected result after each, and what to do if it does not happen.",
+      "Write for a competent stranger who is tired and under stress: numbered steps, clear decision points, marked dangers, no secrets.",
+      "A wrong runbook is worse than none. Own it, date it, test it in drills, and fix it when it is used.",
+      "A production readiness review lists risks: each gap is fixed, scheduled, or explicitly accepted by a named person.",
+      "Build readiness into the service template so that the ready path is the easy path."
+    ],
+    "groups": [
+      {
+        "title": "Alert runbook sections",
+        "items": [
+          { "syntax": "Header", "desc": "Alert name, owner, severity, dashboard link, last tested date" },
+          { "syntax": "What this means", "desc": "User impact and the severity to declare" },
+          { "syntax": "First: recent change?", "desc": "If a deploy lines up, roll back now" },
+          { "syntax": "Diagnose", "desc": "Ordered checks with exact commands and links" },
+          { "syntax": "Mitigations", "desc": "Options, when each applies, expected result" },
+          { "syntax": "Escalate", "desc": "When, and exactly whom to page" },
+          { "syntax": "Afterwards", "desc": "Undo temporary changes; postmortem criteria" }
+        ]
+      },
+      {
+        "title": "First-look diagnostic commands",
+        "items": [
+          { "syntax": "kubectl rollout history deployment/NAME -n NS", "desc": "What was deployed, and when" },
+          { "syntax": "kubectl get pods -n NS -l app=NAME -o wide", "desc": "Restarts, pending pods, node placement" },
+          { "syntax": "kubectl describe pod POD -n NS", "desc": "Events, exit codes, OOMKilled, probe failures" },
+          { "syntax": "kubectl logs deploy/NAME -n NS --since=10m", "desc": "Recent logs" },
+          { "syntax": "kubectl get events -n NS --sort-by=.lastTimestamp", "desc": "What the cluster did recently" },
+          { "syntax": "kubectl top pods -n NS", "desc": "Live CPU and memory" },
+          { "syntax": "journalctl -u NAME --since \"15 min ago\"", "desc": "The same, for a systemd service" },
+          { "syntax": "curl -sS -o /dev/null -w '%{http_code} %{time_total}\\n' URL", "desc": "Status and latency from where you sit" }
+        ]
+      },
+      {
+        "title": "Mitigation commands",
+        "items": [
+          { "syntax": "kubectl rollout undo deployment/NAME -n NS", "desc": "Roll back to the previous revision" },
+          { "syntax": "kubectl rollout status deployment/NAME -n NS", "desc": "Wait for it and confirm" },
+          { "syntax": "kubectl scale deployment/NAME --replicas=N -n NS", "desc": "Add capacity" },
+          { "syntax": "kubectl set env deployment/NAME KEY=value -n NS", "desc": "Flip an operational switch; record it" },
+          { "syntax": "kubectl cordon NODE && kubectl drain NODE --ignore-daemonsets", "desc": "Take a bad node out of service" },
+          { "syntax": "kubectl rollout restart deployment/NAME -n NS", "desc": "Gradual restart of all pods" }
+        ]
+      },
+      {
+        "title": "Production readiness areas",
+        "items": [
+          { "syntax": "Ownership", "desc": "Owner, on-call, escalation path" },
+          { "syntax": "SLOs and observability", "desc": "SLIs, SLOs, dashboards, logs, traces, version metric" },
+          { "syntax": "Alerting", "desc": "Symptom-based pages, each with a tested runbook" },
+          { "syntax": "Failure handling", "desc": "Timeouts, bounded retries, degradation, probes, graceful shutdown" },
+          { "syntax": "Capacity", "desc": "Load test, requests and limits, autoscaling, known bottleneck" },
+          { "syntax": "Change management", "desc": "Pipeline, gradual rollout, rehearsed rollback, compatible migrations" },
+          { "syntax": "Data", "desc": "Backups, tested restore, RPO and RTO, retention" },
+          { "syntax": "Security", "desc": "Secrets manager, least privilege, scanning, encryption" },
+          { "syntax": "Dependencies", "desc": "Hard and soft, their SLOs, their owners informed" }
+        ]
+      },
+      {
+        "title": "Runbook hygiene",
+        "items": [
+          { "syntax": "runbook_url annotation on every page", "desc": "One click from the alert to the instructions" },
+          { "syntax": "CI check for missing or dead links", "desc": "Fails the build, so gaps cannot accumulate" },
+          { "syntax": "Last tested: DATE", "desc": "Tested, not merely edited" },
+          { "syntax": "Tested by a non-author", "desc": "Every hesitation is a defect" },
+          { "syntax": "Reachable during the outage it describes", "desc": "Not only on the system that is down" },
+          { "syntax": "Followed verbatim, often", "desc": "A signal to automate it" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Writing runbooks as essays about the architecture instead of steps to take.",
+      "Vague instructions such as \"restart the service\" with no command, target or expected result.",
+      "Letting runbooks rot, so that the responder follows instructions for a cluster that no longer exists.",
+      "Storing the only copy of a runbook on the system whose outage it describes.",
+      "Putting passwords or tokens in a runbook for convenience.",
+      "Treating the readiness review as a box to tick at launch, with gaps quietly ignored instead of owned."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "In an alert runbook for a user-facing error spike, what should come immediately after the description of impact?",
+      "options": [
+        "A check for a recent change, with the exact rollback command",
+        "A detailed explanation of the service's internal architecture",
+        "The full list of every metric the service exposes to Prometheus",
+        "Instructions for writing the postmortem once it has been resolved"
+      ],
+      "answer": 0,
+      "explain": "Most incidents follow a change, and rollback is the quickest safe mitigation. The runbook should lead with the most likely fix, not make the responder read background first."
+    },
+    {
+      "q": "A runbook step says: \"Restart the worker service if needed.\" What is wrong with it?",
+      "options": [
+        "It gives no command, no condition, and no expected result to verify",
+        "Restarting a service is never an acceptable step in any runbook",
+        "It is written in the imperative mood, which readers find unclear",
+        "It should have been placed in the architecture documentation"
+      ],
+      "answer": 0,
+      "explain": "A stressed reader needs the exact command with real names, the condition under which to run it, and what should happen afterwards. Otherwise they cannot act, or cannot tell whether it worked."
+    },
+    {
+      "q": "What is the most reliable way to find out whether a runbook is accurate and usable?",
+      "options": [
+        "Have someone who did not write it follow it during a drill",
+        "Ask the author to read it through once more before publishing",
+        "Check that it was edited at some point within the last year",
+        "Count how many times the page has been viewed on the wiki"
+      ],
+      "answer": 0,
+      "explain": "Authors fill gaps from memory without noticing. A non-author following it for real exposes missing steps, stale commands and unclear decisions. Recent edits and page views say nothing about correctness."
+    },
+    {
+      "q": "A production readiness review finds that the new service has no tested restore from backup. The launch date is fixed. What is the appropriate outcome?",
+      "options": [
+        "Record the risk, with a named person accepting it and a date to fix",
+        "Launch anyway and leave the finding out of the review document",
+        "Cancel the launch permanently, since the review has been failed",
+        "Remove backups from the checklist so that the service can pass"
+      ],
+      "answer": 0,
+      "explain": "A PRR produces a list of risks. Each gap is fixed, or consciously accepted by someone accountable with a deadline. Hiding it or editing the checklist defeats the purpose."
+    },
+    {
+      "q": "An alert has paged the team six times this month. Each time, the engineer followed the same runbook exactly, with no decisions to make. What does this indicate?",
+      "options": [
+        "The procedure is toil and should be automated or its cause fixed",
+        "The runbook is excellent, so nothing further needs to be done",
+        "The alert should be reclassified from a page to an email notice",
+        "The on-call engineers need more training on this specific service"
+      ],
+      "answer": 0,
+      "explain": "A procedure that needs no judgement and recurs often is exactly the definition of toil. The runbook is already the specification for the automation, or the repeated page points at a cause worth fixing."
+    }
+  ]
+}

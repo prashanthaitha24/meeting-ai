@@ -1,0 +1,232 @@
+{
+  "id": "devops-finops",
+  "minutes": 25,
+  "intro": "In a data centre, spending was decided once a year by a purchasing department. In the cloud, every engineer who merges a Terraform change or sets a replica count is making a purchasing decision, usually without seeing the price. Bills grow quietly until someone in finance asks a question nobody can answer. FinOps is the practice of making cost a visible, shared engineering concern. This module gives you the working knowledge: how to attribute spend, where the waste usually is, and how to put guard rails in place.",
+  "objectives": [
+    "Explain the FinOps loop of inform, optimise and operate, and why engineers own cost",
+    "Design and enforce a tagging policy so that every cost can be attributed to a team and a service",
+    "Read a cloud bill and identify the usual drivers: compute, storage, data transfer and managed services",
+    "Right-size workloads and tune Kubernetes requests, autoscaling and scheduling for cost",
+    "Choose between on-demand, committed and spot pricing, and set budgets and anomaly alerts"
+  ],
+  "sections": [
+    {
+      "heading": "Cost is an engineering metric",
+      "blocks": [
+        { "type": "p", "text": "**FinOps** brings engineering, finance and product together around cloud spending, with the goal of getting the most value per unit of money, not simply the lowest bill. The FinOps Foundation describes the work as a loop with three phases." },
+        { "type": "table", "headers": ["Phase", "Question", "Activities"], "rows": [
+          ["**Inform**", "Where is the money going, and who is spending it?", "Tagging, allocation, dashboards, showback to teams"],
+          ["**Optimise**", "Where are we paying for something we do not use?", "Right-sizing, deleting waste, commitments, architecture changes"],
+          ["**Operate**", "How do we keep it that way?", "Budgets, alerts, policies, regular reviews, cost in design discussions"]
+        ]},
+        { "type": "p", "text": "The ordering matters. Teams that jump to optimisation without attribution make one-off savings that quietly return, because nobody owns the number. Once every team can see what its services cost, most waste removes itself, since engineers dislike waste once they can see it." },
+        { "type": "p", "text": "Absolute spend is a poor measure, because a growing business should spend more. Track **unit economics** instead: cost per customer, per order, per thousand requests. If cost per order is falling while total spend rises, you are doing well. If it is rising, something in the architecture is scaling badly." },
+        { "type": "code", "lang": "text", "code": "unit cost          = cost of the service / units of business value delivered\nexample            = monthly cost of checkout service / orders processed that month\n\nallocation rate    = spend attributed to an owner / total spend        (aim high)\nwaste rate         = spend on idle or unused resources / total spend   (aim low)" }
+      ]
+    },
+    {
+      "heading": "Tagging: no attribution, no accountability",
+      "blocks": [
+        { "type": "p", "text": "A **tag** (a **label** on Google Cloud and in Kubernetes) is a key and value attached to a resource. Billing data can be grouped by tag, and that is the only practical way to answer \"what does the orders service cost?\" Agree on a small mandatory set and enforce it mechanically." },
+        { "type": "table", "headers": ["Tag", "Example", "Answers"], "rows": [
+          ["`team`", "`shop-platform`", "Who owns this and gets asked about it?"],
+          ["`service`", "`orders-api`", "Which application is it part of?"],
+          ["`environment`", "`prod`, `staging`, `dev`", "Can it be switched off at night?"],
+          ["`cost-center`", "`cc-4100`", "Which budget pays for it?"],
+          ["`managed-by`", "`terraform`", "Where do I change it?"]
+        ]},
+        { "type": "p", "text": "Do not rely on people remembering. With Terraform, the provider can apply tags to every resource it creates, so an untagged resource becomes the exception that needs explaining." },
+        { "type": "code", "lang": "hcl", "code": "provider \"aws\" {\n  region = var.region\n\n  default_tags {\n    tags = {\n      team        = \"shop-platform\"\n      service     = var.service\n      environment = var.environment\n      cost-center = \"cc-4100\"\n      managed-by  = \"terraform\"\n    }\n  }\n}" },
+        { "type": "list", "items": [
+          "**Enforce in CI.** A policy check from the secrets module fails any plan that creates an untagged resource.",
+          "**Activate the tags for billing.** On AWS, for example, a tag must be enabled as a cost allocation tag before it appears in cost reports, and it is not applied retroactively.",
+          "**Decide how to split shared costs**, such as the Kubernetes control plane, NAT gateways and observability tooling: proportionally by usage, evenly, or kept as a central platform cost.",
+          "**Hunt for the untagged remainder** regularly. It is where forgotten experiments live."
+        ]},
+        { "type": "callout", "kind": "tip", "text": "Separate cloud accounts, subscriptions or projects per team or environment give you coarse attribution for free, even before tagging is perfect, because billing is always broken down by account." }
+      ]
+    },
+    {
+      "heading": "Reading a bill",
+      "blocks": [
+        { "type": "p", "text": "Open the cost explorer, group by service, and sort descending. In most organisations a handful of lines account for nearly all the spend, and they fall into four families." },
+        { "type": "list", "items": [
+          "**Compute**: virtual machines, Kubernetes nodes, functions. Usually the largest line, and the one where over-provisioning is most common.",
+          "**Storage**: object storage, disks and snapshots. Cheap per gigabyte, but it only ever grows unless lifecycle rules delete or archive old data. Look for unattached disks and years of accumulated snapshots.",
+          "**Data transfer**: the line that surprises everyone. Inbound traffic is generally free. Traffic **out to the internet** is charged, and so is traffic **between availability zones** and between regions. A NAT gateway charges per gigabyte processed on top of its hourly fee.",
+          "**Managed services**: databases, caches, queues, and above all **logs and metrics**. Observability ingestion and retention regularly becomes one of the top three lines, because logging everything at debug level is free to write and expensive to keep."
+        ]},
+        { "type": "code", "lang": "bash", "code": "# monthly cost by service\naws ce get-cost-and-usage \\\n  --time-period Start=2026-08-01,End=2026-09-01 \\\n  --granularity MONTHLY --metrics UnblendedCost \\\n  --group-by Type=DIMENSION,Key=SERVICE\n\n# the same, broken down by the 'team' tag\naws ce get-cost-and-usage \\\n  --time-period Start=2026-08-01,End=2026-09-01 \\\n  --granularity MONTHLY --metrics UnblendedCost \\\n  --group-by Type=TAG,Key=team" },
+        { "type": "callout", "kind": "warning", "text": "Architecture decisions carry data-transfer costs that are invisible in a diagram. A chatty service whose replicas sit in a different zone from its database pays for every query. Pulling large container images or datasets through a NAT gateway pays per gigabyte. Private endpoints to the provider's storage and registry services usually remove that charge." }
+      ]
+    },
+    {
+      "heading": "Right-sizing and Kubernetes",
+      "blocks": [
+        { "type": "p", "text": "**Right-sizing** means matching what you provision to what you use. Look at utilisation over a representative period, at least two weeks, so that weekly peaks are included. A VM that peaks at fifteen percent CPU can drop a size or two. Size for the realistic peak plus headroom, and let autoscaling handle the rest, instead of provisioning for a theoretical worst case all day and all night." },
+        { "type": "p", "text": "In Kubernetes, cost is decided by **requests**, not by usage. The scheduler reserves what a pod requests, and the cluster autoscaler adds nodes when requests cannot be satisfied. A pod that requests two cores and uses a tenth of one wastes nearly two cores that nothing else can use. Multiply that across a cluster and it is common to find nodes that are fully reserved and mostly idle." },
+        { "type": "code", "lang": "bash", "code": "kubectl top pods -n shop --containers            # what is actually being used\nkubectl get pods -n shop -o custom-columns=\\\nNAME:.metadata.name,CPU_REQ:.spec.containers[*].resources.requests.cpu,\\\nMEM_REQ:.spec.containers[*].resources.requests.memory\nkubectl describe node NODE_NAME | grep -A 8 'Allocated resources'" },
+        { "type": "code", "lang": "promql", "caption": "Requested CPU that is not being used, per namespace", "code": "sum by (namespace) (kube_pod_container_resource_requests{resource=\"cpu\"})\n-\nsum by (namespace) (rate(container_cpu_usage_seconds_total{container!=\"\"}[5m]))" },
+        { "type": "code", "lang": "yaml", "caption": "Scale replicas with load instead of provisioning for the peak", "code": "apiVersion: autoscaling/v2\nkind: HorizontalPodAutoscaler\nmetadata:\n  name: orders\n  namespace: shop\nspec:\n  scaleTargetRef:\n    apiVersion: apps/v1\n    kind: Deployment\n    name: orders\n  minReplicas: 2\n  maxReplicas: 12\n  metrics:\n    - type: Resource\n      resource:\n        name: cpu\n        target:\n          type: Utilization\n          averageUtilization: 70" },
+        { "type": "list", "items": [
+          "The HPA's utilisation target is a percentage of the pod's CPU **request**, so wrong requests also mean wrong scaling.",
+          "The **Vertical Pod Autoscaler** in recommendation mode suggests requests based on observed usage, which is a good starting point for right-sizing.",
+          "The **cluster autoscaler**, or Karpenter on AWS, removes nodes when pods fit on fewer, and can pick cheaper instance types.",
+          "**Non-production can sleep.** Scaling development and staging environments to zero outside working hours removes roughly two thirds of their running hours.",
+          "Tools such as OpenCost attribute cluster cost to namespaces and workloads, using the same labels you already apply."
+        ]}
+      ]
+    },
+    {
+      "heading": "Pricing models and guard rails",
+      "blocks": [
+        { "type": "table", "headers": ["Model", "Discount", "Trade-off", "Use for"], "rows": [
+          ["**On-demand**", "None", "Full flexibility", "Spiky or unpredictable load; anything new"],
+          ["**Commitment** (reserved, savings plans, committed use)", "Substantial", "You pay for one to three years whether you use it or not", "The steady baseline that runs all day, every day"],
+          ["**Spot / preemptible**", "Largest", "Capacity can be reclaimed at short notice", "Stateless, fault-tolerant work: CI runners, batch jobs, extra replicas"]
+        ]},
+        { "type": "p", "text": "Sequence matters. **Right-size first, then commit.** Committing to an over-provisioned fleet locks in the waste for years. Cover the stable baseline with commitments, handle variation on demand, and move whatever tolerates interruption to spot. Disposable, twelve-factor workloads that handle `SIGTERM` gracefully are exactly what makes spot capacity safe to use." },
+        { "type": "p", "text": "Then make surprises impossible. Set a **budget** per account or team with alerts at, say, fifty, eighty and one hundred percent of the expected monthly amount, plus an alert on the **forecast**, which warns you mid-month instead of on the invoice. Turn on **anomaly detection**, which flags a service whose daily spend departs from its pattern." },
+        { "type": "code", "lang": "hcl", "code": "resource \"aws_budgets_budget\" \"shop\" {\n  name         = \"shop-monthly\"\n  budget_type  = \"COST\"\n  limit_amount = \"2000\"\n  limit_unit   = \"USD\"\n  time_unit    = \"MONTHLY\"\n\n  notification {\n    comparison_operator        = \"GREATER_THAN\"\n    threshold                  = 80\n    threshold_type             = \"PERCENTAGE\"\n    notification_type          = \"FORECASTED\"\n    subscriber_email_addresses = [\"shop-platform@example.com\"]\n  }\n}" },
+        { "type": "p", "text": "Finally, put cost where decisions are made. Tools such as Infracost comment on a pull request with the monthly price difference of a Terraform change, which turns cost into a normal part of code review. A short monthly review of the top movers, with the teams that own them, keeps the loop turning." },
+        { "type": "callout", "kind": "note", "text": "Optimise in order of size. An hour spent shaving a small line item is wasted while an idle database cluster ten times its cost sits untouched. And never optimise reliability away: removing the second availability zone does cut the bill, until the day it does not." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Find the waste in an account you can see",
+    "steps": [
+      "In the cloud account you used for the cloud fundamentals module, or any account you can read, open the cost explorer. Group by service for the last three months and write down the top five lines.",
+      "Group the same data by tag. Work out your allocation rate: what share of spend has an owner tag? List the largest untagged items.",
+      "Add `default_tags` to your Terraform provider block, apply, and confirm the tags appear on a resource. Activate them as cost allocation tags if your provider requires it.",
+      "Search for orphans: unattached disks, old snapshots, unused load balancers, idle public IP addresses, and stopped instances that still hold storage.",
+      "In your Kubernetes cluster, compare `kubectl top pods` with the configured requests for three workloads. Calculate how over-requested each is, and propose new values with headroom.",
+      "Add a HorizontalPodAutoscaler to one Deployment, generate load, and watch it scale out and back in.",
+      "Create a monthly budget with a forecast alert in Terraform. Then write one unit-cost metric for a service you know, such as cost per thousand requests."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "FinOps loop: inform, then optimise, then operate. Attribution comes before optimisation.",
+      "Every resource carries owner tags, applied by default in Terraform and enforced in CI.",
+      "Track unit cost, such as cost per order, not just total spend.",
+      "The big four on a bill: compute, storage, data transfer, managed services including observability.",
+      "Data transfer out, across zones and through NAT gateways is the classic hidden cost.",
+      "In Kubernetes you pay for requests, not usage. Right-size requests, then autoscale.",
+      "Right-size first, then buy commitments for the baseline; use spot for interruptible work.",
+      "Budgets with forecast alerts and anomaly detection, so that surprises arrive mid-month and not on the invoice."
+    ],
+    "groups": [
+      {
+        "title": "Formulas",
+        "items": [
+          { "syntax": "unit cost = service cost / business units", "desc": "Cost per order, per customer, per 1,000 requests" },
+          { "syntax": "allocation rate = attributed spend / total spend", "desc": "How much of the bill has an owner" },
+          { "syntax": "CPU waste = requested cores - used cores", "desc": "Reserved but idle capacity in Kubernetes" },
+          { "syntax": "utilisation = used / provisioned", "desc": "Low sustained utilisation means a smaller size will do" },
+          { "syntax": "commitment coverage = committed usage / steady baseline", "desc": "Cover the floor, not the peaks" },
+          { "syntax": "off-hours saving ~ 1 - (working hours / 168)", "desc": "Share of a week a sleeping dev environment is not billed" }
+        ]
+      },
+      {
+        "title": "Mandatory tags",
+        "items": [
+          { "syntax": "team", "desc": "Owner who answers questions about it" },
+          { "syntax": "service", "desc": "Application it belongs to" },
+          { "syntax": "environment", "desc": "prod, staging or dev" },
+          { "syntax": "cost-center", "desc": "Budget that pays" },
+          { "syntax": "managed-by", "desc": "terraform, helm or manual: where to change it" },
+          { "syntax": "default_tags { tags = {...} }", "desc": "Terraform AWS provider: tag everything it creates" }
+        ]
+      },
+      {
+        "title": "Finding cost and waste",
+        "items": [
+          { "syntax": "aws ce get-cost-and-usage --group-by Type=DIMENSION,Key=SERVICE", "desc": "Spend by service" },
+          { "syntax": "aws ce get-cost-and-usage --group-by Type=TAG,Key=team", "desc": "Spend by tag" },
+          { "syntax": "aws ec2 describe-volumes --filters Name=status,Values=available", "desc": "Unattached disks still being billed" },
+          { "syntax": "kubectl top pods --containers", "desc": "Actual CPU and memory per container" },
+          { "syntax": "kubectl describe node NAME", "desc": "Allocated requests versus node capacity" },
+          { "syntax": "kube_pod_container_resource_requests", "desc": "kube-state-metrics series for requested resources" }
+        ]
+      },
+      {
+        "title": "Levers",
+        "items": [
+          { "syntax": "right-size", "desc": "Match instance size and pod requests to observed peak plus headroom" },
+          { "syntax": "autoscale", "desc": "HPA for replicas, cluster autoscaler or Karpenter for nodes" },
+          { "syntax": "schedule", "desc": "Scale non-production to zero outside working hours" },
+          { "syntax": "lifecycle rules", "desc": "Archive or expire old objects, snapshots and logs" },
+          { "syntax": "commitments", "desc": "Discount for the steady baseline, after right-sizing" },
+          { "syntax": "spot", "desc": "Deep discount for stateless, interruptible work" },
+          { "syntax": "private endpoints", "desc": "Avoid NAT charges for traffic to provider services" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Optimising before attributing, so that savings are temporary because nobody owns the number.",
+      "Buying multi-year commitments for a fleet that was never right-sized.",
+      "Setting Kubernetes requests by guesswork and paying for nodes that are reserved but idle.",
+      "Ignoring data transfer and NAT charges when designing how services talk to each other.",
+      "Keeping every log at debug level, with long retention, in the most expensive storage tier.",
+      "Cutting redundancy to save money and discovering the real price during an outage."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A company's total cloud bill rose 30% over the year while orders processed doubled. What is the best reading of this?",
+      "options": [
+        "Cost per order fell, so efficiency improved even though spend rose",
+        "Spending is out of control and should be frozen at once",
+        "Nothing can be concluded without the number of engineers",
+        "The rise shows commitments were bought too early"
+      ],
+      "answer": 0,
+      "explain": "Unit economics are what matter. Spend grew by 1.3 times while output grew by 2 times, so the cost of each order dropped by about a third."
+    },
+    {
+      "q": "A pod requests 2 CPU cores and consistently uses 0.2. Why does this cost money even though it is mostly idle?",
+      "options": [
+        "The scheduler reserves the requested 2 cores, so nothing else can use them and more nodes are needed",
+        "Kubernetes bills each pod separately according to its CPU limit",
+        "Idle pods are moved onto more expensive nodes automatically",
+        "The container runtime charges a fixed fee for every core requested"
+      ],
+      "answer": 0,
+      "explain": "Requests drive scheduling and node autoscaling. Reserved but unused capacity cannot be given to other pods, so the cluster runs more nodes than the real load requires."
+    },
+    {
+      "q": "In which order should a team approach optimisation?",
+      "options": [
+        "Attribute spend, right-size, then buy commitments for the stable baseline",
+        "Buy commitments first to lock in the discount, then right-size afterwards",
+        "Move everything to spot, then add tags to see what was saved",
+        "Right-size and commit first, and introduce tagging once spend is lower"
+      ],
+      "answer": 0,
+      "explain": "Without attribution nobody owns the result. Committing before right-sizing locks in payment for capacity you are about to stop needing."
+    },
+    {
+      "q": "Which workload is the best candidate for spot or preemptible instances?",
+      "options": [
+        "A pool of stateless CI runners whose jobs can be retried",
+        "The single primary node of a self-managed database",
+        "A legacy application that takes 20 minutes to start",
+        "A payment service that keeps session state in memory"
+      ],
+      "answer": 0,
+      "explain": "Spot capacity can be reclaimed at short notice, so it suits work that is stateless, quick to restart and safe to retry. The other three would lose data or availability when interrupted."
+    },
+    {
+      "q": "After a service moved to a new architecture, a large new charge appeared for data transfer. Replicas run in three zones and call a database in one zone. What is the most likely cause?",
+      "options": [
+        "Traffic between availability zones is charged, and most queries now cross zones",
+        "Inbound traffic from users is billed at a higher rate in multi-zone setups",
+        "The database charges per connection opened from each replica",
+        "Load balancers bill for every health check they send"
+      ],
+      "answer": 0,
+      "explain": "Cross-zone traffic is billed per gigabyte. With replicas in three zones and the database in one, roughly two thirds of database traffic crosses a zone boundary. Inbound internet traffic is generally free."
+    }
+  ]
+}

@@ -1,0 +1,224 @@
+{
+  "id": "devops-scripting",
+  "minutes": 35,
+  "intro": "Any task you do by hand three times is a script waiting to be written: rotating logs, calling an API, checking fifty servers, gluing two tools together in a pipeline. Bash is the glue that is always available; Python is what you move to when the logic gets real. This module teaches both to a production standard, which mostly means scripts that fail loudly, clean up after themselves, and can be run twice without damage.",
+  "objectives": [
+    "Write Bash scripts that stop on errors using `set -euo pipefail`, quoting, and explicit exit codes",
+    "Use variables, conditionals, loops and functions in Bash without the classic quoting bugs",
+    "Process JSON with `jq` and call HTTP APIs from the shell",
+    "Decide when to switch from Bash to Python, and write a small Python CLI with `argparse`, `subprocess` and `pathlib`",
+    "Make automation idempotent, so that re-running it is always safe"
+  ],
+  "sections": [
+    {
+      "heading": "A Bash script that fails properly",
+      "blocks": [
+        { "type": "p", "text": "By default Bash carries on after a command fails, which is exactly wrong for automation: a failed `cd` followed by `rm -rf *` deletes the wrong directory. Start every script with the same three lines." },
+        { "type": "code", "lang": "bash", "code": "#!/usr/bin/env bash\nset -euo pipefail\n\n# -e           exit as soon as a command fails\n# -u           treat use of an unset variable as an error\n# -o pipefail  a pipeline fails if ANY command in it fails, not just the last" },
+        { "type": "p", "text": "The first line, the **shebang**, tells the kernel which interpreter to use. Make the file executable with `chmod +x` and run it as `./script.sh`. Every command returns an **exit code**, `0` for success and non-zero for failure, and your script should too: CI systems, cron and `&&` chains all decide what to do next from that number." },
+        { "type": "code", "lang": "bash", "code": "#!/usr/bin/env bash\nset -euo pipefail\n\nusage() { echo \"usage: $0 ENVIRONMENT\" >&2; exit 2; }\n[[ $# -eq 1 ]] || usage\n\nenv_name=\"$1\"\nworkdir=\"$(mktemp -d)\"\ntrap 'rm -rf \"$workdir\"' EXIT        # runs on success, failure, or Ctrl-C\n\necho \"Deploying to ${env_name}, scratch space ${workdir}\"" },
+        { "type": "p", "text": "Two habits are visible there. Errors and usage messages go to **stderr** (`>&2`) so they do not pollute output that another program may be parsing. And `trap ... EXIT` registers cleanup that runs however the script ends, so temporary files never leak." }
+      ]
+    },
+    {
+      "heading": "Variables, quoting, tests and loops",
+      "blocks": [
+        { "type": "p", "text": "Assign with no spaces around `=`, read with `$name` or `${name}`. The single most important Bash rule is: **quote your variables**. Unquoted, a value containing spaces is split into several words and any `*` in it is expanded against the filesystem." },
+        { "type": "code", "lang": "bash", "code": "file=\"monthly report.txt\"\nrm $file            # WRONG: tries to delete 'monthly' and 'report.txt'\nrm \"$file\"          # right\n\ntoday=\"$(date +%F)\"               # command substitution\nregion=\"${AWS_REGION:-eu-west-1}\"  # default if unset or empty\n: \"${API_TOKEN:?API_TOKEN must be set}\"   # abort with a message if missing" },
+        { "type": "p", "text": "Use `[[ ... ]]` for tests. `if` does not test a boolean; it runs a command and checks its exit code, which means any command can be a condition." },
+        { "type": "code", "lang": "bash", "code": "if [[ -f \"$config\" ]]; then echo \"found\"; fi      # -f file, -d dir, -z empty string\nif [[ \"$env_name\" == \"prod\" && -z \"${FORCE:-}\" ]]; then\n  echo \"refusing to touch prod without FORCE=1\" >&2\n  exit 1\nfi\nif ! grep -q \"^server\" \"$config\"; then echo \"no server line\" >&2; fi\n\nfor host in web1 web2 web3; do\n  ssh \"$host\" uptime || echo \"failed: $host\" >&2\ndone\n\nwhile IFS= read -r line; do         # read a file line by line, safely\n  echo \"got: $line\"\ndone < hosts.txt" },
+        { "type": "callout", "kind": "tip", "text": "Run `shellcheck script.sh` on everything you write. It catches unquoted variables, useless `cat`, broken tests and dozens of other mistakes, and explains each one. Add it to CI next to your other linters." }
+      ]
+    },
+    {
+      "heading": "JSON and APIs from the shell",
+      "blocks": [
+        { "type": "p", "text": "Almost every tool you automate can emit JSON: cloud CLIs, `kubectl -o json`, `docker inspect`, REST APIs. Do not parse it with `grep` and `cut`. **jq** is a small language for slicing JSON." },
+        { "type": "code", "lang": "bash", "code": "curl -fsS https://api.example.com/v1/servers > servers.json\n\njq '.' servers.json                          # pretty-print\njq -r '.servers[].name' servers.json         # every name, raw (no quotes)\njq -r '.servers[] | select(.status == \"down\") | .name' servers.json\njq '.servers | length' servers.json          # count\njq -r '.servers[] | [.name, .ip] | @tsv' servers.json   # table for the shell" },
+        { "type": "p", "text": "The `curl` flags matter in scripts. Without `-f`, curl exits `0` even when the server returns `500`, and your script marches on with an error page in a variable. `-sS` hides the progress bar but still prints errors." },
+        { "type": "code", "lang": "bash", "code": "response=\"$(curl -fsS --max-time 10 \\\n  -H \"Authorization: Bearer ${API_TOKEN}\" \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"name\": \"web4\", \"size\": \"small\"}' \\\n  https://api.example.com/v1/servers)\"\n\nserver_id=\"$(jq -r '.id' <<< \"$response\")\"\necho \"created ${server_id}\"" },
+        { "type": "p", "text": "For YAML, the equivalent tool is `yq`. In Python, YAML needs the third-party PyYAML package; always use `yaml.safe_load`, never plain `yaml.load` on input you do not control." }
+      ]
+    },
+    {
+      "heading": "When to switch to Python",
+      "blocks": [
+        { "type": "p", "text": "Bash is excellent at running programs and connecting them. It is poor at data structures, arithmetic, error handling and testing. A useful rule: move to Python when the script passes about fifty lines, needs a list of dictionaries, has to retry or handle errors selectively, or will be maintained by someone else." },
+        { "type": "code", "lang": "python", "code": "#!/usr/bin/env python3\n\"\"\"Report certificates that expire soon.\"\"\"\nimport argparse\nimport json\nimport sys\nfrom pathlib import Path\n\n\ndef main() -> int:\n    parser = argparse.ArgumentParser(description=__doc__)\n    parser.add_argument(\"inventory\", type=Path, help=\"JSON file of certificates\")\n    parser.add_argument(\"--days\", type=int, default=30)\n    args = parser.parse_args()\n\n    certs = json.loads(args.inventory.read_text())\n    expiring = [c for c in certs if c[\"days_left\"] < args.days]\n    for cert in sorted(expiring, key=lambda c: c[\"days_left\"]):\n        print(f\"{cert['host']}: {cert['days_left']} days\", file=sys.stderr)\n    return 1 if expiring else 0\n\n\nif __name__ == \"__main__\":\n    sys.exit(main())" },
+        { "type": "p", "text": "Notice the same conventions as in Bash: a shebang, arguments parsed properly (you get `--help` for free), diagnostics on stderr, and a meaningful exit code returned through `sys.exit`. That exit code is what lets a pipeline or a monitoring check act on the result." },
+        { "type": "p", "text": "To run other programs, use `subprocess.run` with a **list** of arguments. Passing a list means no shell is involved, so a filename containing spaces or a `;` cannot be misinterpreted. `check=True` raises an exception when the command fails, which is Python's equivalent of `set -e`." },
+        { "type": "code", "lang": "python", "code": "import subprocess\n\nresult = subprocess.run(\n    [\"kubectl\", \"get\", \"pods\", \"-n\", \"shop\", \"-o\", \"json\"],\n    capture_output=True, text=True, check=True, timeout=30,\n)\nprint(len(result.stdout), \"bytes of JSON\")" },
+        { "type": "callout", "kind": "warning", "text": "Avoid `shell=True` and `os.system`, especially with any value that came from a user, a file or an API. Building a command string from outside input is how command-injection vulnerabilities are written." }
+      ]
+    },
+    {
+      "heading": "Calling APIs with retries",
+      "blocks": [
+        { "type": "p", "text": "Networks fail briefly all the time, so a script that calls an API needs a timeout on every request and a bounded retry for failures that are worth retrying: connection errors and `5xx` or `429` responses. A `4xx` means your request is wrong, and retrying it will not help. The widely used `requests` library keeps this short." },
+        { "type": "code", "lang": "python", "code": "import os\nimport time\n\nimport requests\n\nTOKEN = os.environ[\"API_TOKEN\"]          # KeyError if missing: fail early\n\n\ndef get_json(url: str, attempts: int = 4) -> dict:\n    for attempt in range(attempts):\n        try:\n            resp = requests.get(\n                url, headers={\"Authorization\": f\"Bearer {TOKEN}\"}, timeout=10\n            )\n            if resp.status_code < 500 and resp.status_code != 429:\n                resp.raise_for_status()   # raises on 4xx: do not retry those\n                return resp.json()\n        except requests.ConnectionError:\n            pass\n        time.sleep(2 ** attempt)          # 1s, 2s, 4s, 8s\n    raise RuntimeError(f\"gave up on {url} after {attempts} attempts\")" },
+        { "type": "p", "text": "Secrets come from the environment or a secret manager, never from the source file. Install third-party packages into a **virtual environment** (`python3 -m venv .venv`) and record them in `requirements.txt`, so the script runs the same on your laptop and in CI." }
+      ]
+    },
+    {
+      "heading": "Idempotency: safe to run twice",
+      "blocks": [
+        { "type": "p", "text": "Automation gets re-run: after a failure halfway, by a scheduler, by a colleague who was not sure it worked. An **idempotent** script produces the same end state however many times it runs. The technique is to describe the state you want and check before you act, instead of blindly performing an action." },
+        { "type": "table", "headers": ["Fragile", "Idempotent"], "rows": [
+          ["`mkdir /srv/app`", "`mkdir -p /srv/app`"],
+          ["`echo \"line\" >> file`", "`grep -qxF \"line\" file || echo \"line\" >> file`"],
+          ["`ln -s target link`", "`ln -sfn target link`"],
+          ["`useradd app`", "`id app >/dev/null 2>&1 || useradd app`"],
+          ["`rm file`", "`rm -f file`"]
+        ]},
+        { "type": "p", "text": "This idea is the foundation of the tools later in this track. Ansible modules, Terraform resources and Kubernetes manifests are all declarations of desired state that can be applied repeatedly. Also add a `--dry-run` flag to anything destructive, so you can see what it would do before it does it." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Automate a real check, twice",
+    "steps": [
+      "Install `shellcheck` and `jq`. Write `check_sites.sh` that reads URLs from a file and prints the HTTP status code and total time for each, using `curl -o /dev/null -s -w`.",
+      "Give it `set -euo pipefail`, a usage message on stderr, and a `trap` that removes a temp directory. Make it exit `1` if any site did not return `200`.",
+      "Run `shellcheck` on it and fix every finding. Then prove the exit code works: `./check_sites.sh urls.txt && echo OK || echo FAILED`.",
+      "Call a public JSON API with `curl -fsS` and use `jq` to extract one field from every element of an array, as tab-separated output.",
+      "Rewrite the site checker in Python with `argparse`, a `--timeout` option, per-request timeouts, and the same exit-code behaviour.",
+      "Write a small setup script (create a directory, append a line to a config file, create a symlink) and run it three times in a row. Fix it until the third run changes nothing and prints no errors."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Start every Bash script with `set -euo pipefail`. Without it, failures are ignored.",
+      "Quote every variable expansion: `\"$var\"`. Unquoted variables are the number one Bash bug.",
+      "Exit code `0` is success; return a meaningful non-zero code on failure. Diagnostics go to stderr.",
+      "`curl -fsS` in scripts, always with a timeout. Without `-f` an HTTP 500 looks like success.",
+      "Parse JSON with `jq`, never with `grep`.",
+      "Past about 50 lines or once you need real data structures, use Python.",
+      "`subprocess.run([...], check=True)` with a list of arguments. No `shell=True`.",
+      "Idempotent: check the state, then act. The script must be safe to run twice."
+    ],
+    "groups": [
+      {
+        "title": "Bash safety and structure",
+        "items": [
+          { "syntax": "#!/usr/bin/env bash", "desc": "Shebang: find bash on the PATH" },
+          { "syntax": "set -euo pipefail", "desc": "Exit on error, on unset variables, on any failure in a pipeline" },
+          { "syntax": "trap 'rm -rf \"$tmp\"' EXIT", "desc": "Cleanup that runs however the script ends" },
+          { "syntax": "echo \"message\" >&2", "desc": "Write to stderr" },
+          { "syntax": "exit 1", "desc": "Finish with a failure code" },
+          { "syntax": "cmd1 && cmd2 || cmd3", "desc": "cmd2 if cmd1 succeeds; cmd3 if that chain fails" },
+          { "syntax": "shellcheck script.sh", "desc": "Lint a script for common bugs" }
+        ]
+      },
+      {
+        "title": "Variables and expansion",
+        "items": [
+          { "syntax": "name=\"value\"", "desc": "Assign (no spaces around =)" },
+          { "syntax": "\"$(command)\"", "desc": "Capture a command's output" },
+          { "syntax": "\"${VAR:-default}\"", "desc": "Use default if unset or empty" },
+          { "syntax": ": \"${VAR:?message}\"", "desc": "Abort with message if unset or empty" },
+          { "syntax": "$1 $2 \"$@\" $#", "desc": "Positional args, all args, arg count" },
+          { "syntax": "$?", "desc": "Exit code of the last command" }
+        ]
+      },
+      {
+        "title": "Tests and loops",
+        "items": [
+          { "syntax": "[[ -f FILE ]] / [[ -d DIR ]]", "desc": "File exists / directory exists" },
+          { "syntax": "[[ -z \"$s\" ]] / [[ -n \"$s\" ]]", "desc": "String is empty / not empty" },
+          { "syntax": "[[ \"$a\" == \"$b\" ]]", "desc": "String equality" },
+          { "syntax": "[[ \"$n\" -gt 5 ]]", "desc": "Integer comparison: -eq -ne -lt -le -gt -ge" },
+          { "syntax": "for x in a b c; do ...; done", "desc": "Loop over words" },
+          { "syntax": "while IFS= read -r line; do ...; done < FILE", "desc": "Read a file line by line" }
+        ]
+      },
+      {
+        "title": "jq and curl",
+        "items": [
+          { "syntax": "jq -r '.items[].name'", "desc": "A field from every array element, unquoted" },
+          { "syntax": "jq '.items[] | select(.ok == false)'", "desc": "Filter elements" },
+          { "syntax": "jq '.items | length'", "desc": "Count" },
+          { "syntax": "jq -r '.[] | [.a, .b] | @tsv'", "desc": "Tab-separated rows for shell loops" },
+          { "syntax": "curl -fsS --max-time 10 URL", "desc": "Fail on HTTP errors, quiet, bounded time" },
+          { "syntax": "curl -H \"Authorization: Bearer $TOKEN\" URL", "desc": "Authenticated request" }
+        ]
+      },
+      {
+        "title": "Python for ops",
+        "items": [
+          { "syntax": "argparse.ArgumentParser()", "desc": "Command-line arguments with `--help` for free" },
+          { "syntax": "sys.exit(main())", "desc": "Return the script's exit code" },
+          { "syntax": "subprocess.run([...], check=True, capture_output=True, text=True)", "desc": "Run a program safely and capture its output" },
+          { "syntax": "Path(p).read_text() / .exists() / .glob('*.log')", "desc": "Files with `pathlib`" },
+          { "syntax": "json.loads(s) / json.dumps(obj, indent=2)", "desc": "Parse and produce JSON" },
+          { "syntax": "os.environ[\"NAME\"] / os.environ.get(\"NAME\", \"x\")", "desc": "Required / optional environment variable" },
+          { "syntax": "python3 -m venv .venv && . .venv/bin/activate", "desc": "Isolated environment for dependencies" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Omitting `set -e`, so a failed `cd` is followed by a destructive command in the wrong directory.",
+      "Leaving variables unquoted, which breaks on the first filename that contains a space.",
+      "Using `curl` without `-f` and treating an HTTP error page as a successful response.",
+      "Hard-coding tokens and passwords in the script instead of reading them from the environment.",
+      "Building shell command strings from input in Python with `shell=True`, which invites injection.",
+      "Writing a script that only works on the first run because it never checks the current state."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A script contains `cd \"$BUILD_DIR\"` followed by `rm -rf ./*`, and has no `set` line. `BUILD_DIR` points to a directory that does not exist. What happens?",
+      "options": [
+        "cd fails, the script continues, and rm deletes files in the current directory",
+        "The script stops at the failed cd and nothing is deleted",
+        "Bash creates the missing directory and then empties it",
+        "rm refuses to run because the previous command failed"
+      ],
+      "answer": 0,
+      "explain": "Without `set -e`, Bash ignores the failed `cd` and runs the next line wherever it happens to be. `set -euo pipefail` would have stopped the script at the `cd`."
+    },
+    {
+      "q": "With `set -euo pipefail` active, what does `pipefail` change?",
+      "options": [
+        "A pipeline fails if any command in it fails, not only the last one",
+        "Pipelines are no longer allowed to write to stderr",
+        "Each command in a pipeline runs only after the previous one exits",
+        "A failing pipeline is retried once before the script exits"
+      ],
+      "answer": 0,
+      "explain": "By default a pipeline's exit code is that of its last command, so `failing_cmd | sort` looks successful. `pipefail` makes the pipeline report the failure."
+    },
+    {
+      "q": "Your deploy script calls an API with plain `curl -s URL` and stores the body. The API returns HTTP 500 with an HTML error page. What does the script see?",
+      "options": [
+        "Exit code 0 and the error page as if it were valid data",
+        "Exit code 22 and an empty response body",
+        "An exception that stops the script immediately",
+        "Exit code 500, matching the HTTP status"
+      ],
+      "answer": 0,
+      "explain": "curl considers any completed HTTP exchange a success unless you pass `-f` (`--fail`), which makes it exit non-zero on 4xx and 5xx responses."
+    },
+    {
+      "q": "In Python, why is `subprocess.run([\"rm\", filename], check=True)` safer than `os.system(\"rm \" + filename)`?",
+      "options": [
+        "No shell parses the string, so characters in filename cannot become commands",
+        "The list form runs the command with reduced privileges",
+        "os.system cannot delete files that contain spaces in the path",
+        "subprocess asks for confirmation before destructive commands"
+      ],
+      "answer": 0,
+      "explain": "With a list, the arguments are passed straight to the program. With a string handed to a shell, a filename such as `x; rm -rf ~` is interpreted as two commands."
+    },
+    {
+      "q": "Which line is idempotent, meaning it is safe to run any number of times?",
+      "options": [
+        "grep -qxF \"$line\" app.conf || echo \"$line\" >> app.conf",
+        "echo \"$line\" >> app.conf",
+        "mkdir /srv/app && echo \"$line\" > /srv/app/app.conf",
+        "useradd app && echo \"$line\" >> app.conf"
+      ],
+      "answer": 0,
+      "explain": "It checks whether the exact line is already present and appends only if it is not. Plain `>>` adds a duplicate each run, and `mkdir` and `useradd` both fail the second time because the thing already exists."
+    }
+  ]
+}

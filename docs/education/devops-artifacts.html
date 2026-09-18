@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Artifacts &amp; supply chain — DevOps | ThavionAI Education</title>
+  <meta name="description" content="Registries, versioning, dependency pinning, image scanning, and SBOM basics." />
+  <meta property="og:title" content="Artifacts &amp; supply chain — ThavionAI Education" />
+  <meta property="og:description" content="Registries, versioning, dependency pinning, image scanning, and SBOM basics." />
+  <meta property="og:type" content="article" />
+  <link rel="canonical" href="https://thavionai.com/education/devops-artifacts.html" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-devops" data-module="devops-artifacts">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><div class="nav-logo-icon">T</div>ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html#features">Features</a>
+    <a href="../index.html#products">Products</a>
+    <a href="../education.html" class="active">Education</a>
+    <a href="../index.html#about">About</a>
+    <a href="../index.html#pricing">Pricing</a>
+    <a href="../index.html#contact" class="nav-cta">Contact Us</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#devops">DevOps</a> › Stage 2: Build &amp; ship</div>
+    <h1>Artifacts &amp; supply chain</h1>
+    <p class="lede">Registries, versioning, dependency pinning, image scanning, and SBOM basics.</p>
+    <div class="meta">
+      <span class="chip">Beginner–Intermediate</span>
+      <span class="chip">~30 min read</span>
+      <span class="chip">Module 8 of 17</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">The code your team writes is a small fraction of what you ship. The rest is base images, open-source libraries and their own dependencies, pulled from the internet at build time. Attackers know this, and compromising a dependency or a build system reaches thousands of victims at once. This module covers how artifacts are stored, named and versioned, and the practical controls that let you answer two questions at any time: what exactly is running, and is it known to be vulnerable?</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Explain what an artifact registry is for and how tags differ from digests</li><li>Apply semantic versioning and an image tagging scheme that makes every deploy traceable</li><li>Pin dependencies with lockfiles and digests so that builds are reproducible</li><li>Scan images and dependencies for known vulnerabilities and triage the results sensibly</li><li>Generate a software bill of materials and explain what signing and provenance add</li></ul>
+    </div>
+    <section id="artifacts-and-registries"><h2>Artifacts and registries</h2>
+    <p>An <strong>artifact</strong> is the immutable output of a build: a container image, a JAR, a Python wheel, an npm package, a Helm chart. A <strong>registry</strong> (or artifact repository) stores artifacts, controls who may push and pull them, and serves them to deploy targets. It is the hand-off point between CI, which produces artifacts, and CD, which consumes them.</p>
+    <p>Container registries include Docker Hub, GitHub Container Registry, and one from every cloud provider. A full image reference has four parts:</p>
+    <div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>ghcr.io / acme/orders-api : 1.4.2   @sha256:9b2c...e41f
+   |            |             |              |
+registry    repository       tag           digest</code></pre></div>
+    <p>The distinction between the last two is the most important idea in this module. A <strong>tag</strong> is a human-friendly, <strong>mutable</strong> label: whoever can push may point <code>1.4.2</code>, and certainly <code>latest</code>, at a different image tomorrow. A <strong>digest</strong> is the SHA-256 hash of the image manifest. It is <strong>immutable</strong> and content-addressed: if a single byte changes, the digest changes. Pulling by digest guarantees you get precisely the image you tested.</p>
+    <div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>docker pull ghcr.io/acme/orders-api:1.4.2
+docker inspect --format '{{index .RepoDigests 0}}' ghcr.io/acme/orders-api:1.4.2
+# ghcr.io/acme/orders-api@sha256:9b2c...
+
+docker buildx imagetools inspect ghcr.io/acme/orders-api:1.4.2   # manifest and platforms</code></pre></div>
+    <div class="callout callout-tip"><strong>Tip</strong><p>Many registries let you mark a repository's tags as immutable, so an existing tag can never be overwritten. Turn it on for release repositories; it removes a whole class of "but it was working yesterday" incidents.</p></div></section>
+  <section id="versioning-and-tagging"><h2>Versioning and tagging</h2>
+    <p><strong>Semantic versioning</strong> encodes compatibility in the number <code>MAJOR.MINOR.PATCH</code>. Increment PATCH for backwards-compatible bug fixes, MINOR for backwards-compatible new features, and MAJOR for breaking changes. It is a promise to your consumers about what upgrading will cost them, and it is what makes version ranges in package managers meaningful.</p>
+    <p>For deployable images, tag every build with the <strong>commit SHA</strong>, which is unique and traceable, and add a semantic version tag when you cut a release. Deploy by SHA tag or digest. Treat <code>latest</code> as a convenience for humans, never as something a production manifest refers to.</p>
+    <div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>SHA="$(git rev-parse --short HEAD)"
+IMAGE=ghcr.io/acme/orders-api
+
+docker build -t "$IMAGE:$SHA" .
+docker push "$IMAGE:$SHA"
+
+# on a release, add the version tag to the image that was already built and tested
+docker tag "$IMAGE:$SHA" "$IMAGE:1.4.2"
+docker push "$IMAGE:1.4.2"</code></pre></div>
+    <p>Note that the release step tags an existing image; it does not rebuild. Registries also need housekeeping. Set a <strong>retention policy</strong> that deletes old untagged and per-commit images while keeping released versions, or storage costs grow without limit.</p></section>
+  <section id="pinning-for-reproducible-builds"><h2>Pinning for reproducible builds</h2>
+    <p>A build is <strong>reproducible</strong> when the same commit produces the same artifact next month. Version ranges work against that: a manifest that allows <code>^4.17.0</code> installs whatever matching version is newest on build day. A <strong>lockfile</strong> records the exact version, and usually a hash, of every direct and <strong>transitive</strong> dependency, which is a dependency of a dependency and makes up most of your tree.</p>
+    <div class="table-wrap"><table><thead><tr><th>Ecosystem</th><th>Lockfile</th><th>Install exactly what it says</th></tr></thead><tbody><tr><td>npm</td><td><code>package-lock.json</code></td><td><code>npm ci</code></td></tr><tr><td>Python (pip-tools)</td><td><code>requirements.txt</code> with hashes</td><td><code>pip install --require-hashes -r requirements.txt</code></td></tr><tr><td>Go</td><td><code>go.sum</code></td><td><code>go mod download</code> / <code>go mod verify</code></td></tr><tr><td>Rust</td><td><code>Cargo.lock</code></td><td><code>cargo build --locked</code></td></tr></tbody></table></div>
+    <p>Commit the lockfile, and make CI use the strict install command so that a drifted lockfile fails the build instead of being silently updated. Apply the same thinking to base images: <code>FROM python:3.12-slim</code> moves as patches are released, while a digest pin does not.</p>
+    <div class="code"><div class="code-head"><span>dockerfile</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># tag for humans, digest for the machine
+FROM python:3.12-slim@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef</code></pre></div>
+    <p>Pinning has a cost: pinned things do not update themselves, including for security fixes. The answer is not to stop pinning but to <strong>automate updates</strong>. Tools such as Dependabot and Renovate open pull requests that bump lockfiles and digests, and your pipeline tests each one. You get reproducibility and freshness, with every change reviewed and revertable.</p></section>
+  <section id="scanning-for-known-vulnerabilities"><h2>Scanning for known vulnerabilities</h2>
+    <p>A <strong>vulnerability scanner</strong> lists the packages in an image or lockfile and matches them against databases of published vulnerabilities, identified by <strong>CVE</strong> numbers. Open-source scanners include Trivy and Grype; registries and Git hosts often have one built in. Run a scan in the pipeline on every build, and re-scan what is already deployed on a schedule, because new CVEs are published against old images every day.</p>
+    <div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>trivy image ghcr.io/acme/orders-api:1.4.2             # OS packages and language deps
+trivy image --severity HIGH,CRITICAL --ignore-unfixed \
+  --exit-code 1 ghcr.io/acme/orders-api:1.4.2        # fail the pipeline on serious, fixable issues
+trivy fs .                                            # scan the repo's lockfiles
+trivy config .                                        # misconfigurations in Dockerfiles, IaC</code></pre></div>
+    <p>The first scan of a typical image returns a discouraging list. Triage it with three questions.</p>
+    <ol><li><strong>Is there a fix?</strong> If a patched version exists, upgrading is usually cheap. <code>--ignore-unfixed</code> hides findings you cannot act on yet.</li><li><strong>Is it reachable?</strong> A vulnerable library function your code never calls, in a package that is only present because the base image is large, is a lower priority than a flaw in your request-parsing path.</li><li><strong>Can you remove it entirely?</strong> Moving to a slim or distroless base deletes whole categories of findings, which is the security payoff of the multi-stage builds from the Docker module.</li></ol>
+    <div class="callout callout-warning"><strong>Watch out</strong><p>Gate on a threshold you will actually enforce, such as fixable HIGH and CRITICAL findings. A gate that fails every build gets disabled within a week. Record accepted risks in an ignore file with a reason and an expiry date, reviewed like code.</p></div></section>
+  <section id="sboms-signing-and-provenance"><h2>SBOMs, signing and provenance</h2>
+    <p>A <strong>software bill of materials</strong> (SBOM) is a machine-readable inventory of every component in an artifact, with versions and licences. The two common formats are <strong>SPDX</strong> and <strong>CycloneDX</strong>. Its value shows on the day a major vulnerability is announced: instead of rebuilding and scanning everything, you query the SBOMs you stored and know within minutes which services contain the affected library.</p>
+    <div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>syft ghcr.io/acme/orders-api:1.4.2 -o spdx-json &gt; sbom.spdx.json
+trivy image --format cyclonedx --output sbom.cdx.json ghcr.io/acme/orders-api:1.4.2
+
+grype sbom:./sbom.spdx.json          # scan the inventory later, without the image</code></pre></div>
+    <p>Scanning tells you what is inside. <strong>Signing</strong> tells you where it came from. The pipeline signs the image digest after building it, and the deploy target verifies the signature before running anything, so an image pushed to your registry by someone other than your pipeline is rejected. Sigstore's <code>cosign</code> is the common open-source tool, and it supports keyless signing tied to the pipeline's OIDC identity.</p>
+    <div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>cosign sign ghcr.io/acme/orders-api@sha256:9b2c0f5e...      # sign the digest, not a tag
+cosign verify ghcr.io/acme/orders-api@sha256:9b2c0f5e... \
+  --certificate-identity-regexp 'https://github.com/acme/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com</code></pre></div>
+    <figure class="diagram" id="fig-supply-chain"><div class="diagram-scroll"><svg viewBox="0 0 740 356" role="img" aria-label="Source with a lockfile and pinned base image flows into a CI build. The built image is scanned for vulnerabilities and an SBOM is generated and stored. The image digest is signed with cosign and pushed to the registry. At deploy time the cluster verifies the signature and pulls the image by digest." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="supply-chain-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="supply-chain-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="supply-chain-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="supply-chain-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="supply-chain-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><polyline points="171.0,70.0 201.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#supply-chain-arrow-default)"/><polyline points="341.0,70.0 371.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#supply-chain-arrow-default)"/><rect x="335.8" y="24.0" width="40.5" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">image</text><polyline points="511.0,70.0 541.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#supply-chain-arrow-default)"/><rect x="487.4" y="24.0" width="77.1" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">gate passed</text><polyline points="441.0,98.0 441.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#supply-chain-arrow-default)"/><rect x="385.3" y="116.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="434.0" y="124.0" text-anchor="end" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">records</text><polyline points="611.0,98.0 611.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#supply-chain-arrow-default)"/><rect x="614.0" y="116.0" width="107.6" height="16" rx="4" class="dg-label-bg"/><text x="618.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">push + signature</text><polyline points="611.0,206.0 611.0,258.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#supply-chain-arrow-default)"/><rect x="614.0" y="224.0" width="34.4" height="16" rx="4" class="dg-label-bg"/><text x="618.0" y="232.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">pull</text><polyline points="541.0,286.0 511.0,286.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#supply-chain-arrow-default)"/><rect x="475.2" y="240.0" width="101.5" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="248.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">signature valid</text><polyline points="441.0,206.0 441.0,258.0" fill="none" style="stroke:rgba(148,163,184,0.55)" stroke-width="1.6" stroke-dasharray="6 5"/><rect x="318.2" y="224.0" width="119.8" height="16" rx="4" class="dg-label-bg"/><text x="434.0" y="232.0" text-anchor="end" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">&quot;are we affected?&quot;</text><rect x="31" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Source</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">lockfile, pinned base</text><rect x="201" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">CI build</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">reproducible</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Scan + SBOM</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">trivy, syft</text><rect x="541" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Sign digest</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">cosign, OIDC</text><path d="M371,157.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M371,157.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">SBOM store</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">per release</text><path d="M541,157.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M541,157.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="611.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Registry</text><text x="611.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">image@sha256:...</text><rect x="541" y="258.0" width="140" height="56" rx="8" class="dg-node dg-ok"/><text x="611.0" y="279.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#6ee7b7">Verify</text><text x="611.0" y="297.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">admission policy</text><rect x="371" y="258.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="441.0" y="279.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Cluster</text><text x="441.0" y="297.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">runs by digest</text></svg></div><figcaption>A defended supply chain: pinned dependencies go into a reproducible build, the artifact is scanned and its SBOM recorded, the digest is signed, and the deploy target verifies the signature before it will run anything.</figcaption></figure>
+    <p><strong>Provenance</strong> goes one step further: a signed statement of how the artifact was built, from which commit, by which workflow. The SLSA framework describes increasing levels of this assurance. You do not need all of it on day one. A sensible order is: lockfiles and pinned bases, scanning in CI, SBOMs stored per release, then signing with verification at deploy.</p></section>
+  <section id="common-supply-chain-attacks"><h2>Common supply-chain attacks</h2>
+    <ul><li><strong>Typosquatting</strong>: a malicious package named almost like a popular one, waiting for a typing mistake in an install command.</li><li><strong>Dependency confusion</strong>: your internal package name is registered on the public registry with a higher version, and the package manager prefers it. Defend with scoped or namespaced packages and by configuring which registry serves which names.</li><li><strong>Compromised maintainer or build</strong>: a legitimate package publishes a malicious release. Lockfiles with hashes stop it arriving silently; reviewed update pull requests give you a chance to notice.</li><li><strong>Mutable references</strong>: a tag or an unpinned GitHub Action changes underneath you. Pin images by digest and third-party actions by commit SHA.</li></ul>
+    <p>Pulling everything through a <strong>pull-through cache</strong> or private proxy registry gives you one place to enforce these rules, and it also protects your builds from upstream outages and rate limits.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Make one image traceable, reproducible and inspected</h2>
+    <ol><li>Extend the pipeline from the CI/CD module so every image is tagged with the short commit SHA. After a run, find the image's digest with <code>docker buildx imagetools inspect</code>.</li><li>Pull the same image once by tag and once by digest. Then push a different build to the same tag and show that the tag now resolves to a new digest while the old digest still pulls the old image.</li><li>Make sure the project has a committed lockfile and that CI uses the strict install command (<code>npm ci</code>, <code>pip install --require-hashes</code>, or <code>cargo build --locked</code>). Break the lockfile on purpose and watch CI fail.</li><li>Install Trivy and scan your image. Count the findings, switch the Dockerfile to a slim or distroless base, rebuild, and compare.</li><li>Add a pipeline step that runs Trivy with <code>--severity HIGH,CRITICAL --ignore-unfixed --exit-code 1</code>, and an ignore file containing one documented, dated exception.</li><li>Generate an SBOM with Syft or Trivy, store it as a build artifact, and use <code>jq</code> to list every package name and version it contains.</li><li>Enable Dependabot or Renovate on the repository and merge the first update pull request it opens once CI is green.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Artifacts &amp; supply chain — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Tags are mutable labels; digests are immutable content hashes. Deploy what you tested by SHA tag or digest, never <code>latest</code>.</li><li>Semantic versioning: MAJOR breaks, MINOR adds, PATCH fixes.</li><li>Promote by re-tagging the built image. Never rebuild for a release.</li><li>Commit lockfiles and use strict installs in CI. Most of your code is transitive dependencies.</li><li>Pin, then automate updates with a bot, so you get both reproducibility and patches.</li><li>Scan on every build and re-scan deployed images on a schedule. Gate on fixable HIGH and CRITICAL.</li><li>Keep an SBOM per release so you can answer "are we affected?" in minutes.</li><li>Sign digests in the pipeline and verify at deploy to prove where an image came from.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>References and versions</h3><table><tbody><tr><td><code>REGISTRY/REPO:TAG</code></td><td>Mutable, human-friendly reference</td></tr><tr><td><code>REGISTRY/REPO@sha256:DIGEST</code></td><td>Immutable, content-addressed reference</td></tr><tr><td><code>MAJOR.MINOR.PATCH</code></td><td>Breaking . feature . fix</td></tr><tr><td><code>^1.4.2</code></td><td>npm range: any 1.x.y at or above 1.4.2</td></tr><tr><td><code>~1.4.2</code></td><td>npm range: any 1.4.x at or above 1.4.2</td></tr><tr><td><code>git rev-parse --short HEAD</code></td><td>Short commit SHA for an image tag</td></tr></tbody></table></div><div class="cheat-group"><h3>Registry commands</h3><table><tbody><tr><td><code>docker login REGISTRY</code></td><td>Authenticate (use <code>--password-stdin</code> in scripts)</td></tr><tr><td><code>docker tag SRC:TAG REGISTRY/REPO:TAG</code></td><td>Add another name to an existing image</td></tr><tr><td><code>docker push REGISTRY/REPO:TAG</code></td><td>Upload</td></tr><tr><td><code>docker pull REGISTRY/REPO@sha256:DIGEST</code></td><td>Pull an exact image</td></tr><tr><td><code>docker buildx imagetools inspect REF</code></td><td>Show manifest, digest and platforms</td></tr></tbody></table></div><div class="cheat-group"><h3>Strict, reproducible installs</h3><table><tbody><tr><td><code>npm ci</code></td><td>Install exactly the lockfile; fail if it is out of sync</td></tr><tr><td><code>pip-compile --generate-hashes</code></td><td>Produce a fully pinned, hashed requirements file (pip-tools)</td></tr><tr><td><code>pip install --require-hashes -r requirements.txt</code></td><td>Refuse any package whose hash does not match</td></tr><tr><td><code>go mod verify</code></td><td>Check downloaded modules against <code>go.sum</code></td></tr><tr><td><code>cargo build --locked</code></td><td>Fail if <code>Cargo.lock</code> would need to change</td></tr><tr><td><code>FROM image:tag@sha256:DIGEST</code></td><td>Pin a base image</td></tr></tbody></table></div><div class="cheat-group"><h3>Scan, inventory, sign</h3><table><tbody><tr><td><code>trivy image REF</code></td><td>Vulnerabilities in OS and language packages</td></tr><tr><td><code>trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 REF</code></td><td>Pipeline gate</td></tr><tr><td><code>trivy fs . / trivy config .</code></td><td>Scan lockfiles / Dockerfile and IaC misconfigurations</td></tr><tr><td><code>syft REF -o spdx-json</code></td><td>Generate an SBOM</td></tr><tr><td><code>grype sbom:./sbom.spdx.json</code></td><td>Scan a stored SBOM</td></tr><tr><td><code>cosign sign REPO@sha256:DIGEST</code></td><td>Sign an image digest</td></tr><tr><td><code>cosign verify REPO@sha256:DIGEST</code></td><td>Verify a signature before deploying</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Deploying <code>latest</code>, then being unable to say which version is running or to roll back to the previous one.</li><li>Leaving the lockfile out of Git, so every build resolves a different dependency tree.</li><li>Pinning everything and never updating, which freezes known vulnerabilities in place.</li><li>Setting a scan gate so strict that it is switched off instead of tuned.</li><li>Scanning only at build time, while images that have run for months accumulate new CVEs unnoticed.</li><li>Signing a tag instead of a digest, which says nothing once the tag moves.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "A Kubernetes manifest references `orders-api:1.4.2`. Overnight, with no deploy, new pods start behaving differently from old ones. What is the most likely explanation?", "options": ["Someone pushed a different image to the same mutable tag", "The image digest changed by itself as the registry aged", "Kubernetes rebuilt the image from source when pods restarted", "Semantic versioning automatically upgraded it to 1.4.3"], "answer": 0, "explain": "Tags can be re-pointed. New pods pulled the new content while old pods kept the old. Deploying by digest, or enabling tag immutability, prevents this."}, {"q": "A library moves from 2.7.4 to 3.0.0. Under semantic versioning, what should you assume?", "options": ["It contains breaking changes, so upgrading may need code changes", "It contains only bug fixes and is always safe to take", "It adds features but remains backwards compatible", "It is a pre-release that should not be used in production"], "answer": 0, "explain": "A MAJOR increment signals incompatible API changes. MINOR is for compatible features and PATCH for compatible fixes."}, {"q": "Why should CI run `npm ci` instead of `npm install`?", "options": ["It installs exactly the locked versions and fails if the lockfile is out of sync", "It skips development dependencies, which makes the build faster", "It upgrades every dependency to the newest compatible version", "It checks each package for vulnerabilities before installing it"], "answer": 0, "explain": "`npm ci` treats the lockfile as the source of truth, giving reproducible installs. `npm install` may resolve ranges afresh and rewrite the lockfile."}, {"q": "A critical vulnerability is announced in a widely used logging library. Which asset lets you find your affected services fastest?", "options": ["Stored SBOMs for each released artifact, which you can search by package", "The list of image tags currently present in your registry", "The Dockerfiles, since they list every library in the image", "The signatures on your images, which record their contents"], "answer": 0, "explain": "An SBOM inventories every component, including transitive ones a Dockerfile never mentions. Signatures prove origin, not contents."}, {"q": "Your first image scan reports 140 findings. Which response is most effective?", "options": ["Move to a minimal base image, then fix the fixable HIGH and CRITICAL findings", "Add every finding to the ignore file so that the pipeline passes", "Block all deployments until the count reaches zero", "Disable scanning until the team has time to review the list"], "answer": 0, "explain": "Most findings come from packages you do not need, and a smaller base removes them wholesale. Then act on what is serious and fixable. Blanket ignoring or zero-tolerance gates both end with the scanner being useless."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="devops-12factor.html"><span>← Previous</span><strong>Twelve-Factor applications</strong></a>
+    <a class="pager-up" href="../education.html#devops">All DevOps modules</a>
+    <a class="pager-link pager-next" href="devops-k8s.html"><span>Next →</span><strong>Kubernetes core</strong></a>
+  </nav>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="mailto:support@thavionai.com?subject=Education%20feedback%3A%20devops-artifacts">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

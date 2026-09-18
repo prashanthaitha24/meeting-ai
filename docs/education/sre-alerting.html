@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Alerting on symptoms — Site Reliability | ThavionAI Education</title>
+  <meta name="description" content="Multi-window burn-rate alerts, actionable pages, and killing alert fatigue." />
+  <meta property="og:title" content="Alerting on symptoms — ThavionAI Education" />
+  <meta property="og:description" content="Multi-window burn-rate alerts, actionable pages, and killing alert fatigue." />
+  <meta property="og:type" content="article" />
+  <link rel="canonical" href="https://thavionai.com/education/sre-alerting.html" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-sre" data-module="sre-alerting">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><div class="nav-logo-icon">T</div>ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html#features">Features</a>
+    <a href="../index.html#products">Products</a>
+    <a href="../education.html" class="active">Education</a>
+    <a href="../index.html#about">About</a>
+    <a href="../index.html#pricing">Pricing</a>
+    <a href="../index.html#contact" class="nav-cta">Contact Us</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#sre">Site Reliability</a> › Stage 2: Observability</div>
+    <h1>Alerting on symptoms</h1>
+    <p class="lede">Multi-window burn-rate alerts, actionable pages, and killing alert fatigue.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 8 of 16</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">Alerting is where monitoring meets a human being, usually at the worst possible time. A team that pages on every CPU spike learns to ignore its pager, and then misses the one page that mattered. A team that pages only when users are affected, with enough context to act, sleeps better and responds faster. This module shows you how to alert on symptoms instead of causes, how to build the multi-window burn-rate alerts that SLO-based teams rely on, and how to cut an inherited pile of noisy alerts down to the few that deserve to wake someone.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Distinguish symptom-based from cause-based alerts, and decide what deserves a page, a ticket or nothing</li><li>Explain why simple threshold alerts on error rate perform badly, in terms of precision, recall, detection time and reset time</li><li>Build multi-window, multi-burn-rate alerts from an SLO, and verify the arithmetic behind the thresholds</li><li>Write Prometheus alerting rules and route them with Alertmanager grouping, inhibition and silences</li><li>Run a regular alert review that reduces noise and keeps every page actionable</li></ul>
+    </div>
+    <section id="symptoms-not-causes"><h2>Symptoms, not causes</h2>
+    <p>A <strong>symptom</strong> is something users experience: requests failing, pages loading slowly, data going stale. A <strong>cause</strong> is something inside the system that may or may not lead to a symptom: high CPU, a restarted pod, a full connection pool, a failed node.</p>
+    <p>Cause-based alerts fail in both directions. They fire when nothing is wrong for users: a pod restarts and Kubernetes replaces it, or CPU sits at 90% on a batch host that is meant to be busy. And they miss real problems, because you can never list every possible cause in advance. The failure that hurts you is, almost by definition, the one you did not think to write an alert for. A symptom-based alert on the user's experience catches it anyway, whatever lies behind it.</p>
+    <div class="table-wrap"><table><thead><tr><th>Cause-based (avoid as a page)</th><th>Symptom-based (page on this)</th></tr></thead><tbody><tr><td>CPU above 90% for 5 minutes</td><td>Checkout error budget is burning 14 times too fast</td></tr><tr><td>A pod restarted</td><td>Fewer than half the expected requests are being served</td></tr><tr><td>Database connections above 80%</td><td>99th percentile latency has breached the SLO threshold for 10% of requests</td></tr><tr><td>Disk at 85%</td><td>The nightly export has not completed by its deadline</td></tr></tbody></table></div>
+    <p>Causes still matter, in two places. They belong on <strong>dashboards</strong>, where they help the person who was paged find out why. And a few causes deserve <strong>tickets</strong>, not pages, when they predict a future symptom with time to spare: a disk that will fill in four days, or a certificate that expires in two weeks. Nobody needs to be woken for those, but somebody must deal with them during working hours.</p>
+    <p>Every notification should fall into one of three classes, and the test for the first is strict.</p>
+    <div class="table-wrap"><table><thead><tr><th>Class</th><th>Test</th><th>Delivery</th></tr></thead><tbody><tr><td><strong>Page</strong></td><td>Users are affected now, or will be very soon, and a human must act immediately</td><td>Pager, phone call; wakes people up</td></tr><tr><td><strong>Ticket</strong></td><td>A human must act, but it can wait until working hours</td><td>Ticket queue, reviewed daily</td></tr><tr><td><strong>Log / dashboard</strong></td><td>No action is needed; it is context for investigation</td><td>Nowhere. Not email, not a chat channel nobody reads</td></tr></tbody></table></div>
+    <div class="callout callout-warning"><strong>Watch out</strong><p>An alert that goes to an email folder or a muted chat channel is not an alert. It is noise that trains everyone to ignore notifications, and it gives a false sense of coverage. If nobody needs to act, delete it.</p></div></section>
+  <section id="why-simple-thresholds-disappoint"><h2>Why simple thresholds disappoint</h2>
+    <p>The Google SRE Workbook evaluates alerting strategies on four properties.</p>
+    <ul><li><strong>Precision</strong>: the share of alerts that corresponded to a real, significant event. Low precision means false alarms.</li><li><strong>Recall</strong>: the share of significant events that produced an alert. Low recall means missed incidents.</li><li><strong>Detection time</strong>: how long a problem lasts before the alert fires.</li><li><strong>Reset time</strong>: how long the alert keeps firing after the problem is fixed.</li></ul>
+    <p>Take an SLO of 99.9%, so the allowed error rate is 0.1%. The obvious alert is "error rate above 0.1% over the last 10 minutes". It has good recall and fast detection, but terrible precision. A ten-minute blip at 0.15% errors fires the pager, yet it consumes only about 0.035% of a thirty-day budget. At that sensitivity you could be paged over a hundred times a month and still meet the SLO comfortably.</p>
+    <p>Lengthen the window to 36 hours and precision improves, but now a total outage takes far too long to detect, and the alert keeps firing for a day and a half after the fix. Adding a <code>for: 1h</code> clause fails differently: the condition has to hold continuously, so an outage that flaps resets the timer each time and never alerts, and a complete outage still goes unreported for a full hour.</p>
+    <p>The root of the problem is that error rate alone is the wrong quantity. What you care about is <strong>how much error budget is being consumed, and how fast</strong>. A high error rate for two minutes and a slightly raised rate for three days can do the same damage to the SLO, and they call for different urgency. That is what burn rate captures.</p></section>
+  <section id="burn-rate-alerts"><h2>Burn-rate alerts</h2>
+    <p>From the SLO module: <strong>burn rate</strong> is how fast you consume the budget relative to the rate that would spend it exactly over the SLO period. At burn rate 1 the budget lasts the whole period. At burn rate 10 it is gone in a tenth of it.</p>
+    <div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>burn rate            = observed error rate / (1 - SLO)
+budget consumed      = burn rate x alert window / SLO period
+burn rate threshold  = budget share you are willing to lose x SLO period / alert window
+
+For a 30-day SLO period (720 hours):
+
+  lose 2% of the budget in 1 hour    -&gt;  0.02 x 720 / 1   = 14.4
+  lose 5% of the budget in 6 hours   -&gt;  0.05 x 720 / 6   = 6
+  lose 10% of the budget in 3 days   -&gt;  0.10 x 720 / 72  = 1
+
+With SLO 99.9% (allowed error rate 0.1%), the error-rate thresholds are:
+  14.4 x 0.1% = 1.44%        6 x 0.1% = 0.6%        1 x 0.1% = 0.1%</code></pre></div>
+    <p>That gives the recommended starting set: two <strong>pages</strong> for fast burns and one <strong>ticket</strong> for a slow burn. The fast-burn alerts catch outages, and the slow one catches the quiet, persistent degradation that would otherwise consume the budget without anyone noticing.</p>
+    <p>One problem remains. An alert over a one-hour window keeps firing for up to an hour after the errors stop, which is a poor reset time, and it invites people to distrust the alert. The fix is a <strong>second, short window</strong>, conventionally one twelfth of the long one, evaluated against the same threshold. The alert fires only when <strong>both</strong> exceed it.</p>
+    <div class="table-wrap"><table><thead><tr><th>Severity</th><th>Windows (long + short)</th><th>Burn rate</th><th>Budget consumed</th></tr></thead><tbody><tr><td>Page</td><td>1 hour + 5 minutes</td><td>14.4</td><td>2%</td></tr><tr><td>Page</td><td>6 hours + 30 minutes</td><td>6</td><td>5%</td></tr><tr><td>Ticket</td><td>3 days + 6 hours</td><td>1</td><td>10%</td></tr></tbody></table></div>
+    <p>The long window establishes that the burn is significant, and the short window confirms that it is <strong>still happening</strong>. Once the problem is fixed, the five-minute rate drops within minutes and the alert clears, even though the one-hour average is still high. This is the <strong>multi-window, multi-burn-rate</strong> alert, and it scores well on all four properties at once.</p>
+    <div class="callout callout-note"><strong>Note</strong><p>These numbers are a starting point for a 30-day period, not a law. If your period is 28 days, recompute the thresholds with 672 hours. If a service has very little traffic, a handful of failed requests can produce a huge burn rate; low-traffic services need longer windows, synthetic traffic to raise the volume, or a minimum request count in the alert condition.</p></div></section>
+  <section id="implementing-it-in-prometheus"><h2>Implementing it in Prometheus</h2>
+    <p>First record the error ratio over each window you need, so that the alert expressions stay short and the dashboard uses the same definition.</p>
+    <div class="code"><div class="code-cap">rules/checkout-slo-recording.yml</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>groups:
+  - name: checkout-slo-recording
+    rules:
+      - record: job:slo_errors_per_request:ratio_rate5m
+        expr: |
+          sum by (job) (rate(http_requests_total{job="checkout", code=~"5.."}[5m]))
+          /
+          sum by (job) (rate(http_requests_total{job="checkout"}[5m]))
+      - record: job:slo_errors_per_request:ratio_rate1h
+        expr: |
+          sum by (job) (rate(http_requests_total{job="checkout", code=~"5.."}[1h]))
+          /
+          sum by (job) (rate(http_requests_total{job="checkout"}[1h]))
+      # ...repeat for 30m, 6h and 3d</code></pre></div>
+    <div class="code"><div class="code-cap">rules/checkout-slo-alerts.yml</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>groups:
+  - name: checkout-slo-alerts
+    rules:
+      - alert: CheckoutErrorBudgetFastBurn
+        expr: |
+          (
+            job:slo_errors_per_request:ratio_rate1h{job="checkout"} &gt; (14.4 * 0.001)
+            and
+            job:slo_errors_per_request:ratio_rate5m{job="checkout"} &gt; (14.4 * 0.001)
+          )
+          or
+          (
+            job:slo_errors_per_request:ratio_rate6h{job="checkout"} &gt; (6 * 0.001)
+            and
+            job:slo_errors_per_request:ratio_rate30m{job="checkout"} &gt; (6 * 0.001)
+          )
+        labels:
+          severity: page
+          team: checkout
+        annotations:
+          summary: "Checkout is burning its error budget fast"
+          description: "Error ratio over 1h is {{ $value | humanizePercentage }}. SLO is 99.9%."
+          runbook_url: "https://runbooks.example.com/checkout/error-budget-burn"
+          dashboard: "https://grafana.example.com/d/checkout"
+
+      - alert: CheckoutErrorBudgetSlowBurn
+        expr: |
+          job:slo_errors_per_request:ratio_rate3d{job="checkout"} &gt; (1 * 0.001)
+          and
+          job:slo_errors_per_request:ratio_rate6h{job="checkout"} &gt; (1 * 0.001)
+        labels:
+          severity: ticket
+          team: checkout
+        annotations:
+          summary: "Checkout is slowly exhausting its error budget"</code></pre></div>
+    <ul><li><code>0.001</code> is <code>1 - SLO</code> for 99.9%. Keeping it visible in the expression documents where the threshold came from.</li><li><strong>Labels</strong> drive routing: <code>severity</code> and <code>team</code> decide who is notified and how. <strong>Annotations</strong> carry information for the human: what is happening, how bad it is, and links.</li><li>Every page needs a <strong>runbook link</strong> and a <strong>dashboard link</strong>. The person paged at three in the morning should be one click from what to do and one click from the picture.</li><li>The <code>for:</code> clause is unnecessary here, because the long window already provides the smoothing. Where you do use <code>for:</code>, remember that the condition must hold continuously for that whole time.</li><li>Unit-test the rules with <code>promtool test rules</code>, feeding in a synthetic series and asserting which alerts fire. Open-source generators such as Sloth and Pyrra produce the whole rule set from a short SLO definition.</li></ul></section>
+  <section id="routing-grouping-and-silencing"><h2>Routing, grouping and silencing</h2>
+    <p>Prometheus decides <strong>whether</strong> an alert is firing. <strong>Alertmanager</strong> decides <strong>who hears about it, and how</strong>. It deduplicates, groups related alerts into one notification, routes by label, suppresses alerts that are consequences of others, and honours silences.</p>
+    <figure class="diagram" id="fig-alert-routing"><div class="diagram-scroll"><svg viewBox="0 0 910 248" role="img" aria-label="Recording rules feed alerting rules inside Prometheus. Firing alerts go to Alertmanager, which deduplicates and groups by alertname and team, applies inhibition and silences, and routes by severity label: page alerts go to the on-call pager, ticket alerts go to the team&#x27;s queue." style="width:100%;max-width:910px;min-width:540px;height:auto;display:block"><defs><marker id="alert-routing-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="alert-routing-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="alert-routing-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="alert-routing-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="alert-routing-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><rect x="20" y="19" width="332" height="102" rx="10" class="dg-group"/><text x="30" y="114" font-size="10" font-weight="700" letter-spacing="1" class="dg-group-label">PROMETHEUS: IS IT FIRING?</text><rect x="360" y="19" width="502" height="210" rx="10" class="dg-group"/><text x="370" y="222" font-size="10" font-weight="700" letter-spacing="1" class="dg-group-label">ALERTMANAGER: WHO HEARS ABOUT IT, AND HOW?</text><polyline points="171.0,70.0 201.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#alert-routing-arrow-default)"/><rect x="147.4" y="24.0" width="77.1" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">precomputed</text><polyline points="341.0,70.0 371.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#alert-routing-arrow-default)"/><rect x="311.4" y="24.0" width="89.3" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">firing alerts</text><polyline points="511.0,70.0 541.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#alert-routing-arrow-default)"/><rect x="472.2" y="24.0" width="107.6" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">one notification</text><polyline points="611.0,98.0 611.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#alert-routing-arrow-default)"/><rect x="614.0" y="116.0" width="64.9" height="16" rx="4" class="dg-label-bg"/><text x="618.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">not muted</text><polyline points="681.0,178.0 711.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#alert-routing-arrow-default)"/><rect x="636.1" y="132.0" width="119.8" height="16" rx="4" class="dg-label-bg"/><text x="696.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">page: wake someone</text><polyline points="541.0,178.0 511.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#alert-routing-arrow-default)"/><rect x="460.0" y="132.0" width="132.0" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">ticket: next workday</text><rect x="31" y="42.0" width="140" height="56" rx="8" class="dg-node dg-muted"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text2)">Recording rules</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">ratio per window</text><rect x="201" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Alerting rules</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">burn-rate exprs</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Group + dedupe</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">alertname, team</text><rect x="541" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Inhibit, silence</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">mute consequences</text><rect x="541" y="150.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="611.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Route</text><text x="611.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">by severity label</text><rect x="371" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Ticket queue</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">severity=ticket</text><rect x="711" y="150.0" width="140" height="56" rx="28.0" class="dg-node dg-actor"/><text x="781.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">On-call pager</text><text x="781.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">severity=page</text></svg></div><figcaption>Prometheus decides whether an alert is firing; Alertmanager decides who hears about it and how, grouping related alerts, muting the consequences of a bigger failure, and routing pages and tickets to different receivers.</figcaption></figure>
+    <div class="code"><div class="code-cap">alertmanager.yml</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>route:
+  receiver: default-tickets
+  group_by: [alertname, team]
+  group_wait: 30s          # wait to collect related alerts before the first notification
+  group_interval: 5m       # wait before notifying about new alerts added to the group
+  repeat_interval: 4h      # re-notify if still firing
+  routes:
+    - matchers: ['severity="page"']
+      receiver: oncall-pager
+    - matchers: ['severity="ticket"']
+      receiver: default-tickets
+
+inhibit_rules:
+  - source_matchers: ['alertname="ClusterUnreachable"']
+    target_matchers: ['severity="page"']
+    equal: [cluster]
+
+receivers:
+  - name: oncall-pager
+    pagerduty_configs:
+      - routing_key_file: /etc/alertmanager/secrets/pagerduty-key
+  - name: default-tickets
+    webhook_configs:
+      - url: http://ticket-bridge:8080/alerts</code></pre></div>
+    <ul><li><strong>Grouping</strong> turns fifty alerts from one failing cluster into a single notification listing fifty instances, instead of fifty pages.</li><li><strong>Inhibition</strong> mutes alerts that are downstream consequences. If the whole cluster is unreachable, there is no value in also being told about every service inside it.</li><li><strong>Silences</strong> mute matching alerts for a fixed period, for planned maintenance. Always give them an expiry, an author and a comment, and never use one to hide a noisy alert indefinitely. Fix or delete the alert instead.</li><li><strong>Escalation</strong>, acknowledgement and schedules live in the paging tool. If the primary does not acknowledge within a few minutes, the page goes to the secondary.</li></ul>
+    <div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>amtool check-config alertmanager.yml
+amtool alert query severity=page
+amtool silence add alertname=CheckoutErrorBudgetFastBurn \
+  --duration 2h --author jane --comment "planned database failover, change CHG-1042"
+amtool silence query
+promtool check rules rules/checkout-slo-alerts.yml</code></pre></div>
+    <div class="callout callout-tip"><strong>Tip</strong><p>Who watches the watcher? Add one alert that always fires, often called a dead man's switch, and route it to an external heartbeat service. If the heartbeats stop arriving, that service pages you, which covers the case where Prometheus, Alertmanager or the network path between them has failed silently.</p></div></section>
+  <section id="killing-alert-fatigue"><h2>Killing alert fatigue</h2>
+    <p><strong>Alert fatigue</strong> sets in when people are paged so often, or for so little, that they stop responding with care. It is a safety problem, not merely an annoyance: fatigued responders acknowledge and ignore, and the one real page is lost among the false ones. The Google SRE book suggests that an on-call shift should see no more than about two incidents, which leaves time to handle each one properly and follow up afterwards.</p>
+    <p>Hold a short <strong>alert review</strong> every week or two. Go through every page since the last review and ask the same questions of each.</p>
+    <ol><li>Was it <strong>actionable</strong>? Did the responder do something that mattered, beyond acknowledging it?</li><li>Was it <strong>urgent</strong>? Could it have waited until morning as a ticket?</li><li>Did it reflect <strong>user impact</strong>, or an internal condition that users never noticed?</li><li>Was it a <strong>duplicate</strong> of another alert for the same underlying problem?</li><li>Did the alert carry enough <strong>context</strong>, with a runbook that helped?</li></ol>
+    <p>Then act on the answers. Delete alerts that were never actionable. Demote the non-urgent to tickets. Replace groups of cause-based alerts with one SLO burn-rate alert. Fix the underlying problem for alerts that fire repeatedly with the same manual remedy, because that is toil. Rewrite alerts that lacked context. Track pages per shift, the share outside working hours, and the share that was actionable, and expect all three to improve.</p>
+    <p>Deleting an alert feels risky, which is why noisy alerts survive. The symptom-based SLO alerts are your safety net: if they are in place and trusted, a removed cause-based alert cannot hide a user-facing problem. It can only remove a warning that you were not acting on anyway.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Replace noisy alerts with burn-rate alerts</h2>
+    <ol><li>List every alert that currently pages for one service. Mark each as symptom or cause, and as actionable or not, based on the last time it fired.</li><li>Using the service's SLO, calculate the burn-rate thresholds for 2% in 1 hour, 5% in 6 hours and 10% in 3 days, for your own SLO period. Convert each to an error-rate threshold.</li><li>Write recording rules for the error ratio over 5m, 30m, 1h, 6h and 3d, then the two alerts from this module. Validate them with <code>promtool check rules</code>.</li><li>Inject errors into your test service at about 2% for ten minutes. Note when the fast-burn alert fires, then stop the errors and time how long it takes to clear. Explain the reset time using the short window.</li><li>Inject a low error rate, slightly above the allowed rate, for a longer period and confirm that only the ticket-level alert would catch it.</li><li>Configure Alertmanager with routes for <code>severity=page</code> and <code>severity=ticket</code>, grouping by <code>alertname</code> and <code>team</code>, and one inhibition rule. Check it with <code>amtool check-config</code>.</li><li>Add summary, description, runbook and dashboard annotations to each alert, and write the first version of the runbook the link points to.</li><li>Propose which of the original alerts to delete, demote or keep, and present the before and after page counts to your team.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Alerting on symptoms — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Page on symptoms users feel, not on internal causes. Causes go on dashboards, or become tickets if they predict trouble.</li><li>A page must be urgent, actionable and about user impact. Everything else is a ticket or nothing.</li><li>Judge alerts on precision, recall, detection time and reset time.</li><li>Burn rate = error rate / (1 - SLO). Threshold = budget share x SLO period / window.</li><li>Standard set for 30 days: 14.4 over 1h and 5m (page), 6 over 6h and 30m (page), 1 over 3d and 6h (ticket).</li><li>The short window, one twelfth of the long one, makes the alert clear quickly once the problem is fixed.</li><li>Labels route the alert; annotations inform the human. Every page links to a runbook and a dashboard.</li><li>Review every page regularly. Delete, demote, merge or fix. Aim for no more than about two incidents per shift.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Burn-rate arithmetic (30-day period = 720 h)</h3><table><tbody><tr><td><code>burn rate = error rate / (1 - SLO)</code></td><td>1 means the budget lasts exactly the period</td></tr><tr><td><code>budget consumed = burn rate x window / period</code></td><td>14.4 x 1 h / 720 h = 2%</td></tr><tr><td><code>threshold = budget share x period / window</code></td><td>0.05 x 720 / 6 = 6</td></tr><tr><td><code>14.4 -&gt; 1h + 5m</code></td><td>Page: 2% of budget in an hour</td></tr><tr><td><code>6 -&gt; 6h + 30m</code></td><td>Page: 5% of budget in six hours</td></tr><tr><td><code>1 -&gt; 3d + 6h</code></td><td>Ticket: 10% of budget in three days</td></tr><tr><td><code>error-rate threshold = burn rate x (1 - SLO)</code></td><td>14.4 x 0.1% = 1.44% for a 99.9% SLO</td></tr></tbody></table></div><div class="cheat-group"><h3>Alerting rule fields</h3><table><tbody><tr><td><code>alert: NAME</code></td><td>CamelCase name that states the condition</td></tr><tr><td><code>expr: PROMQL</code></td><td>Fires for every series the expression returns</td></tr><tr><td><code>for: 5m</code></td><td>Condition must hold continuously this long before firing</td></tr><tr><td><code>labels: { severity: page, team: X }</code></td><td>Used by Alertmanager for routing and grouping</td></tr><tr><td><code>annotations: { summary, description, runbook_url }</code></td><td>Human-readable context; templates allowed</td></tr><tr><td><code>{{ $value }} / {{ $labels.instance }}</code></td><td>Template variables in annotations</td></tr><tr><td><code>A and B / A or B / A unless B</code></td><td>Combine conditions on matching label sets</td></tr></tbody></table></div><div class="cheat-group"><h3>Alertmanager</h3><table><tbody><tr><td><code>group_by: [alertname, team]</code></td><td>Combine related alerts into one notification</td></tr><tr><td><code>group_wait / group_interval / repeat_interval</code></td><td>Initial wait / wait for group updates / re-notify period</td></tr><tr><td><code>routes: - matchers: ['severity="page"']</code></td><td>Send matching alerts to a specific receiver</td></tr><tr><td><code>inhibit_rules</code></td><td>Mute target alerts while a source alert is firing</td></tr><tr><td><code>amtool silence add MATCHER --duration 2h --comment TEXT</code></td><td>Mute temporarily, with a reason</td></tr><tr><td><code>amtool check-config FILE</code></td><td>Validate the configuration</td></tr></tbody></table></div><div class="cheat-group"><h3>Alert review questions</h3><table><tbody><tr><td><code>Actionable?</code></td><td>Did someone have to do something?</td></tr><tr><td><code>Urgent?</code></td><td>Could it have waited until morning?</td></tr><tr><td><code>User impact?</code></td><td>Did users notice, or would they have soon?</td></tr><tr><td><code>Duplicate?</code></td><td>Same root problem as another alert?</td></tr><tr><td><code>Context?</code></td><td>Did the runbook and links help?</td></tr><tr><td><code>Outcome</code></td><td>Delete, demote to ticket, merge, fix the cause, or improve the text</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Paging on CPU, memory or pod restarts instead of on what users experience.</li><li>Sending non-actionable alerts to email or chat, which trains everyone to ignore notifications.</li><li>Alerting when the error rate crosses the SLO threshold over a short window, which pages constantly for insignificant blips.</li><li>Relying on a long <code>for:</code> clause, which resets on every flap and delays detection of total outages.</li><li>Pages with no runbook or dashboard link, leaving the responder to start from nothing.</li><li>Silencing a noisy alert indefinitely instead of fixing or deleting it.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "Which of these is the best candidate for a page that wakes someone at night?", "options": ["The checkout error budget is burning at 14 times the sustainable rate", "CPU utilisation on a checkout pod has been above 90% for five minutes", "A checkout pod restarted and was replaced automatically by Kubernetes", "The checkout database disk will be full in approximately six days"], "answer": 0, "explain": "It describes significant, current user impact that needs a human now. High CPU and a replaced pod may affect nobody, and a disk filling in six days is a ticket for working hours."}, {"q": "For a 30-day SLO period, which burn rate corresponds to consuming 5% of the error budget in 6 hours?", "options": ["6", "14.4", "1", "30"], "answer": 0, "explain": "Burn rate is budget share times period divided by window: 0.05 times 720 hours, divided by 6 hours, equals 6."}, {"q": "In a multi-window burn-rate alert, what is the purpose of the short window, such as 5 minutes alongside 1 hour?", "options": ["It confirms the burn is still happening, so the alert clears soon after a fix", "It makes the alert fire much earlier than the long window would by itself", "It lowers the threshold so that small, brief error spikes are also caught", "It reduces the load on Prometheus, because less data has to be evaluated"], "answer": 0, "explain": "Both windows must exceed the threshold. After a fix, the short-window rate drops within minutes and the alert stops, while the long-window average would stay high for up to an hour."}, {"q": "A node fails, and the on-call engineer receives 40 separate pages, one for each service that was running on it. Which Alertmanager features address this?", "options": ["Group related alerts into one notification, and inhibit those caused by the node", "Lengthen the scrape interval, so that fewer alert rules are evaluated per minute", "Add a permanent silence that covers every one of the service-level alerts", "Raise repeat_interval, so that the same pages are re-sent much less often"], "answer": 0, "explain": "Grouping merges alerts that share labels into a single notification, and inhibition suppresses consequences while the underlying cause is firing. A permanent silence would hide real problems."}, {"q": "During an alert review, a team finds a page that fired 12 times last month. Each time, the on-call acknowledged it and took no action, and users were unaffected. What should they do?", "options": ["Delete it or demote it to a dashboard, as it is not actionable or user-facing", "Keep it, because removing any alert always reduces monitoring coverage", "Route it to a second engineer as well, so that the paging load is shared", "Raise its severity, so that the on-call engineers take it more seriously"], "answer": 0, "explain": "An alert that never leads to action only creates fatigue and makes real pages easier to miss. With symptom-based SLO alerts in place, removing it loses nothing."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="sre-otel.html"><span>← Previous</span><strong>Traces &amp; logs with OpenTelemetry</strong></a>
+    <a class="pager-up" href="../education.html#sre">All Site Reliability modules</a>
+    <a class="pager-link pager-next" href="sre-oncall.html"><span>Next →</span><strong>Sustainable on-call</strong></a>
+  </nav>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="mailto:support@thavionai.com?subject=Education%20feedback%3A%20sre-alerting">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

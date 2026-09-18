@@ -1,0 +1,240 @@
+{
+  "id": "sre-grafana",
+  "minutes": 30,
+  "intro": "Most dashboards are built once, in a quiet week, by someone adding every metric they can find. Then an incident happens, the on-call engineer opens forty panels of squiggly lines, and none of them answers the only question that matters: are users affected, and where is the problem? A good dashboard is a tool for making decisions under pressure. This module teaches a method for designing dashboards that answer questions, the Grafana features that make them work, and how to manage them as code.",
+  "objectives": [
+    "Design a dashboard around the questions an on-call engineer needs answered, from top to bottom",
+    "Apply the RED and USE methods to decide which panels a service dashboard needs",
+    "Choose the right visualisation, unit, axis and threshold for each kind of data",
+    "Use variables, annotations and links to make one dashboard serve many services and speed up investigation",
+    "Manage data sources and dashboards as code with provisioning and version control"
+  ],
+  "sections": [
+    {
+      "heading": "Start from questions, not metrics",
+      "blocks": [
+        { "type": "p", "text": "Before adding a panel, write down who will look at the dashboard and what they need to decide. For an on-call engineer who has just been paged, the questions come in a fixed order." },
+        { "type": "steps", "items": [
+          "**Is it really broken, and for whom?** Are we meeting the SLO right now? How much error budget is left?",
+          "**What are users experiencing?** Request rate, error rate and latency for the service as a whole.",
+          "**Where is it?** Which route, which instance, which zone, which version, which dependency?",
+          "**Why?** Is a resource saturated: CPU, memory, connection pool, queue, disk?",
+          "**What changed?** Was there a deploy, a config push, a traffic spike, an autoscaling event?"
+        ]},
+        { "type": "p", "text": "Lay the dashboard out in the same order, top to bottom. The top row should be readable in five seconds and answer question one, so that someone glancing at it knows whether to worry. Detail goes lower down, in rows that can be collapsed. Keep one question per panel and give the panel a title that states it, such as \"Error ratio by route\" and not \"Errors\"." },
+        { "type": "p", "text": "Build a small **hierarchy** instead of one giant board. An overview dashboard shows the health of every service on one screen, mostly as SLO status. Each service has its own dashboard, reached by a link from the overview. From there, links lead to the dashboards of its dependencies and resources: database, queue, nodes. An engineer should be able to move from \"something is wrong\" to \"it is the connection pool on the orders database\" in three or four clicks." },
+        { "type": "callout", "kind": "tip", "text": "The real test of a dashboard is an incident. After each one, ask which panel showed the problem first, which panels misled you, and what you had to query by hand. Add the missing panel and delete the ones nobody looked at." }
+      ]
+    },
+    {
+      "heading": "What goes on a service dashboard",
+      "blocks": [
+        { "type": "p", "text": "The **RED method** gives you the core of any dashboard for a request-driven service: **R**ate, **E**rrors, **D**uration. It is the user's view, and it should come first. The **USE method** covers every resource the service depends on: **U**tilisation, **S**aturation, **E**rrors. It is the machine's view, and it explains the symptoms that RED reveals." },
+        { "type": "table", "headers": ["Row", "Panels", "Notes"], "rows": [
+          ["1. Health", "SLO compliance, error budget remaining, current burn rate", "Stat panels with thresholds; readable at a glance"],
+          ["2. RED", "Request rate, error ratio, latency (p50, p95, p99)", "Whole service first, then broken down by route"],
+          ["3. Breakdown", "The same three, by instance, zone or version", "Shows whether the problem is everywhere or in one place"],
+          ["4. Dependencies", "Rate, errors and latency of calls this service makes", "Database, cache, downstream APIs"],
+          ["5. Resources (USE)", "CPU and throttling, memory against its limit, restarts, pool and queue usage", "Collapsed by default"],
+          ["6. Changes", "Deploy annotations on every graph; replica count", "Correlates symptoms with causes"]
+        ]},
+        { "type": "code", "lang": "promql", "caption": "Panel queries, using recording rules from the Prometheus module", "code": "# Request rate by route\nsum by (route) (rate(http_requests_total{job=\"$job\"}[$__rate_interval]))\n\n# Error ratio (a percentage when the unit is set to 'Percent (0.0-1.0)')\nsum(rate(http_requests_total{job=\"$job\", code=~\"5..\"}[$__rate_interval]))\n/\nsum(rate(http_requests_total{job=\"$job\"}[$__rate_interval]))\n\n# Latency percentiles: one query per percentile on the same panel\nhistogram_quantile(0.99, sum by (le) (\n  rate(http_request_duration_seconds_bucket{job=\"$job\"}[$__rate_interval])))\n\n# CPU throttling: share of CPU periods in which the container was throttled\nsum by (pod) (rate(container_cpu_cfs_throttled_periods_total{pod=~\"$job-.*\"}[$__rate_interval]))\n/\nsum by (pod) (rate(container_cpu_cfs_periods_total{pod=~\"$job-.*\"}[$__rate_interval]))" },
+        { "type": "p", "text": "`$__rate_interval` is a Grafana variable designed for `rate()`. It picks a window that is always at least four scrape intervals and that grows as you zoom out, so graphs stay correct whether you look at the last fifteen minutes or the last thirty days. Use it in place of a hard-coded `[5m]` in dashboard queries. Alerting rules in Prometheus still need a fixed window." }
+      ]
+    },
+    {
+      "heading": "Visualisation that does not mislead",
+      "blocks": [
+        { "type": "table", "headers": ["Data", "Panel", "Why"], "rows": [
+          ["How something changes over time", "Time series", "The default; use it for rate, errors and latency"],
+          ["One current value against a threshold", "Stat or gauge", "Budget remaining, replicas ready, days until a certificate expires"],
+          ["Distribution over time", "Heatmap", "Shows the whole latency distribution, including a second cluster of slow requests that percentiles hide"],
+          ["Ranked comparison across many items", "Bar gauge or table", "Top routes by error count, pods by memory"],
+          ["State over time", "State timeline", "Up or down, or deployed version, per instance"],
+          ["Log lines next to graphs", "Logs panel", "Context without leaving the dashboard"]
+        ]},
+        { "type": "list", "items": [
+          "**Set the unit on every panel**: seconds, bytes, percent, requests per second. Grafana then formats `0.0042` as `4.2 ms` and picks sensible axis labels. A graph without a unit cannot be read under pressure.",
+          "**Start ratio and count axes at zero**, and fix the range of percentages to 0 to 100. An automatically scaled axis makes a change from 0.01% to 0.02% look like a catastrophe.",
+          "**Draw the SLO threshold on the graph**, as a line or a shaded region, so that \"is this bad?\" needs no mental arithmetic.",
+          "**Use colour for meaning, not decoration.** Reserve red for bad. Keep the same colour for the same series on every panel. Do not rely on red and green alone, since a meaningful share of people cannot tell them apart.",
+          "**Limit the number of series.** A panel with sixty lines conveys nothing. Show the top five with `topk`, or aggregate, and put the detail on a drill-down.",
+          "**Prefer percentiles or a heatmap to averages** for latency, and show p50 alongside p99, because the gap between them is itself informative.",
+          "**Use a shared crosshair** across panels, so that hovering over a spike in errors shows the same moment on the latency and CPU graphs."
+        ]},
+        { "type": "callout", "kind": "warning", "text": "Be careful with stacked graphs. Stacking makes sense for parts of a whole, such as requests by status code. Stacking latency percentiles or unrelated series produces a picture in which the top line means nothing." }
+      ]
+    },
+    {
+      "heading": "Variables, annotations and links",
+      "blocks": [
+        { "type": "p", "text": "**Variables** turn one dashboard into a template. Instead of forty near-identical service dashboards that drift apart, you maintain one, with drop-downs at the top for service, environment and instance. A **query variable** fills its options from the data source, so new services appear automatically." },
+        { "type": "code", "lang": "text", "caption": "Dashboard variables (Settings > Variables)", "code": "Name: job         Type: Query   Query: label_values(http_requests_total, job)\nName: route       Type: Query   Query: label_values(http_requests_total{job=\"$job\"}, route)\n                  Multi-value: on     Include All option: on\nName: percentile  Type: Custom  Values: 0.5,0.95,0.99\n\nUsed in a query:\n  sum by (route) (rate(http_requests_total{job=\"$job\", route=~\"$route\"}[$__rate_interval]))" },
+        { "type": "p", "text": "For a multi-value variable, match with `=~` and not `=`, because Grafana expands the selection into a regular expression such as `(a|b|c)`. Variables can be chained, as `route` depends on `job` above, and **repeating** a row or panel over a variable draws one copy per selected value." },
+        { "type": "p", "text": "**Annotations** mark events as vertical lines across every graph. Deploys are the essential ones, because most incidents start with a change. When the line sits exactly where the error rate rises, the investigation is nearly over. Have your pipeline post an annotation at the end of each deploy." },
+        { "type": "code", "lang": "bash", "code": "curl -fsS -X POST \"$GRAFANA_URL/api/annotations\" \\\n  -H \"Authorization: Bearer $GRAFANA_TOKEN\" \\\n  -H 'Content-Type: application/json' \\\n  -d \"{\\\"tags\\\": [\\\"deploy\\\", \\\"orders\\\"], \\\"text\\\": \\\"orders ${GIT_SHA} deployed\\\"}\"" },
+        { "type": "p", "text": "Annotations can also be driven by a query, for example marking every moment when a build-info metric changes version. **Links** complete the workflow: dashboard links to go from the overview to the service, and **data links** on a panel that carry the clicked series and time range to a drill-down dashboard, to the matching logs, or to the traces for that route. Every alert should in turn link to the dashboard that explains it, so that the path from page to picture is one click." }
+      ]
+    },
+    {
+      "heading": "Dashboards as code",
+      "blocks": [
+        { "type": "p", "text": "Dashboards edited by hand in the UI share the problems of infrastructure changed by hand in a console: no review, no history, no way to recreate them, and differences between environments that nobody can explain. A dashboard is a JSON document, and Grafana can load data sources and dashboards from files at start-up. This is **provisioning**." },
+        { "type": "code", "lang": "yaml", "caption": "provisioning/datasources/prometheus.yml", "code": "apiVersion: 1\ndatasources:\n  - name: Prometheus\n    type: prometheus\n    access: proxy\n    url: http://prometheus:9090\n    isDefault: true" },
+        { "type": "code", "lang": "yaml", "caption": "provisioning/dashboards/default.yml", "code": "apiVersion: 1\nproviders:\n  - name: services\n    folder: Services\n    type: file\n    allowUiUpdates: false\n    options:\n      path: /var/lib/grafana/dashboards" },
+        { "type": "list", "items": [
+          "Keep the dashboard JSON in Git, review changes in pull requests, and let the pipeline deliver them. Design in the UI if you like, then export the JSON and commit it.",
+          "With `allowUiUpdates: false`, changes made in the UI cannot be saved over the provisioned version, so Git remains the source of truth, which is the GitOps idea applied to dashboards.",
+          "On Kubernetes, the `kube-prometheus-stack` chart runs a sidecar that loads any ConfigMap carrying a specific label as a dashboard, so a service's dashboard can ship in the same Helm chart as the service.",
+          "For large estates, generate dashboards from code with Grafonnet, the Grafana Foundation SDK or Terraform's Grafana provider, so that every service gets the same standard layout.",
+          "Refer to data sources by a variable or a stable name, not by an internal ID, so that the same JSON works in every environment."
+        ]},
+        { "type": "p", "text": "Manage sprawl deliberately. Use folders and tags, give each dashboard an owner, and delete what is unused. Grafana's usage statistics show which dashboards nobody has opened in months. Ten dashboards that people trust are worth more than three hundred that nobody can find their way around." }
+      ]
+    },
+    {
+      "heading": "Dashboards are not alerts",
+      "blocks": [
+        { "type": "p", "text": "A dashboard only works when someone is looking at it, and nobody watches graphs at three in the morning. Anything that needs a human response must be an alert. A dashboard is what the human opens after the alert, to understand and diagnose. If your team finds problems by noticing them on a wall-mounted screen, the alerting has a gap." },
+        { "type": "p", "text": "Grafana has its own alerting engine, which can evaluate queries against any data source and route notifications. Whether you use it or Prometheus with Alertmanager matters less than keeping the rules in version control and applying the principles of the next module: alert on symptoms that users feel, tie alerts to SLOs, and make every page actionable." },
+        { "type": "p", "text": "Grafana is also not limited to metrics. The same dashboard can query logs in Loki or Elasticsearch, traces in Tempo or Jaeger, and SQL databases. Placing a log panel beneath the error graph, filtered by the same variables, saves a great deal of switching between tools during an incident." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Build a service dashboard that answers the five questions",
+    "steps": [
+      "Run Grafana next to your Prometheus from the previous module, for example with Docker Compose. Add Prometheus as a data source through a provisioning file, not through the UI.",
+      "Write down the five on-call questions for your instrumented service, then sketch the row layout on paper before touching Grafana.",
+      "Build the RED row: request rate, error ratio and latency percentiles, using `$__rate_interval`. Set units, start axes at zero, and draw your SLO threshold on the error and latency panels.",
+      "Add a `job` query variable and a multi-value `route` variable. Confirm that the same dashboard works for a second service by changing only the drop-down.",
+      "Add a latency heatmap from the histogram buckets. Generate a mix of fast and slow requests, and compare what the heatmap shows with what the p99 line shows.",
+      "Post a deploy annotation with the `curl` command, generate errors just after it, and confirm the vertical line appears on every panel.",
+      "Export the dashboard JSON, commit it, and provision it from a file with `allowUiUpdates: false`. Try to save a change in the UI and observe what happens.",
+      "Ask a colleague who does not know the service to look at the dashboard for ten seconds and tell you whether it is healthy. Revise the top row until they can."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Design from the on-call engineer's questions: is it broken, what do users see, where, why, what changed.",
+      "Top row readable in five seconds; detail below; one question per panel, stated in the title.",
+      "RED (rate, errors, duration) for every service first; USE (utilisation, saturation, errors) for every resource below.",
+      "Always set units, start ratio axes at zero, and draw the SLO threshold on the graph.",
+      "Percentiles or a heatmap for latency, never just an average. Few series per panel.",
+      "Use `$__rate_interval` in dashboard `rate()` queries, and `=~` with multi-value variables.",
+      "Annotate every deploy. Link alerts to dashboards and dashboards to drill-downs.",
+      "Dashboards live in Git and are provisioned from files. A dashboard is not an alert."
+    ],
+    "groups": [
+      {
+        "title": "Standard service layout",
+        "items": [
+          { "syntax": "Row 1: Health", "desc": "SLO compliance, budget remaining, burn rate" },
+          { "syntax": "Row 2: RED", "desc": "Rate, error ratio, latency p50/p95/p99" },
+          { "syntax": "Row 3: Breakdown", "desc": "By route, instance, zone, version" },
+          { "syntax": "Row 4: Dependencies", "desc": "Calls to database, cache and downstream services" },
+          { "syntax": "Row 5: Resources (USE)", "desc": "CPU, throttling, memory against limit, restarts, pools" },
+          { "syntax": "Row 6: Changes", "desc": "Deploy annotations, replica count" }
+        ]
+      },
+      {
+        "title": "Grafana variables in queries",
+        "items": [
+          { "syntax": "$__rate_interval", "desc": "Safe window for rate(); at least 4 scrape intervals, grows with zoom" },
+          { "syntax": "$__interval", "desc": "Time between data points at the current zoom" },
+          { "syntax": "$__range", "desc": "The whole selected time range, e.g. for totals in a stat panel" },
+          { "syntax": "label_values(METRIC, LABEL)", "desc": "Query variable: all values of a label" },
+          { "syntax": "label_values(METRIC{job=\"$job\"}, route)", "desc": "Chained variable, filtered by another" },
+          { "syntax": "{route=~\"$route\"}", "desc": "Regex match, required for multi-value and All" }
+        ]
+      },
+      {
+        "title": "Choosing a panel",
+        "items": [
+          { "syntax": "Time series", "desc": "Anything that changes over time" },
+          { "syntax": "Stat / Gauge", "desc": "One current number with thresholds" },
+          { "syntax": "Heatmap", "desc": "Latency distribution from histogram buckets" },
+          { "syntax": "Bar gauge / Table", "desc": "Ranked comparison across many items" },
+          { "syntax": "State timeline", "desc": "Discrete states per instance over time" },
+          { "syntax": "Logs", "desc": "Log lines filtered by the same variables" }
+        ]
+      },
+      {
+        "title": "As code",
+        "items": [
+          { "syntax": "provisioning/datasources/*.yml", "desc": "Data sources loaded at start-up" },
+          { "syntax": "provisioning/dashboards/*.yml", "desc": "Providers that load dashboard JSON from a path" },
+          { "syntax": "allowUiUpdates: false", "desc": "UI edits cannot overwrite the provisioned dashboard" },
+          { "syntax": "POST /api/annotations", "desc": "Create an annotation, e.g. from a deploy pipeline" },
+          { "syntax": "Dashboard JSON in Git", "desc": "Reviewed, versioned, reproducible" },
+          { "syntax": "ConfigMap + sidecar label", "desc": "Ship a dashboard with the service's Helm chart" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Building the dashboard from the list of available metrics instead of from the questions it must answer.",
+      "Graphing average latency, which looks healthy while a tenth of users wait ten seconds.",
+      "Leaving axes on automatic scaling, so that noise looks like an incident.",
+      "Cloning a dashboard for each service instead of using variables, leaving dozens of inconsistent copies.",
+      "Editing dashboards only in the UI, so they cannot be reviewed, recovered or reproduced.",
+      "Relying on someone noticing a graph instead of having an alert."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "What belongs in the top row of an on-call service dashboard?",
+      "options": [
+        "SLO status, error budget remaining and burn rate, readable at a glance",
+        "CPU and memory graphs for every pod in the deployment",
+        "A table listing every metric the service exposes",
+        "The slowest database queries from the last 24 hours"
+      ],
+      "answer": 0,
+      "explain": "The first question on call is whether users are affected and how badly. Resource detail and query-level diagnostics answer later questions and belong lower down or on a drill-down."
+    },
+    {
+      "q": "Why use `$__rate_interval` in a dashboard query instead of a fixed `[1m]` window?",
+      "options": [
+        "It always spans enough scrape intervals and adapts as the time range is zoomed",
+        "It makes Prometheus store the data at a higher resolution",
+        "It converts counters into gauges before the rate is computed",
+        "It is required for queries that use the sum aggregation"
+      ],
+      "answer": 0,
+      "explain": "A fixed short window can contain too few samples for `rate()`, giving gaps, and misses detail aggregation when zoomed out. `$__rate_interval` is calculated from the scrape interval and the current zoom."
+    },
+    {
+      "q": "A latency panel shows a flat average of 120 ms, yet users report that the app sometimes hangs for several seconds. What change would reveal the problem?",
+      "options": [
+        "Show p99 alongside p50, or use a heatmap of the histogram buckets",
+        "Shorten the dashboard's refresh interval to five seconds",
+        "Switch the panel from a time series to a gauge",
+        "Add the average latency of each individual pod to the panel"
+      ],
+      "answer": 0,
+      "explain": "An average is dominated by the many fast requests and hides a slow tail. High percentiles and heatmaps expose the distribution, including a separate cluster of slow requests."
+    },
+    {
+      "q": "A `route` variable has multi-value enabled. With `route=\"$route\"` the panel goes blank when two routes are selected. What is the fix?",
+      "options": [
+        "Use the regex matcher: route=~\"$route\"",
+        "Wrap the variable in quotes twice",
+        "Disable the Include All option on the variable",
+        "Use sum without (route) in the query"
+      ],
+      "answer": 0,
+      "explain": "Grafana expands multiple selections into a regular expression such as `(a|b)`. The equality matcher looks for a route literally named that, so the regex matcher `=~` is required."
+    },
+    {
+      "q": "What is the main reason to have the deploy pipeline post annotations to Grafana?",
+      "options": [
+        "Most incidents follow a change, and the marker shows at once whether a deploy lines up with the symptom",
+        "Annotations are required before Grafana will evaluate alert rules",
+        "They reduce the load on Prometheus by caching query results",
+        "They prevent users from editing dashboards during a deployment"
+      ],
+      "answer": 0,
+      "explain": "Seeing a deploy line at the exact moment errors rise shortens diagnosis dramatically and points straight at a rollback. It answers the \"what changed?\" question without any searching."
+    }
+  ]
+}

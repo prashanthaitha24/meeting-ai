@@ -1,0 +1,226 @@
+{
+  "id": "devops-12factor",
+  "minutes": 25,
+  "intro": "Some applications are a pleasure to operate: you can scale them by adding copies, restart them at any moment, and promote one build from staging to production by changing a few variables. Others fight you at every step. The difference is rarely the language or framework. It is a set of design habits, written down in 2011 as the Twelve-Factor App, which containers and Kubernetes now simply assume. This module teaches the factors that matter most in practice and how to check an app against them.",
+  "objectives": [
+    "Explain why one build must run unchanged in every environment, and how config in the environment makes that possible",
+    "Design stateless, share-nothing processes that scale horizontally",
+    "Make processes disposable: fast start-up, graceful shutdown on `SIGTERM`, crash safety",
+    "Treat logs as event streams and backing services as attached resources",
+    "Audit an existing application against the twelve factors and prioritise the fixes"
+  ],
+  "sections": [
+    {
+      "heading": "The twelve factors at a glance",
+      "blocks": [
+        { "type": "p", "text": "The methodology describes how to build software that is delivered as a service. Read it as a contract between the application and the platform: if the app keeps these promises, the platform can build, run, scale and replace it without special knowledge." },
+        { "type": "table", "headers": ["#", "Factor", "In one sentence"], "rows": [
+          ["1", "Codebase", "One repository per app, many deploys from it."],
+          ["2", "Dependencies", "Declare every dependency explicitly and isolate it; assume nothing is installed on the host."],
+          ["3", "Config", "Everything that varies between deploys lives in the environment, not in the code."],
+          ["4", "Backing services", "Databases, queues and caches are attached resources, swappable by changing config."],
+          ["5", "Build, release, run", "Strictly separate stages; a release is an immutable build plus config."],
+          ["6", "Processes", "The app runs as stateless, share-nothing processes."],
+          ["7", "Port binding", "The app is self-contained and exports its service by listening on a port."],
+          ["8", "Concurrency", "Scale out by running more processes, not by making one bigger."],
+          ["9", "Disposability", "Start fast, shut down gracefully, survive sudden death."],
+          ["10", "Dev/prod parity", "Keep development, staging and production as similar as possible."],
+          ["11", "Logs", "Write an event stream to stdout; let the platform route it."],
+          ["12", "Admin processes", "Run one-off tasks such as migrations from the same release, in the same environment."]
+        ]},
+        { "type": "p", "text": "You have already met several of these. Factor 2 is what a Dockerfile and a lockfile give you. Factor 5 is the \"build once, promote everywhere\" rule from the CI/CD module. Factor 7 is why a container simply listens on a port. The rest of this module concentrates on the four that cause the most operational pain when ignored: config, processes, disposability and logs." }
+      ]
+    },
+    {
+      "heading": "Config belongs in the environment",
+      "blocks": [
+        { "type": "p", "text": "**Config** is everything likely to differ between deploys: database URLs, credentials, hostnames of other services, feature switches. The litmus test is simple: could you make the repository public right now without leaking a credential? If not, config is living in the code." },
+        { "type": "p", "text": "The twelve-factor answer is **environment variables**. They are language-neutral, every platform can set them (`docker run -e`, Compose `environment:`, Kubernetes ConfigMaps and Secrets, systemd `EnvironmentFile`), and they are hard to commit by accident. The same image then runs anywhere; only the environment differs." },
+        { "type": "code", "lang": "python", "code": "import os\nimport sys\n\n\ndef require(name: str) -> str:\n    value = os.environ.get(name)\n    if not value:\n        sys.exit(f\"FATAL: required environment variable {name} is not set\")\n    return value\n\n\nDATABASE_URL = require(\"DATABASE_URL\")          # no default: must be provided\nLOG_LEVEL = os.environ.get(\"LOG_LEVEL\", \"INFO\")   # safe default\nPORT = int(os.environ.get(\"PORT\", \"8000\"))\nFEATURE_NEW_CHECKOUT = os.environ.get(\"FEATURE_NEW_CHECKOUT\", \"false\") == \"true\"" },
+        { "type": "list", "items": [
+          "**Fail fast.** Validate required config at start-up and exit with a clear message. A crash at boot is caught by the deploy; a `None` that surfaces on the first request at midnight is an incident.",
+          "**No environment names in code.** `if env == \"production\"` multiplies with every new environment. Give each behaviour its own variable instead.",
+          "**Secrets are config too**, but they need more care than a plain variable: they come from a secret manager and are injected at runtime. The secrets module covers that.",
+          "A local `.env` file is fine for development. It stays in `.gitignore`, and a committed `.env.example` documents which variables exist."
+        ]}
+      ]
+    },
+    {
+      "heading": "Stateless processes and attached resources",
+      "blocks": [
+        { "type": "p", "text": "A twelve-factor process keeps nothing important in its own memory or on its local disk between requests. Session data, uploaded files, job queues and caches that must be shared all live in a **backing service**: a database, an object store, Redis, a message queue. The process can use memory and disk as a scratchpad within a single request, and nothing more." },
+        { "type": "p", "text": "The payoff is that every copy of the app is identical and interchangeable. A load balancer can send any request to any instance; an orchestrator can kill one and start another; scaling is just changing a replica count. The moment an instance holds unique state, such as sessions in memory, users get logged out on every deploy and you are forced into sticky sessions, which undermine load balancing and failover." },
+        { "type": "table", "headers": ["State", "Wrong place", "Right place"], "rows": [
+          ["User sessions", "Process memory", "Redis, database, or a signed cookie"],
+          ["Uploaded files", "Local disk of one instance", "Object storage"],
+          ["Background jobs", "An in-memory list", "A queue or a database table"],
+          ["Scheduled tasks", "A timer inside every web instance", "One scheduler, or a platform cron job"]
+        ]},
+        { "type": "p", "text": "Backing services are **attached resources**: the app should not care whether PostgreSQL is a local container or a managed cloud database. Both are just a URL in config. If swapping one for the other needs a code change, factor 4 is broken." }
+      ]
+    },
+    {
+      "heading": "Disposability: start fast, stop gracefully",
+      "blocks": [
+        { "type": "p", "text": "On a modern platform, processes are started and stopped constantly: deploys, autoscaling, node maintenance, crashes. An app must treat that as normal. **Fast start-up** makes scaling and recovery quick. **Graceful shutdown** means that on `SIGTERM` the app stops accepting new work, finishes the requests in flight, releases its resources and exits, all within the platform's grace period." },
+        { "type": "code", "lang": "python", "code": "import signal\nimport sys\nimport threading\n\nshutting_down = threading.Event()\n\n\ndef handle_sigterm(signum, frame):\n    print(\"SIGTERM received, finishing current job\", flush=True)\n    shutting_down.set()\n\n\nsignal.signal(signal.SIGTERM, handle_sigterm)\n\nwhile not shutting_down.is_set():\n    job = fetch_next_job(timeout=5)      # returns None when the queue is idle\n    if job is not None:\n        process(job)                     # finish it; do not abandon it halfway\n        acknowledge(job)\n\nclose_connections()\nsys.exit(0)" },
+        { "type": "p", "text": "Web frameworks and servers such as gunicorn, uvicorn and most Node and Go HTTP servers can do this for you, provided the signal actually reaches them, which is why the Docker module insisted on exec-form `CMD`." },
+        { "type": "p", "text": "Graceful shutdown is the polite case. Hardware fails and processes get `SIGKILL`, so the app must also be **crash-safe**: a job is acknowledged only after it completes, so that a dead worker's job returns to the queue, and operations are **idempotent** so that running one twice does no harm." },
+        { "type": "callout", "kind": "tip", "text": "A cheap test of disposability: in staging, kill a random instance during a load test. If users see errors or a job is lost, you have found the work to do before production finds it for you." }
+      ]
+    },
+    {
+      "heading": "Logs are a stream, not a file",
+      "blocks": [
+        { "type": "p", "text": "A twelve-factor app does not open log files, rotate them or ship them anywhere. It writes one event per line to **stdout** (and errors to stderr), unbuffered, and stops caring. The execution environment captures the stream and routes it: `docker logs`, `journalctl`, `kubectl logs`, or a collector that forwards everything to a central store. The app stays simple, and operators can change the log destination without touching it." },
+        { "type": "p", "text": "Make the stream machine-readable. **Structured logging** emits each event as JSON with consistent fields, so that you can filter by `level`, `request_id` or `user_id` instead of writing regular expressions against prose." },
+        { "type": "code", "lang": "python", "code": "import json\nimport sys\nimport time\n\n\ndef log(level: str, message: str, **fields) -> None:\n    event = {\"ts\": time.time(), \"level\": level, \"msg\": message, **fields}\n    print(json.dumps(event), file=sys.stdout, flush=True)\n\n\nlog(\"info\", \"order created\", order_id=\"o-1842\", request_id=\"f3a9\", duration_ms=41)\n# {\"ts\": 1767225600.0, \"level\": \"info\", \"msg\": \"order created\", \"order_id\": \"o-1842\", ...}" },
+        { "type": "callout", "kind": "warning", "text": "Never log secrets, tokens, passwords or full request bodies that may contain personal data. Logs are copied to many systems and kept for a long time; anything written there should be treated as widely readable." }
+      ]
+    },
+    {
+      "heading": "Parity and admin tasks",
+      "blocks": [
+        { "type": "p", "text": "**Dev/prod parity** means closing three gaps: the time gap (deploy hours after writing code, not weeks), the personnel gap (the people who write it are involved in running it), and the tools gap (the same backing services everywhere). SQLite in development and PostgreSQL in production is the classic trap: tests pass, then a query behaves differently in production. With Compose, running the real database locally costs a few lines." },
+        { "type": "p", "text": "**Admin processes** such as database migrations or one-off data fixes run as separate, short-lived processes using the same image and the same config as the app, never from a developer's laptop against production. That guarantees the task runs against the exact code and settings that are deployed." },
+        { "type": "code", "lang": "bash", "code": "# same image, same environment, different command\ndocker compose run --rm app python manage.py migrate\n\n# the Kubernetes equivalent is a Job, or a one-off command in the running release\nkubectl exec deploy/myapp -- python manage.py migrate" },
+        { "type": "p", "text": "The twelve factors are a baseline, not the whole story. They predate containers and say little about health checks, metrics, tracing or security, which the rest of this site's tracks cover. But an app that satisfies them is one that Kubernetes, autoscalers and pipelines can handle without surprises." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Audit and fix a real application",
+    "steps": [
+      "Take the app from the Docker module, or any service you work on, and score it against all twelve factors: pass, partial or fail, with one line of evidence each.",
+      "Search the code for hard-coded hosts, credentials and `if environment ==` branches. Move each one to an environment variable, add start-up validation that exits with a clear message, and commit a `.env.example`.",
+      "Find any state held in process memory or on local disk (sessions, uploads, caches). Move one of them to a backing service started with Compose.",
+      "Run two instances of the app behind a simple load balancer or just on two ports. Log in through one, make a request to the other, and confirm the session still works.",
+      "Add a `SIGTERM` handler or configure your server's graceful timeout. Start a slow request, run `docker stop`, and prove the request completes and the container exits before the ten-second kill.",
+      "Switch logging to one JSON object per line on stdout and filter it: `docker logs CONTAINER | jq 'select(.level == \"error\")'`."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "One immutable build runs in every environment. Only config differs, and config lives in environment variables.",
+      "Litmus test for config: could the repository be made public today without leaking anything?",
+      "Processes are stateless and share nothing. Shared state goes in a backing service.",
+      "Scale out with more processes, not a bigger one.",
+      "Disposability: fast start-up, graceful `SIGTERM` handling, crash-safe and idempotent work.",
+      "Logs are an unbuffered event stream on stdout, one structured event per line. The platform routes them.",
+      "Migrations and one-off tasks run from the same release and config as the app."
+    ],
+    "groups": [
+      {
+        "title": "The twelve factors",
+        "items": [
+          { "syntax": "1 Codebase", "desc": "One repo per app, many deploys" },
+          { "syntax": "2 Dependencies", "desc": "Explicitly declared and isolated (lockfile, image)" },
+          { "syntax": "3 Config", "desc": "In the environment, never in code" },
+          { "syntax": "4 Backing services", "desc": "Attached resources addressed by URL in config" },
+          { "syntax": "5 Build, release, run", "desc": "Release = immutable build + config" },
+          { "syntax": "6 Processes", "desc": "Stateless, share-nothing" },
+          { "syntax": "7 Port binding", "desc": "Self-contained; serves by listening on a port" },
+          { "syntax": "8 Concurrency", "desc": "Scale out via the process model" },
+          { "syntax": "9 Disposability", "desc": "Fast start, graceful stop, crash-safe" },
+          { "syntax": "10 Dev/prod parity", "desc": "Same services and tools everywhere" }
+        ]
+      },
+      {
+        "title": "Factors 11-12 and config patterns",
+        "items": [
+          { "syntax": "11 Logs", "desc": "Event stream on stdout; never manage log files" },
+          { "syntax": "12 Admin processes", "desc": "One-off tasks run from the same release" },
+          { "syntax": "os.environ[\"NAME\"]", "desc": "Required variable: raises immediately if missing" },
+          { "syntax": "os.environ.get(\"NAME\", \"default\")", "desc": "Optional variable with a safe default" },
+          { "syntax": "DATABASE_URL=postgres://user:pass@host:5432/db", "desc": "A whole backing service as one URL" },
+          { "syntax": ".env (ignored) + .env.example (committed)", "desc": "Local development config, documented but not leaked" }
+        ]
+      },
+      {
+        "title": "Supplying config on each platform",
+        "items": [
+          { "syntax": "docker run -e KEY=value IMAGE", "desc": "Single variable" },
+          { "syntax": "docker run --env-file .env IMAGE", "desc": "Variables from a file" },
+          { "syntax": "environment: / env_file: (Compose)", "desc": "Per-service variables in `compose.yaml`" },
+          { "syntax": "envFrom: configMapRef / secretRef (Kubernetes)", "desc": "All keys of a ConfigMap or Secret as variables" },
+          { "syntax": "EnvironmentFile=/etc/myapp/env (systemd)", "desc": "Variables for a unit" }
+        ]
+      },
+      {
+        "title": "Shutdown sequence on SIGTERM",
+        "items": [
+          { "syntax": "1. stop accepting", "desc": "Fail the readiness check or close the listener so no new requests arrive" },
+          { "syntax": "2. drain", "desc": "Finish in-flight requests and the current job" },
+          { "syntax": "3. release", "desc": "Close database connections, flush buffers, release locks" },
+          { "syntax": "4. exit 0", "desc": "Before the grace period ends and `SIGKILL` arrives" },
+          { "syntax": "ack after completion", "desc": "So a killed worker's job is redelivered, not lost" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Baking environment-specific config into the image, so each environment needs its own build.",
+      "Keeping sessions or uploads on a single instance, which breaks the moment you run two copies.",
+      "Branching on the environment name in code instead of giving each behaviour its own setting.",
+      "Writing logs to files inside the container, where they vanish with it and nobody collects them.",
+      "Ignoring `SIGTERM`, so every deploy drops the requests that were in flight.",
+      "Running migrations from a laptop against production with whatever code happens to be checked out."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A team builds separate Docker images for staging and production because the database hostname is compiled into the app. Which factor is violated, and what is the fix?",
+      "options": [
+        "Config: read the hostname from an environment variable so one image serves both",
+        "Concurrency: run more instances so each environment has its own process",
+        "Port binding: expose the database port from inside the application image",
+        "Codebase: split staging and production into two separate repositories"
+      ],
+      "answer": 0,
+      "explain": "Anything that varies between deploys is config and belongs in the environment. With the hostname externalised, a single tested image can be promoted unchanged."
+    },
+    {
+      "q": "After scaling a web app from one instance to three, users are randomly logged out. What is the most likely cause?",
+      "options": [
+        "Sessions are stored in each instance's memory instead of a shared backing service",
+        "The load balancer cannot handle more than one backend at a time",
+        "Three instances exhaust the database's connection limit on login",
+        "Environment variables are only passed to the first instance started"
+      ],
+      "answer": 0,
+      "explain": "A request that lands on a different instance finds no session there. Moving sessions to Redis, a database or a signed cookie makes every instance interchangeable."
+    },
+    {
+      "q": "Which behaviour best describes a disposable process receiving `SIGTERM`?",
+      "options": [
+        "It stops taking new work, completes in-flight work, and exits within the grace period",
+        "It ignores the signal so that long-running requests are never interrupted",
+        "It exits immediately, relying on clients to retry any failed requests",
+        "It restarts itself in place so that the platform sees no downtime"
+      ],
+      "answer": 0,
+      "explain": "Graceful shutdown means drain, clean up, and exit. Ignoring the signal only delays the inevitable `SIGKILL`, and exiting instantly drops requests that could have completed."
+    },
+    {
+      "q": "Where should a twelve-factor application running in a container write its logs?",
+      "options": [
+        "To stdout and stderr, as a stream the platform captures and routes",
+        "To a rotating file under /var/log inside the container",
+        "Directly to the central logging service over its HTTP API",
+        "To a table in the application's own primary database"
+      ],
+      "answer": 0,
+      "explain": "The app emits events and the environment decides where they go. That keeps the app simple and lets operators change log routing without a code change."
+    },
+    {
+      "q": "A worker takes a job from a queue, acknowledges it, then processes it. The worker is killed with `SIGKILL` mid-job. What happens?",
+      "options": [
+        "The job is lost, because the queue already considers it done",
+        "The queue redelivers the job to another worker automatically",
+        "The job is completed by the platform before the process exits",
+        "The job is processed twice once the worker restarts"
+      ],
+      "answer": 0,
+      "explain": "Acknowledging before completion tells the queue to forget the job. Acknowledge after the work is finished, and make the work idempotent, so that a crash leads to a harmless redelivery instead of loss."
+    }
+  ]
+}

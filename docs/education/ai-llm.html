@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>How LLMs work — AI Engineering | ThavionAI Education</title>
+  <meta name="description" content="Tokens, context windows, sampling, embeddings — and what that means for your app." />
+  <meta property="og:title" content="How LLMs work — ThavionAI Education" />
+  <meta property="og:description" content="Tokens, context windows, sampling, embeddings — and what that means for your app." />
+  <meta property="og:type" content="article" />
+  <link rel="canonical" href="https://thavionai.com/education/ai-llm.html" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-ai" data-module="ai-llm">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><div class="nav-logo-icon">T</div>ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html#features">Features</a>
+    <a href="../index.html#products">Products</a>
+    <a href="../education.html" class="active">Education</a>
+    <a href="../index.html#about">About</a>
+    <a href="../index.html#pricing">Pricing</a>
+    <a href="../index.html#contact" class="nav-cta">Contact Us</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#ai">AI Engineering</a> › Stage 2: Building with LLMs</div>
+    <h1>How LLMs work</h1>
+    <p class="lede">Tokens, context windows, sampling, embeddings — and what that means for your app.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">~30 min read</span>
+      <span class="chip">Module 5 of 16</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">A large language model can write code, summarise a contract and explain a stack trace, and it can also state something false with complete confidence. Both behaviours come from the same mechanism, and once you understand that mechanism, LLMs stop being magic and become a component you can engineer with. This module explains what a model actually does when you call it, and what that means for cost, latency, limits and reliability in the applications you build.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Explain next-token prediction, and how pretraining and instruction tuning produce an assistant</li><li>Reason about tokens as the unit of cost, speed and limits</li><li>Treat the context window as the model's only working memory, and the API as stateless</li><li>Control output with temperature, top-p, maximum tokens and stop sequences</li><li>Explain why models hallucinate, and use embeddings to find relevant text</li></ul>
+    </div>
+    <section id="one-thing-done-repeatedly-predict-the-next-token"><h2>One thing, done repeatedly: predict the next token</h2>
+    <p>An LLM is the decoder-only transformer from the previous module, at very large scale. Given a sequence of tokens, it outputs a probability for every token in its vocabulary as the one that comes next. To generate text, the application picks one token from that distribution, appends it to the sequence, and runs the model again. It repeats until the model emits a special end token, or a limit is reached. This loop is called <strong>autoregressive generation</strong>.</p>
+    <div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>input:   "The capital of France is"
+
+model -&gt; " Paris"   0.92
+         " the"     0.03
+         " located" 0.01
+         ...every other token in the vocabulary...
+
+pick " Paris" -&gt; input becomes "The capital of France is Paris" -&gt; run the model again -&gt; ...</code></pre></div>
+    <p>Everything else follows from this. The model has no database of facts and no separate reasoning engine. It has billions of numerical weights that encode statistical patterns of language, and those patterns happen to capture a remarkable amount of knowledge and problem-solving ability. It also means that output is produced <strong>one token at a time, strictly in order</strong>, which is why generation is slow compared with reading, why responses can be streamed as they are produced, and why the model cannot revise an earlier sentence once it has been written.</p>
+    <p>A model becomes an assistant in stages.</p>
+    <div class="table-wrap"><table><thead><tr><th>Stage</th><th>Data</th><th>Result</th></tr></thead><tbody><tr><td><strong>Pretraining</strong></td><td>A very large corpus of text and code; the task is simply to predict the next token</td><td>A base model: fluent and knowledgeable, but it only continues text. Ask it a question and it may reply with more questions.</td></tr><tr><td><strong>Instruction tuning</strong></td><td>Curated examples of instructions paired with good responses</td><td>A model that follows instructions and holds a conversation</td></tr><tr><td><strong>Preference tuning</strong></td><td>Human or AI judgements about which of two responses is better (RLHF and related methods)</td><td>Responses that are more helpful, more honest and safer</td></tr></tbody></table></div>
+    <p>Two practical facts follow. A model's knowledge stops at its <strong>training cutoff</strong>: it knows nothing about later events, or about your private data, unless you put that information into the prompt. And the model you call through an API is a fixed snapshot. It does not learn from your conversations.</p></section>
+  <section id="tokens-the-unit-of-everything"><h2>Tokens: the unit of everything</h2>
+    <p>Models read and write <strong>tokens</strong>, not characters or words. A tokeniser splits text into pieces from a fixed vocabulary, using an algorithm such as byte-pair encoding that gives short codes to common sequences. Frequent English words are usually one token. Rare words, names, code, numbers and text in many other languages break into several.</p>
+    <div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>"Hello world"            -&gt; ["Hello", " world"]                        2 tokens
+"Kubernetes"             -&gt; ["Kub", "ernetes"]                         2 tokens (illustrative)
+"antidisestablishment"   -&gt; ["ant", "idis", "establish", "ment"]       4 tokens (illustrative)
+"2026-09-17T14:02:11Z"   -&gt; many small pieces                          10+ tokens
+
+Rule of thumb for English prose:  1 token is about 4 characters, or 0.75 words.
+                                  1,000 words is about 1,300 tokens.
+The exact split differs between model families. Count with the provider's tokeniser.</code></pre></div>
+    <ul><li><strong>Cost</strong> is charged per token, separately for input and output. Output tokens usually cost several times more than input tokens.</li><li><strong>Latency</strong> depends mostly on the number of <strong>output</strong> tokens, because they are generated one after another. A long prompt adds a little; a long answer adds a lot.</li><li><strong>Limits</strong> are in tokens: the context window, the maximum output, and your rate limits per minute.</li><li><strong>Non-English text and structured data</strong> such as JSON, logs and UUIDs can use far more tokens than their length suggests, which affects cost and how much fits.</li><li><strong>Character-level tasks are hard.</strong> The model sees <code>["Kub", "ernetes"]</code>, not letters, so counting the letters in a word, reversing a string, or exact arithmetic on long numbers is unreliable. Have it write code that does such work, or use a tool.</li></ul>
+    <div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>def estimate_tokens(text: str) -&gt; int:
+    """Rough estimate for English prose. Use the provider's tokeniser for real budgeting."""
+    return max(1, round(len(text) / 4))
+
+
+def fits(prompt: str, context_window: int, reserve_for_output: int) -&gt; bool:
+    return estimate_tokens(prompt) + reserve_for_output &lt;= context_window</code></pre></div></section>
+  <section id="the-context-window-and-statelessness"><h2>The context window, and statelessness</h2>
+    <p>The <strong>context window</strong> is the maximum number of tokens the model can consider at once, counting everything: system instructions, conversation history, documents you pasted in, tool definitions and results, and the response being generated. It is the model's <strong>only working memory</strong>. Whatever is not in the window does not exist for the model on that call.</p>
+    <p>The most important architectural fact for application builders is that <strong>the API is stateless</strong>. The model remembers nothing between calls. A chat application creates the appearance of memory by sending the whole conversation again with every request.</p>
+    <figure class="diagram" id="fig-llm-stateless"><div class="diagram-scroll"><svg viewBox="0 0 740 248" role="img" aria-label="The application holds the message history: a system prompt and the user and assistant turns so far. On each request it sends the whole history to the model. The model generates the reply token by token until an end token or the limit. The reply is appended to the history, which grows with every turn, and nothing is stored on the model&#x27;s side." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="llm-stateless-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="llm-stateless-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="llm-stateless-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="llm-stateless-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="llm-stateless-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><rect x="20" y="19" width="332" height="210" rx="10" class="dg-group"/><text x="30" y="222" font-size="10" font-weight="700" letter-spacing="1" class="dg-group-label">YOUR APPLICATION: THE ONLY MEMORY</text><rect x="530" y="19" width="162" height="210" rx="10" class="dg-group"/><text x="540" y="222" font-size="10" font-weight="700" letter-spacing="1" class="dg-group-label">PROVIDER: STATELESS</text><polyline points="171.0,178.0 271.0,178.0 271.0,98.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#llm-stateless-arrow-default)"/><rect x="185.5" y="159.0" width="71.0" height="16" rx="4" class="dg-label-bg"/><text x="221.0" y="167.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">messages[]</text><polyline points="341.0,70.0 541.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#llm-stateless-arrow-default)"/><rect x="390.2" y="24.0" width="101.5" height="16" rx="4" class="dg-label-bg"/><text x="441.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">tokens in: paid</text><polyline points="611.0,98.0 611.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#llm-stateless-arrow-default)"/><rect x="614.0" y="116.0" width="144.2" height="16" rx="4" class="dg-label-bg"/><text x="618.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">tokens out: slow, paid</text><polyline points="611.0,206.0 611.0,228.0 101.0,228.0 101.0,206.0" fill="none" style="stroke:var(--accent)" stroke-width="1.6" marker-end="url(#llm-stateless-arrow-accent)"/><rect x="293.1" y="231.0" width="125.9" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="239.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--accent)">append as assistant</text><polyline points="101.0,98.0 101.0,150.0" fill="none" style="stroke:rgba(148,163,184,0.55)" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#llm-stateless-arrow-muted)"/><path d="M31,157.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M31,157.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="101.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Message history</text><text x="101.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">system + all turns</text><rect x="31" y="42.0" width="140" height="56" rx="8" class="dg-node dg-muted"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text2)">Truncate</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">when the window fills</text><rect x="201" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Request</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">entire history, again</text><rect x="541" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Model</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">next-token prediction</text><rect x="541" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="611.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Reply</text><text x="611.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">one token at a time</text></svg></div><figcaption>The API is stateless: your application keeps the conversation history and sends all of it with every request, the model generates the reply one token at a time, and the reply is appended to the history for the next turn.</figcaption></figure>
+    <div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># call_llm is a stand-in: wire it to whichever provider you use.
+# It takes a list of messages and returns the assistant's reply as a string.
+
+messages = [
+    {"role": "system", "content": "You are a concise assistant for on-call engineers."},
+    {"role": "user", "content": "What does exit code 137 mean in Kubernetes?"},
+]
+reply = call_llm(messages)
+messages.append({"role": "assistant", "content": reply})
+
+# The follow-up only makes sense because the WHOLE history is sent again
+messages.append({"role": "user", "content": "How do I find out which container it was?"})
+reply = call_llm(messages)</code></pre></div>
+    <ul><li>Each turn costs more than the last, because the history grows. A fifty-turn conversation pays for the first message fifty times.</li><li>When the history would overflow the window, you must do something: truncate the oldest turns, summarise them, or retrieve only the relevant parts. That decision is yours, not the model's.</li><li>"Memory" features in products are built the same way: something stores notes outside the model, and places the relevant ones into the prompt.</li><li>A larger window is not a substitute for selecting well. Models attend less reliably to material buried in the middle of a very long context, more tokens mean more cost and latency, and irrelevant text dilutes the relevant. Put in what is needed, clearly organised.</li><li>Roles matter. The <strong>system</strong> message sets behaviour for the whole conversation. <strong>User</strong> and <strong>assistant</strong> messages alternate. Providers differ in the details, and the pattern is universal.</li></ul></section>
+  <section id="sampling-controlling-the-output"><h2>Sampling: controlling the output</h2>
+    <p>The model outputs a probability distribution, and the <strong>sampling</strong> settings decide how a token is chosen from it. These are the main controls you have at request time.</p>
+    <div class="table-wrap"><table><thead><tr><th>Parameter</th><th>Effect</th><th>Guidance</th></tr></thead><tbody><tr><td><strong>Temperature</strong></td><td>Divides the logits before the softmax. Low values sharpen the distribution; high values flatten it.</td><td>Around 0 for extraction, classification and code. Higher for brainstorming and creative writing.</td></tr><tr><td><strong>Top-p</strong> (nucleus)</td><td>Samples only from the smallest set of tokens whose probabilities add up to p</td><td>Leave at the default, or adjust temperature or top-p, not both</td></tr><tr><td><strong>Top-k</strong></td><td>Samples only from the k most likely tokens</td><td>Offered by some providers; rarely needs changing</td></tr><tr><td><strong>Max output tokens</strong></td><td>A hard cap on the length of the response</td><td>Always set it. It bounds cost and latency, and stops runaway output.</td></tr><tr><td><strong>Stop sequences</strong></td><td>Strings at which generation halts</td><td>Useful for structured formats and for ending at a delimiter</td></tr></tbody></table></div>
+    <p>Temperature 0 makes the model pick the most likely token every time, which is called greedy decoding. It makes output far more repeatable, and <strong>still not perfectly deterministic</strong>, because of floating-point behaviour on parallel hardware and because providers update models. Do not build anything that requires byte-identical output from one call to the next. If a response ends abruptly, check the <strong>stop reason</strong> that the API returns: a value indicating that the token limit was reached means the output was cut off, not that the model had finished.</p>
+    <div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># Deterministic-leaning task: extract fields from a log line
+extraction = call_llm(messages, temperature=0, max_tokens=300)
+
+# Open-ended task: propose names for an internal tool
+ideas = call_llm(messages, temperature=1.0, max_tokens=500)</code></pre></div>
+    <div class="callout callout-note"><strong>Note</strong><p>Some recent models that reason at length before answering fix or restrict certain sampling parameters. Check the documentation for the model you are using instead of assuming that every setting is available.</p></div></section>
+  <section id="why-models-hallucinate"><h2>Why models hallucinate</h2>
+    <p>A <strong>hallucination</strong> is output that is fluent, confident and false: a function that does not exist, an invented citation, a plausible configuration flag. It is not a malfunction. It is the normal mechanism operating where it lacks grounding. The model is trained to produce a <strong>likely</strong> continuation. It has no internal marker that separates "I know this" from "this is the kind of thing that usually comes next", and a text that says "I am not sure" is, in most training data, less common than a text that answers.</p>
+    <ul><li>Hallucination is most likely for <strong>specifics</strong>: exact names, numbers, quotations, URLs, API signatures, version details, anything recent or obscure, and anything about your private systems.</li><li>It is least likely where the answer is <strong>in the context</strong>. A model asked to answer from a document you have supplied is far more reliable than one asked from memory. This is the basis of retrieval-augmented generation, two modules ahead.</li><li><strong>Give it a way out.</strong> Instruct the model to say when the provided material does not contain the answer, and hallucination falls noticeably.</li><li><strong>Ask for evidence.</strong> Have it quote the passage that supports each claim, then check that the quote really appears in the source.</li><li><strong>Give it tools</strong> for what it is bad at: a calculator, a code interpreter, a search, a database query. A later module covers tool use.</li><li><strong>Verify mechanically</strong> whatever can be verified: compile the code, run the tests, validate the JSON against a schema, check that the URL exists.</li><li><strong>Keep a human in the loop</strong> in proportion to the stakes.</li></ul>
+    <div class="callout callout-warning"><strong>Watch out</strong><p>Fluency is not evidence of correctness. Models write with the same assured tone whether they are right or wrong, and people are strongly inclined to trust well-written text. Design your application on the assumption that any unverified specific may be wrong.</p></div></section>
+  <section id="embeddings"><h2>Embeddings</h2>
+    <p>An <strong>embedding model</strong> is a related kind of model that, instead of generating text, turns a piece of text into a single vector which represents its meaning. Texts with similar meanings produce vectors that point in similar directions, so <strong>cosine similarity</strong>, from the maths module, measures how closely two texts are related, even when they share no words at all.</p>
+    <div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import numpy as np
+
+# embed is a stand-in: it takes a list of strings and returns an array (n, dimension)
+docs = [
+    "Pod is in CrashLoopBackOff after the deploy",
+    "How to request annual leave",
+    "Container keeps restarting with exit code 137",
+]
+doc_vecs = embed(docs)
+query_vec = embed(["my application restarts over and over"])[0]
+
+
+def normalise(v: np.ndarray) -&gt; np.ndarray:
+    return v / np.linalg.norm(v, axis=-1, keepdims=True)
+
+
+scores = normalise(doc_vecs) @ normalise(query_vec)     # cosine similarities, shape (3,)
+for i in np.argsort(-scores):
+    print(f"{scores[i]:.3f}  {docs[i]}")
+# the two restart-related documents rank first, despite sharing few words with the query</code></pre></div>
+    <ul><li>Uses: semantic search, retrieval for RAG, clustering similar tickets or incidents, removing near-duplicates, recommendations, and classification with very few examples.</li><li>Embedding calls are far cheaper and faster than generation, and the vectors can be calculated once and stored.</li><li>Vectors from <strong>different embedding models cannot be compared</strong> with each other. If you change the model, you must embed everything again.</li><li>Embedding models have their own input limits, so long documents are split into chunks first. How to chunk is a design decision that the RAG module covers.</li><li>Similar does not mean correct, or relevant to the question. "How do I enable feature X?" and "How do I disable feature X?" are close together in embedding space.</li></ul></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Probe a model's behaviour</h2>
+    <ol><li>Get API access to any LLM provider, or run a small open model locally. Write a <code>call_llm(messages, **params)</code> function that wraps it, and print the token usage that the API reports with each response.</li><li>Use the provider's tokeniser or token-counting endpoint on an English paragraph, the same paragraph in another language, a block of JSON, and a block of code. Compare tokens per character across them.</li><li>Prove that the API is stateless. Tell the model your name in one call, and ask for it in a separate call with no history. Then send both turns together.</li><li>Run the same creative prompt five times at temperature 0 and five times at temperature 1. Compare the variation. Then run an extraction task both ways, and note which setting you would ship.</li><li>Set a very low maximum output, ask for a long answer, and find the field in the response that tells you the output was cut off.</li><li>Provoke a hallucination: ask for the exact signature of an obscure function in a niche library, or for a citation. Then supply the real documentation in the prompt, with an instruction to answer only from it, and compare.</li><li>Ask the model to count the letter "r" in a long word, and then ask it to write and reason through Python code that does so. Explain the difference in terms of tokens.</li><li>Embed ten short sentences on two or three topics. Compute the matrix of cosine similarities, and check whether sentences on the same topic score highest with each other.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>How LLMs work — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>An LLM predicts the next token, repeatedly. There is no fact database and no separate reasoning engine.</li><li>Pretraining gives knowledge; instruction and preference tuning make it an assistant. Knowledge stops at the training cutoff.</li><li>Tokens are the unit of cost, latency and limits. Output tokens are the slow and expensive ones.</li><li>The context window is the model's only memory, and the API is stateless: you send the history again every time.</li><li>Temperature near 0 for extraction and code, higher for creative work. Always set a maximum output, and check the stop reason.</li><li>Low temperature is repeatable, not deterministic.</li><li>Hallucination is likely output without grounding. Supply the source, allow "I don't know", ask for quotes, and verify.</li><li>Embeddings turn text into vectors, and cosine similarity finds related text. Never mix vectors from different models.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Token rules of thumb (English)</h3><table><tbody><tr><td><code>1 token ~ 4 characters ~ 0.75 words</code></td><td>Rough average for prose</td></tr><tr><td><code>1,000 words ~ 1,300 tokens</code></td><td>For estimating documents</td></tr><tr><td><code>code, JSON, logs, IDs</code></td><td>More tokens per character than prose</td></tr><tr><td><code>non-English text</code></td><td>Often noticeably more tokens for the same meaning</td></tr><tr><td><code>cost = in_tokens x in_price + out_tokens x out_price</code></td><td>Output is usually priced higher</td></tr><tr><td><code>latency ~ time to first token + out_tokens / tokens per second</code></td><td>Output length dominates</td></tr></tbody></table></div><div class="cheat-group"><h3>Request parameters</h3><table><tbody><tr><td><code>temperature = 0</code></td><td>Most likely token each time; repeatable; for extraction, classification, code</td></tr><tr><td><code>temperature ~ 0.7 to 1.0</code></td><td>More varied; for ideas and prose</td></tr><tr><td><code>top_p</code></td><td>Sample from the smallest set of tokens totalling probability p</td></tr><tr><td><code>max_tokens</code></td><td>Hard cap on output length; always set it</td></tr><tr><td><code>stop sequences</code></td><td>Halt when any of these strings is generated</td></tr><tr><td><code>stop reason</code></td><td>Why generation ended: natural end, length limit, stop sequence, tool call</td></tr></tbody></table></div><div class="cheat-group"><h3>Message structure</h3><table><tbody><tr><td><code>{"role": "system", "content": ...}</code></td><td>Standing instructions and persona</td></tr><tr><td><code>{"role": "user", "content": ...}</code></td><td>The person's turn, or your application's request</td></tr><tr><td><code>{"role": "assistant", "content": ...}</code></td><td>The model's earlier replies, sent back as history</td></tr><tr><td><code>messages.append(...)</code></td><td>You maintain the history; the API remembers nothing</td></tr><tr><td><code>truncate / summarise / retrieve</code></td><td>Three ways to keep history inside the window</td></tr></tbody></table></div><div class="cheat-group"><h3>Reducing hallucination</h3><table><tbody><tr><td><code>ground it</code></td><td>Put the source material in the prompt</td></tr><tr><td><code>allow a way out</code></td><td>"If the answer is not in the text, say so"</td></tr><tr><td><code>ask for quotes</code></td><td>Then check that they appear in the source</td></tr><tr><td><code>use tools</code></td><td>Calculator, code execution, search, database</td></tr><tr><td><code>verify mechanically</code></td><td>Compile, test, validate against a schema, resolve the link</td></tr><tr><td><code>human review</code></td><td>In proportion to the stakes</td></tr></tbody></table></div><div class="cheat-group"><h3>Embeddings</h3><table><tbody><tr><td><code>embed(texts) -&gt; array (n, d)</code></td><td>One vector per text</td></tr><tr><td><code>v / np.linalg.norm(v)</code></td><td>Normalise, so that a dot product is cosine similarity</td></tr><tr><td><code>docs_n @ query_n</code></td><td>Similarity of one query to every document</td></tr><tr><td><code>np.argsort(-scores)[:k]</code></td><td>Indices of the k most similar</td></tr><tr><td><code>same model for queries and documents</code></td><td>Vectors from different models are not comparable</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Assuming that the model remembers earlier calls, when it sees only what you send this time.</li><li>Letting conversation history grow without limit, until cost climbs and the window overflows.</li><li>Leaving the maximum output unset, and paying for, and waiting on, runaway responses.</li><li>Relying on temperature 0 for byte-identical output.</li><li>Trusting a fluent answer about a specific API, number or citation without checking it.</li><li>Asking the model for character-level or exact arithmetic work that a line of code would do reliably.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "A chatbot answers a follow-up question correctly, using details from earlier in the conversation. How does the model know those details?", "options": ["The application sends the whole conversation history again with each request", "The model stores each user's conversation in its weights between calls", "The provider keeps a session on the server that the model reads from", "The model was fine-tuned on this user's messages after the first turn"], "answer": 0, "explain": "The API is stateless, and the context window is the model's only memory. Chat applications resend the accumulated messages every turn, which is why long conversations cost more with each turn."}, {"q": "Which change will reduce the latency of an LLM response the most?", "options": ["Asking for a shorter answer, so that fewer output tokens are generated", "Removing two sentences from a long system prompt", "Lowering the temperature from 1.0 to 0", "Writing the prompt in capital letters for emphasis"], "answer": 0, "explain": "Output tokens are generated one after another, so their number dominates response time. Input is processed in parallel and adds comparatively little. Temperature does not affect speed."}, {"q": "A model confidently gives the signature of a function that does not exist in the library you named. What is the best explanation?", "options": ["It produces likely-looking text, and has no internal check that a specific detail is real", "It deliberately invents answers when the temperature is set above zero", "The library was removed from its database after the training cutoff", "Its context window was too small to hold the whole of the question"], "answer": 0, "explain": "The model predicts plausible continuations and has no separate record of facts to check against. Exact names and signatures are where this shows most. Supplying the real documentation in the prompt is the remedy."}, {"q": "For a task that extracts an invoice number and a total from text into JSON, which settings are most appropriate?", "options": ["Temperature 0, with a modest limit on output tokens", "Temperature 1.2, with no limit on output tokens", "Temperature 0.9, with top-p raised to its maximum value", "Whatever the defaults are, since settings do not affect extraction"], "answer": 0, "explain": "Extraction has one right answer, so you want the most likely tokens and repeatable output. A cap on output bounds cost and guards against runaway generation."}, {"q": "You embedded 50,000 documents with one embedding model, and then switched to a different model for embedding queries. Search quality collapsed. Why?", "options": ["Vectors from different models live in unrelated spaces and cannot be compared", "Cosine similarity only works when there are fewer than 10,000 documents", "The new model's vectors must be un-normalised before they are compared", "Embedding models expire, so the old document vectors became invalid"], "answer": 0, "explain": "Each embedding model learns its own coordinate system. Similarity between a vector from one model and a vector from another is meaningless, so all documents must be embedded again with the new model."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="ai-dl.html"><span>← Previous</span><strong>Neural networks &amp; deep learning</strong></a>
+    <a class="pager-up" href="../education.html#ai">All AI Engineering modules</a>
+    <a class="pager-link pager-next" href="ai-prompting.html"><span>Next →</span><strong>Prompt engineering</strong></a>
+  </nav>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="mailto:support@thavionai.com?subject=Education%20feedback%3A%20ai-llm">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

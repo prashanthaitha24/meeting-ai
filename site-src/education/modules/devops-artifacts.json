@@ -1,0 +1,220 @@
+{
+  "id": "devops-artifacts",
+  "minutes": 30,
+  "intro": "The code your team writes is a small fraction of what you ship. The rest is base images, open-source libraries and their own dependencies, pulled from the internet at build time. Attackers know this, and compromising a dependency or a build system reaches thousands of victims at once. This module covers how artifacts are stored, named and versioned, and the practical controls that let you answer two questions at any time: what exactly is running, and is it known to be vulnerable?",
+  "objectives": [
+    "Explain what an artifact registry is for and how tags differ from digests",
+    "Apply semantic versioning and an image tagging scheme that makes every deploy traceable",
+    "Pin dependencies with lockfiles and digests so that builds are reproducible",
+    "Scan images and dependencies for known vulnerabilities and triage the results sensibly",
+    "Generate a software bill of materials and explain what signing and provenance add"
+  ],
+  "sections": [
+    {
+      "heading": "Artifacts and registries",
+      "blocks": [
+        { "type": "p", "text": "An **artifact** is the immutable output of a build: a container image, a JAR, a Python wheel, an npm package, a Helm chart. A **registry** (or artifact repository) stores artifacts, controls who may push and pull them, and serves them to deploy targets. It is the hand-off point between CI, which produces artifacts, and CD, which consumes them." },
+        { "type": "p", "text": "Container registries include Docker Hub, GitHub Container Registry, and one from every cloud provider. A full image reference has four parts:" },
+        { "type": "code", "lang": "text", "code": "ghcr.io / acme/orders-api : 1.4.2   @sha256:9b2c...e41f\n   |            |             |              |\nregistry    repository       tag           digest" },
+        { "type": "p", "text": "The distinction between the last two is the most important idea in this module. A **tag** is a human-friendly, **mutable** label: whoever can push may point `1.4.2`, and certainly `latest`, at a different image tomorrow. A **digest** is the SHA-256 hash of the image manifest. It is **immutable** and content-addressed: if a single byte changes, the digest changes. Pulling by digest guarantees you get precisely the image you tested." },
+        { "type": "code", "lang": "bash", "code": "docker pull ghcr.io/acme/orders-api:1.4.2\ndocker inspect --format '{{index .RepoDigests 0}}' ghcr.io/acme/orders-api:1.4.2\n# ghcr.io/acme/orders-api@sha256:9b2c...\n\ndocker buildx imagetools inspect ghcr.io/acme/orders-api:1.4.2   # manifest and platforms" },
+        { "type": "callout", "kind": "tip", "text": "Many registries let you mark a repository's tags as immutable, so an existing tag can never be overwritten. Turn it on for release repositories; it removes a whole class of \"but it was working yesterday\" incidents." }
+      ]
+    },
+    {
+      "heading": "Versioning and tagging",
+      "blocks": [
+        { "type": "p", "text": "**Semantic versioning** encodes compatibility in the number `MAJOR.MINOR.PATCH`. Increment PATCH for backwards-compatible bug fixes, MINOR for backwards-compatible new features, and MAJOR for breaking changes. It is a promise to your consumers about what upgrading will cost them, and it is what makes version ranges in package managers meaningful." },
+        { "type": "p", "text": "For deployable images, tag every build with the **commit SHA**, which is unique and traceable, and add a semantic version tag when you cut a release. Deploy by SHA tag or digest. Treat `latest` as a convenience for humans, never as something a production manifest refers to." },
+        { "type": "code", "lang": "bash", "code": "SHA=\"$(git rev-parse --short HEAD)\"\nIMAGE=ghcr.io/acme/orders-api\n\ndocker build -t \"$IMAGE:$SHA\" .\ndocker push \"$IMAGE:$SHA\"\n\n# on a release, add the version tag to the image that was already built and tested\ndocker tag \"$IMAGE:$SHA\" \"$IMAGE:1.4.2\"\ndocker push \"$IMAGE:1.4.2\"" },
+        { "type": "p", "text": "Note that the release step tags an existing image; it does not rebuild. Registries also need housekeeping. Set a **retention policy** that deletes old untagged and per-commit images while keeping released versions, or storage costs grow without limit." }
+      ]
+    },
+    {
+      "heading": "Pinning for reproducible builds",
+      "blocks": [
+        { "type": "p", "text": "A build is **reproducible** when the same commit produces the same artifact next month. Version ranges work against that: a manifest that allows `^4.17.0` installs whatever matching version is newest on build day. A **lockfile** records the exact version, and usually a hash, of every direct and **transitive** dependency, which is a dependency of a dependency and makes up most of your tree." },
+        { "type": "table", "headers": ["Ecosystem", "Lockfile", "Install exactly what it says"], "rows": [
+          ["npm", "`package-lock.json`", "`npm ci`"],
+          ["Python (pip-tools)", "`requirements.txt` with hashes", "`pip install --require-hashes -r requirements.txt`"],
+          ["Go", "`go.sum`", "`go mod download` / `go mod verify`"],
+          ["Rust", "`Cargo.lock`", "`cargo build --locked`"]
+        ]},
+        { "type": "p", "text": "Commit the lockfile, and make CI use the strict install command so that a drifted lockfile fails the build instead of being silently updated. Apply the same thinking to base images: `FROM python:3.12-slim` moves as patches are released, while a digest pin does not." },
+        { "type": "code", "lang": "dockerfile", "code": "# tag for humans, digest for the machine\nFROM python:3.12-slim@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" },
+        { "type": "p", "text": "Pinning has a cost: pinned things do not update themselves, including for security fixes. The answer is not to stop pinning but to **automate updates**. Tools such as Dependabot and Renovate open pull requests that bump lockfiles and digests, and your pipeline tests each one. You get reproducibility and freshness, with every change reviewed and revertable." }
+      ]
+    },
+    {
+      "heading": "Scanning for known vulnerabilities",
+      "blocks": [
+        { "type": "p", "text": "A **vulnerability scanner** lists the packages in an image or lockfile and matches them against databases of published vulnerabilities, identified by **CVE** numbers. Open-source scanners include Trivy and Grype; registries and Git hosts often have one built in. Run a scan in the pipeline on every build, and re-scan what is already deployed on a schedule, because new CVEs are published against old images every day." },
+        { "type": "code", "lang": "bash", "code": "trivy image ghcr.io/acme/orders-api:1.4.2             # OS packages and language deps\ntrivy image --severity HIGH,CRITICAL --ignore-unfixed \\\n  --exit-code 1 ghcr.io/acme/orders-api:1.4.2        # fail the pipeline on serious, fixable issues\ntrivy fs .                                            # scan the repo's lockfiles\ntrivy config .                                        # misconfigurations in Dockerfiles, IaC" },
+        { "type": "p", "text": "The first scan of a typical image returns a discouraging list. Triage it with three questions." },
+        { "type": "steps", "items": [
+          "**Is there a fix?** If a patched version exists, upgrading is usually cheap. `--ignore-unfixed` hides findings you cannot act on yet.",
+          "**Is it reachable?** A vulnerable library function your code never calls, in a package that is only present because the base image is large, is a lower priority than a flaw in your request-parsing path.",
+          "**Can you remove it entirely?** Moving to a slim or distroless base deletes whole categories of findings, which is the security payoff of the multi-stage builds from the Docker module."
+        ]},
+        { "type": "callout", "kind": "warning", "text": "Gate on a threshold you will actually enforce, such as fixable HIGH and CRITICAL findings. A gate that fails every build gets disabled within a week. Record accepted risks in an ignore file with a reason and an expiry date, reviewed like code." }
+      ]
+    },
+    {
+      "heading": "SBOMs, signing and provenance",
+      "blocks": [
+        { "type": "p", "text": "A **software bill of materials** (SBOM) is a machine-readable inventory of every component in an artifact, with versions and licences. The two common formats are **SPDX** and **CycloneDX**. Its value shows on the day a major vulnerability is announced: instead of rebuilding and scanning everything, you query the SBOMs you stored and know within minutes which services contain the affected library." },
+        { "type": "code", "lang": "bash", "code": "syft ghcr.io/acme/orders-api:1.4.2 -o spdx-json > sbom.spdx.json\ntrivy image --format cyclonedx --output sbom.cdx.json ghcr.io/acme/orders-api:1.4.2\n\ngrype sbom:./sbom.spdx.json          # scan the inventory later, without the image" },
+        { "type": "p", "text": "Scanning tells you what is inside. **Signing** tells you where it came from. The pipeline signs the image digest after building it, and the deploy target verifies the signature before running anything, so an image pushed to your registry by someone other than your pipeline is rejected. Sigstore's `cosign` is the common open-source tool, and it supports keyless signing tied to the pipeline's OIDC identity." },
+        { "type": "code", "lang": "bash", "code": "cosign sign ghcr.io/acme/orders-api@sha256:9b2c0f5e...      # sign the digest, not a tag\ncosign verify ghcr.io/acme/orders-api@sha256:9b2c0f5e... \\\n  --certificate-identity-regexp 'https://github.com/acme/.*' \\\n  --certificate-oidc-issuer https://token.actions.githubusercontent.com" },
+        { "type": "p", "text": "**Provenance** goes one step further: a signed statement of how the artifact was built, from which commit, by which workflow. The SLSA framework describes increasing levels of this assurance. You do not need all of it on day one. A sensible order is: lockfiles and pinned bases, scanning in CI, SBOMs stored per release, then signing with verification at deploy." }
+      ]
+    },
+    {
+      "heading": "Common supply-chain attacks",
+      "blocks": [
+        { "type": "list", "items": [
+          "**Typosquatting**: a malicious package named almost like a popular one, waiting for a typing mistake in an install command.",
+          "**Dependency confusion**: your internal package name is registered on the public registry with a higher version, and the package manager prefers it. Defend with scoped or namespaced packages and by configuring which registry serves which names.",
+          "**Compromised maintainer or build**: a legitimate package publishes a malicious release. Lockfiles with hashes stop it arriving silently; reviewed update pull requests give you a chance to notice.",
+          "**Mutable references**: a tag or an unpinned GitHub Action changes underneath you. Pin images by digest and third-party actions by commit SHA."
+        ]},
+        { "type": "p", "text": "Pulling everything through a **pull-through cache** or private proxy registry gives you one place to enforce these rules, and it also protects your builds from upstream outages and rate limits." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Make one image traceable, reproducible and inspected",
+    "steps": [
+      "Extend the pipeline from the CI/CD module so every image is tagged with the short commit SHA. After a run, find the image's digest with `docker buildx imagetools inspect`.",
+      "Pull the same image once by tag and once by digest. Then push a different build to the same tag and show that the tag now resolves to a new digest while the old digest still pulls the old image.",
+      "Make sure the project has a committed lockfile and that CI uses the strict install command (`npm ci`, `pip install --require-hashes`, or `cargo build --locked`). Break the lockfile on purpose and watch CI fail.",
+      "Install Trivy and scan your image. Count the findings, switch the Dockerfile to a slim or distroless base, rebuild, and compare.",
+      "Add a pipeline step that runs Trivy with `--severity HIGH,CRITICAL --ignore-unfixed --exit-code 1`, and an ignore file containing one documented, dated exception.",
+      "Generate an SBOM with Syft or Trivy, store it as a build artifact, and use `jq` to list every package name and version it contains.",
+      "Enable Dependabot or Renovate on the repository and merge the first update pull request it opens once CI is green."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Tags are mutable labels; digests are immutable content hashes. Deploy what you tested by SHA tag or digest, never `latest`.",
+      "Semantic versioning: MAJOR breaks, MINOR adds, PATCH fixes.",
+      "Promote by re-tagging the built image. Never rebuild for a release.",
+      "Commit lockfiles and use strict installs in CI. Most of your code is transitive dependencies.",
+      "Pin, then automate updates with a bot, so you get both reproducibility and patches.",
+      "Scan on every build and re-scan deployed images on a schedule. Gate on fixable HIGH and CRITICAL.",
+      "Keep an SBOM per release so you can answer \"are we affected?\" in minutes.",
+      "Sign digests in the pipeline and verify at deploy to prove where an image came from."
+    ],
+    "groups": [
+      {
+        "title": "References and versions",
+        "items": [
+          { "syntax": "REGISTRY/REPO:TAG", "desc": "Mutable, human-friendly reference" },
+          { "syntax": "REGISTRY/REPO@sha256:DIGEST", "desc": "Immutable, content-addressed reference" },
+          { "syntax": "MAJOR.MINOR.PATCH", "desc": "Breaking . feature . fix" },
+          { "syntax": "^1.4.2", "desc": "npm range: any 1.x.y at or above 1.4.2" },
+          { "syntax": "~1.4.2", "desc": "npm range: any 1.4.x at or above 1.4.2" },
+          { "syntax": "git rev-parse --short HEAD", "desc": "Short commit SHA for an image tag" }
+        ]
+      },
+      {
+        "title": "Registry commands",
+        "items": [
+          { "syntax": "docker login REGISTRY", "desc": "Authenticate (use `--password-stdin` in scripts)" },
+          { "syntax": "docker tag SRC:TAG REGISTRY/REPO:TAG", "desc": "Add another name to an existing image" },
+          { "syntax": "docker push REGISTRY/REPO:TAG", "desc": "Upload" },
+          { "syntax": "docker pull REGISTRY/REPO@sha256:DIGEST", "desc": "Pull an exact image" },
+          { "syntax": "docker buildx imagetools inspect REF", "desc": "Show manifest, digest and platforms" }
+        ]
+      },
+      {
+        "title": "Strict, reproducible installs",
+        "items": [
+          { "syntax": "npm ci", "desc": "Install exactly the lockfile; fail if it is out of sync" },
+          { "syntax": "pip-compile --generate-hashes", "desc": "Produce a fully pinned, hashed requirements file (pip-tools)" },
+          { "syntax": "pip install --require-hashes -r requirements.txt", "desc": "Refuse any package whose hash does not match" },
+          { "syntax": "go mod verify", "desc": "Check downloaded modules against `go.sum`" },
+          { "syntax": "cargo build --locked", "desc": "Fail if `Cargo.lock` would need to change" },
+          { "syntax": "FROM image:tag@sha256:DIGEST", "desc": "Pin a base image" }
+        ]
+      },
+      {
+        "title": "Scan, inventory, sign",
+        "items": [
+          { "syntax": "trivy image REF", "desc": "Vulnerabilities in OS and language packages" },
+          { "syntax": "trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 REF", "desc": "Pipeline gate" },
+          { "syntax": "trivy fs . / trivy config .", "desc": "Scan lockfiles / Dockerfile and IaC misconfigurations" },
+          { "syntax": "syft REF -o spdx-json", "desc": "Generate an SBOM" },
+          { "syntax": "grype sbom:./sbom.spdx.json", "desc": "Scan a stored SBOM" },
+          { "syntax": "cosign sign REPO@sha256:DIGEST", "desc": "Sign an image digest" },
+          { "syntax": "cosign verify REPO@sha256:DIGEST", "desc": "Verify a signature before deploying" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Deploying `latest`, then being unable to say which version is running or to roll back to the previous one.",
+      "Leaving the lockfile out of Git, so every build resolves a different dependency tree.",
+      "Pinning everything and never updating, which freezes known vulnerabilities in place.",
+      "Setting a scan gate so strict that it is switched off instead of tuned.",
+      "Scanning only at build time, while images that have run for months accumulate new CVEs unnoticed.",
+      "Signing a tag instead of a digest, which says nothing once the tag moves."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A Kubernetes manifest references `orders-api:1.4.2`. Overnight, with no deploy, new pods start behaving differently from old ones. What is the most likely explanation?",
+      "options": [
+        "Someone pushed a different image to the same mutable tag",
+        "The image digest changed by itself as the registry aged",
+        "Kubernetes rebuilt the image from source when pods restarted",
+        "Semantic versioning automatically upgraded it to 1.4.3"
+      ],
+      "answer": 0,
+      "explain": "Tags can be re-pointed. New pods pulled the new content while old pods kept the old. Deploying by digest, or enabling tag immutability, prevents this."
+    },
+    {
+      "q": "A library moves from 2.7.4 to 3.0.0. Under semantic versioning, what should you assume?",
+      "options": [
+        "It contains breaking changes, so upgrading may need code changes",
+        "It contains only bug fixes and is always safe to take",
+        "It adds features but remains backwards compatible",
+        "It is a pre-release that should not be used in production"
+      ],
+      "answer": 0,
+      "explain": "A MAJOR increment signals incompatible API changes. MINOR is for compatible features and PATCH for compatible fixes."
+    },
+    {
+      "q": "Why should CI run `npm ci` instead of `npm install`?",
+      "options": [
+        "It installs exactly the locked versions and fails if the lockfile is out of sync",
+        "It skips development dependencies, which makes the build faster",
+        "It upgrades every dependency to the newest compatible version",
+        "It checks each package for vulnerabilities before installing it"
+      ],
+      "answer": 0,
+      "explain": "`npm ci` treats the lockfile as the source of truth, giving reproducible installs. `npm install` may resolve ranges afresh and rewrite the lockfile."
+    },
+    {
+      "q": "A critical vulnerability is announced in a widely used logging library. Which asset lets you find your affected services fastest?",
+      "options": [
+        "Stored SBOMs for each released artifact, which you can search by package",
+        "The list of image tags currently present in your registry",
+        "The Dockerfiles, since they list every library in the image",
+        "The signatures on your images, which record their contents"
+      ],
+      "answer": 0,
+      "explain": "An SBOM inventories every component, including transitive ones a Dockerfile never mentions. Signatures prove origin, not contents."
+    },
+    {
+      "q": "Your first image scan reports 140 findings. Which response is most effective?",
+      "options": [
+        "Move to a minimal base image, then fix the fixable HIGH and CRITICAL findings",
+        "Add every finding to the ignore file so that the pipeline passes",
+        "Block all deployments until the count reaches zero",
+        "Disable scanning until the team has time to review the list"
+      ],
+      "answer": 0,
+      "explain": "Most findings come from packages you do not need, and a smaller base removes them wholesale. Then act on what is serious and fixable. Blanket ignoring or zero-tolerance gates both end with the scanner being useless."
+    }
+  ]
+}

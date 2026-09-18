@@ -1,0 +1,229 @@
+{
+  "id": "sre-capacity",
+  "minutes": 35,
+  "intro": "Systems rarely fail gently as load rises. They behave well up to a point, and then latency climbs steeply and errors appear, often within a few percent of extra traffic. The job of capacity planning is to know where that point is, keep a deliberate distance from it, and see demand coming early enough to act. This module covers the small amount of queueing theory that explains the behaviour, how to load test honestly, how much headroom to keep, and how to forecast.",
+  "objectives": [
+    "Explain why latency rises non-linearly with utilisation, and identify the knee of the curve",
+    "Use Little's Law to relate throughput, latency and concurrency when sizing pools and replicas",
+    "Design and run load, stress, soak and spike tests with a realistic, open workload model",
+    "Calculate headroom for peak load and for N+1 or N+2 redundancy",
+    "Forecast demand from organic growth and planned events, and configure autoscaling with sensible limits"
+  ],
+  "sections": [
+    {
+      "heading": "Why there is a knee",
+      "blocks": [
+        { "type": "p", "text": "Any resource that serves requests, such as a CPU, a worker pool, a database connection or a disk, behaves like a queue. While it is mostly idle, a new request is served at once. As it gets busier, a new request increasingly arrives to find others ahead of it, and has to wait. Queueing theory gives a simple approximation for a single server with random arrivals." },
+        { "type": "code", "lang": "text", "code": "response time = service time / (1 - utilisation)\n\nservice time 20 ms:\n  utilisation 50%  ->  20 / 0.50 =   40 ms   (2x)\n  utilisation 80%  ->  20 / 0.20 =  100 ms   (5x)\n  utilisation 90%  ->  20 / 0.10 =  200 ms   (10x)\n  utilisation 95%  ->  20 / 0.05 =  400 ms   (20x)\n  utilisation 99%  ->  20 / 0.01 = 2000 ms   (100x)" },
+        { "type": "p", "text": "The curve is nearly flat at first, then bends sharply upward. That bend is the **knee**. Going from 50% to 80% utilisation costs a little latency. Going from 90% to 95% doubles it. Real systems have many servers and less random arrivals, so the exact numbers differ, but the shape always holds. Past the knee, a small rise in traffic, a slightly slower dependency or the loss of one instance pushes you up a cliff." },
+        { "type": "p", "text": "Two consequences follow. First, **running hot is a false economy**: a fleet at 90% utilisation looks efficient, and it has no ability to absorb anything. Second, **averages hide the knee**. Utilisation averaged over five minutes can read 60% while one-second bursts reach 100% and queues form. Look at high percentiles of latency and at saturation signals such as queue depth and CPU throttling, not only at average utilisation." },
+        { "type": "p", "text": "**Little's Law** is the other tool worth carrying. For any stable system:" },
+        { "type": "code", "lang": "text", "code": "L = lambda x W\n\nL       average number of requests in the system (concurrency)\nlambda  average arrival rate (requests per second)\nW       average time a request spends in the system (seconds)\n\nExample: 400 requests/s, each taking 250 ms\n  L = 400 x 0.25 = 100 requests in flight at any moment\n\n  Each pod handles 16 concurrent requests -> 100 / 16 = 6.25 -> at least 7 pods,\n  before any headroom.\n\n  If a dependency slows and W doubles to 500 ms, L doubles to 200:\n  the same traffic now needs twice the concurrency." },
+        { "type": "p", "text": "That last line explains many outages. Traffic did not rise, but a dependency slowed, so requests stayed in flight longer and concurrency doubled. Thread pools and connection pools sized for the old concurrency ran out, and the cascading failure from the previous module began. Size pools from Little's Law using a pessimistic latency, not the happy-path figure." }
+      ]
+    },
+    {
+      "heading": "Load testing honestly",
+      "blocks": [
+        { "type": "p", "text": "You find the knee by measurement. Different tests answer different questions." },
+        { "type": "table", "headers": ["Test", "Shape", "Question answered"], "rows": [
+          ["**Load**", "Ramp to expected peak and hold", "Do we meet the SLO at the load we expect?"],
+          ["**Stress**", "Keep increasing until it breaks", "Where is the limit, what breaks first, and does it recover?"],
+          ["**Soak**", "Moderate load for hours or days", "Are there leaks: memory, connections, disk, file handles?"],
+          ["**Spike**", "A sudden jump, many times normal", "Can we absorb a surge, and does autoscaling react in time?"]
+        ]},
+        { "type": "p", "text": "The most important and least understood choice is the **workload model**. In a **closed** model, a fixed number of virtual users each send a request, wait for the response, then send another. When the system slows, the users slow with it, so the offered load **falls** just as the system gets into trouble, and the test flatters you. In an **open** model, requests arrive at a set rate regardless of how fast responses come back, which is how real internet traffic behaves: users do not stop arriving because your site is slow. Test with an open model, specifying an arrival rate." },
+        { "type": "p", "text": "The related measurement error is **coordinated omission**. If a tool waits for each response before sending the next request, then during a ten-second stall it records one slow request instead of the hundreds that should have been sent and would have been slow as well. The reported percentiles look far better than what users experienced. Tools that schedule requests at a constant rate, and measure from the intended send time, avoid it." },
+        { "type": "code", "lang": "javascript", "caption": "k6: an open-model test that ramps the arrival rate and enforces the SLO", "code": "import http from 'k6/http';\nimport { check } from 'k6';\n\nexport const options = {\n  scenarios: {\n    ramp: {\n      executor: 'ramping-arrival-rate',   // open model: a request rate, not a user count\n      startRate: 50,\n      timeUnit: '1s',\n      preAllocatedVUs: 200,\n      maxVUs: 2000,\n      stages: [\n        { target: 200, duration: '5m' },  // ramp to expected peak\n        { target: 200, duration: '10m' }, // hold\n        { target: 600, duration: '10m' }, // keep going to find the knee\n      ],\n    },\n  },\n  thresholds: {\n    http_req_failed: ['rate<0.001'],      // under 0.1% errors\n    http_req_duration: ['p(99)<500'],     // p99 under 500 ms\n  },\n};\n\nexport default function () {\n  const res = http.get('https://staging.example.com/api/products?page=1');\n  check(res, { 'status is 200': (r) => r.status === 200 });\n}" },
+        { "type": "list", "items": [
+          "**Use a realistic mix** of endpoints, payload sizes and data. Hitting one cached URL measures your cache, not your system.",
+          "**Test an environment like production**, in size and in data volume. A query that is instant on a thousand rows may be a full scan on a hundred million.",
+          "**Watch the system, not only the tool.** Record which resource saturates first: CPU, memory, a connection pool, a lock, a downstream rate limit. That is your bottleneck, and the thing to fix or scale next.",
+          "**Check recovery.** After a stress test, does latency return to normal when the load drops, or does the system stay broken until restarted? The second is a serious finding.",
+          "**Do not load test a dependency you do not own** without agreement. Stub third-party APIs, or you will be testing someone else's rate limiter.",
+          "**Make it routine.** Run a short load test in the pipeline to catch performance regressions, and a full one before every expected peak."
+        ]}
+      ]
+    },
+    {
+      "heading": "Headroom and redundancy",
+      "blocks": [
+        { "type": "p", "text": "Capacity is not sized for the average. It is sized for the **peak**, plus room for failure, plus room for growth and error. Work through it in order." },
+        { "type": "code", "lang": "text", "code": "1. Peak demand            measured peak, e.g. 1,200 requests/s on the busiest day\n2. Per-instance capacity  from a load test, at the SLO: e.g. 150 requests/s per pod\n                          (the load where p99 still meets the target, NOT the breaking point)\n3. Instances for peak     1,200 / 150 = 8\n4. Redundancy             N+1: survive the loss of one   -> 9\n                          N+2: one in maintenance AND one failing -> 10\n5. Zone failure           3 zones; losing one must leave >= 8\n                          -> 12 pods, 4 per zone (8 remain)\n6. Growth buffer          expected growth until the next review, e.g. +20%" },
+        { "type": "p", "text": "Step five is often the largest term, and it surprises people. With instances spread across three zones, surviving the loss of a zone means the remaining two thirds must carry the full peak, so you run at no more than about 67% of capacity in normal operation. With two zones it is 50%. That arithmetic is the real price of zone redundancy, and it is why target utilisation figures of 50 to 65% are common and sensible, not wasteful." },
+        { "type": "p", "text": "Remember what happens at the moment of failure. The survivors take on extra load **and** are moved up the latency curve towards the knee. If the fleet was at 85% before one of four instances died, the remaining three face 113% and collapse. This is the load-redistribution failure from the previous module, and headroom is the defence." },
+        { "type": "callout", "kind": "tip", "text": "Express capacity in the unit the business understands, such as orders per minute or concurrent viewers, and track the ratio of current peak to tested capacity. \"We are at 62% of what we have proven we can handle\" is a statement that product managers and finance can plan with." }
+      ]
+    },
+    {
+      "heading": "Forecasting demand",
+      "blocks": [
+        { "type": "p", "text": "Demand comes from two sources, and they need different methods. **Organic growth** is the natural trend from adoption and usage. It can be estimated from history. **Inorganic growth** comes from events that history cannot predict: a product launch, a marketing campaign, a large customer being onboarded, a seasonal sale. It can only be learned by talking to the people planning those events, which makes capacity planning partly a communication job." },
+        { "type": "code", "lang": "python", "code": "import numpy as np\n\n# weekly peak requests/s for the last 12 weeks\npeaks = np.array([810, 835, 850, 870, 905, 915, 940, 975, 990, 1020, 1050, 1075])\nweeks = np.arange(len(peaks))\n\nslope, intercept = np.polyfit(weeks, peaks, 1)          # straight-line fit\ncapacity = 2000                                         # tested capacity, requests/s\nthreshold = 0.65 * capacity                             # act before 65% of capacity\n\nweeks_until_threshold = (threshold - intercept) / slope - weeks[-1]\nprint(f\"growth: {slope:.0f} req/s per week\")\nprint(f\"threshold of {threshold:.0f} reached in about {weeks_until_threshold:.0f} weeks\")" },
+        { "type": "list", "items": [
+          "**Forecast the peak, not the mean.** Use weekly or daily maxima, and respect seasonality: compare this December with last December, not with November.",
+          "**Compare the forecast with lead time.** If adding capacity takes six weeks, because of procurement, quota increases or a database migration, you must act when the threshold is more than six weeks away. Cloud quotas and account limits are a classic hidden lead time.",
+          "**Track more than CPU.** Storage, database connections, IP addresses in a subnet, licence seats, API rate limits with third parties and message queue partitions all run out, often less visibly.",
+          "**Alert on the trend.** `predict_linear` in Prometheus turns a forecast into an early-warning ticket, such as a disk that will fill in four days.",
+          "**Revisit regularly.** A forecast is wrong the day after it is made. A short monthly review of forecast against actual keeps it useful."
+        ]},
+        { "type": "code", "lang": "promql", "code": "# disk will be full within 4 days at the current rate of growth (ticket, not page)\npredict_linear(node_filesystem_avail_bytes{mountpoint=\"/data\"}[3d], 4 * 86400) < 0\n\n# weekly peak request rate, for the capacity dashboard\nmax_over_time(sum(rate(http_requests_total{job=\"checkout\"}[5m]))[7d:5m])" }
+      ]
+    },
+    {
+      "heading": "Autoscaling, and its limits",
+      "blocks": [
+        { "type": "p", "text": "Autoscaling matches capacity to demand automatically, which saves money in quiet periods and absorbs ordinary peaks. It complements capacity planning and does not replace it, because it has limits you must design around." },
+        { "type": "code", "lang": "yaml", "code": "apiVersion: autoscaling/v2\nkind: HorizontalPodAutoscaler\nmetadata:\n  name: checkout\n  namespace: shop\nspec:\n  scaleTargetRef:\n    apiVersion: apps/v1\n    kind: Deployment\n    name: checkout\n  minReplicas: 6                 # enough for normal load with a zone lost\n  maxReplicas: 30                # a ceiling that protects dependencies and the budget\n  metrics:\n    - type: Resource\n      resource:\n        name: cpu\n        target:\n          type: Utilization\n          averageUtilization: 60\n  behavior:\n    scaleUp:\n      stabilizationWindowSeconds: 0\n      policies:\n        - type: Percent\n          value: 100\n          periodSeconds: 60      # may double every minute\n    scaleDown:\n      stabilizationWindowSeconds: 300   # scale in slowly, to avoid flapping" },
+        { "type": "list", "items": [
+          "**It reacts, so it lags.** Metrics must be scraped, a decision made, pods scheduled, perhaps a node provisioned, images pulled, the application started and its caches warmed. That takes from tens of seconds to several minutes. A spike that arrives in ten seconds is served by the capacity you already had, which is why the target is 60% and not 90%.",
+          "**Scale up fast and down slowly.** Rapid scale-in followed by another spike causes flapping and needless cold starts.",
+          "**Choose the metric that reflects the bottleneck.** CPU suits compute-bound services. For I/O-bound services, scale on requests per second, queue depth or in-flight requests, using custom or external metrics.",
+          "**`minReplicas` is a reliability setting**, not a cost setting. It must cover normal load with a zone lost, without waiting for the autoscaler.",
+          "**`maxReplicas` protects what is downstream.** Thirty pods with twenty database connections each is six hundred connections. If the database allows five hundred, the autoscaler has just caused your outage. Scale the whole chain, or put a connection pooler in between.",
+          "**Pre-scale for known events.** Before a campaign or a sale, raise the minimum in advance. Do not make the autoscaler discover the launch from a wall of traffic.",
+          "**A scaled-to-zero or freshly started fleet is cold.** Test how the service behaves in its first minute under load."
+        ]},
+        { "type": "callout", "kind": "warning", "text": "Stateless application tiers scale easily, which means that capacity problems migrate to the parts that do not: the primary database, a shared cache, a third-party API. Know which of your components cannot scale horizontally, know their limits, and plan those by hand." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Find the knee of a real service",
+    "steps": [
+      "Deploy a service you can safely overload, with the dashboards from the observability stage showing request rate, error ratio, latency percentiles, CPU and any connection pools.",
+      "Install k6, or another tool that supports a constant arrival rate. Write an open-model test that ramps the request rate in steps, holding each step for a few minutes.",
+      "Run it and record p50 and p99 latency, error ratio and CPU at each step. Plot latency against request rate and mark the knee. Note which resource saturated first.",
+      "Define per-instance capacity as the highest rate at which the latency SLO is still met. Using Little's Law, check it against your worker or connection pool size.",
+      "Repeat with a closed-model test using a fixed number of virtual users, and compare the results. Explain why the closed model looks better.",
+      "Calculate the replicas needed for your peak with N+1 redundancy and the loss of one of three zones, and state the resulting normal-operation utilisation.",
+      "Add a HorizontalPodAutoscaler. Run a spike test and measure the time from the spike to the new pods serving traffic. Decide whether your utilisation target leaves enough headroom for that delay.",
+      "Run a two-hour soak test at moderate load and look for steadily rising memory, connections or file descriptors."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Latency rises non-linearly with utilisation: roughly service time / (1 - utilisation). Stay below the knee.",
+      "Average utilisation hides bursts. Watch p99 latency and saturation signals such as queue depth and throttling.",
+      "Little's Law: concurrency = arrival rate x latency. A slower dependency raises concurrency at the same traffic.",
+      "Load test with an open model (an arrival rate). Closed models and coordinated omission flatter the system.",
+      "Per-instance capacity is the rate at which the SLO is still met, not the rate at which it breaks.",
+      "Size for peak, plus N+1 or N+2, plus the loss of a zone, plus growth. Three zones means about 67% utilisation at most.",
+      "Forecast peaks, include planned events, and compare the forecast with the lead time for adding capacity.",
+      "Autoscaling lags by minutes. Scale up fast, down slowly, pre-scale for events, and cap the maximum to protect dependencies."
+    ],
+    "groups": [
+      {
+        "title": "Formulas",
+        "items": [
+          { "syntax": "R = S / (1 - U)", "desc": "Response time from service time and utilisation (single server)" },
+          { "syntax": "L = lambda x W", "desc": "Little's Law: concurrency = arrival rate x time in system" },
+          { "syntax": "instances = peak rate / per-instance capacity", "desc": "Round up, before redundancy" },
+          { "syntax": "N+1, N+2", "desc": "Spare instances for one failure, or failure plus maintenance" },
+          { "syntax": "max utilisation = (zones - 1) / zones", "desc": "2 zones 50%, 3 zones 67%, 4 zones 75%" },
+          { "syntax": "load on survivors = U x n / (n - 1)", "desc": "85% across 4 becomes 113% across 3" },
+          { "syntax": "act when: time to threshold <= lead time", "desc": "Procurement, quotas and migrations take weeks" }
+        ]
+      },
+      {
+        "title": "Latency multiplier by utilisation",
+        "items": [
+          { "syntax": "50%", "desc": "2x service time" },
+          { "syntax": "70%", "desc": "3.3x" },
+          { "syntax": "80%", "desc": "5x" },
+          { "syntax": "90%", "desc": "10x" },
+          { "syntax": "95%", "desc": "20x" },
+          { "syntax": "99%", "desc": "100x" }
+        ]
+      },
+      {
+        "title": "Test types",
+        "items": [
+          { "syntax": "Load", "desc": "Expected peak, held: is the SLO met?" },
+          { "syntax": "Stress", "desc": "Beyond the limit: what breaks first, and does it recover?" },
+          { "syntax": "Soak", "desc": "Hours at moderate load: leaks and slow degradation" },
+          { "syntax": "Spike", "desc": "Sudden surge: absorption and autoscaler reaction time" },
+          { "syntax": "Open model", "desc": "Requests arrive at a set rate; realistic for internet traffic" },
+          { "syntax": "Closed model", "desc": "Fixed users wait for replies; load falls as the system slows" }
+        ]
+      },
+      {
+        "title": "k6 essentials",
+        "items": [
+          { "syntax": "k6 run script.js", "desc": "Run a test locally" },
+          { "syntax": "executor: 'ramping-arrival-rate'", "desc": "Open model with a changing request rate" },
+          { "syntax": "executor: 'constant-arrival-rate'", "desc": "Open model at a fixed request rate" },
+          { "syntax": "stages: [{ target: 200, duration: '5m' }]", "desc": "Ramp to a target over a duration" },
+          { "syntax": "thresholds: { http_req_duration: ['p(99)<500'] }", "desc": "Fail the run if the SLO is missed" },
+          { "syntax": "thresholds: { http_req_failed: ['rate<0.001'] }", "desc": "Fail the run on too many errors" }
+        ]
+      },
+      {
+        "title": "Autoscaling and queries",
+        "items": [
+          { "syntax": "minReplicas", "desc": "Covers normal load with a zone lost; a reliability setting" },
+          { "syntax": "maxReplicas", "desc": "Ceiling that protects downstream limits and the budget" },
+          { "syntax": "averageUtilization: 60", "desc": "Target as a percentage of the pod's CPU request" },
+          { "syntax": "behavior.scaleDown.stabilizationWindowSeconds: 300", "desc": "Scale in slowly to avoid flapping" },
+          { "syntax": "predict_linear(metric[3d], 4 * 86400) < 0", "desc": "Will run out within four days" },
+          { "syntax": "max_over_time(EXPR[7d:5m])", "desc": "Weekly peak of an expression, via a subquery" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Running the fleet at 85 to 90% utilisation because it looks efficient, leaving no room for a failure or a spike.",
+      "Load testing with a fixed number of virtual users, so that offered load falls as the system slows.",
+      "Quoting the breaking point as capacity, instead of the rate at which the SLO is still met.",
+      "Testing against a small dataset or a single cached endpoint, and measuring nothing real.",
+      "Letting the autoscaler grow the application tier until it exhausts database connections.",
+      "Forecasting from history alone and being surprised by a launch that marketing had planned for months."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A worker pool has a service time of 10 ms per request. Using the single-server approximation, roughly what is the response time at 90% utilisation?",
+      "options": ["About 100 ms", "About 19 ms", "About 11 ms", "About 50 ms"],
+      "answer": 0,
+      "explain": "Response time is service time divided by one minus utilisation: 10 ms divided by 0.1 is 100 ms, ten times the service time. At 80% it would be 50 ms."
+    },
+    {
+      "q": "A service handles 300 requests per second with an average latency of 200 ms. A downstream database slows, and latency rises to 800 ms at the same traffic. What happens to the number of in-flight requests?",
+      "options": [
+        "It rises from about 60 to about 240, which may exhaust worker and connection pools",
+        "It stays at about 60, because the arrival rate has not changed at all",
+        "It falls, because slower responses mean that fewer requests are started",
+        "It rises from about 60 to about 75, which is in line with the latency change"
+      ],
+      "answer": 0,
+      "explain": "Little's Law: concurrency is arrival rate times latency. 300 times 0.2 is 60, and 300 times 0.8 is 240. Pools sized for 60 are overwhelmed although traffic did not grow."
+    },
+    {
+      "q": "Why can a closed-model load test, with a fixed number of virtual users, give misleadingly good results?",
+      "options": [
+        "When the system slows, each user waits longer, so the offered load drops",
+        "Closed models send requests faster than any production traffic could",
+        "Virtual users cannot generate enough concurrent connections to matter",
+        "Closed models measure latency at the server and ignore the network"
+      ],
+      "answer": 0,
+      "explain": "Each virtual user sends its next request only after the previous reply. A struggling system therefore receives less load exactly when it is in trouble, unlike real users, who keep arriving."
+    },
+    {
+      "q": "A service runs in three availability zones and must carry its full peak after losing any one zone. What is the highest utilisation it should run at during normal peak operation?",
+      "options": ["About 67%", "About 90%", "About 50%", "About 33%"],
+      "answer": 0,
+      "explain": "After losing one zone, two thirds of the capacity remains and must carry 100% of the load. So normal peak load must be at most two thirds of total capacity."
+    },
+    {
+      "q": "An autoscaler raises the application tier from 10 to 40 pods during a sale. Shortly afterwards, the database starts refusing connections. What was missed?",
+      "options": [
+        "maxReplicas times connections per pod exceeded the database's connection limit",
+        "The scale-down stabilisation window was set too long for a busy sale period",
+        "The CPU utilisation target was set too low, so scaling started too early",
+        "minReplicas should have been set to zero before the sale began"
+      ],
+      "answer": 0,
+      "explain": "Stateless tiers scale easily and push the bottleneck downstream. Forty pods with a pool each can exceed the database's limit. The maximum must respect downstream limits, or a connection pooler is needed."
+    }
+  ]
+}

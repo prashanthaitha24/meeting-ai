@@ -1,0 +1,239 @@
+{
+  "id": "sre-oncall",
+  "minutes": 25,
+  "intro": "Someone has to answer when production breaks at three in the morning. How that duty is organised decides whether your team responds quickly and calmly for years, or burns out within months and starts making mistakes. On-call is a system to be engineered like any other: it has inputs you can measure, failure modes you can predict, and design choices that matter. This module covers rotations, escalation, handoffs and the practices that keep the humans in the loop healthy.",
+  "objectives": [
+    "Design a rotation with adequate size, shift length and primary and secondary cover",
+    "Write an escalation policy with clear acknowledgement times and a defined path when nobody responds",
+    "Run handoffs that transfer context, not just the pager",
+    "Measure on-call load and keep it within sustainable limits",
+    "Prepare new engineers for on-call through shadowing and practice, and protect responders from fatigue"
+  ],
+  "sections": [
+    {
+      "heading": "What on-call is for",
+      "blocks": [
+        { "type": "p", "text": "Being **on call** means being reachable and able to act within an agreed time, for an agreed period, in response to pages about production. The on-call engineer is the guardian of the service for that shift: they triage what comes in, mitigate what they can, and pull in help for what they cannot." },
+        { "type": "p", "text": "It is worth being clear about what the role is **not**. The on-call engineer is not expected to know everything, to fix root causes at night, or to work alone. Their goal during an incident is to **restore service**, usually by the quickest safe route: roll back, fail over, scale up, switch off a feature. Understanding why it happened is a job for daylight, with colleagues, in a postmortem." },
+        { "type": "p", "text": "Response-time expectations should follow from the SLO. If a service has a 99.99% target, the monthly budget is a little over four minutes, so a human response is already too slow and recovery must be automatic. At 99.9% there are about 43 minutes a month, which supports an expectation such as acknowledging within five minutes and being hands-on within fifteen. At 99% a response within the hour is reasonable, and the service may not need out-of-hours cover at all." },
+        { "type": "callout", "kind": "note", "text": "Not every service deserves a pager. Out-of-hours on-call is expensive in money and in people. If the business would not notice an outage until Monday, then alert during working hours only, and say so explicitly in the service's documentation." }
+      ]
+    },
+    {
+      "heading": "Designing the rotation",
+      "blocks": [
+        { "type": "p", "text": "A rotation needs enough people that each person's share is tolerable. The Google SRE book suggests **at least eight engineers for a single-site rotation** with week-long shifts, which puts each person on call roughly one week in eight and leaves room for holidays and illness. With two sites in different time zones, around six per site works, and it removes night shifts altogether: each site covers its own daytime. This arrangement is called **follow the sun**." },
+        { "type": "table", "headers": ["Choice", "Options", "Trade-off"], "rows": [
+          ["Shift length", "One week is most common; some teams split weekdays and weekends", "Longer shifts mean fewer handoffs but more accumulated fatigue"],
+          ["Cover", "A primary, plus a secondary as backup", "The secondary catches missed pages and provides a second pair of hands"],
+          ["Who participates", "SREs only, or developers too", "Developers on the rotation feel the operational cost of what they build"],
+          ["Hours", "24x7, extended hours, or business hours only", "Match it to the SLO and to what the business really needs"]
+        ]},
+        { "type": "list", "items": [
+          "**Publish the schedule well ahead**, at least a month, and make swaps easy and guilt-free. People have lives, and a rota that cannot bend will break.",
+          "**Never leave a gap.** The paging tool should refuse a schedule with uncovered hours. Public holidays and the week a colleague leaves are where gaps appear.",
+          "**Small teams need honesty.** A team of three cannot sustain 24x7 cover for long. Options are to share a rotation with a neighbouring team, reduce the hours covered, or invest in making the service need fewer pages.",
+          "**Compensate it.** On-call is work. Time off in lieu, extra pay, or both, according to local law and custom. Uncompensated on-call breeds resentment, and then resignations."
+        ]}
+      ]
+    },
+    {
+      "heading": "Escalation policies",
+      "blocks": [
+        { "type": "p", "text": "An **escalation policy** answers the question: what happens if the page is not acknowledged? Without one, a missed page, because of a flat battery, no signal, or deep sleep, becomes an outage that nobody is working on. The policy is configured in the paging tool and should be written down where everyone can read it." },
+        { "type": "code", "lang": "yaml", "caption": "An escalation policy described as data", "code": "service: checkout\nseverity_page:\n  - level: 1\n    notify: primary-oncall\n    methods: [push, sms, phone]\n    acknowledge_within: 5m\n  - level: 2\n    notify: secondary-oncall\n    methods: [push, sms, phone]\n    acknowledge_within: 10m\n  - level: 3\n    notify: engineering-manager\n    methods: [phone]\n    acknowledge_within: 15m\n  - level: 4\n    notify: director-of-engineering\n    methods: [phone]\nrepeat_policy: 2            # run through the levels twice before giving up\nseverity_ticket:\n  - notify: team-queue      # no paging; handled next working day" },
+        { "type": "p", "text": "There are two kinds of escalation, and both must be easy. **Hierarchical** escalation moves up the chain when a page goes unanswered, as above. **Functional** escalation brings in someone with different expertise: the database team, the network team, the vendor. The on-call engineer must be able to reach those people quickly, which means other teams' on-call contacts are documented and their pagers can be triggered directly." },
+        { "type": "callout", "kind": "tip", "text": "Make escalating a sign of good judgement, not of weakness. The rule to teach is: if you are not making progress after fifteen or twenty minutes, or if the impact is growing, bring someone in. Nobody has ever been criticised in a postmortem for asking for help too early." },
+        { "type": "p", "text": "Acknowledging a page means \"I have seen this and I own it\". It does not mean it is fixed. If you acknowledge and then find you cannot work on it, because you are driving, or unwell, hand it on explicitly by reassigning or escalating. A page that was acknowledged and then abandoned is worse than one never acknowledged, because escalation has been switched off." }
+      ]
+    },
+    {
+      "heading": "Handoffs",
+      "blocks": [
+        { "type": "p", "text": "A shift change transfers responsibility, and responsibility without context is dangerous. The incoming engineer needs to know what is fragile right now, what is in progress, and what they might be woken by. A short written note plus a ten-minute conversation is enough, and the written part matters because it survives if the conversation is skipped." },
+        { "type": "code", "lang": "markdown", "caption": "Handoff note template", "code": "# On-call handoff: checkout   (week 38 -> week 39)\nOutgoing: Priya S.     Incoming: Marco T.     Secondary: Lena K.\n\n## Open incidents / ongoing issues\n- INC-2291 (mitigated, not resolved): payment provider timeouts. Retry budget\n  lowered as a workaround. Provider's fix expected Tuesday. Watch p99 latency.\n\n## Pages this week: 4  (2 actionable, 1 duplicate, 1 false positive)\n- 2x CheckoutErrorBudgetFastBurn: caused by INC-2291. Runbook was accurate.\n- 1x QueueDepthHigh: duplicate of the above. Ticket OPS-812 to inhibit it.\n- 1x CertExpirySoon: false positive, cert was already renewed. Ticket OPS-813.\n\n## Things that may wake you\n- Wednesday 02:00 UTC: database minor version upgrade (CHG-1042). Silence set.\n- Marketing campaign Thursday 09:00: expect about double normal traffic.\n\n## Temporary changes still in place (remember to undo)\n- Retry budget for payment calls at 10% (normally 20%).\n- Feature flag `new_address_form` is OFF in production.\n\n## Runbook / tooling problems found\n- Rollback runbook step 4 refers to the old cluster name. Fixed in PR 1187." },
+        { "type": "p", "text": "The section on **temporary changes** earns its place. Workarounds applied during an incident, such as a raised limit, a disabled check or a manual override, are easily forgotten, and they become the hidden cause of the next incident. Write them down and give them an owner." },
+        { "type": "p", "text": "Review the week's pages at the handoff too. This is the natural moment for the alert review from the previous module: which pages were actionable, which should be deleted or demoted, and which point to toil that needs an engineering fix." }
+      ]
+    },
+    {
+      "heading": "Keeping the load sustainable",
+      "blocks": [
+        { "type": "p", "text": "Measure on-call load the same way you measure the service. What is not measured grows quietly until someone resigns." },
+        { "type": "table", "headers": ["Metric", "Why it matters", "Healthy direction"], "rows": [
+          ["Pages per shift", "The basic measure of load", "The SRE book suggests a maximum of about two incidents per 12-hour shift"],
+          ["Pages outside working hours", "Sleep disruption drives fatigue and error", "As close to zero as possible"],
+          ["Share of pages that were actionable", "Noise erodes trust in the pager", "Approaching 100%"],
+          ["Time to acknowledge", "Shows whether people can actually respond", "Within the policy, consistently"],
+          ["Distribution across people", "Swaps and specialisation can concentrate the load", "Roughly even"],
+          ["Time spent on follow-up", "Incidents need postmortems and fixes", "Enough; a rushed follow-up repeats the incident"]
+        ]},
+        { "type": "p", "text": "The limit of about two incidents per shift is not arbitrary. Handling an incident properly includes mitigation, investigation, writing it up and starting the fix, which takes hours. Beyond that rate, engineers can only fight fires, the causes are never addressed, and the load rises further. When a rotation is consistently over the limit, treat it as an emergency for the team: pause feature work, fix the top sources of pages, and consider returning the pager for the worst service to its developers, as the first module described." },
+        { "type": "p", "text": "The opposite problem is real too. A rotation that is almost never paged loses its skills: people forget the tools, and the runbooks rot. Keep the muscle alive with regular drills and game days, covered in the chaos engineering module." },
+        { "type": "list", "items": [
+          "**Protect sleep.** After a night with a long incident, the engineer starts late or takes the day. A tired responder is a risk to the service.",
+          "**Reduce the on-call person's project load** for the week. They are interrupt-driven by design, so give them small, interruptible work such as runbook fixes and alert tuning.",
+          "**Make it psychologically safe.** People who fear blame hesitate, hide mistakes and avoid escalating. A blameless culture is a precondition for fast response.",
+          "**Provide the tools**: a laptop, mobile data, access that works, and a quiet way to get on a call. Test them before the first shift, not during the first incident."
+        ]}
+      ]
+    },
+    {
+      "heading": "Preparing new responders",
+      "blocks": [
+        { "type": "p", "text": "Nobody should carry a pager alone before they are ready, and being ready is something you can build deliberately instead of hoping for." },
+        { "type": "steps", "items": [
+          "**Learn the system.** Architecture walkthrough, the service's SLOs and dashboards, where the runbooks live, and how to deploy and roll back. Have the newcomer deploy and roll back for real in staging.",
+          "**Read history.** Work through the last several postmortems. They show how the system actually fails, which the architecture diagram never does.",
+          "**Shadow.** The newcomer receives the same pages as the primary and follows along, without responsibility. They see real incidents handled.",
+          "**Reverse shadow.** The newcomer is primary, and an experienced engineer shadows them, ready to step in. Confidence comes from handling a real page with a safety net.",
+          "**Practise.** Run a drill such as \"wheel of misfortune\", in which a past incident is replayed as a role-play and the trainee talks through what they would check and do.",
+          "**Go solo**, with a named secondary who expects to be called, and review the first shift together."
+        ]},
+        { "type": "p", "text": "An on-call **readiness checklist** makes the expectations explicit: access to every system verified, paging app installed and tested with a real test page, runbooks read, a rollback performed, escalation contacts known. It is also an excellent test of your documentation. Every question a new engineer has to ask is a gap in a runbook." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Audit and improve one rotation",
+    "steps": [
+      "For a rotation you are on or know well, write down the number of people, shift length, hours covered, and whether there is a secondary. Compare it with the sizing guidance in this module.",
+      "From the paging tool, pull the last eight weeks of pages. Compute pages per shift, the share outside working hours, the share that were actionable, and the distribution across people.",
+      "Read the current escalation policy. Check that every level has an acknowledgement time, that the final level is a real person who knows they are on it, and that there are no uncovered hours in the next month's schedule.",
+      "Send a test page to yourself and time how long it takes to reach you by each method. Then test what happens when you deliberately do not acknowledge it.",
+      "Write a handoff note for the current week using the template, including the temporary-changes section. Note what you had to look up, since that shows what is not being recorded.",
+      "Draft a one-page on-call readiness checklist for a new team member, and walk a colleague through it to find the gaps.",
+      "Propose one change that would most reduce out-of-hours pages, with the data that supports it."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "The on-call goal is to restore service by the quickest safe route. Root cause is for daylight and the postmortem.",
+      "Response times follow from the SLO. Not every service needs out-of-hours cover.",
+      "Size the rotation properly: about eight people for one site, or about six per site across two time zones.",
+      "Always have a secondary and an escalation policy with acknowledgement times. Acknowledged means owned.",
+      "Escalate early. Fifteen to twenty minutes without progress, or growing impact, means bring someone in.",
+      "Hand off in writing: open issues, pages and their quality, what may wake you, temporary changes to undo.",
+      "Keep load to about two incidents per shift, measure it, and treat sustained overload as a team emergency.",
+      "Prepare people: learn, read postmortems, shadow, reverse shadow, drill, then go solo with backup."
+    ],
+    "groups": [
+      {
+        "title": "Rotation design",
+        "items": [
+          { "syntax": "team size >= 8 (single site)", "desc": "About one week in eight each, with slack for leave" },
+          { "syntax": "~6 per site, two sites", "desc": "Follow the sun: each site covers its own daytime" },
+          { "syntax": "primary + secondary", "desc": "Backup for missed pages and a second pair of hands" },
+          { "syntax": "schedule published >= 4 weeks ahead", "desc": "Swaps are easy and free of guilt" },
+          { "syntax": "no uncovered hours", "desc": "Check holidays and staff changes" },
+          { "syntax": "compensated", "desc": "Time off in lieu, pay, or both" }
+        ]
+      },
+      {
+        "title": "SLO to response expectation",
+        "items": [
+          { "syntax": "99.99%", "desc": "About 4 minutes a month: recovery must be automated" },
+          { "syntax": "99.9%", "desc": "About 43 minutes a month: acknowledge in 5, hands-on in 15" },
+          { "syntax": "99.5%", "desc": "About 3.6 hours a month: response within 30 minutes" },
+          { "syntax": "99%", "desc": "About 7 hours a month: response within the hour; maybe working hours only" }
+        ]
+      },
+      {
+        "title": "Escalation policy contents",
+        "items": [
+          { "syntax": "level 1: primary", "desc": "All contact methods; acknowledge within 5 minutes" },
+          { "syntax": "level 2: secondary", "desc": "Triggered automatically if level 1 does not acknowledge" },
+          { "syntax": "level 3+: manager, director", "desc": "Real people who know they are on the policy" },
+          { "syntax": "repeat policy", "desc": "Cycle through the levels again before giving up" },
+          { "syntax": "functional escalation", "desc": "How to page the database, network or vendor on-call" },
+          { "syntax": "reassign, never abandon", "desc": "If you acknowledged and cannot work it, hand it on explicitly" }
+        ]
+      },
+      {
+        "title": "Handoff note sections",
+        "items": [
+          { "syntax": "Open incidents and ongoing issues", "desc": "State, workaround in place, what to watch" },
+          { "syntax": "Pages this week", "desc": "Count, and which were actionable, duplicate or false" },
+          { "syntax": "Things that may wake you", "desc": "Planned changes, campaigns, known risks" },
+          { "syntax": "Temporary changes to undo", "desc": "Raised limits, disabled checks, flags switched off" },
+          { "syntax": "Runbook and tooling problems", "desc": "What was wrong, and the ticket or PR that fixes it" }
+        ]
+      },
+      {
+        "title": "Load metrics",
+        "items": [
+          { "syntax": "pages per shift", "desc": "Target: at most about two incidents per 12 hours" },
+          { "syntax": "out-of-hours pages", "desc": "Target: as near zero as possible" },
+          { "syntax": "actionable share", "desc": "Target: approaching 100%" },
+          { "syntax": "time to acknowledge", "desc": "Target: within policy, consistently" },
+          { "syntax": "load per person", "desc": "Target: roughly even" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Running 24x7 cover with three people and calling the resulting exhaustion a staffing problem.",
+      "Having no secondary, so that one missed page means nobody is working on the outage.",
+      "Acknowledging a page to silence it, then not working on it, which switches off escalation.",
+      "Handing over the pager with no note, so that temporary workarounds are forgotten.",
+      "Treating escalation as failure, which makes people struggle alone while the impact grows.",
+      "Putting a new engineer on call alone, with no shadowing, in the hope that they will cope."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "During an incident at 03:00, what is the on-call engineer's primary goal?",
+      "options": [
+        "Restore service by the quickest safe route, such as a rollback",
+        "Identify and fix the root cause before doing anything else",
+        "Write a complete timeline so the postmortem can start at once",
+        "Avoid waking anyone else, whatever the impact on users"
+      ],
+      "answer": 0,
+      "explain": "Mitigation comes first: roll back, fail over or switch off the feature. Root-cause analysis is better done rested, with colleagues, in the postmortem. Escalating is encouraged, not avoided."
+    },
+    {
+      "q": "A team of three runs 24x7 on-call in week-long shifts. Pages are rising and one engineer has resigned. What is the most appropriate response?",
+      "options": [
+        "Reduce scope or share the rotation, and invest in cutting pages",
+        "Shorten the shifts to two days so that each one feels lighter",
+        "Ask the two remaining engineers to alternate week by week",
+        "Turn off escalation so that missed pages stop generating noise"
+      ],
+      "answer": 0,
+      "explain": "Three people cannot sustain round-the-clock cover. The real options are structural: fewer covered hours, a shared rotation with another team, and engineering work to reduce the page volume."
+    },
+    {
+      "q": "An engineer acknowledges a page while driving, intending to look at it later, and then forgets. Why is this worse than not acknowledging at all?",
+      "options": [
+        "Acknowledging stops escalation, so nobody else is ever notified",
+        "The paging tool deletes acknowledged alerts after a few minutes",
+        "Acknowledged pages are excluded from the monthly load metrics",
+        "It resets the error budget for the service that raised the page"
+      ],
+      "answer": 0,
+      "explain": "Acknowledgement means \"I own this\". It halts the escalation chain, so the secondary is never paged. If you cannot work an incident, reassign or escalate it explicitly."
+    },
+    {
+      "q": "Which item in a handoff note most often prevents a future incident?",
+      "options": [
+        "The list of temporary changes and workarounds still in place",
+        "The total number of pages that were received during the week",
+        "The names of everyone who joined last week's incident calls",
+        "The version numbers of all the services deployed that week"
+      ],
+      "answer": 0,
+      "explain": "Workarounds applied under pressure, such as raised limits or disabled checks, are easily forgotten and become hidden causes later. Recording them with an owner makes sure they are undone."
+    },
+    {
+      "q": "What is the purpose of a 'reverse shadow' stage when onboarding someone to on-call?",
+      "options": [
+        "The newcomer leads on real pages while an expert stands ready",
+        "The newcomer watches an expert handle pages, with no duties",
+        "The newcomer replays old incidents in a tabletop role-play",
+        "The newcomer reviews every alert rule before going on call"
+      ],
+      "answer": 0,
+      "explain": "In reverse shadowing the trainee is primary and makes the decisions, with an experienced engineer as a safety net. Plain shadowing is the earlier stage, and role-play drills are separate practice."
+    }
+  ]
+}

@@ -1,0 +1,258 @@
+{
+  "id": "sre-release",
+  "minutes": 30,
+  "intro": "Most outages are self-inflicted. Study after study, and your own postmortems, will show that the majority of incidents begin with a change: a deploy, a config push, a flag flip, a migration. Yet stopping change is not an option, and the DORA research shows that the teams who release most often are also the most stable. The way out of that apparent paradox is to make every change small, gradual, observable and reversible. This module covers the release strategies and the supporting techniques that make that possible.",
+  "objectives": [
+    "Compare rolling, blue-green and canary releases, and choose one for a given service",
+    "Design a progressive rollout with stages, bake times and automated analysis against SLIs",
+    "Separate deployment from release using feature flags, and manage the debt they create",
+    "Decide between rolling back and rolling forward, and make rollback fast and rehearsed",
+    "Change database schemas without downtime using the expand and contract pattern"
+  ],
+  "sections": [
+    {
+      "heading": "Change is the main source of risk",
+      "blocks": [
+        { "type": "p", "text": "If change causes most incidents, there are two possible responses. The traditional one is to change less: release monthly, behind a change advisory board, in a maintenance window. It fails for a reason the DORA module explained. Infrequent releases are large, a large release contains hundreds of changes, something in it will break, and finding which of the hundreds is responsible takes hours. Caution of that kind produces exactly the big, risky events it was meant to avoid." },
+        { "type": "p", "text": "The SRE response is to keep changing, and to make each change **safe by construction**. Four properties do the work." },
+        { "type": "list", "items": [
+          "**Small.** A release containing one change has one suspect. It is easy to review, easy to reason about, and easy to revert.",
+          "**Gradual.** Expose the change to a small share of traffic first. If it is bad, most users never see it, and the error budget barely notices.",
+          "**Observable.** You can tell, from metrics split by version, whether the new code is behaving worse than the old.",
+          "**Reversible.** Undoing the change is quick, tested, and needs nobody's heroics."
+        ]},
+        { "type": "p", "text": "Treat every kind of change this way, not only code. Configuration pushes, feature flag changes, infrastructure changes and data migrations cause at least as many outages as deploys do, and they often bypass the pipeline and its safeguards entirely. A configuration value that takes effect globally and instantly is one of the most dangerous things in a modern system." }
+      ]
+    },
+    {
+      "heading": "Rolling, blue-green, canary",
+      "blocks": [
+        { "type": "table", "headers": ["Strategy", "How it works", "Strength", "Weakness"], "rows": [
+          ["**Recreate**", "Stop the old version, start the new", "Simple; never two versions at once", "Downtime"],
+          ["**Rolling**", "Replace instances a few at a time", "No downtime; no extra capacity; the Kubernetes default", "Proceeds on readiness alone, and ends up at 100% whether the code is good or not"],
+          ["**Blue-green**", "Run a full second environment, test it, switch all traffic at once", "Instant switch and instant rollback; tested before any user sees it", "Double the capacity; every user is exposed at the same moment"],
+          ["**Canary**", "Send a small share of real traffic to the new version, compare, and widen in steps", "Real traffic, limited blast radius, decisions from data", "Needs traffic splitting, per-version metrics and automation"]
+        ]},
+        { "type": "p", "text": "A Kubernetes **rolling update** is controlled by two settings. `maxUnavailable` is how many pods may be missing during the update, and `maxSurge` is how many extra may be created. Setting `maxUnavailable: 0` means capacity never drops below the desired count, which matters if you have sized your fleet as tightly as the capacity module warned against." },
+        { "type": "code", "lang": "yaml", "code": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: checkout\n  namespace: shop\nspec:\n  replicas: 12\n  minReadySeconds: 30            # a pod must stay ready this long before it counts\n  progressDeadlineSeconds: 600   # mark the rollout failed if it stalls\n  strategy:\n    type: RollingUpdate\n    rollingUpdate:\n      maxSurge: 25%\n      maxUnavailable: 0\n  selector:\n    matchLabels:\n      app: checkout\n  template:\n    metadata:\n      labels:\n        app: checkout\n    spec:\n      containers:\n        - name: checkout\n          image: ghcr.io/acme/checkout:1.9.0\n          readinessProbe:\n            httpGet:\n              path: /ready\n              port: 8000" },
+        { "type": "p", "text": "The weakness of a plain rolling update is what it checks. It waits for each new pod to pass its **readiness probe**, and nothing else. A version that starts cleanly and then returns errors for 5% of requests, or is twice as slow, passes readiness and rolls out to everyone. Readiness tells you that the process is up, not that the release is good. For that you need to compare the new version's SLIs with the old, which is what a canary does." }
+      ]
+    },
+    {
+      "heading": "Progressive delivery",
+      "blocks": [
+        { "type": "p", "text": "A **canary release** is named after the birds once carried into coal mines as an early warning. A small share of real production traffic goes to the new version while the rest stays on the old. Both are measured on the same SLIs at the same time, under the same conditions. If the canary is no worse, its share grows. If it is worse, traffic returns to the old version automatically." },
+        { "type": "code", "lang": "text", "code": "deploy canary\n  -> 1% of traffic     bake 10 min   compare error ratio and p99 with the baseline\n  -> 5%                bake 10 min   compare\n  -> 25%               bake 15 min   compare\n  -> 50%               bake 15 min   compare\n  -> 100%              keep the old version available for quick rollback\n\nany comparison fails -> traffic back to 0% automatically, release marked failed" },
+        { "type": "list", "items": [
+          "**Compare against a baseline, not a fixed threshold.** \"Error ratio under 1%\" passes a canary that is five times worse than the old version on a quiet day. \"No worse than the current version, measured now\" does not. Ideally the baseline is a freshly started set of old-version pods, so that cold-start effects cancel out.",
+          "**Bake long enough to see the problem.** Memory leaks, cache effects and hourly jobs do not show in two minutes. Enough requests must flow through the canary for the comparison to mean something, which at 1% of a low-traffic service can take a long time.",
+          "**Use the SLIs from your SLOs**, split by a version label. If your metrics cannot be split by version, fix that first. Add saturation, such as CPU and memory per pod, and watch downstream dependencies too.",
+          "**Order the stages by blast radius**: internal users or staff first, then one region or cell, then a small percentage, then everyone. Multi-region services should release one region at a time and never all at once.",
+          "**Make the decision automatic.** A human watching graphs at each stage is slow and inconsistent, and will stop looking."
+        ]},
+        { "type": "code", "lang": "yaml", "caption": "A canary with Argo Rollouts, which replaces the Deployment object", "code": "apiVersion: argoproj.io/v1alpha1\nkind: Rollout\nmetadata:\n  name: checkout\n  namespace: shop\nspec:\n  replicas: 12\n  selector:\n    matchLabels:\n      app: checkout\n  template:\n    metadata:\n      labels:\n        app: checkout\n    spec:\n      containers:\n        - name: checkout\n          image: ghcr.io/acme/checkout:1.9.0\n  strategy:\n    canary:\n      steps:\n        - setWeight: 5\n        - pause: {duration: 10m}\n        - setWeight: 25\n        - pause: {duration: 15m}\n        - setWeight: 50\n        - pause: {duration: 15m}" },
+        { "type": "p", "text": "Argo Rollouts and Flagger both implement this on Kubernetes, and both can run automated **analysis** between steps, querying Prometheus and aborting the rollout when a metric fails. Without a service mesh or an ingress that can split traffic, the weight is approximated by the ratio of canary pods to stable pods, so a precise 1% needs real traffic routing." },
+        { "type": "callout", "kind": "tip", "text": "A canary limits the blast radius for whoever lands on it, and those users still get the broken version. For changes where even a few failures are unacceptable, add **shadow traffic** first: copy real requests to the new version and discard its responses, comparing them with the old version's. It only works safely for requests without side effects." }
+      ]
+    },
+    {
+      "heading": "Feature flags: deploy is not release",
+      "blocks": [
+        { "type": "p", "text": "**Deploying** is putting new code on servers. **Releasing** is exposing new behaviour to users. A **feature flag** separates the two: the code ships switched off, and is turned on later, at runtime, for whoever you choose, without another deploy. This is what makes trunk-based development workable, because unfinished work can be merged daily and stay dark." },
+        { "type": "code", "lang": "python", "code": "def checkout(user, basket):\n    if flags.is_enabled(\"new_pricing_engine\", user=user, default=False):\n        try:\n            return new_pricing_checkout(user, basket)\n        except Exception:\n            metrics.increment(\"new_pricing_engine.fallback\")\n            # fall through to the proven path\n    return legacy_checkout(user, basket)" },
+        { "type": "table", "headers": ["Kind of flag", "Purpose", "Lifetime"], "rows": [
+          ["**Release flag**", "Hide unfinished work; roll a feature out gradually", "Days to weeks. Remove once fully rolled out."],
+          ["**Ops flag (kill switch)**", "Turn off an expensive or risky feature during an incident", "Long-lived, and deliberately so"],
+          ["**Experiment flag**", "A/B test two behaviours", "The length of the experiment"],
+          ["**Permission flag**", "Enable features for certain plans or customers", "Permanent; really part of the product"]
+        ]},
+        { "type": "p", "text": "For reliability, the **kill switch** is the valuable one. Turning a flag off takes seconds, affects only the feature in question, and needs no build, which makes it the fastest mitigation available, faster than any rollback. Build one into every risky new feature and every expensive optional one, and list them in the runbook." },
+        { "type": "list", "items": [
+          "**Flags are production changes.** A flag flip can take a site down as thoroughly as a deploy. Roll flag changes out gradually, record who changed what, and show flag changes as annotations on dashboards, next to deploys.",
+          "**Default to safe.** If the flag service is unreachable, the code must fall back to a sensible default, normally the old behaviour. The flag system must never be a hard dependency of the request path.",
+          "**Flags are debt.** Each one doubles the number of code paths, and old flags combine in ways nobody tests. Give every release flag an owner and an expiry date, and delete the flag and the dead code once the rollout is complete.",
+          "**Test both states**, and the combinations that matter. A well-known trading firm lost hundreds of millions of dollars in under an hour when a reused flag activated long-dead code on one server that had missed a deploy."
+        ]}
+      ]
+    },
+    {
+      "heading": "Rollback, and the changes that cannot be rolled back",
+      "blocks": [
+        { "type": "p", "text": "When a release goes wrong, the default is to **roll back first and understand later**, as the incident response module insisted. Rolling **forward**, meaning writing and shipping a fix, is slower, is done under pressure, and risks a second bad release on top of the first. Roll forward only when rolling back is impossible or clearly more dangerous." },
+        { "type": "code", "lang": "bash", "code": "kubectl rollout status deployment/checkout -n shop --timeout=5m\nkubectl rollout history deployment/checkout -n shop\nkubectl rollout undo deployment/checkout -n shop                    # previous revision\nkubectl rollout undo deployment/checkout -n shop --to-revision=41\nkubectl rollout pause deployment/checkout -n shop                   # stop a rollout midway\n\nkubectl argo rollouts get rollout checkout -n shop --watch          # Argo Rollouts plugin\nkubectl argo rollouts abort checkout -n shop                        # back to the stable version\nkubectl argo rollouts promote checkout -n shop                      # continue past a pause" },
+        { "type": "p", "text": "A rollback is only useful if it is fast, and it is only fast if it has been practised. Time it. If it takes twenty minutes because the old image has to be rebuilt, fix that: keep previous artifacts in the registry, and deploy by immutable tag, as the artifacts module described. In a GitOps setup the rollback is a `git revert`, and the agent applies it." },
+        { "type": "p", "text": "The hard part is state. Code can be rolled back, but data cannot. If version 2 has written records in a new format, or dropped a column, then rolling the code back to version 1 leaves it facing a database it does not understand. The answer is to make every schema change **backwards compatible**, in phases, using **expand and contract**, also called parallel change." },
+        { "type": "code", "lang": "text", "caption": "Renaming a column, customer_name to full_name, with zero downtime", "code": "1. EXPAND    Add the new column full_name, nullable. Old code is unaffected.\n2. DUAL WRITE Deploy code that writes to BOTH columns and still reads the old one.\n3. BACKFILL  Copy existing data into full_name, in small batches, off-peak.\n4. SWITCH    Deploy code that reads full_name (still writing both).\n5. VERIFY    Run for a while. Rollback to step 2 or 3 is still safe.\n6. CONTRACT  Deploy code that ignores customer_name. Then, separately and much\n             later, drop the column.\n\nEvery step is its own release, and each can be rolled back by itself." },
+        { "type": "list", "items": [
+          "**Never couple a schema change to the code that needs it** in one release. During a rolling update both versions run at once, so the schema must suit both.",
+          "**Additive changes are safe**: a new table, a new nullable column, a new index built concurrently. **Destructive changes are dangerous**: dropping or renaming a column, changing a type, adding a `NOT NULL` constraint without a default.",
+          "**Watch for locks.** On a large table, an innocent-looking `ALTER TABLE` can take a lock that blocks all traffic for minutes. Learn which operations your database can perform online, and use its tooling for the rest.",
+          "The same reasoning applies to **APIs and message formats**. Consumers and producers are deployed at different times, so add fields without removing any, tolerate fields you do not recognise, and version anything that must break."
+        ]}
+      ]
+    },
+    {
+      "heading": "Putting it into the pipeline",
+      "blocks": [
+        { "type": "p", "text": "Safe release practice is the delivery pipeline from the DevOps track with reliability built in. A mature flow looks like this." },
+        { "type": "steps", "items": [
+          "A small change is merged to the trunk behind a flag, after review and automated tests.",
+          "The artifact is built once, scanned and signed, and promoted unchanged.",
+          "It deploys to staging, where smoke tests and a short load test run.",
+          "It deploys to production as a canary. Automated analysis compares it with the baseline at each step and aborts on regression.",
+          "Deploy and flag events appear as annotations on every dashboard.",
+          "The feature is released by flag, to staff first, then to a growing share of users, again watching the SLIs.",
+          "The flag and the old code path are removed."
+        ]},
+        { "type": "p", "text": "The **error budget** is the governor of this machine. With budget in hand, releases flow continuously. When the budget is exhausted, the policy from the SLO module slows feature releases until reliability recovers. Release freezes before peak events are a legitimate use of the same idea, but keep them short: a long freeze builds up a large batch of changes, and the release that follows the freeze is the riskiest of the year." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Ship a bad release and have the system catch it",
+    "steps": [
+      "Take a service running in your cluster with at least four replicas and per-version metrics. If metrics cannot be split by version, add a `version` label first.",
+      "Configure the rolling update with `maxUnavailable: 0`, a `maxSurge`, `minReadySeconds` and a readiness probe. Deploy a new version while sending load, and confirm that no requests fail.",
+      "Build a version that starts correctly and returns errors for 20% of requests. Deploy it with a plain rolling update and observe that it reaches 100%. Roll back with `kubectl rollout undo` and time it.",
+      "Install Argo Rollouts or Flagger. Convert the Deployment to a canary strategy with steps at 5%, 25% and 50%, with pauses.",
+      "Add automated analysis that queries Prometheus for the canary's error ratio. Deploy the bad version again and watch the rollout abort by itself. Note what share of requests were affected, compared with step three.",
+      "Wrap a feature in a flag with a safe default. Deploy with the flag off, turn it on for a small share of users, then use it as a kill switch and time how long that takes compared with the rollback.",
+      "Plan an expand and contract migration for a column rename in a test database. Carry out each phase as a separate deploy, and roll one phase back to prove that it is safe."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Most incidents start with a change. Make changes small, gradual, observable and reversible instead of rare.",
+      "Config pushes, flag flips and migrations are changes too, and they deserve the same safeguards as deploys.",
+      "A rolling update checks readiness only. It cannot tell a bad release from a good one.",
+      "Canary: a small share of real traffic, compared with a baseline on your SLIs, widened in steps, aborted automatically.",
+      "Deploy is not release. Feature flags separate them, and a kill switch is the fastest mitigation you have.",
+      "Flags are production changes and technical debt: safe defaults, an owner, an expiry date, and removal.",
+      "Roll back first, understand later. Time your rollback, and keep old artifacts ready.",
+      "Data cannot be rolled back. Use expand and contract so that every schema step suits both old and new code."
+    ],
+    "groups": [
+      {
+        "title": "Strategies",
+        "items": [
+          { "syntax": "Recreate", "desc": "Stop old, start new; downtime" },
+          { "syntax": "Rolling", "desc": "Replace in batches; gated by readiness only" },
+          { "syntax": "Blue-green", "desc": "Two full environments; switch and roll back instantly; 2x capacity" },
+          { "syntax": "Canary", "desc": "Small share of real traffic, compared and widened" },
+          { "syntax": "Shadow / mirroring", "desc": "Copy traffic to the new version, discard its responses" },
+          { "syntax": "Ring / cell rollout", "desc": "Staff, then one region or cell, then a percentage, then all" }
+        ]
+      },
+      {
+        "title": "Deployment settings",
+        "items": [
+          { "syntax": "strategy.rollingUpdate.maxUnavailable: 0", "desc": "Never drop below the desired replica count" },
+          { "syntax": "strategy.rollingUpdate.maxSurge: 25%", "desc": "Extra pods allowed during the update" },
+          { "syntax": "minReadySeconds: 30", "desc": "A pod must stay ready this long before it counts" },
+          { "syntax": "progressDeadlineSeconds: 600", "desc": "Mark a stalled rollout as failed" },
+          { "syntax": "readinessProbe", "desc": "Gates traffic and the progress of the rollout" },
+          { "syntax": "revisionHistoryLimit: 10", "desc": "How many old ReplicaSets are kept for rollback" }
+        ]
+      },
+      {
+        "title": "Rollout commands",
+        "items": [
+          { "syntax": "kubectl rollout status deploy/NAME", "desc": "Wait for the result; non-zero exit on failure" },
+          { "syntax": "kubectl rollout history deploy/NAME", "desc": "List revisions" },
+          { "syntax": "kubectl rollout undo deploy/NAME", "desc": "Back to the previous revision" },
+          { "syntax": "kubectl rollout undo deploy/NAME --to-revision=N", "desc": "Back to a specific revision" },
+          { "syntax": "kubectl rollout pause|resume deploy/NAME", "desc": "Hold or continue a rollout" },
+          { "syntax": "kubectl argo rollouts abort NAME", "desc": "Return all traffic to the stable version" },
+          { "syntax": "kubectl argo rollouts promote NAME", "desc": "Continue past a pause step" }
+        ]
+      },
+      {
+        "title": "Canary design",
+        "items": [
+          { "syntax": "steps: 1% -> 5% -> 25% -> 50% -> 100%", "desc": "Widen as confidence grows" },
+          { "syntax": "bake time per step", "desc": "Long enough for volume, leaks and periodic jobs" },
+          { "syntax": "compare with a live baseline", "desc": "No worse than the current version, measured now" },
+          { "syntax": "metrics: error ratio, p99, saturation", "desc": "The SLIs from your SLOs, split by version" },
+          { "syntax": "automatic abort", "desc": "No human watching graphs" },
+          { "syntax": "one region at a time", "desc": "Never everywhere at once" }
+        ]
+      },
+      {
+        "title": "Expand and contract",
+        "items": [
+          { "syntax": "1. Expand", "desc": "Add the new column or table; old code unaffected" },
+          { "syntax": "2. Dual write", "desc": "New code writes both, reads old" },
+          { "syntax": "3. Backfill", "desc": "Copy existing data in small batches" },
+          { "syntax": "4. Switch reads", "desc": "Read new, still write both" },
+          { "syntax": "5. Verify", "desc": "Run for a while; rollback still safe" },
+          { "syntax": "6. Contract", "desc": "Stop using the old column, then drop it much later" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Releasing rarely, in large batches, in the belief that it is safer.",
+      "Trusting a rolling update's readiness check to catch a version that runs but returns errors.",
+      "Judging a canary against a fixed threshold instead of against the version that is currently serving.",
+      "Pushing a configuration or flag change to every instance instantly, with no gradual rollout.",
+      "Leaving release flags in the code for years, until an old one is reused or combined disastrously.",
+      "Shipping a destructive schema change together with the code that depends on it, making rollback impossible."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A new version starts correctly and passes its readiness probe, but returns HTTP 500 for 8% of requests. What does a standard Kubernetes rolling update do?",
+      "options": [
+        "It rolls out to every pod, since readiness is the only thing it checks",
+        "It stops at the first pod, because the error rate is above normal",
+        "It rolls back automatically once the error rate passes five percent",
+        "It sends the failing requests to the old pods until they are removed"
+      ],
+      "answer": 0,
+      "explain": "A rolling update proceeds when new pods report ready. It knows nothing about error ratios or latency. Catching a release that runs but misbehaves needs a canary with analysis of real SLIs."
+    },
+    {
+      "q": "Why should canary analysis compare the new version against a live baseline instead of a fixed threshold such as \"error ratio under 1%\"?",
+      "options": [
+        "A canary far worse than the current version could still pass a fixed threshold",
+        "Fixed thresholds cannot be expressed in the Prometheus query language at all",
+        "A baseline lets the canary take more traffic from the very first step",
+        "Fixed thresholds only work when the service has more than one replica"
+      ],
+      "answer": 0,
+      "explain": "If the current version runs at 0.05% errors, a canary at 0.6% is twelve times worse and still passes a 1% threshold. Comparing both versions under the same conditions reveals the regression."
+    },
+    {
+      "q": "During an incident, a newly released recommendation feature is overloading the database. Which mitigation is normally fastest?",
+      "options": [
+        "Switching the feature off with its kill-switch flag",
+        "Rolling the whole service back to the previous image",
+        "Writing and deploying a fix for the inefficient query",
+        "Scaling the database up to a larger instance type"
+      ],
+      "answer": 0,
+      "explain": "A flag change takes effect in seconds, needs no build or deploy, and affects only that feature. A rollback is next fastest. A fix under pressure is slow and risky, and resizing a database takes time and may not help."
+    },
+    {
+      "q": "Version 2 of a service renames a database column in the same release as the code that uses the new name. What is the main problem?",
+      "options": [
+        "During and after the rollout, old-version pods and any rollback break on the new schema",
+        "Renaming a column always requires the database to be restarted first",
+        "The release will be slower, because migrations run before the pods start",
+        "Kubernetes refuses to roll out a Deployment while a migration is running"
+      ],
+      "answer": 0,
+      "explain": "Both versions run at once during a rolling update, and a rollback returns to code that expects the old column. Expand and contract keeps the schema compatible with both versions at every step."
+    },
+    {
+      "q": "A team announces a six-week release freeze before its busiest season, to be safe. What is the main risk of this approach?",
+      "options": [
+        "Changes pile up, so the first release after the freeze is large and risky",
+        "The error budget cannot be measured while no releases are happening",
+        "Feature flags stop working if no deploy happens for more than a month",
+        "Autoscaling is disabled automatically for the length of any freeze"
+      ],
+      "answer": 0,
+      "explain": "A long freeze creates exactly the big batch that makes releases dangerous, and security fixes wait too. Short freezes, with small safe releases and flags kept off, carry less overall risk."
+    }
+  ]
+}

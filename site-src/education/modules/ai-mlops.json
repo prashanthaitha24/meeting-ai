@@ -1,0 +1,258 @@
+{
+  "id": "ai-mlops",
+  "minutes": 30,
+  "intro": "Traditional software has one thing that changes: the code. A machine learning system has three, namely the code, the data and the model, and an LLM application adds a fourth, the prompts. Any one of them can change the system's behaviour, and most teams version only the first. The result is the model that nobody can reproduce, the \"improvement\" that cannot be traced to its cause, and the silent regression that ships because nothing tested for it. MLOps applies the DevOps discipline of this site to all four. This module shows what to version, how to make training repeatable, and how to build a pipeline whose gates are evaluations.",
+  "objectives": [
+    "Identify everything that determines an ML system's behaviour, and put each of them under version control",
+    "Make training runs reproducible, with pinned environments, seeds and tracked experiments",
+    "Use a model registry to promote models through stages, with their lineage attached",
+    "Design a CI/CD pipeline for ML and for prompts, with data validation and evaluation gates",
+    "Recognise training-serving skew and the feedback loops that degrade models in production"
+  ],
+  "sections": [
+    {
+      "heading": "More things change than the code",
+      "blocks": [
+        { "type": "p", "text": "In ordinary software, the same code always behaves in the same way, so versioning the code is enough. In an ML system, the behaviour is a function of several artifacts, and a change to any of them is a change to production." },
+        { "type": "table", "headers": ["Artifact", "Examples", "How to version it"], "rows": [
+          ["**Code**", "Feature engineering, training scripts, the serving application", "Git"],
+          ["**Data**", "The training set, the labels, the evaluation set", "Immutable snapshots with content hashes; data versioning tools; dated partitions"],
+          ["**Configuration**", "Hyperparameters, feature lists, thresholds", "Files in Git, never command-line arguments that are lost"],
+          ["**Environment**", "Library versions, CUDA, the base image", "A lockfile, together with a container image pinned by digest"],
+          ["**Model**", "The trained weights or the fitted pipeline", "A model registry, with lineage back to everything above"],
+          ["**Prompts**", "System prompts, templates, few-shot examples, tool definitions", "Files in Git, with a version identifier logged on every call"],
+          ["**External models**", "The provider's model, and its exact version", "Pinned identifiers in configuration; never a moving alias"]
+        ]},
+        { "type": "p", "text": "The test of whether you have this under control is **lineage**. For any prediction that your system made last month, can you name the exact model, and for that model, the exact code, data, configuration and environment that produced it? If not, you cannot reproduce a bug, cannot audit a decision, and cannot tell which of five simultaneous changes caused an improvement." },
+        { "type": "p", "text": "This matters for LLM applications that train nothing at all. An application built on a hosted model still has prompts, retrieval settings, tool definitions, an evaluation set and a pinned model version, and a change to any of them alters what users see. MLOps for such an application is mostly the discipline of treating those as code." },
+        { "type": "callout", "kind": "note", "text": "Git is the wrong tool for large files. Keep datasets and model weights in object storage, and have Git track a small pointer file that holds the content hash. Data versioning tools such as DVC do exactly this, and so does a plain convention of immutable, dated paths, recorded in the experiment's metadata." }
+      ]
+    },
+    {
+      "heading": "Reproducible training",
+      "blocks": [
+        { "type": "p", "text": "A training run should be a **deterministic function of versioned inputs**: given the same commit, the same snapshot of the data, the same configuration and the same environment, it produces an equivalent model. Four habits get you most of the way there." },
+        { "type": "list", "items": [
+          "**Pin the environment.** A lockfile with exact versions, installed into a container image that is referred to by digest. A silent upgrade of a numerical library can change results.",
+          "**Fix the seeds** of every source of randomness: Python, NumPy, the ML framework, and the splitting of the data. Record the seed along with the run. Bit-for-bit reproducibility on GPUs is not always achievable, and results that fall within a small tolerance are usually enough.",
+          "**Snapshot the data.** Train from an immutable, versioned snapshot, never from a live table that changes beneath you. Record its hash.",
+          "**Put configuration in files.** Every hyperparameter lives in a versioned configuration file. Nothing that matters is typed at a prompt and then forgotten."
+        ]},
+        { "type": "p", "text": "**Experiment tracking** records each run: its parameters, its metrics, its artifacts, and the versions of code and data. It turns \"I think the run on Tuesday was better\" into a table that you can sort. MLflow is a widely used open-source tracker, and the pattern is the same in all of them." },
+        { "type": "code", "lang": "python", "code": "import hashlib\nimport json\nimport random\nimport subprocess\nfrom pathlib import Path\n\nimport mlflow\nimport numpy as np\n\n\ndef file_hash(path: str) -> str:\n    return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]\n\n\nconfig = json.loads(Path(\"config/train.json\").read_text())\nrandom.seed(config[\"seed\"])\nnp.random.seed(config[\"seed\"])\n\nwith mlflow.start_run(run_name=\"churn-gbm\"):\n    # lineage: what exactly produced this model?\n    mlflow.log_param(\"git_commit\", subprocess.check_output(\n        [\"git\", \"rev-parse\", \"HEAD\"], text=True).strip())\n    mlflow.log_param(\"data_hash\", file_hash(config[\"train_path\"]))\n    for key, value in config[\"hyperparameters\"].items():\n        mlflow.log_param(key, value)\n\n    model, metrics = train_and_evaluate(config)        # your own training code\n\n    for name, value in metrics.items():                # e.g. val_f1, val_pr_auc, latency_ms\n        mlflow.log_metric(name, value)\n    mlflow.sklearn.log_model(model, \"model\")" },
+        { "type": "p", "text": "Run training **in the pipeline, not on a laptop**. A model trained by hand on someone's machine has an environment that nobody can reconstruct. A model trained by a pipeline job, from a commit, has its lineage by construction." }
+      ]
+    },
+    {
+      "heading": "The model registry",
+      "blocks": [
+        { "type": "p", "text": "A **model registry** is to models what the artifact registry of the DevOps track is to container images: the hand-off point between whoever produces them and whoever deploys them. It stores immutable, numbered versions of each model, with their metadata, and records which version is approved for which purpose." },
+        { "type": "list", "items": [
+          "Every registered version links back to the **run** that produced it, and through that to the code, the data and the configuration. This is the lineage, made navigable.",
+          "Versions carry a **stage or an alias**, such as candidate, staging and production. Deployment refers to the alias, and promotion moves the alias. Rolling back means moving it back again.",
+          "Promotion is a **controlled action**, with a record of who did it and why, and ideally one that the pipeline performs after the gates have passed, not something a person does by hand.",
+          "Store the **evaluation results** with the model: the metrics on the standard evaluation set, broken down by segment, together with latency and size.",
+          "Attach a short **model card**: what the model is for, what data it was trained on, its known limitations, the groups on which it performs worse, and what it must not be used for. It is the README that the next engineer, or an auditor, will need."
+        ]},
+        { "type": "p", "text": "The serving layer of the previous module pulls the artifact that the production alias points to. That is the \"build once, promote everywhere\" principle of the DevOps track: the artifact that was evaluated is, byte for byte, the artifact that serves traffic." }
+      ]
+    },
+    {
+      "heading": "CI/CD for machine learning",
+      "blocks": [
+        { "type": "p", "text": "An ML pipeline has the stages of a software pipeline, with two additions: the data is tested as well as the code, and the quality gate is an evaluation, not a unit test that passes or fails." },
+        { "type": "code", "lang": "text", "code": "commit / new data / schedule\n  -> lint + unit tests                  (the code is correct)\n  -> validate the data                  (schema, ranges, nulls, volume, drift against the last snapshot)\n  -> train                              (pinned environment, seeded, tracked)\n  -> evaluate                           (standard eval set, by segment; latency; size)\n  -> GATE: beats the threshold AND does not regress against production\n  -> register as a candidate            (with lineage and a model card)\n  -> deploy to staging -> shadow / canary in production   (the serving module)\n  -> promote the alias                  -> monitor         (the next module)" },
+        { "type": "code", "lang": "python", "caption": "gate.py: fail the pipeline if the candidate is not good enough", "code": "import json\nimport sys\nfrom pathlib import Path\n\nTHRESHOLDS = {\"val_pr_auc\": 0.80, \"recall_at_precision_90\": 0.55}\nMAX_REGRESSION = 0.01            # allowed drop against the production model, per metric\nMAX_LATENCY_MS = 50.0\nMIN_SEGMENT_RECALL = 0.45        # no customer segment may fall below this\n\ncandidate = json.loads(Path(\"reports/candidate.json\").read_text())\nproduction = json.loads(Path(\"reports/production.json\").read_text())\nfailures = []\n\nfor metric, floor in THRESHOLDS.items():\n    if candidate[metric] < floor:\n        failures.append(f\"{metric} {candidate[metric]:.3f} is below the threshold {floor}\")\n    if candidate[metric] < production[metric] - MAX_REGRESSION:\n        failures.append(f\"{metric} regressed: {production[metric]:.3f} -> {candidate[metric]:.3f}\")\n\nif candidate[\"p99_latency_ms\"] > MAX_LATENCY_MS:\n    failures.append(f\"p99 latency {candidate['p99_latency_ms']:.1f} ms exceeds {MAX_LATENCY_MS}\")\n\nfor segment, recall in candidate[\"recall_by_segment\"].items():\n    if recall < MIN_SEGMENT_RECALL:\n        failures.append(f\"recall for segment '{segment}' is {recall:.3f}\")\n\nif failures:\n    print(\"GATE FAILED:\\n  - \" + \"\\n  - \".join(failures))\n    sys.exit(1)\nprint(\"gate passed\")" },
+        { "type": "code", "lang": "yaml", "caption": "A pipeline definition in the style of GitHub Actions", "code": "name: train-and-gate\non:\n  push:\n    paths: [\"src/**\", \"config/**\", \"data.dvc\"]\n  workflow_dispatch:\n\njobs:\n  train:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Check out the code\n        run: git clone --depth 1 \"$REPO_URL\" . && git checkout \"$COMMIT_SHA\"\n      - name: Install the pinned environment\n        run: pip install --require-hashes -r requirements.txt\n      - name: Fetch the versioned data\n        run: dvc pull\n      - name: Unit tests\n        run: pytest tests/unit\n      - name: Validate the data\n        run: python -m pipeline.validate_data --snapshot data/train.parquet\n      - name: Train\n        run: python -m pipeline.train --config config/train.json\n      - name: Evaluate the candidate and the current production model\n        run: python -m pipeline.evaluate --out reports/\n      - name: Quality gate\n        run: python gate.py\n      - name: Register the candidate\n        run: python -m pipeline.register --stage candidate" },
+        { "type": "list", "items": [
+          "**Validate the data before you train.** Check the schema, the types, the ranges, the rates of missing values, the volume of rows, and the distributions of the labels and features against the previous snapshot. Most bad models come from bad data, and a model trained on a broken join will pass every test of the code.",
+          "**Evaluate by segment**, not only in total. A model that improves on average, and collapses for one region or one group of customers, must fail the gate.",
+          "**Compare with what is in production**, not only with a fixed threshold. The question is whether this model is better than the one that you have.",
+          "**Include the non-functional metrics**: inference latency, the size of the model, and its memory. A model that is more accurate and too slow for its SLO is not shippable.",
+          "**Retrain on a trigger**: a schedule, the arrival of new labelled data, or an alert about drift from monitoring. Automated retraining still goes through every gate."
+        ]}
+      ]
+    },
+    {
+      "heading": "Prompts and LLM applications as code",
+      "blocks": [
+        { "type": "p", "text": "For an application built on a hosted LLM, the pipeline is the same, with the training step removed. The artifacts are prompts, retrieval configuration, tool definitions and a pinned model version, and the gate is the eval suite from the evals module." },
+        { "type": "code", "lang": "text", "code": "prompts/\n  triage/\n    system.md               <- the prompt, reviewed in pull requests like code\n    examples.jsonl          <- few-shot examples\n    config.json             <- {\"version\": \"triage-v12\", \"model\": \"PINNED-MODEL-ID\",\n                                 \"temperature\": 0, \"max_tokens\": 300}\nevals/\n  triage/cases.jsonl        <- the golden dataset, also versioned\n  triage/baseline.json      <- the scores of the version now in production" },
+        { "type": "list", "items": [
+          "A pull request that changes a prompt **runs the eval suite**, and shows the difference in scores in the review, exactly as a change to code runs the tests.",
+          "The **prompt version is logged with every call**, so that a change in behaviour in production can be traced to the edit that caused it.",
+          "**Upgrading the provider's model is a release.** Change the pinned identifier in a branch, run the full eval suite, and compare. A prompt tuned for the old model is often wrong for the new one.",
+          "The **evaluation set is itself an artifact**, with a history. When you add cases, record the change, because scores before and after it are not comparable.",
+          "Roll out changes to prompts with the same canary and rollback mechanisms as anything else. Feature flags work well: the new prompt version is a flag that can be switched off in seconds.",
+          "Keep prompts **out of the database, and out of an admin screen** that bypasses review. An unreviewed edit to a prompt is an unreviewed deployment to production."
+        ]}
+      ]
+    },
+    {
+      "heading": "What goes wrong after deployment",
+      "blocks": [
+        { "type": "p", "text": "A deployed model is correct for the world as it was when the training data was collected. The world moves on, and the pipeline has to notice." },
+        { "type": "table", "headers": ["Problem", "What it is", "Defence"], "rows": [
+          ["**Training-serving skew**", "Features are computed in one way for training and in another way in production: a different library, a different default for missing values, a different time zone", "One shared implementation of the features; ship the whole pipeline as one artifact; log the features used in serving, and compare them with those used in training"],
+          ["**Data drift**", "The distribution of the inputs changes: new kinds of customer, a new product, a changed format upstream", "Monitor the distributions of the inputs against the training baseline, and alert"],
+          ["**Concept drift**", "The relationship between the inputs and the outcome changes: fraud patterns evolve, and behaviour shifts", "Monitor real outcomes when the labels arrive; retrain on recent data"],
+          ["**Label delay**", "The true outcome is known only weeks later, so that accuracy cannot be measured in real time", "Watch proxy signals and the distributions of predictions in the meantime"],
+          ["**Feedback loops**", "The model's own decisions shape the data on which it is next trained, as when a recommender only ever learns about what it chose to show", "Keep a small randomised sample; be careful when training on data that the model influenced"],
+          ["**Breakage upstream**", "A source system changes a field, a unit or an encoding, and the model quietly receives nonsense", "Validation of the inputs at serving time; checks of data contracts in the pipeline"]
+        ]},
+        { "type": "p", "text": "A **feature store** is one structural answer to skew. It is a system that computes each feature once, from a single definition, and serves the same values to training, from an offline store with correct historical values, and to production, from a low-latency online store. It is worth its considerable complexity when many models share their features. A single model is usually better served by one shared library of features, and a pipeline that ships the preprocessing together with the model." },
+        { "type": "callout", "kind": "tip", "text": "Start smaller than the diagrams of tooling suggest. Git for the code, the configuration and the prompts, dated immutable paths for the data, a tracker for the runs, a registry with aliases, and a pipeline with a single evaluation gate will take a small team a long way. Add a feature store, automated retraining and an orchestration platform when a specific pain demands them, and not before." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Make one model fully reproducible and gated",
+    "steps": [
+      "Take the classifier from the core ML module. Move every hyperparameter and every path into a `config/train.json`, fix all the random seeds from that file, and confirm that two runs give the same metrics.",
+      "Pin the environment with a lockfile, and build it into a container image. Run the training inside the container.",
+      "Put the training data under version control with DVC, or with a convention of dated immutable paths. Record the hash of the data with every run.",
+      "Add MLflow, or another tracker. Log the commit, the data hash, the parameters, the metrics and the model. Run five variations, and compare them in the tracker's interface.",
+      "Write a data validation step that checks the schema, the ranges, the rates of nulls and the balance of the labels against the previous snapshot. Corrupt a column on purpose, and watch it fail before the training begins.",
+      "Write `gate.py` with absolute thresholds, a check for regression against a stored production report, a limit on latency, and a floor for each segment. Make a worse model on purpose, and confirm that the gate stops it.",
+      "Register the passing model, give it a `candidate` alias, and then promote it to `production`. Make your serving application load whatever the production alias points to, and roll back by moving the alias.",
+      "Do the same for an LLM feature: put the prompt and its configuration in files with a version identifier, and make a pull request that changes the prompt run your eval suite."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "The behaviour of an ML system depends on code, data, configuration, environment, model and prompts. Version all of them.",
+      "Lineage is the test: for any prediction, can you name the exact model, code, data and configuration?",
+      "Reproducible training means a pinned environment, fixed seeds, snapshotted data, configuration in files, and running in a pipeline.",
+      "Track every experiment: parameters, metrics, artifacts, the commit and the hash of the data.",
+      "A model registry holds immutable versions, with lineage and aliases. Promotion and rollback move an alias.",
+      "Validate the data before you train. Most bad models are bad data.",
+      "The gate is an evaluation: above a threshold, no regression against production, by segment, and within latency.",
+      "Prompts, retrieval settings and pinned model versions are code: reviewed, versioned, gated by evals, and logged on each call."
+    ],
+    "groups": [
+      {
+        "title": "What to version, and where",
+        "items": [
+          { "syntax": "code, config, prompts", "desc": "Git" },
+          { "syntax": "datasets, eval sets", "desc": "Object storage, with a hash pointer in Git (for example DVC)" },
+          { "syntax": "environment", "desc": "A lockfile, and an image pinned by digest" },
+          { "syntax": "models", "desc": "A model registry with immutable versions" },
+          { "syntax": "external model identifier", "desc": "A pinned value in configuration; never an alias that moves" },
+          { "syntax": "runs", "desc": "An experiment tracker: parameters, metrics, artifacts, lineage" }
+        ]
+      },
+      {
+        "title": "Tracking and data commands",
+        "items": [
+          { "syntax": "mlflow.start_run(run_name=NAME)", "desc": "Open a tracked run" },
+          { "syntax": "mlflow.log_param(key, value)", "desc": "Record a hyperparameter or a lineage value" },
+          { "syntax": "mlflow.log_metric(key, value)", "desc": "Record a result" },
+          { "syntax": "mlflow.sklearn.log_model(model, \"model\")", "desc": "Store the fitted model as an artifact" },
+          { "syntax": "mlflow ui", "desc": "Browse and compare runs locally" },
+          { "syntax": "dvc add data/train.parquet", "desc": "Track a data file; creates a small .dvc pointer for Git" },
+          { "syntax": "dvc push / dvc pull", "desc": "Send data to remote storage, or fetch it" },
+          { "syntax": "git rev-parse HEAD", "desc": "The commit to record with the run" }
+        ]
+      },
+      {
+        "title": "Reproducibility checklist",
+        "items": [
+          { "syntax": "random.seed / np.random.seed / framework seed", "desc": "Fix every source of randomness" },
+          { "syntax": "random_state=SEED in every split", "desc": "The same training and validation sets each time" },
+          { "syntax": "pip install --require-hashes -r requirements.txt", "desc": "An exact, verified environment" },
+          { "syntax": "FROM image@sha256:DIGEST", "desc": "A pinned base image" },
+          { "syntax": "an immutable data snapshot", "desc": "Never train from a live table" },
+          { "syntax": "configuration files, not flags", "desc": "Nothing that matters is left unrecorded" },
+          { "syntax": "train in CI, not on a laptop", "desc": "Lineage by construction" }
+        ]
+      },
+      {
+        "title": "Pipeline gates",
+        "items": [
+          { "syntax": "data validation", "desc": "Schema, ranges, nulls, volume, drift against the last snapshot" },
+          { "syntax": "metric >= threshold", "desc": "An absolute floor on quality" },
+          { "syntax": "metric >= production - tolerance", "desc": "No regression" },
+          { "syntax": "per-segment floor", "desc": "No group left behind by a better average" },
+          { "syntax": "p99 latency <= budget", "desc": "Shippable within the SLO" },
+          { "syntax": "sys.exit(1) on failure", "desc": "A non-zero exit stops the pipeline" }
+        ]
+      },
+      {
+        "title": "Production failure modes",
+        "items": [
+          { "syntax": "training-serving skew", "desc": "One implementation of features; ship the whole pipeline" },
+          { "syntax": "data drift", "desc": "Monitor inputs against the training baseline" },
+          { "syntax": "concept drift", "desc": "Monitor outcomes; retrain on recent data" },
+          { "syntax": "label delay", "desc": "Use proxies and the distributions of predictions meanwhile" },
+          { "syntax": "feedback loop", "desc": "Keep a randomised sample of decisions" },
+          { "syntax": "upstream change", "desc": "Input validation and data contracts" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Versioning the code, and nothing else, so that no past model can be reproduced or explained.",
+      "Training on a laptop, from a live database, with hyperparameters that were typed once and then lost.",
+      "Skipping data validation, and training a confident model on a broken join.",
+      "Gating on an overall metric while one segment of customers quietly collapses.",
+      "Editing prompts in a database or an admin screen, where no review or evaluation ever sees them.",
+      "Pointing at a provider's moving model alias, and receiving behaviour changes that nobody tested."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A model that went to production three months ago is making odd predictions. The team has the Git history of the training code, and nothing else. What can they not determine?",
+      "options": [
+        "Which data, configuration and library versions produced that exact model",
+        "Which programming language the training script was written in",
+        "Whether the training script contains any syntax errors today",
+        "Who made the most recent commit to the training repository"
+      ],
+      "answer": 0,
+      "explain": "The code is only one of the inputs. Without a versioned snapshot of the data, recorded configuration, a pinned environment and lineage from the model back to a run, the model cannot be reproduced and its behaviour cannot be explained."
+    },
+    {
+      "q": "A candidate model raises the overall F1 score from 0.81 to 0.84. Its recall for customers in one region falls from 0.70 to 0.35. What should the pipeline's gate do?",
+      "options": [
+        "Fail, because a per-segment floor prevents an average from hiding a collapse",
+        "Pass, because the overall metric improved by more than the tolerance",
+        "Pass, and open a ticket to look into the region after the deployment",
+        "Fail only if the latency of the candidate has also become worse"
+      ],
+      "answer": 0,
+      "explain": "Aggregate metrics can conceal serious harm to a subgroup. Evaluating by segment, with a minimum for each one, is what catches it before release."
+    },
+    {
+      "q": "In training, missing incomes are filled with the median. In production, a separate service fills them with zero. What is this, and what is the fix?",
+      "options": [
+        "Training-serving skew: ship the preprocessing together with the model as one artifact",
+        "Concept drift: retrain the model on more recent data every month",
+        "A feedback loop: keep a randomised sample of the model's decisions",
+        "Label delay: use a proxy metric until the true outcomes arrive"
+      ],
+      "answer": 0,
+      "explain": "The model receives inputs in production that were prepared differently from those it learned on, so its predictions are quietly wrong. A single shared implementation, ideally packaged with the model, removes the mismatch."
+    },
+    {
+      "q": "A team edits its production system prompt through an admin web page. The change takes effect at once, and is stored in a database. What is the main problem?",
+      "options": [
+        "A change that alters behaviour reaches production without review, evals or history",
+        "Databases cannot store text as long as a typical system prompt",
+        "Prompts held in a database are slower for the model to read",
+        "The admin page makes the prompt visible to the model's provider"
+      ],
+      "answer": 0,
+      "explain": "A prompt determines behaviour just as code does. Editing it outside version control bypasses review, the eval gate and the ability to trace or roll back a change. Prompts belong in Git, with a version that is logged on each call."
+    },
+    {
+      "q": "Why should a pipeline validate the training data before the training step?",
+      "options": [
+        "Broken data gives a plausible but wrong model, which the tests of the code will not catch",
+        "Validation makes the training step run faster on large datasets",
+        "Training libraries refuse to start unless the data has been validated",
+        "It removes the need to evaluate the model after it has been trained"
+      ],
+      "answer": 0,
+      "explain": "A changed schema, a broken join or a shifted distribution produces a model that trains without error and behaves badly. Catching it at the data stage is cheap, and catching it in production is not."
+    }
+  ]
+}

@@ -1,0 +1,234 @@
+{
+  "id": "devops-gitops",
+  "minutes": 30,
+  "intro": "In the pipelines you have built so far, CI holds cluster credentials and pushes changes with `kubectl` or `helm`. That works, but the cluster's real state lives only in the cluster, anyone with access can change it unnoticed, and rebuilding it after a disaster means replaying history. GitOps turns the arrow around: Git holds the complete desired state, and an agent inside the cluster continuously pulls it and corrects any difference. This module explains the model and implements it with Argo CD.",
+  "objectives": [
+    "State the four GitOps principles and contrast pull-based with push-based deployment",
+    "Install Argo CD and define an Application that syncs a Git path to a cluster namespace",
+    "Interpret sync status and health status, and configure automated sync, pruning and self-heal",
+    "Structure repositories and promote a change across environments through pull requests",
+    "Handle secrets, rollbacks and drift in a GitOps workflow"
+  ],
+  "sections": [
+    {
+      "heading": "The GitOps model",
+      "blocks": [
+        { "type": "p", "text": "GitOps is an operating model, not a product. The OpenGitOps project summarises it in four principles." },
+        { "type": "steps", "items": [
+          "**Declarative.** The desired state of the system is expressed declaratively, as Kubernetes manifests, Helm charts or Kustomize overlays.",
+          "**Versioned and immutable.** That desired state is stored so that history is kept and versions cannot be altered. In practice, Git.",
+          "**Pulled automatically.** Software agents pull the desired state from the source; nothing external pushes into the cluster.",
+          "**Continuously reconciled.** Agents constantly compare actual with desired state and act to converge them."
+        ]},
+        { "type": "table", "headers": ["", "Push (classic CI/CD)", "Pull (GitOps)"], "rows": [
+          ["Who applies changes", "The CI runner, from outside", "An agent inside the cluster"],
+          ["Cluster credentials", "Stored in the CI system", "Never leave the cluster"],
+          ["Manual `kubectl` changes", "Persist unnoticed", "Detected as drift and optionally reverted"],
+          ["Audit trail", "CI logs", "Git history: who, what, when, reviewed by whom"],
+          ["Disaster recovery", "Re-run pipelines in the right order", "Point a new cluster at the repository"]
+        ]},
+        { "type": "p", "text": "The security gain is significant. A CI system that can deploy to production is a high-value target, because compromising it compromises the cluster. With GitOps, CI needs permission only to push to a Git repository and an image registry. The cluster reaches out; nothing reaches in." },
+        { "type": "p", "text": "You already know the underlying idea. It is the Kubernetes reconciliation loop, extended one level up, so that Git, and no longer whoever last ran `kubectl apply`, defines what the cluster should be. Argo CD and Flux are the two main implementations, and both are CNCF graduated projects." }
+      ]
+    },
+    {
+      "heading": "Installing Argo CD and defining an Application",
+      "blocks": [
+        { "type": "code", "lang": "bash", "code": "kubectl create namespace argocd\nkubectl apply -n argocd \\\n  -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml\n\nkubectl -n argocd get pods\nkubectl -n argocd port-forward svc/argocd-server 8080:443      # UI on https://localhost:8080\n\n# initial admin password\nkubectl -n argocd get secret argocd-initial-admin-secret \\\n  -o jsonpath='{.data.password}' | base64 -d" },
+        { "type": "p", "text": "The central object is the **Application**, a custom resource that links a **source**, which is a repository, a revision and a path, to a **destination**, which is a cluster and a namespace. Because it is itself a Kubernetes manifest, it belongs in Git too." },
+        { "type": "code", "lang": "yaml", "caption": "apps/orders-staging.yaml", "code": "apiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: orders-staging\n  namespace: argocd\nspec:\n  project: default\n  source:\n    repoURL: https://github.com/acme/shop-deploy.git\n    targetRevision: main\n    path: apps/orders/overlays/staging\n  destination:\n    server: https://kubernetes.default.svc\n    namespace: shop-staging\n  syncPolicy:\n    automated:\n      prune: true\n      selfHeal: true\n    syncOptions:\n      - CreateNamespace=true" },
+        { "type": "p", "text": "Argo CD detects what the path contains. Plain YAML is applied as it is, a `kustomization.yaml` is built with Kustomize, and a `Chart.yaml` is rendered with Helm. For Helm, note that Argo CD runs the equivalent of `helm template` and applies the output. It does not create Helm releases, so `helm list` will not show them." },
+        { "type": "code", "lang": "yaml", "caption": "A Helm chart as the source", "code": "source:\n  repoURL: https://github.com/acme/shop-deploy.git\n  targetRevision: main\n  path: charts/orders\n  helm:\n    valueFiles:\n      - values.yaml\n      - values-prod.yaml" }
+      ]
+    },
+    {
+      "heading": "Sync status, health and the three switches",
+      "blocks": [
+        { "type": "p", "text": "Argo CD reports two independent things about every Application, and mixing them up causes a lot of confusion." },
+        { "type": "table", "headers": ["Status", "Question", "Values"], "rows": [
+          ["**Sync**", "Does the cluster match what Git says?", "`Synced`, `OutOfSync`"],
+          ["**Health**", "Are the resources actually working?", "`Healthy`, `Progressing`, `Degraded`, `Missing`, `Suspended`"]
+        ]},
+        { "type": "p", "text": "`Synced` but `Degraded` means Argo CD applied exactly what you committed and what you committed is broken, for example an image that crash-loops. `OutOfSync` but `Healthy` means the cluster works but differs from Git: either a commit has not been applied yet, or someone changed the cluster by hand." },
+        { "type": "p", "text": "Three settings under `syncPolicy.automated` decide how assertive Argo CD is." },
+        { "type": "list", "items": [
+          "**`automated`** present: new commits are applied without anyone pressing Sync. Without it, Argo CD only reports `OutOfSync` and waits.",
+          "**`prune: true`**: a resource deleted from Git is deleted from the cluster. It is off by default, because deleting is dangerous, but without it removed manifests linger forever.",
+          "**`selfHeal: true`**: manual changes to managed resources are reverted to match Git. This is what makes Git the real source of truth instead of a suggestion."
+        ]},
+        { "type": "code", "lang": "bash", "code": "argocd login localhost:8080\nargocd app list\nargocd app get orders-staging              # sync and health, resource by resource\nargocd app diff orders-staging             # what differs between Git and the cluster\nargocd app sync orders-staging             # apply now\nargocd app history orders-staging          # deployed revisions\nargocd app wait orders-staging --health    # block until healthy (useful in scripts)" },
+        { "type": "callout", "kind": "warning", "text": "With `selfHeal` on, an emergency `kubectl edit` during an incident is undone within minutes. Agree in advance how hotfixes work: either a fast-tracked commit, or a documented procedure for pausing automated sync on that one Application and turning it back on afterwards." }
+      ]
+    },
+    {
+      "heading": "Repositories and promotion",
+      "blocks": [
+        { "type": "p", "text": "Keep deployment configuration in a **separate repository** from application source code. The two change at different rates and for different reasons, and keeping them apart stops every image bump from triggering the application's CI, which would otherwise loop. It also lets you give fewer people write access to what runs in production." },
+        { "type": "code", "lang": "text", "code": "shop-deploy/\n  apps/\n    orders/\n      base/                     # Deployment, Service, shared by all environments\n        kustomization.yaml\n      overlays/\n        staging/kustomization.yaml    # image tag + staging patches\n        prod/kustomization.yaml       # image tag + prod patches\n  argocd/\n    orders-staging.yaml         # the Application objects themselves\n    orders-prod.yaml" },
+        { "type": "p", "text": "Use **directories per environment, not long-lived branches**. Branch-per-environment looks tidy but leads to merge conflicts, drift between branches and no clear answer to what differs between staging and production. With directories, that answer is a `diff` of two folders." },
+        { "type": "p", "text": "The full delivery flow then looks like this." },
+        { "type": "steps", "items": [
+          "A developer merges to the application repository. CI tests, builds the image, tags it with the commit SHA and pushes it.",
+          "CI's last step commits one line to the deploy repository: the new tag in `overlays/staging`. That commit is the deployment.",
+          "Argo CD sees the commit and syncs staging. Health checks and smoke tests run.",
+          "**Promotion** is a pull request that copies the same tag into `overlays/prod`. Review and merge are the approval gate, and the merge is the production deploy."
+        ]},
+        { "type": "code", "lang": "bash", "caption": "The CI step that deploys to staging", "code": "git clone https://github.com/acme/shop-deploy.git && cd shop-deploy/apps/orders/overlays/staging\nkustomize edit set image ghcr.io/acme/orders-api=\"ghcr.io/acme/orders-api:${GIT_SHA}\"\ngit commit -am \"orders: deploy ${GIT_SHA} to staging\"\ngit push" },
+        { "type": "p", "text": "When you have dozens of Applications, do not create them by hand. The **app-of-apps** pattern uses one parent Application whose source is a directory of Application manifests, and an **ApplicationSet** generates Applications from a template, for example one per directory in the repository or one per cluster." }
+      ]
+    },
+    {
+      "heading": "Rollbacks, secrets and drift",
+      "blocks": [
+        { "type": "p", "text": "**Rollback is `git revert`.** Reverting the commit that introduced the bad version makes Git describe the previous state again, and Argo CD applies it. The rollback is reviewed and audited like any other change, which is the same rule as in the Git module: shared history moves forward. Argo CD also has `argocd app rollback`, but it requires automated sync to be off and leaves Git out of step with the cluster, so treat it as an emergency measure." },
+        { "type": "p", "text": "**Secrets** are the hard part, because everything must be in Git and secrets must not be readable there. There are two established answers." },
+        { "type": "list", "items": [
+          "**Encrypt what you commit.** Sealed Secrets encrypts a Secret with a key that only the in-cluster controller holds, so the sealed form is safe in Git. SOPS encrypts the values of a YAML file with a cloud KMS key or an age key.",
+          "**Commit only a reference.** External Secrets Operator reads a manifest that says which entry in AWS Secrets Manager, Vault or a similar store to fetch, and creates the Kubernetes Secret inside the cluster. Nothing sensitive ever touches Git, and rotation happens in one place."
+        ]},
+        { "type": "p", "text": "**Drift** becomes visible and manageable. Some differences are legitimate: a HorizontalPodAutoscaler changes `spec.replicas`, and a controller may inject fields. If you declare a replica count in Git and an autoscaler manages it, the two fight, and the Application flaps between `Synced` and `OutOfSync`. Omit `replicas` from the manifest, or tell Argo CD to ignore that field." },
+        { "type": "code", "lang": "yaml", "code": "spec:\n  ignoreDifferences:\n    - group: apps\n      kind: Deployment\n      jsonPointers:\n        - /spec/replicas" },
+        { "type": "callout", "kind": "tip", "text": "Alert on Applications that stay `OutOfSync` or `Degraded`. Argo CD exposes Prometheus metrics, and its notifications component can post sync results to chat. A GitOps setup nobody watches fails quietly." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Deploy by commit, and watch the cluster heal itself",
+    "steps": [
+      "On your local cluster, install Argo CD into the `argocd` namespace, port-forward the server, and log in to the UI and the `argocd` CLI with the initial admin password.",
+      "Create a Git repository with `apps/orders/base` and `overlays/staging` using Kustomize, or reuse your Helm chart from the previous module.",
+      "Write an Application manifest pointing at the staging path with no automated sync. Apply it, observe `OutOfSync`, run `argocd app diff`, then sync manually.",
+      "Enable `automated` with `prune` and `selfHeal`. Change the image tag in Git, push, and watch the rollout happen with no `kubectl` or pipeline involved.",
+      "Test self-heal: `kubectl scale` the Deployment, or delete its Service, and time how long Argo CD takes to restore it. Then remove a manifest from Git and confirm pruning deletes the resource.",
+      "Commit a broken image tag. Observe `Synced` with `Degraded`, explain why those two are not contradictory, then roll back with `git revert`.",
+      "Add an `overlays/prod` directory and a second Application. Promote a version from staging to production through a pull request that changes only the image tag."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Four principles: declarative, versioned and immutable, pulled automatically, continuously reconciled.",
+      "Pull beats push on security: cluster credentials never leave the cluster, and CI only writes to Git and the registry.",
+      "Sync status is about matching Git. Health status is about working. `Synced` plus `Degraded` means you committed something broken.",
+      "`automated` applies commits, `prune` deletes what Git no longer has, `selfHeal` reverts manual changes.",
+      "Separate deploy repository; directories per environment, not branches.",
+      "A deployment is a commit, a promotion is a pull request, a rollback is `git revert`.",
+      "Never commit plaintext secrets: seal or encrypt them, or commit only a reference to an external store.",
+      "Do not declare fields that another controller owns, such as `replicas` under an autoscaler."
+    ],
+    "groups": [
+      {
+        "title": "argocd CLI",
+        "items": [
+          { "syntax": "argocd login HOST", "desc": "Authenticate the CLI" },
+          { "syntax": "argocd app list", "desc": "All Applications with sync and health status" },
+          { "syntax": "argocd app get NAME", "desc": "Detail, resource by resource" },
+          { "syntax": "argocd app diff NAME", "desc": "Differences between Git and the live cluster" },
+          { "syntax": "argocd app sync NAME", "desc": "Apply the desired state now (`--prune` to delete extras)" },
+          { "syntax": "argocd app wait NAME --health", "desc": "Block until healthy; useful in scripts" },
+          { "syntax": "argocd app history NAME", "desc": "Revisions that have been deployed" },
+          { "syntax": "argocd app set NAME --sync-policy none", "desc": "Pause automated sync, e.g. during an incident" }
+        ]
+      },
+      {
+        "title": "Application spec",
+        "items": [
+          { "syntax": "spec.source.repoURL / targetRevision / path", "desc": "Where the desired state lives" },
+          { "syntax": "spec.destination.server / namespace", "desc": "Where it is applied" },
+          { "syntax": "spec.project", "desc": "AppProject that restricts allowed repos and destinations" },
+          { "syntax": "syncPolicy.automated: {}", "desc": "Apply new commits automatically" },
+          { "syntax": "syncPolicy.automated.prune: true", "desc": "Delete resources removed from Git" },
+          { "syntax": "syncPolicy.automated.selfHeal: true", "desc": "Revert manual changes in the cluster" },
+          { "syntax": "syncPolicy.syncOptions: [CreateNamespace=true]", "desc": "Create the destination namespace if missing" },
+          { "syntax": "spec.ignoreDifferences", "desc": "Fields to leave out of the comparison" }
+        ]
+      },
+      {
+        "title": "Status vocabulary",
+        "items": [
+          { "syntax": "Synced / OutOfSync", "desc": "Cluster matches Git / cluster differs from Git" },
+          { "syntax": "Healthy", "desc": "Resources report ready" },
+          { "syntax": "Progressing", "desc": "Still rolling out; not yet ready" },
+          { "syntax": "Degraded", "desc": "Failed: crash loops, failed rollout, unavailable replicas" },
+          { "syntax": "Missing", "desc": "Defined in Git, absent from the cluster" },
+          { "syntax": "Synced + Degraded", "desc": "Git was applied correctly; what Git says is broken" }
+        ]
+      },
+      {
+        "title": "Workflow building blocks",
+        "items": [
+          { "syntax": "kustomize edit set image NAME=NAME:TAG", "desc": "Bump an image tag in an overlay from CI" },
+          { "syntax": "git revert COMMIT && git push", "desc": "Roll back a deployment" },
+          { "syntax": "argocd.argoproj.io/sync-wave: \"1\"", "desc": "Annotation that orders resources within a sync" },
+          { "syntax": "app-of-apps", "desc": "A parent Application whose source is a folder of Applications" },
+          { "syntax": "ApplicationSet", "desc": "Generate Applications from a template: per folder, per cluster" },
+          { "syntax": "Sealed Secrets / SOPS / External Secrets Operator", "desc": "Three ways to keep secrets out of plaintext Git" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Leaving `prune` off and wondering why deleted manifests keep running in the cluster.",
+      "Using a branch per environment, which ends in merge conflicts and unexplained differences between environments.",
+      "Keeping application code and deployment config in one repository, so image bumps retrigger CI in a loop.",
+      "Declaring `replicas` in Git while an autoscaler manages it, making the Application flap.",
+      "Hot-fixing with `kubectl edit` under `selfHeal`, then being surprised when the fix disappears.",
+      "Reading `Synced` as \"everything is fine\" without looking at health."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "What is the main security advantage of pull-based GitOps over a CI pipeline that runs `kubectl apply`?",
+      "options": [
+        "Cluster credentials stay inside the cluster instead of being stored in the CI system",
+        "Manifests are encrypted automatically when they are pushed to Git",
+        "The CI system no longer needs any credentials of any kind",
+        "Pull requests are scanned for vulnerabilities before merging"
+      ],
+      "answer": 0,
+      "explain": "The in-cluster agent pulls from Git, so nothing outside needs access to the Kubernetes API. CI still needs credentials, but only to push to a repository and a registry, which is a far smaller prize for an attacker."
+    },
+    {
+      "q": "An Application shows `Synced` and `Degraded`. What does that tell you?",
+      "options": [
+        "The cluster matches Git exactly, but what was committed is not working",
+        "Argo CD failed to apply the latest commit to the cluster",
+        "Someone changed the cluster by hand and it no longer matches Git",
+        "The Git repository is unreachable, so status cannot be refreshed"
+      ],
+      "answer": 0,
+      "explain": "Sync compares the cluster with Git; health asks whether the resources work. Here the manifests were applied faithfully and the workload itself is failing, for example a crash-looping image. The fix is a new commit or a revert."
+    },
+    {
+      "q": "With `automated`, `prune: true` and `selfHeal: true`, an engineer runs `kubectl scale deployment orders --replicas=10`, while Git says 3. What happens?",
+      "options": [
+        "Argo CD notices the drift and sets the replica count back to 3",
+        "The change stays, and the Application is marked OutOfSync forever",
+        "Argo CD commits replicas: 10 back to the Git repository",
+        "The Deployment is deleted and recreated from the manifests"
+      ],
+      "answer": 0,
+      "explain": "Self-heal reverts live changes to managed resources so that Git remains the source of truth. Argo CD never writes to your repository; a lasting change must be made as a commit."
+    },
+    {
+      "q": "In a GitOps workflow, what is the recommended way to roll back a bad production release?",
+      "options": [
+        "Revert the commit in the deploy repository and let the agent sync",
+        "Run kubectl rollout undo on the affected Deployment",
+        "Delete the Application object and create it again",
+        "Force-push the main branch back to an older commit"
+      ],
+      "answer": 0,
+      "explain": "A revert keeps Git and the cluster in agreement, with review and an audit trail. `kubectl rollout undo` would be reverted by self-heal, and force-pushing rewrites shared history."
+    },
+    {
+      "q": "Why do most teams prefer a directory per environment over a Git branch per environment?",
+      "options": [
+        "Differences between environments are explicit files to diff, with no branch merges to drift",
+        "Argo CD is unable to track any branch other than main",
+        "Directories allow each environment to use a different cluster version",
+        "Branches cannot be protected with required reviews"
+      ],
+      "answer": 0,
+      "explain": "With directories, everything is on one branch and environment differences are visible side by side. Long-lived environment branches accumulate conflicts and cherry-picks until nobody can say what differs. Argo CD can track any branch, tag or commit."
+    }
+  ]
+}

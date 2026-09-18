@@ -1,0 +1,241 @@
+{
+  "id": "sre-prometheus",
+  "minutes": 40,
+  "intro": "You cannot manage an SLO you cannot measure. Metrics are the cheapest and most powerful signal you have: a few numbers per service, sampled every few seconds, that show at once whether users are being served, how fast, and how close the system is to its limits. Prometheus is the de facto standard for metrics in cloud-native systems, and its query language, PromQL, is a skill you will use every day on call. This module covers the data model, the four golden signals, the queries that matter, and the mistakes that take a Prometheus server down.",
+  "objectives": [
+    "Describe how Prometheus collects data: the pull model, targets, exporters and service discovery",
+    "Choose the right metric type, and name and label metrics without creating a cardinality problem",
+    "Instrument and query the four golden signals: latency, traffic, errors and saturation",
+    "Write correct PromQL using `rate`, aggregation, and `histogram_quantile`",
+    "Use recording rules to make SLI and dashboard queries fast and consistent"
+  ],
+  "sections": [
+    {
+      "heading": "How Prometheus works",
+      "blocks": [
+        { "type": "p", "text": "Prometheus **pulls**. Each application exposes its current metric values as plain text on an HTTP endpoint, conventionally `/metrics`. On a fixed **scrape interval**, commonly 15 to 60 seconds, Prometheus fetches that page from every **target**, timestamps the values and stores them in its local time series database. Software you cannot instrument, such as a Linux host, PostgreSQL or an HTTP endpoint you want to probe, is covered by an **exporter**: a small process that translates its state into the same format." },
+        { "type": "code", "lang": "text", "caption": "What a /metrics endpoint returns", "code": "# HELP http_requests_total Total HTTP requests handled.\n# TYPE http_requests_total counter\nhttp_requests_total{method=\"GET\",route=\"/orders\",code=\"200\"} 184223\nhttp_requests_total{method=\"GET\",route=\"/orders\",code=\"500\"} 37\nhttp_requests_total{method=\"POST\",route=\"/orders\",code=\"201\"} 9120\n# HELP process_resident_memory_bytes Resident memory size in bytes.\n# TYPE process_resident_memory_bytes gauge\nprocess_resident_memory_bytes 1.2843008e+08" },
+        { "type": "p", "text": "Pulling has practical advantages. Prometheus knows what it expects to scrape, so a target that stops answering is itself a signal: the automatic `up` metric becomes `0`. You can open any `/metrics` page in a browser to debug it. And the monitoring system, not each application, controls the load." },
+        { "type": "code", "lang": "yaml", "caption": "prometheus.yml", "code": "global:\n  scrape_interval: 30s\n  evaluation_interval: 30s\n\nrule_files:\n  - rules/*.yml\n\nscrape_configs:\n  - job_name: orders\n    static_configs:\n      - targets: [\"orders-1:8000\", \"orders-2:8000\"]\n\n  - job_name: kubernetes-pods\n    kubernetes_sd_configs:\n      - role: pod\n    relabel_configs:\n      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]\n        action: keep\n        regex: \"true\"" },
+        { "type": "p", "text": "In dynamic environments you do not list targets by hand. **Service discovery** asks Kubernetes, a cloud API or Consul what exists, and **relabelling** decides which of those to scrape and which labels to attach. In Kubernetes most teams install the Prometheus Operator, usually through the `kube-prometheus-stack` Helm chart, and describe targets with `ServiceMonitor` objects instead of editing this file." },
+        { "type": "p", "text": "Every sample belongs to a **time series**, identified by a metric name plus a set of **labels**. `http_requests_total{method=\"GET\",code=\"200\"}` and `http_requests_total{method=\"GET\",code=\"500\"}` are two different series. Prometheus adds `job` and `instance` labels to everything it scrapes." }
+      ]
+    },
+    {
+      "heading": "Metric types, names and labels",
+      "blocks": [
+        { "type": "table", "headers": ["Type", "Behaviour", "Use for", "Query with"], "rows": [
+          ["**Counter**", "Only goes up; resets to zero on restart", "Requests, errors, bytes sent, jobs completed", "`rate()` or `increase()`, never the raw value"],
+          ["**Gauge**", "Goes up and down", "Memory in use, queue depth, temperature, in-flight requests", "The value itself, `avg_over_time`, `max_over_time`"],
+          ["**Histogram**", "Counts observations into cumulative buckets, plus `_sum` and `_count`", "Request latency, response size", "`histogram_quantile()`, or a bucket ratio"],
+          ["**Summary**", "Quantiles calculated inside the client", "Rarely the right choice", "Cannot be aggregated across instances"]
+        ]},
+        { "type": "p", "text": "Prefer a histogram to a summary. Histogram buckets from many instances can be added together and a quantile computed over the whole service, while quantiles precomputed by a summary cannot be meaningfully averaged. Choose bucket boundaries around the values you care about, and put one **exactly at your SLO threshold**, so that \"proportion of requests under 500 ms\" is an exact count and not an estimate." },
+        { "type": "code", "lang": "python", "caption": "Instrumenting a service with the official Python client", "code": "import time\n\nfrom prometheus_client import Counter, Gauge, Histogram, start_http_server\n\nREQUESTS = Counter(\n    \"http_requests_total\", \"Total HTTP requests handled.\", [\"method\", \"route\", \"code\"]\n)\nLATENCY = Histogram(\n    \"http_request_duration_seconds\", \"Request latency in seconds.\", [\"route\"],\n    buckets=[0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],\n)\nIN_FLIGHT = Gauge(\"http_requests_in_flight\", \"Requests currently being served.\")\n\n\ndef handle(method: str, route: str) -> None:\n    IN_FLIGHT.inc()\n    start = time.perf_counter()\n    code = \"500\"\n    try:\n        code = do_work(route)                  # returns the status code as a string\n    finally:\n        LATENCY.labels(route=route).observe(time.perf_counter() - start)\n        REQUESTS.labels(method=method, route=route, code=code).inc()\n        IN_FLIGHT.dec()\n\n\nstart_http_server(9000)                        # serves /metrics on port 9000" },
+        { "type": "list", "items": [
+          "**Names** state what is measured and end with the **base unit**: `_seconds`, `_bytes`, and `_total` for counters. Never milliseconds or megabytes; conversion is the dashboard's job.",
+          "**Labels** are dimensions you will want to filter or group by: `method`, `route`, `code`.",
+          "Label the **route template**, such as `/orders/{id}`, never the raw path `/orders/48213`."
+        ]},
+        { "type": "callout", "kind": "warning", "text": "Every distinct combination of label values is a separate time series held in memory. This is **cardinality**, and it is the most common way to break Prometheus. Five methods times twenty routes times ten status codes is 1,000 series per instance, which is fine. Add a `user_id` label with a million values and you have created a billion. Never use labels for user IDs, email addresses, request IDs, raw URLs or error messages. Those belong in logs and traces." }
+      ]
+    },
+    {
+      "heading": "The four golden signals",
+      "blocks": [
+        { "type": "p", "text": "The Google SRE book names four signals that, if you could measure only four things about a user-facing service, you should choose. They line up with the SLIs from the previous stage." },
+        { "type": "table", "headers": ["Signal", "Question", "Typical metric"], "rows": [
+          ["**Latency**", "How long do requests take? Track successes and failures separately.", "`http_request_duration_seconds` histogram"],
+          ["**Traffic**", "How much demand is there?", "`rate(http_requests_total[5m])`"],
+          ["**Errors**", "What share of requests fail?", "Ratio of `code=~\"5..\"` to all requests"],
+          ["**Saturation**", "How full is the most constrained resource?", "CPU, memory, queue depth, connection pool usage"]
+        ]},
+        { "type": "p", "text": "Two related checklists are worth knowing. **RED**, for request-driven services, is Rate, Errors and Duration, which is the first three golden signals. **USE**, for resources such as CPUs, disks and network links, is Utilisation, Saturation and Errors. Use RED for every service and USE for every resource it depends on." },
+        { "type": "p", "text": "Latency needs care in two ways. A fast error is still an error: if failing requests return in five milliseconds, a wave of failures makes your average latency look better, so track the latency of successful requests separately. And averages hide the experience of the users who suffer most, which is why you work with percentiles from histograms." }
+      ]
+    },
+    {
+      "heading": "PromQL you will use every day",
+      "blocks": [
+        { "type": "p", "text": "A **selector** such as `http_requests_total{job=\"orders\", code=~\"5..\"}` returns an **instant vector**: the latest value of each matching series. Adding a range, `[5m]`, returns a **range vector**: all samples from the last five minutes. Functions like `rate()` take a range vector and return an instant vector. Matchers are `=`, `!=`, `=~` for a regular expression match and `!~` for its negation." },
+        { "type": "code", "lang": "promql", "code": "# TRAFFIC: requests per second, per route\nsum by (route) (rate(http_requests_total{job=\"orders\"}[5m]))\n\n# ERRORS: share of requests failing with a 5xx\nsum(rate(http_requests_total{job=\"orders\", code=~\"5..\"}[5m]))\n/\nsum(rate(http_requests_total{job=\"orders\"}[5m]))\n\n# LATENCY: 99th percentile across all instances\nhistogram_quantile(\n  0.99,\n  sum by (le) (rate(http_request_duration_seconds_bucket{job=\"orders\"}[5m]))\n)\n\n# LATENCY as an SLI: proportion of requests served within 500 ms\nsum(rate(http_request_duration_seconds_bucket{job=\"orders\", le=\"0.5\"}[5m]))\n/\nsum(rate(http_request_duration_seconds_count{job=\"orders\"}[5m]))\n\n# SATURATION: memory used as a share of the container limit\ncontainer_memory_working_set_bytes{container=\"orders\"}\n/\ncontainer_spec_memory_limit_bytes{container=\"orders\"}" },
+        { "type": "list", "items": [
+          "**Always `rate()` a counter.** The raw value is a large number that depends on when the process last restarted. `rate()` gives the per-second increase over the window and handles counter resets for you. `increase()` is the same thing multiplied by the window length.",
+          "**`rate` first, then `sum`.** Take the rate of each series and then aggregate. Summing first destroys the reset detection, so one restarting pod produces a huge false spike.",
+          "**Keep `le` when aggregating histogram buckets.** `histogram_quantile` needs the bucket boundaries, so write `sum by (le)`, adding any other labels you want to break down by, such as `sum by (le, route)`.",
+          "**Make the range at least four times the scrape interval**, so that each window always contains enough samples. With a 30 second scrape, `[2m]` is the minimum and `[5m]` is a comfortable default.",
+          "**Never average percentiles.** The average of each pod's 99th percentile is not the service's 99th percentile. Aggregate the buckets, then compute the quantile once.",
+          "`sum by (label)` keeps the labels you name. `sum without (label)` drops the ones you name and keeps the rest."
+        ]},
+        { "type": "code", "lang": "promql", "code": "up{job=\"orders\"} == 0                                   # targets that are failing to scrape\ntopk(5, sum by (route) (rate(http_requests_total[5m])))  # the five busiest routes\nabsent(up{job=\"orders\"})                                # returns 1 if the series does not exist at all\npredict_linear(node_filesystem_avail_bytes[6h], 4 * 3600) < 0   # disk full within 4 hours?\nrate(http_requests_total[5m] offset 1w)                 # the same query, one week ago" }
+      ]
+    },
+    {
+      "heading": "Recording rules",
+      "blocks": [
+        { "type": "p", "text": "Some expressions are expensive, and some are used in many places: dashboards, alerts, SLO reports. A **recording rule** evaluates an expression on a schedule and stores the result as a new time series. Queries then read one precomputed series instead of aggregating thousands. Just as important, the definition of \"error ratio\" exists in exactly one place, so the dashboard and the alert cannot disagree." },
+        { "type": "code", "lang": "yaml", "caption": "rules/orders.yml", "code": "groups:\n  - name: orders-sli\n    interval: 30s\n    rules:\n      - record: job:http_requests:rate5m\n        expr: sum by (job) (rate(http_requests_total[5m]))\n\n      - record: job:http_requests_errors:ratio_rate5m\n        expr: |\n          sum by (job) (rate(http_requests_total{code=~\"5..\"}[5m]))\n          /\n          sum by (job) (rate(http_requests_total[5m]))\n\n      - record: job:http_request_duration_seconds:p99_5m\n        expr: |\n          histogram_quantile(0.99,\n            sum by (job, le) (rate(http_request_duration_seconds_bucket[5m])))" },
+        { "type": "p", "text": "The naming convention is `level:metric:operations`. `level` lists the labels that remain after aggregation, `metric` is the original metric name, and `operations` lists what was applied, newest first. `job:http_requests_errors:ratio_rate5m` therefore reads as: aggregated to the job level, from the requests metric, a ratio of five-minute rates." },
+        { "type": "code", "lang": "bash", "code": "promtool check config prometheus.yml          # validates the config and every rule file it references\npromtool check rules rules/orders.yml\npromtool test rules tests/orders_test.yml     # unit tests for rules and alerts\ncurl -s -X POST http://localhost:9090/-/reload   # reload; needs --web.enable-lifecycle" },
+        { "type": "p", "text": "Treat rules as code: keep them in Git, validate them with `promtool` in CI, and review changes. The alerting module builds burn-rate alerts directly on top of recording rules like these." }
+      ]
+    },
+    {
+      "heading": "Running it in production",
+      "blocks": [
+        { "type": "list", "items": [
+          "**Local storage is not long-term storage.** A single Prometheus keeps data on local disk, with a default retention of 15 days, and is not clustered. For high availability, run two identical servers scraping the same targets. For long retention and a global view across clusters, add a system built for it, such as Thanos, Grafana Mimir or Cortex, fed through `remote_write`.",
+          "**Watch your own cardinality.** `prometheus_tsdb_head_series` shows the number of active series. The query `topk(10, count by (__name__) ({__name__=~\".+\"}))` lists the metrics with the most series. Drop unwanted series or labels at scrape time with `metric_relabel_configs`.",
+          "**Monitor the monitor.** Alert on `up == 0`, on scrape failures, and on rule evaluation failures. Add a dead man's switch: an alert that always fires, routed to an external service that raises the alarm when it stops arriving.",
+          "**Short-lived jobs** cannot be scraped reliably. Batch jobs push their final metrics to the **Pushgateway**, which Prometheus then scrapes. Use it only for that purpose, never as a general way to push metrics.",
+          "**Metrics tell you that something is wrong and where.** They rarely tell you why for one specific request. That is the job of logs and traces, covered in the OpenTelemetry module."
+        ]},
+        { "type": "callout", "kind": "tip", "text": "On Kubernetes, the `kube-prometheus-stack` chart installs Prometheus, Alertmanager, Grafana, `node_exporter`, `kube-state-metrics` and a sensible set of default rules in one step. It is the quickest route to a working setup that you can then adapt." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Instrument a service and query its golden signals",
+    "steps": [
+      "Run Prometheus locally with Docker (`prom/prometheus`), mounting a `prometheus.yml` that scrapes Prometheus itself. Open the web UI on port 9090, find the Targets page, and run `up`.",
+      "Add the Prometheus client library to a small web service. Expose a request counter labelled by method, route template and status code, and a latency histogram with a bucket exactly at your SLO threshold.",
+      "Open the service's `/metrics` endpoint in a browser and read it. Add the service as a scrape target and confirm that `up{job=\"YOUR_JOB\"}` is `1`.",
+      "Generate traffic with a loop of `curl` commands or a load tool, including some requests that fail. Then write queries for all four golden signals.",
+      "Compute the 99th percentile latency with `histogram_quantile`, then the proportion of requests under your threshold using the bucket ratio. Note which one is exact.",
+      "Add a label containing a random ID to one metric, and watch `prometheus_tsdb_head_series` climb. Remove it, and write down in one sentence why it was a mistake.",
+      "Move your error-ratio and latency queries into recording rules using the `level:metric:operations` convention, validate them with `promtool check rules`, and query the new series."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Prometheus pulls `/metrics` on an interval. A target that stops answering shows up as `up == 0`.",
+      "Counter: only rises, always query with `rate()`. Gauge: read directly. Histogram: for latency and sizes.",
+      "Every unique label combination is a time series. Never label with user IDs, request IDs, raw paths or messages.",
+      "Four golden signals: latency, traffic, errors, saturation. RED for services, USE for resources.",
+      "`rate()` first, then `sum`. Keep `le` when aggregating histogram buckets. Range at least four times the scrape interval.",
+      "Never average percentiles; aggregate buckets, then call `histogram_quantile` once.",
+      "Put a histogram bucket exactly at your SLO threshold.",
+      "Recording rules: `level:metric:operations`, one definition shared by dashboards and alerts."
+    ],
+    "groups": [
+      {
+        "title": "Selectors and ranges",
+        "items": [
+          { "syntax": "metric{label=\"value\"}", "desc": "Instant vector: latest sample of each matching series" },
+          { "syntax": "{label=~\"5..\"} / {label!~\"2..\"}", "desc": "Regex match / negative regex match" },
+          { "syntax": "metric[5m]", "desc": "Range vector: all samples in the last 5 minutes" },
+          { "syntax": "metric offset 1w", "desc": "The value one week ago" },
+          { "syntax": "up", "desc": "1 if the last scrape of the target succeeded, else 0" }
+        ]
+      },
+      {
+        "title": "Functions",
+        "items": [
+          { "syntax": "rate(counter[5m])", "desc": "Per-second increase, averaged over the window; handles resets" },
+          { "syntax": "irate(counter[5m])", "desc": "Rate from the last two samples; very responsive, very noisy" },
+          { "syntax": "increase(counter[1h])", "desc": "Total increase over the window" },
+          { "syntax": "histogram_quantile(0.99, sum by (le) (rate(x_bucket[5m])))", "desc": "Estimated 99th percentile" },
+          { "syntax": "avg_over_time(gauge[1h]) / max_over_time(gauge[1h])", "desc": "Aggregate a gauge over time" },
+          { "syntax": "predict_linear(gauge[6h], 4 * 3600)", "desc": "Linear forecast 4 hours ahead" },
+          { "syntax": "absent(metric)", "desc": "1 if no such series exists; catches missing data" }
+        ]
+      },
+      {
+        "title": "Aggregation",
+        "items": [
+          { "syntax": "sum by (route) (...)", "desc": "Keep only the named labels" },
+          { "syntax": "sum without (instance) (...)", "desc": "Drop the named labels, keep the rest" },
+          { "syntax": "avg / min / max / count", "desc": "Other aggregation operators" },
+          { "syntax": "topk(5, ...) / bottomk(5, ...)", "desc": "Largest or smallest N series" },
+          { "syntax": "count by (__name__) ({__name__=~\".+\"})", "desc": "Series count per metric name, for cardinality hunting" }
+        ]
+      },
+      {
+        "title": "Golden signal queries",
+        "items": [
+          { "syntax": "sum(rate(http_requests_total[5m]))", "desc": "Traffic: requests per second" },
+          { "syntax": "sum(rate(http_requests_total{code=~\"5..\"}[5m])) / sum(rate(http_requests_total[5m]))", "desc": "Error ratio" },
+          { "syntax": "sum(rate(x_bucket{le=\"0.5\"}[5m])) / sum(rate(x_count[5m]))", "desc": "Latency SLI: proportion under 500 ms" },
+          { "syntax": "sum(rate(x_sum[5m])) / sum(rate(x_count[5m]))", "desc": "Average latency; use only alongside percentiles" },
+          { "syntax": "working_set_bytes / limit_bytes", "desc": "Saturation: memory against its limit" }
+        ]
+      },
+      {
+        "title": "Naming and tooling",
+        "items": [
+          { "syntax": "NAME_total", "desc": "Counter suffix" },
+          { "syntax": "NAME_seconds / NAME_bytes", "desc": "Base units only" },
+          { "syntax": "NAME_bucket{le=\"...\"}, NAME_sum, NAME_count", "desc": "The three series a histogram exposes" },
+          { "syntax": "level:metric:operations", "desc": "Recording rule name, e.g. job:http_requests:rate5m" },
+          { "syntax": "promtool check config FILE / check rules FILE", "desc": "Validate before deploying" },
+          { "syntax": "curl -X POST HOST:9090/-/reload", "desc": "Reload config; requires --web.enable-lifecycle" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Graphing or alerting on the raw value of a counter instead of its `rate()`.",
+      "Adding a high-cardinality label such as user ID or full URL and running the server out of memory.",
+      "Writing `rate(sum(...))`, which breaks counter-reset handling and produces false spikes.",
+      "Averaging per-instance percentiles and presenting the result as the service's percentile.",
+      "Dropping the `le` label when aggregating buckets, so that `histogram_quantile` returns nothing useful.",
+      "Using a `rate()` window shorter than a few scrape intervals, which gives gaps and erratic values."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "Which query correctly gives the total requests per second across all instances of a service?",
+      "options": [
+        "sum(rate(http_requests_total{job=\"orders\"}[5m]))",
+        "rate(sum(http_requests_total{job=\"orders\"})[5m])",
+        "sum(http_requests_total{job=\"orders\"})",
+        "avg(http_requests_total{job=\"orders\"}[5m])"
+      ],
+      "answer": 0,
+      "explain": "Take the rate of each series, then sum. Summing first hides counter resets from `rate()`, so a restarting pod causes a false spike. The raw counter value is not a rate at all."
+    },
+    {
+      "q": "A developer adds a `customer_id` label to `http_requests_total`. The service has 400,000 customers. What is the likely consequence?",
+      "options": [
+        "Series count explodes and Prometheus memory use grows until it struggles or crashes",
+        "Queries become faster, because each customer now has an index",
+        "Nothing changes, because labels are stored separately from samples",
+        "The counter stops incrementing once the label limit is reached"
+      ],
+      "answer": 0,
+      "explain": "Each distinct label combination is its own time series held in memory. Multiplying existing series by 400,000 customers creates a cardinality explosion. Per-customer detail belongs in logs or traces."
+    },
+    {
+      "q": "You want the 95th percentile latency for a service running 12 pods. Which approach is correct?",
+      "options": [
+        "Sum the bucket rates across pods by le, then apply histogram_quantile once",
+        "Compute histogram_quantile for each pod and take the average",
+        "Divide the _sum series by the _count series",
+        "Take the maximum of each pod's summary quantile"
+      ],
+      "answer": 0,
+      "explain": "Percentiles cannot be averaged. Histogram buckets can be added, so aggregate them across pods while keeping `le`, then compute the quantile. `_sum` divided by `_count` is the mean, not a percentile."
+    },
+    {
+      "q": "Your latency SLO is \"99% of requests under 300 ms\". How should the histogram be set up to measure it accurately?",
+      "options": [
+        "Include a bucket boundary at exactly 0.3 seconds",
+        "Use only two buckets, at 0.1 and 10 seconds, to save memory",
+        "Record latency in milliseconds with a bucket at 300",
+        "Use a gauge that stores the most recent request's latency"
+      ],
+      "answer": 0,
+      "explain": "With a bucket at the threshold, the share of requests under 300 ms is an exact ratio of two counters. Without it, the value must be interpolated between neighbouring buckets. Base units mean seconds, not milliseconds."
+    },
+    {
+      "q": "What is the main benefit of defining an error ratio as a recording rule?",
+      "options": [
+        "It is precomputed once, so dashboards and alerts are fast and share one definition",
+        "It lets Prometheus store the metric for longer than the retention period",
+        "It removes the need to instrument the application with counters",
+        "It converts the underlying counter into a gauge automatically"
+      ],
+      "answer": 0,
+      "explain": "A recording rule evaluates an expression on a schedule and stores the result as a new series. Expensive aggregations become cheap to read, and every consumer uses the same definition."
+    }
+  ]
+}

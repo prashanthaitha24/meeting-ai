@@ -1,0 +1,252 @@
+{
+  "id": "sre-postmortem",
+  "minutes": 25,
+  "intro": "An incident is an expensive lesson, and the fee is paid whether or not you learn anything. A postmortem is how you collect what you paid for. Done well, it turns one bad afternoon into permanent improvements to systems and process. Done badly, it produces a document that names a culprit, recommends being more careful, lists ten action items that are never completed, and teaches everyone to hide their mistakes next time. This module covers how to run the good kind.",
+  "objectives": [
+    "Explain what blameless means, and why blame makes systems less safe",
+    "Decide which incidents need a postmortem, and who should own it",
+    "Reconstruct an accurate timeline and analyse contributing factors instead of a single root cause",
+    "Write action items that are specific, owned, prioritised and actually completed",
+    "Run a review meeting and share the results so that the whole organisation learns"
+  ],
+  "sections": [
+    {
+      "heading": "Why blameless",
+      "blocks": [
+        { "type": "p", "text": "A **postmortem**, also called an incident review or retrospective, is a written record of an incident: what happened, the impact, what was done about it, why it happened, and what will change. **Blameless** means it is written on the assumption that everyone involved acted with good intentions and made reasonable decisions given the information, tools and time they had." },
+        { "type": "p", "text": "This is not kindness for its own sake. It is the only approach that works. If the engineer who ran the wrong command is punished, three things follow. The next person who makes a mistake hides it, and you learn about it later and at greater cost. People become cautious to the point of paralysis. And the real finding is lost, because \"Alex was careless\" ends the inquiry at the exact moment it should begin. Why was that command possible? Why did staging look identical to production in the terminal? Why was there no confirmation, no dry run, no review?" },
+        { "type": "p", "text": "People will always make mistakes. A system that depends on nobody ever making one is a badly designed system, and that design is what a postmortem examines. The person closest to the failure is your best source of information about how the system really behaves, and they will only tell you if it is safe to." },
+        { "type": "table", "headers": ["Blaming language", "Blameless language"], "rows": [
+          ["Alex ran the migration against production by mistake", "The migration was run against production. The tool takes the target from an environment variable that was still set from an earlier session, and gives no indication of which database it is connected to."],
+          ["The on-call engineer failed to notice the alert", "The alert was delivered to a channel that receives about 200 messages a day. It was seen 40 minutes later."],
+          ["QA should have caught this", "The test suite does not cover requests with more than 50 items. Such requests are about 0.2% of production traffic."]
+        ]},
+        { "type": "callout", "kind": "note", "text": "Blameless does not mean unaccountable. People remain accountable for taking part honestly, for completing the actions they own, and for their professional conduct. Blamelessness covers honest mistakes made while doing the job, which is nearly all of them. Naming individuals is usually unnecessary; roles such as \"the on-call engineer\" work better." }
+      ]
+    },
+    {
+      "heading": "When to write one, and who does it",
+      "blocks": [
+        { "type": "p", "text": "Define the triggers in advance, so that whether to hold a review is never a political question. Typical criteria follow." },
+        { "type": "list", "items": [
+          "Any SEV1 or SEV2 incident.",
+          "User-visible downtime or degradation beyond a set threshold.",
+          "Data loss of any kind, however small.",
+          "An incident that consumed more than a set share of the error budget, such as 20%.",
+          "Any incident that needed a manual intervention by on-call, such as a rollback or a traffic reroute.",
+          "A monitoring failure: the problem was found by a customer or by luck, not by an alert.",
+          "A **near miss**, where luck prevented an outage. These are the cheapest lessons you will ever be offered.",
+          "Anyone involved asks for one."
+        ]},
+        { "type": "p", "text": "Appoint **one owner**, usually someone who took part in the response but not necessarily the person at the centre of events. The owner gathers input from everyone involved, drafts the document, and drives the review. Aim to circulate a draft within about **five working days**. Sooner is better, because memories fade and blur quickly, and chat logs and metrics age out of retention." },
+        { "type": "p", "text": "Scale the effort to the incident. A SEV3 may need a half-page note and one action. A SEV1 with customer impact deserves a thorough document, a review meeting, and often a version written for customers. A lightweight process that is always followed is better than a heavy one that people avoid." }
+      ]
+    },
+    {
+      "heading": "The document",
+      "blocks": [
+        { "type": "code", "lang": "markdown", "caption": "Postmortem template", "code": "# Postmortem: Checkout failures after deploy   (INC-2304)\nDate: 2026-09-17     Severity: SEV2     Status: Draft | In review | Final\nOwner: Priya S.      Reviewers: checkout team, platform team\n\n## Summary\nTwo or three sentences a busy person can read: what broke, for whom, for how\nlong, and what fixed it.\n\n## Impact\n- Users: about 31% of checkout attempts failed between 14:04 and 15:02 UTC.\n- Business: roughly 1,900 failed purchases; 140 support contacts.\n- SLO: consumed 38% of the 28-day error budget.\n- Data: no orders or payments were lost.\n\n## Timeline (UTC)\n14:02  Deploy 7f3a9c1 reaches 100% of checkout pods.\n14:04  Error ratio rises from 0.05% to 31%.\n14:09  CheckoutErrorBudgetFastBurn pages the on-call engineer.   <- detection\n14:14  Incident declared, SEV2. IC assigned.\n14:41  Rollback started, after ruling out the payment provider.\n15:02  Error ratio back to normal.                               <- mitigation\n15:20  Incident resolved after monitoring.\n\n## Detection\nHow did we find out? How long did it take? Could it have been faster?\n\n## Response\nWhat went well, what was difficult, where we were lucky.\n\n## Contributing factors\nThe conditions that, together, made this incident possible and made it last.\n\n## Action items\n| Action | Type | Priority | Owner | Due | Ticket |\n\n## Lessons learned\nWhat went well. What went badly. Where we got lucky.\n\n## Supporting material\nLinks to dashboards (fixed time ranges), the incident channel, traces, the diff." },
+        { "type": "p", "text": "Three parts deserve particular care. The **impact** should be stated in numbers and in users' terms, because it determines how much investment the follow-up justifies, and because vague impact statements make every incident sound the same." },
+        { "type": "p", "text": "The **timeline** is the factual spine. Build it from sources that carry timestamps, such as chat history, alert and deploy logs, dashboards and the scribe's notes, and not from memory, which reliably reorders and compresses events. Record observations, decisions and actions, and mark the key moments: when the fault was introduced, when impact began, detection, declaration, mitigation and resolution. The intervals between them are the numbers worth tracking: **time to detect**, time to mitigate and time to resolve." },
+        { "type": "p", "text": "**Where we got lucky** is the section teams leave out and should not. \"An engineer happened to be looking at that dashboard\", or \"it occurred at a quiet time of day\", marks a place where the outcome could have been much worse and nothing in your system prevented it." }
+      ]
+    },
+    {
+      "heading": "From root cause to contributing factors",
+      "blocks": [
+        { "type": "p", "text": "The phrase **root cause** suggests that an incident has a single origin which, once removed, makes the system safe. Real incidents in complex systems rarely work like that. They need several things to be true at once: a latent bug, a gap in testing, a missing alert, a confusing tool, a deploy that went to all instances at the same time, a slow rollback. Remove any one and the incident does not happen, or is far smaller. Each of them is a **contributing factor**, and each is an opportunity." },
+        { "type": "p", "text": "The **five whys** technique, asking \"why?\" repeatedly, is a useful prompt for getting past the first answer. Its weakness is that it follows a single chain and tends to end at a person or at the last step. Ask it as a tree instead, with several branches." },
+        { "type": "code", "lang": "text", "code": "Why did 31% of checkouts fail?\n  -> The new version rejects baskets with more than 50 items.\n     Why was that not caught before release?\n       -> No test covers large baskets; staging data has none.\n     Why did it reach every user at once?\n       -> The deploy goes to 100% in one step; there is no canary stage.\nWhy did it last 58 minutes?\n  -> Detection took 5 minutes (good), but mitigation took another 53.\n     Why so long?\n       -> 27 minutes after declaration went on investigating the payment provider.\n          Why?\n            -> The dashboard has no deploy annotations, so the link to the\n               14:02 deploy was not visible.\n       -> The rollback itself needed a manual approval from someone who was\n          in a meeting." },
+        { "type": "p", "text": "Useful questions move the inquiry away from individuals and towards the system." },
+        { "type": "list", "items": [
+          "What made this action seem reasonable to the person at the time?",
+          "What information did they have, and what were they missing?",
+          "What did the tools make easy, and what did they make hard?",
+          "Which defences were supposed to catch this, and why did each one fail?",
+          "How did we detect it, and what would have detected it earlier?",
+          "What slowed the response down, and what made it possible to recover at all?",
+          "Has this happened before? If so, what became of the earlier action items?"
+        ]},
+        { "type": "callout", "kind": "warning", "text": "Watch for **hindsight bias**. Once you know the outcome, the warning signs look obvious and the right decision looks easy. They were not, to someone in the middle of events with incomplete information and twenty other signals competing for attention. If the postmortem says someone \"should have known\", rewrite it to describe what they could actually see." }
+      ]
+    },
+    {
+      "heading": "Action items that get done",
+      "blocks": [
+        { "type": "p", "text": "The action items are the return on the whole exercise, and also where most postmortems fail. A review that ends with fifteen vague intentions and no owners has achieved nothing. Every action item should pass a simple test." },
+        { "type": "table", "headers": ["Quality", "Weak", "Strong"], "rows": [
+          ["**Specific and verifiable**", "Improve monitoring", "Add deploy annotations to the checkout dashboard from the CD pipeline"],
+          ["**Owned**", "The team will look into it", "Owner: Marco T."],
+          ["**Dated and tracked**", "Soon", "Due 2026-10-01, ticket SHOP-4412"],
+          ["**Systemic**", "Be more careful with large baskets", "Add a test for 100-item baskets and seed staging with large baskets"],
+          ["**Prioritised**", "A list of twelve equal items", "Two P1 items that would have prevented or halved this incident"]
+        ]},
+        { "type": "p", "text": "Classify each action by what it does, and check that you have covered more than one category. Teams drift towards prevention alone, although faster detection and mitigation pay off against **every** future incident, including the ones you cannot predict." },
+        { "type": "list", "items": [
+          "**Prevent**: stop this class of fault from occurring. Tests, validation, safer defaults, removing the hazard.",
+          "**Detect**: find it sooner. Alerts, dashboards, synthetic checks.",
+          "**Mitigate**: reduce impact and duration. Canary releases, faster rollback, feature flags, graceful degradation.",
+          "**Process**: runbooks, training, handoffs, escalation paths."
+        ]},
+        { "type": "p", "text": "Be suspicious of three kinds of action. \"Be more careful\" and \"remind everyone\" rely on human vigilance, which is precisely what failed. \"Add a manual approval step\" adds friction and rarely adds safety. And a long list dilutes attention: prefer the two or three items with the most leverage, and ticket the rest at a lower priority, honestly labelled." },
+        { "type": "p", "text": "Then follow through. Track postmortem actions in the same system as other work, review open ones at a regular meeting, and report the completion rate. When the error budget policy says that reliability work takes priority, these are the items it means. A repeat incident whose earlier action items were never done is the clearest sign of a broken process, and it deserves a postmortem of its own." }
+      ]
+    },
+    {
+      "heading": "Review and share",
+      "blocks": [
+        { "type": "p", "text": "Circulate the draft to everyone involved for corrections, then hold a **review meeting** of thirty to sixty minutes. A facilitator who was not central to the incident keeps the discussion blameless and on the system. Walk through the timeline, test the contributing factors (\"is there anything else that had to be true?\"), and agree and prioritise the actions. Do not use the meeting to redraft the document line by line." },
+        { "type": "p", "text": "A postmortem that only its authors read teaches only its authors. Publish it where the whole engineering organisation can find it, in a searchable, consistently tagged repository. Announce new ones. Many companies run a regular reading session or newsletter, and use past postmortems as onboarding material and as scenarios for the drills described in the on-call module. A customer-facing version, shorter and free of internal detail, builds far more trust than silence does." },
+        { "type": "p", "text": "Over time, the collection becomes data. Tag each postmortem with its contributing factors, detection method and the kinds of action taken, and review them quarterly. Patterns emerge that no single incident shows: that most incidents follow config changes, that customers detect a third of them before your alerts do, or that one overloaded team appears in most timelines. Those findings should shape the reliability roadmap." },
+        { "type": "callout", "kind": "tip", "text": "Reward good postmortems visibly. When leaders thank the engineer who wrote a candid review of their own mistake, and act on it, everyone learns that honesty is safe. That single signal does more for reliability than any tool." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Write a postmortem for a real incident",
+    "steps": [
+      "Choose a real incident you were involved in, or a detailed public postmortem from a company that publishes them. A near miss works well too.",
+      "Rebuild the timeline from timestamped sources only: chat, alerts, deploy history, dashboards. Mark when the fault was introduced, when impact began, detection, mitigation and resolution, and compute the intervals.",
+      "Write the impact section in numbers and in users' terms, including the share of the error budget consumed.",
+      "Draft the contributing factors as a tree, with at least two branches for why it happened and two for why it lasted as long as it did.",
+      "Search your draft for names, and for the words \"should have\", \"failed to\", \"careless\" and \"human error\". Rewrite each sentence to describe what the system allowed and what the person could see.",
+      "Write the \"where we got lucky\" section, with at least two items.",
+      "Propose no more than five action items covering at least three of prevent, detect, mitigate and process. Give each an owner, a due date and a verifiable definition of done, and mark the two with the most leverage.",
+      "Ask a colleague who was not involved to read it and tell you what they would do differently in their own service as a result."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Blameless: assume good intentions and reasonable decisions given what people knew. Blame ends the inquiry and teaches people to hide mistakes.",
+      "Define triggers in advance, including near misses and incidents found by customers.",
+      "One owner, draft within about five working days, effort scaled to severity.",
+      "Build the timeline from timestamped sources, not memory. Track time to detect and time to mitigate.",
+      "Look for contributing factors, not a single root cause. Ask why as a tree, not a chain.",
+      "Beware hindsight bias: replace \"should have known\" with what was actually visible.",
+      "Few, specific, owned, dated, systemic action items across prevent, detect and mitigate. \"Be more careful\" is not an action.",
+      "Track actions to completion, share widely, and mine the collection for patterns."
+    ],
+    "groups": [
+      {
+        "title": "Document sections",
+        "items": [
+          { "syntax": "Summary", "desc": "Two or three sentences: what, who, how long, what fixed it" },
+          { "syntax": "Impact", "desc": "Users, business, SLO budget consumed, data" },
+          { "syntax": "Timeline", "desc": "Timestamped observations, decisions and actions; key moments marked" },
+          { "syntax": "Detection", "desc": "How it was found, how long it took, how it could be faster" },
+          { "syntax": "Response", "desc": "What helped, what hindered" },
+          { "syntax": "Contributing factors", "desc": "Everything that had to be true for this to happen and to last" },
+          { "syntax": "Action items", "desc": "Action, type, priority, owner, due date, ticket" },
+          { "syntax": "Lessons", "desc": "Went well, went badly, where we got lucky" }
+        ]
+      },
+      {
+        "title": "Key intervals",
+        "items": [
+          { "syntax": "time to detect = detection - impact start", "desc": "Quality of monitoring and alerting" },
+          { "syntax": "time to declare = declaration - detection", "desc": "Whether people hesitate to raise incidents" },
+          { "syntax": "time to mitigate = mitigation - detection", "desc": "Quality of tooling, runbooks and rollback" },
+          { "syntax": "time to resolve = resolution - impact start", "desc": "Total duration users could have been affected" },
+          { "syntax": "budget consumed = bad events / budget events", "desc": "Ties the incident to the SLO and the budget policy" }
+        ]
+      },
+      {
+        "title": "Questions that find system causes",
+        "items": [
+          { "syntax": "What made this seem reasonable at the time?", "desc": "Replaces \"why did they do that?\"" },
+          { "syntax": "What information was missing?", "desc": "Points at observability and tooling gaps" },
+          { "syntax": "Which defences should have caught it?", "desc": "Tests, review, canary, alerts: why each one missed" },
+          { "syntax": "What slowed the response?", "desc": "Access, approvals, runbooks, unclear ownership" },
+          { "syntax": "Where were we lucky?", "desc": "What would the bad version have looked like?" },
+          { "syntax": "Has it happened before?", "desc": "And what became of those action items?" }
+        ]
+      },
+      {
+        "title": "Action item test",
+        "items": [
+          { "syntax": "Specific and verifiable", "desc": "You can tell objectively when it is done" },
+          { "syntax": "Owned", "desc": "One named person, not a team" },
+          { "syntax": "Dated and ticketed", "desc": "In the normal work tracker, with a due date" },
+          { "syntax": "Systemic", "desc": "Changes the system, not people's level of care" },
+          { "syntax": "Prioritised", "desc": "Two or three high-leverage items stand out" },
+          { "syntax": "Types: prevent / detect / mitigate / process", "desc": "Cover more than one" }
+        ]
+      },
+      {
+        "title": "Words to search for and rewrite",
+        "items": [
+          { "syntax": "human error", "desc": "Describe what the system allowed and why it was easy" },
+          { "syntax": "should have / failed to", "desc": "Describe what the person could see at the time" },
+          { "syntax": "careless / negligent", "desc": "Remove; describe conditions and tooling" },
+          { "syntax": "personal names", "desc": "Use roles: the on-call engineer, the deployer" },
+          { "syntax": "root cause (singular)", "desc": "List the contributing factors instead" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Concluding with \"human error\" and recommending that people be more careful.",
+      "Writing the timeline from memory a fortnight later, after the chat and metrics have aged out.",
+      "Stopping at the first cause found and missing the factors that made the incident last.",
+      "Producing a dozen unowned action items, none of which is ever completed.",
+      "Skipping near misses, the cheapest lessons available.",
+      "Filing the document where nobody outside the team will ever read it."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A postmortem draft says: \"The engineer carelessly ran the script against production.\" What is the best blameless rewrite?",
+      "options": [
+        "The script ran on production: the tool shows no target and takes it from a stale variable",
+        "An engineer, who will not be named here, carelessly ran the script against production",
+        "The script was run against production due to human error during the maintenance task",
+        "The engineer has been reminded to double-check the target environment before running scripts"
+      ],
+      "answer": 0,
+      "explain": "It describes what the system allowed and why the mistake was easy to make, which points at fixes. Removing the name while keeping \"carelessly\", or labelling it human error, still stops the inquiry at the person."
+    },
+    {
+      "q": "Why do experienced teams prefer 'contributing factors' to a single 'root cause'?",
+      "options": [
+        "Incidents need several conditions at once, and each one is a chance to improve",
+        "A single root cause is always a person, which is against blameless principles",
+        "Listing many factors makes the document longer and so more authoritative",
+        "Root causes can only be identified by the vendor of the failing component"
+      ],
+      "answer": 0,
+      "explain": "A latent bug, a testing gap, an all-at-once deploy and a slow rollback may all have been necessary. Fixing any of them helps, and fixing detection or mitigation helps against future incidents of other kinds too."
+    },
+    {
+      "q": "Which of these is the strongest action item?",
+      "options": [
+        "Add a canary stage at 5% to the checkout pipeline. Owner: Marco. Due 1 Oct. SHOP-4412",
+        "The team should improve monitoring and testing of the checkout service",
+        "All engineers must be more careful when deploying on a Friday afternoon",
+        "Add a second manual approval from a manager before every production deploy"
+      ],
+      "answer": 0,
+      "explain": "It is specific, verifiable, owned, dated, tracked, and changes the system. The others are vague, rely on vigilance, or add friction without adding real safety."
+    },
+    {
+      "q": "A review describes the warning signs as obvious and says the on-call engineer 'should have known' the deploy was the cause. What is going wrong?",
+      "options": [
+        "Hindsight bias: the outcome makes signals look clearer than they were",
+        "The timeline was constructed from timestamped logs instead of memory",
+        "The review is being held too soon after the incident to be objective",
+        "The postmortem is missing a section that lists the people responsible"
+      ],
+      "answer": 0,
+      "explain": "Knowing the ending makes the right path look obvious. During the incident those signals competed with many others. The useful question is what the engineer could see, and how to make the link visible next time."
+    },
+    {
+      "q": "A faulty config change was caught by chance during a code review, minutes before it would have taken down login. Should the team write a postmortem?",
+      "options": [
+        "Yes: a near miss exposes the same weaknesses without the cost of an outage",
+        "No: postmortems are only for incidents that had measurable user impact",
+        "No: reviewing it would unfairly single out the author of the change",
+        "Only if the same kind of change causes a real outage in the future"
+      ],
+      "answer": 0,
+      "explain": "The only thing that prevented the outage was luck, so the system is as weak as if it had happened. Near misses are the cheapest lessons on offer, and a blameless process singles nobody out."
+    }
+  ]
+}

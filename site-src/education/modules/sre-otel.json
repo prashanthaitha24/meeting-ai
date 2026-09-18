@@ -1,0 +1,250 @@
+{
+  "id": "sre-otel",
+  "minutes": 35,
+  "intro": "Metrics tell you that checkout latency doubled at 14:02. They cannot tell you why this particular customer's request took nine seconds, because a metric is an aggregate and the answer lies in one request's journey through six services. That is what traces and logs are for. OpenTelemetry is the vendor-neutral standard for producing all three signals, so that you instrument your code once and can send the data to any backend. This module covers how distributed tracing works, how to make logs useful, and how to run the OpenTelemetry Collector.",
+  "objectives": [
+    "Explain what metrics, logs and traces are each good for, and how they connect during an investigation",
+    "Describe traces, spans and context propagation, including the W3C `traceparent` header",
+    "Instrument a service with OpenTelemetry using automatic and manual instrumentation",
+    "Write structured logs that carry trace and span IDs so that they correlate with traces",
+    "Configure an OpenTelemetry Collector pipeline with receivers, processors and exporters, and choose a sampling strategy"
+  ],
+  "sections": [
+    {
+      "heading": "Three signals, one investigation",
+      "blocks": [
+        { "type": "table", "headers": ["Signal", "What it is", "Strength", "Weakness"], "rows": [
+          ["**Metrics**", "Numbers aggregated over time", "Cheap, fast, ideal for alerting and trends", "No detail about any individual request"],
+          ["**Logs**", "Timestamped records of discrete events", "Rich detail, arbitrary context", "Expensive at volume, hard to follow across services"],
+          ["**Traces**", "The path of one request through every service it touched", "Shows where time went and where it failed", "Needs propagation everywhere; usually sampled"]
+        ]},
+        { "type": "p", "text": "A typical investigation uses all three, in order. A **metric**-based alert says the error budget is burning. The dashboard narrows it to one route. You open **traces** for slow or failed requests on that route and see that the time is spent in a call to the inventory service. You then read the **logs** for that exact span and find the cause: a timeout connecting to a replica. Each signal hands you to the next, provided they share identifiers." },
+        { "type": "p", "text": "**Monitoring** answers questions you thought of in advance: is the error rate above the threshold? **Observability** is the ability to ask new questions about a system's behaviour from the outside, without shipping new code, which matters most for the failures nobody predicted. High-cardinality detail, such as customer ID, build version and feature flag state, is what makes that possible, and it lives in traces and logs because it cannot live in metric labels." },
+        { "type": "p", "text": "**OpenTelemetry**, usually shortened to OTel, is a CNCF project that provides a specification, APIs and SDKs for most languages, a wire protocol called **OTLP**, and the Collector. It is not a backend: it does not store or display anything. You send its output to Jaeger, Tempo, Prometheus, Loki, Elasticsearch or a commercial vendor, and you can change your mind later without touching your application code. That freedom from lock-in is the reason it became the standard." }
+      ]
+    },
+    {
+      "heading": "Traces, spans and context propagation",
+      "blocks": [
+        { "type": "p", "text": "A **trace** represents one request end to end. It is made of **spans**, each representing one unit of work: handling an HTTP request, running a database query, calling another service. A span has a name, a start time and a duration, a **status**, a set of key-value **attributes**, optional timestamped **events**, and the ID of its **parent span**. The parent links assemble the spans into a tree, usually drawn as a waterfall." },
+        { "type": "code", "lang": "text", "code": "trace 4bf92f3577b34da6a3ce929d0e0e4736                          total 1,240 ms\n\nGET /checkout                 [==============================================] 1240 ms\n  auth.verify_token            [==]                                              38 ms\n  cart.load                       [====]                                         95 ms\n    SELECT cart_items                [==]                                        41 ms\n  POST inventory/reserve               [==============================]          870 ms  ERROR\n    SELECT stock ... FOR UPDATE           [==========================]           812 ms\n  payment.authorize                                                  [=======]  190 ms" },
+        { "type": "p", "text": "One glance shows what no metric could: the request spent 870 of its 1,240 milliseconds reserving inventory, nearly all of it waiting on one locking query. The waterfall also reveals structure, such as calls made one after another that could run in parallel, or a query executed forty times in a loop." },
+        { "type": "p", "text": "For this to work across processes, the trace identity must travel with the request. This is **context propagation**. When a service makes an outgoing call, the SDK injects the current trace and span IDs into the request headers, and the receiving service extracts them and continues the same trace. The standard header is W3C Trace Context:" },
+        { "type": "code", "lang": "text", "code": "traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\n             |  |                                |                |\n             |  trace-id (32 hex chars)          |                trace-flags (01 = sampled)\n             version                             parent span-id (16 hex chars)" },
+        { "type": "callout", "kind": "warning", "text": "Propagation is only as good as its weakest link. One service, proxy or message queue that does not pass the context on splits the trace in two, and the most interesting part of the journey is usually on the far side. For queues and background jobs the context must be carried in the message metadata and extracted by the consumer." }
+      ]
+    },
+    {
+      "heading": "Instrumenting a service",
+      "blocks": [
+        { "type": "p", "text": "OpenTelemetry separates the **API**, which your code calls to create spans, from the **SDK**, which decides what happens to them. Libraries can depend on the lightweight API safely: if no SDK is configured, the calls do nothing. **Automatic instrumentation** gets you most of the value with no code changes, by patching common frameworks and clients, such as web servers, HTTP clients, database drivers and messaging libraries, to create spans and propagate context." },
+        { "type": "code", "lang": "bash", "caption": "Zero-code instrumentation of a Python service", "code": "pip install opentelemetry-distro opentelemetry-exporter-otlp\nopentelemetry-bootstrap -a install          # adds instrumentation for the libraries it finds\n\nexport OTEL_SERVICE_NAME=checkout\nexport OTEL_RESOURCE_ATTRIBUTES=deployment.environment=staging,service.version=1.4.2\nexport OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317\nexport OTEL_TRACES_SAMPLER=parentbased_traceidratio\nexport OTEL_TRACES_SAMPLER_ARG=0.1\n\nopentelemetry-instrument python app.py" },
+        { "type": "p", "text": "The `OTEL_*` environment variables are standard across languages, which fits the twelve-factor approach to configuration. `service.name` is the most important **resource attribute**: it labels every span, metric and log from this process, and without it your backend shows a service called `unknown_service`. Java has an equivalent agent attached with `-javaagent`, and Node.js and .NET have their own auto-instrumentation packages. On Kubernetes, the OpenTelemetry Operator can inject instrumentation into pods by annotation." },
+        { "type": "p", "text": "Automatic instrumentation knows about HTTP and SQL, not about your business. Add **manual spans** around the operations that matter, and attach the attributes you will want to search by." },
+        { "type": "code", "lang": "python", "code": "from opentelemetry import trace\nfrom opentelemetry.trace import Status, StatusCode\n\ntracer = trace.get_tracer(__name__)\n\n\ndef reserve_stock(order_id: str, items: list[dict]) -> None:\n    with tracer.start_as_current_span(\"inventory.reserve_stock\") as span:\n        span.set_attribute(\"order.id\", order_id)\n        span.set_attribute(\"order.item_count\", len(items))\n        try:\n            for item in items:\n                lock_and_decrement(item[\"sku\"], item[\"qty\"])\n            span.add_event(\"stock reserved\")\n        except StockUnavailable as exc:\n            span.record_exception(exc)\n            span.set_status(Status(StatusCode.ERROR, \"stock unavailable\"))\n            raise" },
+        { "type": "list", "items": [
+          "Follow the **semantic conventions** for attribute names, such as `http.request.method`, `http.response.status_code`, `db.system` and `server.address`. Backends build their views on those names, and consistent names make queries work across services written in different languages.",
+          "Attributes can be high cardinality, which is the whole point. Customer ID, order ID and feature-flag state are exactly what you will want to filter by.",
+          "Never put secrets, tokens, passwords or unnecessary personal data in attributes. Trace data is widely readable and kept for a long time.",
+          "Name spans after the operation, not the instance: `GET /orders/{id}`, not `GET /orders/48213`.",
+          "Do not create a span for every function call. Spans cost memory and money; instrument boundaries and meaningful units of work."
+        ]}
+      ]
+    },
+    {
+      "heading": "Logs that correlate",
+      "blocks": [
+        { "type": "p", "text": "Logs are the oldest signal and the most abused. Three rules make them useful. Write **structured** logs, one JSON object per line on stdout, as the twelve-factor module described, so that they can be filtered by field and not by regular expression. Use **levels** consistently. And include the **trace ID and span ID** in every line written while handling a request." },
+        { "type": "code", "lang": "json", "code": "{\n  \"timestamp\": \"2026-09-17T14:02:11.482Z\",\n  \"level\": \"error\",\n  \"message\": \"stock reservation failed\",\n  \"service\": \"inventory\",\n  \"trace_id\": \"4bf92f3577b34da6a3ce929d0e0e4736\",\n  \"span_id\": \"00f067aa0ba902b7\",\n  \"order_id\": \"o-1842\",\n  \"sku\": \"SKU-9917\",\n  \"error\": \"lock wait timeout exceeded\",\n  \"duration_ms\": 812\n}" },
+        { "type": "p", "text": "With the trace ID present, your tooling can jump from a span straight to the log lines written during it, and from any log line to the full trace of the request it belongs to. That single field turns a log search across six services into one click. OpenTelemetry's logging instrumentation can inject these IDs into your existing logger's records automatically, so you usually do not have to pass them around by hand." },
+        { "type": "code", "lang": "python", "code": "import json\nimport logging\n\nfrom opentelemetry import trace\n\n\nclass JsonFormatter(logging.Formatter):\n    def format(self, record: logging.LogRecord) -> str:\n        ctx = trace.get_current_span().get_span_context()\n        event = {\n            \"timestamp\": self.formatTime(record),\n            \"level\": record.levelname.lower(),\n            \"message\": record.getMessage(),\n            \"logger\": record.name,\n        }\n        if ctx.is_valid:\n            event[\"trace_id\"] = format(ctx.trace_id, \"032x\")\n            event[\"span_id\"] = format(ctx.span_id, \"016x\")\n        return json.dumps(event)" },
+        { "type": "table", "headers": ["Level", "Use it for"], "rows": [
+          ["`ERROR`", "An operation failed and someone may need to act. Include enough context to act on."],
+          ["`WARN`", "Something unexpected that the system recovered from: a retry, a fallback, a slow dependency"],
+          ["`INFO`", "Significant business and lifecycle events: started, order created, config loaded"],
+          ["`DEBUG`", "Detail for developers; off in production by default, switchable at runtime"]
+        ]},
+        { "type": "p", "text": "Log volume is a real cost, as the FinOps module noted. Log an event once, at the place that handles it, not at every layer it passes through. Do not log inside tight loops. And do not use logs to count things: that is a metric, and it is thousands of times cheaper." }
+      ]
+    },
+    {
+      "heading": "The Collector",
+      "blocks": [
+        { "type": "p", "text": "Applications could export straight to a backend, but in practice you run the **OpenTelemetry Collector** in between. It is a standalone process that receives telemetry, processes it, and exports it to one or more destinations. It takes batching, retries, credentials and vendor-specific formats out of your applications, and gives operators one place to filter, redact and route. Its configuration is a set of components wired into **pipelines**, one pipeline per signal." },
+        { "type": "code", "lang": "yaml", "caption": "otel-collector.yaml", "code": "receivers:\n  otlp:\n    protocols:\n      grpc:\n        endpoint: 0.0.0.0:4317\n      http:\n        endpoint: 0.0.0.0:4318\n\nprocessors:\n  memory_limiter:\n    check_interval: 1s\n    limit_mib: 512\n  batch:\n    timeout: 5s\n  attributes/redact:\n    actions:\n      - key: http.request.header.authorization\n        action: delete\n\nexporters:\n  otlp/tempo:\n    endpoint: tempo:4317\n    tls:\n      insecure: true\n  prometheus:\n    endpoint: 0.0.0.0:8889\n  debug:\n    verbosity: basic\n\nservice:\n  pipelines:\n    traces:\n      receivers: [otlp]\n      processors: [memory_limiter, attributes/redact, batch]\n      exporters: [otlp/tempo, debug]\n    metrics:\n      receivers: [otlp]\n      processors: [memory_limiter, batch]\n      exporters: [prometheus]" },
+        { "type": "list", "items": [
+          "A component does nothing until it is listed in a pipeline under `service`. Defining an exporter and forgetting to reference it is the most common configuration mistake.",
+          "**Processor order matters.** Put `memory_limiter` first, so the Collector sheds load instead of crashing, and `batch` last, so that data is grouped after all filtering.",
+          "The `type/name` form, as in `otlp/tempo`, lets you define several instances of one component type.",
+          "OTLP uses port **4317 for gRPC** and **4318 for HTTP**.",
+          "Two deployment patterns are common, often together. An **agent** runs next to the application, as a DaemonSet or sidecar, and collects locally. A **gateway** is a central, scaled pool that does the heavy processing and holds the backend credentials."
+        ]},
+        { "type": "p", "text": "The core distribution contains only the most stable components. The **contrib** distribution adds hundreds more, including receivers for Prometheus scraping, host metrics, log files and Kubernetes events, so check which distribution a component ships in before you copy a configuration." }
+      ]
+    },
+    {
+      "heading": "Sampling: you cannot keep everything",
+      "blocks": [
+        { "type": "p", "text": "A busy service produces millions of traces a day, and the great majority are identical, uneventful successes. Storing them all is expensive and pointless. **Sampling** keeps a subset, and the strategy determines which." },
+        { "type": "table", "headers": ["Strategy", "Decision made", "Pros", "Cons"], "rows": [
+          ["**Head sampling**", "At the start of the trace, in the SDK, for example keep 10%", "Simple and cheap; unsampled requests cost almost nothing", "Decides before it knows the outcome, so it discards most errors and slow requests too"],
+          ["**Tail sampling**", "After the trace is complete, in the Collector", "Can keep every error and every slow trace, plus a small share of the rest", "Must buffer whole traces in memory, and all spans of a trace must reach the same Collector"]
+        ]},
+        { "type": "code", "lang": "yaml", "caption": "Tail sampling in the Collector (contrib distribution)", "code": "processors:\n  tail_sampling:\n    decision_wait: 10s\n    policies:\n      - name: keep-errors\n        type: status_code\n        status_code:\n          status_codes: [ERROR]\n      - name: keep-slow\n        type: latency\n        latency:\n          threshold_ms: 1000\n      - name: sample-the-rest\n        type: probabilistic\n        probabilistic:\n          sampling_percentage: 5" },
+        { "type": "p", "text": "With head sampling, use a **parent-based** sampler, as in the environment variables earlier. The first service makes the decision, records it in the `traceparent` flags, and every downstream service honours it. Without that, each service decides independently and you collect fragments of traces with no complete one among them." },
+        { "type": "callout", "kind": "tip", "text": "Sampling applies to traces, not to the metrics you alert on. Derive request rate, error rate and latency from **every** request, either from metrics the application records or from a Collector component that computes them from spans before the sampling step. If you calculate an SLI from sampled traces, tail sampling that favours errors will make your error rate look terrible." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Trace a request across two services",
+    "steps": [
+      "With Docker Compose, run an OpenTelemetry Collector and a trace backend such as Jaeger or Grafana Tempo. Give the Collector an OTLP receiver, the `batch` processor, an exporter to the backend, and the `debug` exporter.",
+      "Write two small services, where A calls B over HTTP and B queries a database or sleeps briefly. Run both under automatic instrumentation with `OTEL_SERVICE_NAME` and `OTEL_EXPORTER_OTLP_ENDPOINT` set.",
+      "Send a request to A. Find the trace in the backend and confirm that it contains spans from both services in one tree. Print the incoming headers in B and read the `traceparent` value.",
+      "Break propagation on purpose by making the call from A to B with a raw socket or a client that is not instrumented. Observe the two separate traces, then restore it.",
+      "Add a manual span in B around a business operation, with two attributes and an error status on failure. Find failing traces by filtering on that attribute.",
+      "Switch both services to JSON logging that includes `trace_id` and `span_id`. Pick an error in the logs and use the ID to find its trace.",
+      "Set head sampling to 10% and note how many error traces you lose. If you use the contrib Collector, replace it with a tail-sampling policy that keeps all errors and compare.",
+      "Add an `attributes` processor that deletes a sensitive header attribute, and confirm in the backend that it no longer appears."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Metrics say that something is wrong, traces show where, logs explain why. Shared IDs connect them.",
+      "A trace is a tree of spans. Context travels between services in the W3C `traceparent` header.",
+      "One component that drops the context breaks the trace. Queues and jobs need explicit propagation.",
+      "Start with automatic instrumentation, then add manual spans and attributes for business operations.",
+      "Always set `service.name`. Follow the semantic conventions. Never put secrets in attributes.",
+      "Structured JSON logs on stdout, with `trace_id` and `span_id` in every line.",
+      "Collector = receivers, processors, exporters, wired together in pipelines. `memory_limiter` first, `batch` last.",
+      "Head sampling is cheap but blind; tail sampling keeps errors and slow traces. Never compute SLIs from sampled data."
+    ],
+    "groups": [
+      {
+        "title": "Concepts",
+        "items": [
+          { "syntax": "Trace", "desc": "One request end to end, identified by a 32-hex trace ID" },
+          { "syntax": "Span", "desc": "One unit of work: name, start, duration, status, attributes, parent" },
+          { "syntax": "Attribute", "desc": "Key-value detail on a span; high cardinality is fine" },
+          { "syntax": "Event", "desc": "Timestamped message inside a span" },
+          { "syntax": "Resource", "desc": "Attributes of the producing process, e.g. service.name" },
+          { "syntax": "OTLP", "desc": "OpenTelemetry's wire protocol: gRPC on 4317, HTTP on 4318" },
+          { "syntax": "traceparent: 00-TRACEID-SPANID-FLAGS", "desc": "W3C Trace Context header; flags 01 means sampled" }
+        ]
+      },
+      {
+        "title": "Standard environment variables",
+        "items": [
+          { "syntax": "OTEL_SERVICE_NAME", "desc": "Sets service.name" },
+          { "syntax": "OTEL_RESOURCE_ATTRIBUTES", "desc": "Comma-separated key=value resource attributes" },
+          { "syntax": "OTEL_EXPORTER_OTLP_ENDPOINT", "desc": "Where to send telemetry, usually a Collector" },
+          { "syntax": "OTEL_EXPORTER_OTLP_PROTOCOL", "desc": "grpc or http/protobuf" },
+          { "syntax": "OTEL_TRACES_SAMPLER", "desc": "e.g. parentbased_traceidratio, always_on" },
+          { "syntax": "OTEL_TRACES_SAMPLER_ARG", "desc": "Argument for the sampler, e.g. 0.1 for 10%" },
+          { "syntax": "OTEL_PROPAGATORS", "desc": "Propagation formats; default tracecontext,baggage" }
+        ]
+      },
+      {
+        "title": "Python API",
+        "items": [
+          { "syntax": "opentelemetry-instrument python app.py", "desc": "Run with automatic instrumentation" },
+          { "syntax": "opentelemetry-bootstrap -a install", "desc": "Install instrumentation for detected libraries" },
+          { "syntax": "tracer = trace.get_tracer(__name__)", "desc": "Obtain a tracer" },
+          { "syntax": "with tracer.start_as_current_span(\"name\") as span:", "desc": "Create a span and make it current" },
+          { "syntax": "span.set_attribute(\"key\", value)", "desc": "Attach searchable detail" },
+          { "syntax": "span.add_event(\"message\")", "desc": "Timestamped note inside the span" },
+          { "syntax": "span.record_exception(exc)", "desc": "Attach an exception as an event" },
+          { "syntax": "span.set_status(Status(StatusCode.ERROR))", "desc": "Mark the span as failed" }
+        ]
+      },
+      {
+        "title": "Collector configuration",
+        "items": [
+          { "syntax": "receivers:", "desc": "How data gets in: otlp, prometheus, filelog, hostmetrics" },
+          { "syntax": "processors:", "desc": "What happens in between: memory_limiter, batch, attributes, tail_sampling" },
+          { "syntax": "exporters:", "desc": "Where data goes: otlp, prometheus, debug, vendor exporters" },
+          { "syntax": "service.pipelines.traces|metrics|logs", "desc": "Wires components together; unused components do nothing" },
+          { "syntax": "TYPE/NAME", "desc": "A named instance of a component, e.g. otlp/tempo" },
+          { "syntax": "otelcol validate --config FILE", "desc": "Check a configuration before deploying" }
+        ]
+      },
+      {
+        "title": "Logging rules",
+        "items": [
+          { "syntax": "one JSON object per line on stdout", "desc": "Structured and platform-routed" },
+          { "syntax": "trace_id + span_id in every request log", "desc": "Links logs to traces in both directions" },
+          { "syntax": "ERROR / WARN / INFO / DEBUG", "desc": "Failed / recovered / significant event / developer detail" },
+          { "syntax": "log once, where it is handled", "desc": "Not at every layer the error passes through" },
+          { "syntax": "count with metrics, not logs", "desc": "Orders of magnitude cheaper" },
+          { "syntax": "never log secrets or needless personal data", "desc": "Logs are widely readable and long-lived" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Leaving one service or queue without context propagation, so that every trace is cut in half there.",
+      "Forgetting to set `service.name`, leaving every span attributed to `unknown_service`.",
+      "Putting IDs in span names, which makes every request look like a different operation.",
+      "Defining a Collector exporter or processor and never adding it to a pipeline.",
+      "Using head sampling alone and discovering during an incident that the failing traces were discarded.",
+      "Computing error rates from tail-sampled traces, which are deliberately biased towards errors."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "An alert shows that p99 latency for `/checkout` doubled. Which signal is best suited to finding which downstream call is responsible?",
+      "options": [
+        "Traces, because they show where time was spent within individual requests",
+        "Metrics, because they can be aggregated by any label at no cost",
+        "Logs at DEBUG level, because they contain the most detail",
+        "The Kubernetes events stream, because it records every change"
+      ],
+      "answer": 0,
+      "explain": "A trace breaks one request into timed spans across services, so the slow call is visible in the waterfall. Metrics showed that there is a problem; they cannot show the path of a single request."
+    },
+    {
+      "q": "Traces in your backend always stop at the message queue: the producer's spans and the consumer's spans appear as separate traces. What is the cause?",
+      "options": [
+        "Trace context is not being carried in the message and extracted by the consumer",
+        "The sampling rate on the consumer is lower than on the producer",
+        "The Collector's batch processor is splitting traces by service",
+        "Message queues are not supported by distributed tracing"
+      ],
+      "answer": 0,
+      "explain": "Context propagation must cross every hop. For HTTP the `traceparent` header does it automatically; for messaging, the context must be injected into message metadata and extracted on the other side."
+    },
+    {
+      "q": "Why should every log line written during a request include the trace ID?",
+      "options": [
+        "It lets you jump between a trace and exactly the log lines from that request, across all services",
+        "It makes the log lines smaller, because the message can be omitted",
+        "It is required for the log collector to parse JSON correctly",
+        "It guarantees that the log line is kept by the tail sampler"
+      ],
+      "answer": 0,
+      "explain": "The shared ID correlates the two signals in both directions. Without it, finding one request's logs across several services means guessing from timestamps."
+    },
+    {
+      "q": "A Collector configuration defines an exporter called `otlp/vendor`, but no data arrives at the vendor. The Collector logs no errors. What should you check first?",
+      "options": [
+        "Whether the exporter is listed in a pipeline under the service section",
+        "Whether the exporter name contains a slash, which is not allowed",
+        "Whether the batch processor appears before the memory limiter",
+        "Whether the applications are using port 4318 instead of 4317"
+      ],
+      "answer": 0,
+      "explain": "Components are inert until a pipeline references them. Defining a component without wiring it in is valid configuration, so nothing complains, and nothing is sent."
+    },
+    {
+      "q": "You want to keep every failed and every slow trace, but only a small share of normal ones. Which approach achieves that?",
+      "options": [
+        "Tail sampling in the Collector, with policies for errors, latency and a probabilistic remainder",
+        "Head sampling at 100% for errors and 5% for successes",
+        "A lower log level on services that have more errors",
+        "A shorter scrape interval on the services in question"
+      ],
+      "answer": 0,
+      "explain": "Only tail sampling decides after the trace has finished, when its status and duration are known. Head sampling decides at the start, before anyone knows whether the request will fail."
+    }
+  ]
+}

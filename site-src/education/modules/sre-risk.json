@@ -1,0 +1,211 @@
+{
+  "id": "sre-risk",
+  "minutes": 25,
+  "intro": "Engineers tend to treat reliability as something to maximise. SRE treats it as something to choose. Every improvement in reliability is paid for with money, with engineering time, and with slower delivery of features, and beyond a certain point users cannot even notice what they are paying for. This module teaches you to reason about risk as a cost and a benefit, to decide how reliable a particular service needs to be, and to reduce the impact of failure in ways that are far cheaper than another nine.",
+  "objectives": [
+    "Explain why 100% reliability is the wrong target, in terms of cost, velocity and what users can perceive",
+    "Estimate the cost of downtime and compare it with the cost of preventing it",
+    "Calculate how dependencies combine, in series and in parallel, to limit a system's availability",
+    "Set different risk tolerances for different services and user journeys",
+    "Use risk reduction techniques that limit blast radius and recovery time instead of chasing failure prevention alone"
+  ],
+  "sections": [
+    {
+      "heading": "Why not 100%?",
+      "blocks": [
+        { "type": "p", "text": "Three arguments lead to the same conclusion." },
+        { "type": "p", "text": "**Cost rises steeply.** Moving from 99% to 99.9% might mean a second instance and a load balancer. Reaching 99.99% means multiple zones, automated failover, a rehearsed on-call rotation and careful releases. 99.999% means multiple regions, active-active data replication and removing humans from every recovery path. Each step costs several times the one before, for a tenth of the previous improvement." },
+        { "type": "p", "text": "**Users cannot perceive it.** Between your service and your user sit a phone, a Wi-Fi router, a mobile network, an ISP and DNS. If that chain is, generously, 99.9% reliable, a user cannot distinguish a 99.99% service from a 99.999% one. The failures they experience are dominated by everything else. The extra nine is real money spent on an improvement nobody can see." },
+        { "type": "p", "text": "**Reliability competes with change.** Most outages are caused by changes: deploys, config pushes, migrations. The surest way to be reliable is to change nothing, and a product that changes nothing loses to one that improves. A 100% target leaves an error budget of zero, which forbids every release." },
+        { "type": "callout", "kind": "note", "text": "The right target is the lowest level of reliability at which users remain happy, because every increment above it is paid for with features you did not build. Embracing risk does not mean being careless. It means choosing the level deliberately, measuring it, and managing to it." }
+      ]
+    },
+    {
+      "heading": "Putting a price on downtime",
+      "blocks": [
+        { "type": "p", "text": "To decide whether a reliability investment is worth making, compare what it costs with what it saves. The Google SRE book frames it as a simple calculation. Suppose a service earns 1,000,000 a year and you are considering a project to raise availability from 99.9% to 99.99%." },
+        { "type": "code", "lang": "text", "code": "improvement in availability   = 99.99% - 99.9%   = 0.09%\nvalue of the improvement      = 1,000,000 x 0.0009 = 900 per year\n\nIf the project costs more than 900 per year, it is not justified by revenue alone." },
+        { "type": "p", "text": "That model assumes revenue is lost in proportion to downtime, which is a simplification. A fuller estimate of the cost of an outage includes several components." },
+        { "type": "code", "lang": "text", "code": "cost of an outage ~  lost revenue          (revenue per hour x hours x share of users affected)\n                   + SLA penalties          (credits owed to customers)\n                   + recovery cost          (engineer hours x loaded hourly cost)\n                   + support cost           (extra tickets and calls)\n                   + reputational damage    (churn, lost deals: real, but hard to measure)\n\nexpected annual loss = probability of the event per year x cost when it happens" },
+        { "type": "code", "lang": "python", "code": "def expected_annual_loss(events_per_year: float, hours_each: float,\n                         revenue_per_hour: float, share_affected: float,\n                         responders: int, hourly_cost: float) -> float:\n    lost_revenue = hours_each * revenue_per_hour * share_affected\n    recovery = hours_each * responders * hourly_cost\n    return events_per_year * (lost_revenue + recovery)\n\n\n# a zone failure: once every two years, 3 hours, all users, 4 responders\nloss = expected_annual_loss(0.5, 3, 4_000, 1.0, 4, 120)\nprint(f\"expected loss: {loss:,.0f} per year\")        # 6,720\n# Running in a second zone costs 15,000 a year -> not justified by this risk alone." },
+        { "type": "p", "text": "The numbers will be rough, and that is fine. The purpose is to make the trade-off visible and to have the conversation with the people who own the budget, in their terms. It also works in the other direction: for a payment system, the same arithmetic may show that a second region pays for itself many times over." }
+      ]
+    },
+    {
+      "heading": "Dependencies set your ceiling",
+      "blocks": [
+        { "type": "p", "text": "No service is more reliable than the things it cannot work without. When a request needs **all** of several components, their availabilities multiply, and the result is always worse than the weakest of them. This is a **serial** dependency." },
+        { "type": "code", "lang": "text", "code": "serial (all must work):      A_total = A1 x A2 x A3 x ...\n\n  app 99.95%, database 99.95%, auth service 99.9%, payment provider 99.9%\n  0.9995 x 0.9995 x 0.999 x 0.999 = 0.9970  ->  99.70%\n  expected downtime per 30 days: about 129 minutes, against 21.6 for the app by itself\n\nredundant (any one is enough, failures independent):\n                             A_total = 1 - (1 - A1) x (1 - A2) x ...\n\n  two instances at 99% each:     1 - 0.01 x 0.01   = 99.99%\n  three instances at 99% each:   1 - 0.01^3        = 99.9999%" },
+        { "type": "p", "text": "Two lessons follow. First, every hard dependency you add lowers your ceiling, so a microservice architecture with ten serial calls needs each service to be far more reliable than the target for the whole. A common rule of thumb is that a critical dependency should offer about one more nine than the service that depends on it." },
+        { "type": "p", "text": "Second, redundancy is powerful, but the formula assumes **independent** failures, and real ones often are not. Two replicas running the same bad release, reading the same corrupted config, in the same zone, behind the same load balancer, fail together. Redundancy pays off only to the extent that you remove the things the copies have in common." },
+        { "type": "p", "text": "The most effective way to escape the multiplication is to turn hard dependencies into **soft** ones. If the recommendation service is down, show the page without recommendations. If the cache is down, serve more slowly from the database. If a provider is slow, queue the work and confirm later. A dependency that can fail without failing the request drops out of the product entirely. This is **graceful degradation**, and the failure-modes module returns to it in depth." }
+      ]
+    },
+    {
+      "heading": "Different services, different tolerances",
+      "blocks": [
+        { "type": "p", "text": "There is no single correct target for an organisation. Decide per service, and often per user journey within a service, by asking a few questions." },
+        { "type": "list", "items": [
+          "**What do users expect?** Compare with similar products and with what users currently tolerate. A free consumer tool and a paid enterprise API carry different expectations.",
+          "**Is revenue tied directly to availability?** Checkout is; the recommendations carousel mostly is not.",
+          "**Which kind of failure matters?** A brief period of errors, slow responses, stale data and lost data are very different. Losing data is usually far worse than being unavailable, and deserves a much stricter target.",
+          "**When does it matter?** An internal reporting tool can be down at night at no cost. Planned maintenance windows are a legitimate way to spend the budget.",
+          "**What does it cost to serve each level,** and who pays?"
+        ]},
+        { "type": "table", "headers": ["Service", "Reasonable target", "Reasoning"], "rows": [
+          ["Payment processing", "99.99%, with stricter durability", "Direct revenue, trust, and no tolerance for lost transactions"],
+          ["Product search", "99.9% availability, latency SLO", "Matters to revenue, but a retry is acceptable and degraded results are fine"],
+          ["Recommendations", "99%", "A soft dependency: the page works without it"],
+          ["Internal analytics dashboard", "99% during business hours", "A few users, and delay is an inconvenience, not a loss"],
+          ["Nightly batch export", "Freshness: complete by 06:00 on 99% of days", "Availability is the wrong measure; timeliness is what users feel"]
+        ]},
+        { "type": "p", "text": "Tiering has an architectural payoff. Once you accept that parts of the system can be less reliable, you can build them more cheaply: fewer replicas, spot instances, a single zone. You spend the savings where reliability is worth the most. Infrastructure teams can do the same by offering classes of service, for example a low-latency tier and a cheaper throughput tier, and letting consumers choose." }
+      ]
+    },
+    {
+      "heading": "Reducing risk without buying another nine",
+      "blocks": [
+        { "type": "p", "text": "Availability is driven by two things: how often you fail, and how long each failure lasts." },
+        { "type": "code", "lang": "text", "code": "availability = MTBF / (MTBF + MTTR)\n\nMTBF  mean time between failures     (how rarely it breaks)\nMTTR  mean time to restore           (how quickly you recover)\n\n  fails every 30 days, 60 min to restore:   43,200 / 43,260  = 99.86%\n  fails every 30 days, 6 min to restore:    43,200 / 43,206  = 99.986%\n  fails every 300 days, 60 min to restore:  432,000 / 432,060 = 99.986%" },
+        { "type": "p", "text": "Recovering ten times faster buys the same availability as failing ten times less often, and it is nearly always cheaper and more achievable. Preventing all failures is impossible; recovering quickly is a matter of engineering. This is why so much of SRE concentrates on detection and recovery." },
+        { "type": "p", "text": "The third lever is **blast radius**: how many users a failure reaches. A request-based error budget counts the affected share, so a failure that touches 5% of users for an hour costs a twentieth of one that touches everyone." },
+        { "type": "table", "headers": ["Lever", "Techniques"], "rows": [
+          ["Fail less often", "Testing, code review, redundancy, removing single points of failure, simpler designs"],
+          ["Recover faster", "Symptom-based alerting, one-command rollback, automated failover, runbooks, practised on-call"],
+          ["Affect fewer users", "Canary releases, progressive rollout, feature flags, cell or shard isolation, regional independence"],
+          ["Fail more softly", "Graceful degradation, timeouts, cached fallbacks, queueing instead of rejecting"]
+        ]},
+        { "type": "p", "text": "The error budget ties these together. While budget remains, take risks deliberately: release more often, run the migration, run the chaos experiment. Those are what the budget is for, and a team that never spends its budget is going slower than it needs to. When the budget is gone, stop taking discretionary risk until it recovers. That is embracing risk in practice: a quantity you manage, not a thing you fear." },
+        { "type": "callout", "kind": "tip", "text": "A simple risk register helps you choose where to invest. List the plausible failure scenarios, estimate for each how often it happens, how long it lasts and what share of users it affects, and multiply to get expected bad minutes per year. Sort by that number and compare the top items with your error budget. The results regularly surprise teams, because frequent small failures often cost more than the rare dramatic one everybody worries about." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Build a risk register for one service",
+    "steps": [
+      "Choose a service you know and draw its hard dependencies for one important user journey: everything the request cannot succeed without.",
+      "Find or estimate an availability figure for each dependency and multiply them. Compare the result with the service's target, or with the target you would want.",
+      "Identify one hard dependency that could become a soft one through a fallback, a cache, or a queue. Recalculate the ceiling without it.",
+      "List six to ten plausible failure scenarios, including a bad deploy, a dependency outage, a zone failure, an expired certificate, and a full disk or exhausted quota.",
+      "For each scenario, estimate occurrences per year, minutes to detect, minutes to restore, and the share of users affected. Compute expected bad minutes per year as occurrences times duration times share.",
+      "Sort the list, and compare the total with the error budget in minutes per year implied by your target.",
+      "For the top two risks, propose one measure that cuts duration or blast radius rather than frequency, and estimate its cost against the expected loss it removes."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "100% is the wrong target: cost rises steeply, users cannot perceive the last nines, and it forbids all change.",
+      "Aim for the lowest reliability at which users stay happy; everything above it is paid for in features.",
+      "Serial dependencies multiply: you cannot be more reliable than what you hard-depend on.",
+      "Redundancy only helps as far as failures are independent.",
+      "Turn hard dependencies into soft ones with graceful degradation.",
+      "Availability = MTBF / (MTBF + MTTR). Recovering faster is usually cheaper than failing less.",
+      "Blast radius is a third lever: canaries, flags and cells reduce who is affected.",
+      "Spend the error budget on purpose while it lasts, and stop taking discretionary risk when it is gone."
+    ],
+    "groups": [
+      {
+        "title": "Formulas",
+        "items": [
+          { "syntax": "A_serial = A1 x A2 x ... x An", "desc": "All components required; worse than the weakest" },
+          { "syntax": "A_redundant = 1 - (1 - A1)(1 - A2)...", "desc": "Any one suffices; assumes independent failures" },
+          { "syntax": "availability = MTBF / (MTBF + MTTR)", "desc": "Failure frequency and recovery time" },
+          { "syntax": "expected loss = probability per year x cost per event", "desc": "Compare with the annual cost of mitigation" },
+          { "syntax": "value of improvement = revenue x (A_new - A_old)", "desc": "A first-order bound on what it is worth" },
+          { "syntax": "bad minutes = events per year x duration x share of users", "desc": "One row of a risk register" }
+        ]
+      },
+      {
+        "title": "Worked numbers",
+        "items": [
+          { "syntax": "0.9995 x 0.9995 x 0.999 x 0.999", "desc": "= 0.9970: four serial dependencies give 99.70%" },
+          { "syntax": "1 - 0.01 x 0.01", "desc": "= 99.99%: two independent 99% replicas" },
+          { "syntax": "ten serial services at 99.9%", "desc": "0.999^10 = 99.0%" },
+          { "syntax": "fail monthly, 60 min MTTR", "desc": "99.86%" },
+          { "syntax": "fail monthly, 6 min MTTR", "desc": "99.986%: ten times faster recovery gains about a nine" },
+          { "syntax": "1,000,000 revenue x 0.0009", "desc": "= 900 a year: value of going from 99.9% to 99.99%" }
+        ]
+      },
+      {
+        "title": "Questions for setting a tolerance",
+        "items": [
+          { "syntax": "What do users expect?", "desc": "Compare with similar products and current behaviour" },
+          { "syntax": "Is revenue tied to uptime?", "desc": "Directly, indirectly, or not at all" },
+          { "syntax": "Which failure type hurts most?", "desc": "Errors, latency, staleness or data loss" },
+          { "syntax": "When does it matter?", "desc": "Business hours, peak season, always" },
+          { "syntax": "Who pays for each level?", "desc": "Put the cost next to the benefit" },
+          { "syntax": "Can it degrade instead of fail?", "desc": "Soft dependencies leave the equation" }
+        ]
+      },
+      {
+        "title": "Four levers",
+        "items": [
+          { "syntax": "Fail less often", "desc": "Tests, review, redundancy, simplicity" },
+          { "syntax": "Recover faster", "desc": "Detection, rollback, failover, runbooks" },
+          { "syntax": "Affect fewer users", "desc": "Canary, progressive rollout, flags, cells" },
+          { "syntax": "Fail more softly", "desc": "Degradation, timeouts, fallbacks, queues" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Applying one reliability target to every service, overspending on the trivial and underspending on the critical.",
+      "Promising more availability than the product of your hard dependencies allows.",
+      "Treating two replicas of the same release, in the same zone, as independent.",
+      "Investing only in preventing failure and never in detecting and recovering from it.",
+      "Never spending the error budget, and mistaking slow delivery for prudence.",
+      "Leaving data durability at the same target as availability, when data loss is far more costly."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A request must pass through an API gateway (99.95%), an application (99.9%) and a database (99.95%). What is the best availability the user can see?",
+      "options": ["About 99.8%", "About 99.95%", "About 99.9%", "About 99.99%"],
+      "answer": 0,
+      "explain": "Serial availabilities multiply: 0.9995 times 0.999 times 0.9995 is about 0.998. The result is always lower than the weakest single component."
+    },
+    {
+      "q": "Two replicas of a service each have 99% availability. The formula for redundancy gives 99.99% combined. Why is the real figure often lower?",
+      "options": [
+        "The replicas share failure causes, such as the same release, config or zone",
+        "Load balancers can only route to one replica at any moment",
+        "Availability figures cannot be combined unless the replicas are identical",
+        "Each additional replica lowers the availability of the others"
+      ],
+      "answer": 0,
+      "explain": "The formula assumes failures are independent. Anything the replicas have in common, such as a bad deploy, fails them together, which is why diversity in zone, rollout timing and dependencies matters."
+    },
+    {
+      "q": "A service fails about once a month and takes 60 minutes to restore. The team can either halve the failure frequency at great expense, or cut restore time to 10 minutes with better alerting and one-command rollback. Which improves availability more?",
+      "options": [
+        "Cutting restore time, which reduces monthly downtime from 60 minutes to 10",
+        "Halving failure frequency, which reduces monthly downtime from 60 minutes to 10",
+        "They are identical, because availability depends only on the number of incidents",
+        "Neither, because availability is fixed by the cloud provider"
+      ],
+      "answer": 0,
+      "explain": "Downtime is frequency times duration. Halving frequency gives an average of 30 minutes a month, while a 10-minute restore gives 10. Faster recovery is usually the cheaper and larger gain."
+    },
+    {
+      "q": "The recommendations service goes down, and as a result the whole product page returns an error. What does risk-aware design suggest?",
+      "options": [
+        "Make it a soft dependency, so the page renders without recommendations",
+        "Raise the recommendations service to the same SLO as checkout",
+        "Add a third replica of the product page service",
+        "Retry the recommendations call until it eventually succeeds"
+      ],
+      "answer": 0,
+      "explain": "A non-essential feature should not be able to fail the request. Degrading gracefully removes it from the serial chain altogether, which is cheaper and more robust than making it as reliable as a critical service."
+    },
+    {
+      "q": "A team ends every quarter with 90% of its error budget unspent. What is the most useful interpretation?",
+      "options": [
+        "They could release faster or take more risk, or the SLO is looser than users need",
+        "They are an exemplary team and should change nothing",
+        "Their monitoring must be broken, since budgets are always consumed",
+        "They should lower the SLO to zero so the budget is used up"
+      ],
+      "answer": 0,
+      "explain": "An unspent budget is unused capacity for change. Either the team can afford more velocity and experimentation, or the target should be reviewed against what users actually need."
+    }
+  ]
+}

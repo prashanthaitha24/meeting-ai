@@ -1,0 +1,213 @@
+{
+  "id": "devops-helm",
+  "minutes": 30,
+  "intro": "By the end of the Kubernetes module you had five YAML files for one service. Multiply that by three environments and twenty services, each differing only in image tag, replica count and hostname, and copy-paste becomes your biggest source of bugs. Helm is the package manager for Kubernetes: it turns those manifests into a parameterised, versioned chart that you install, upgrade and roll back as one unit.",
+  "objectives": [
+    "Explain charts, values, releases and revisions, and how they relate",
+    "Read and write Helm templates using values, built-in objects, pipelines and named helpers",
+    "Deploy one chart to several environments with layered values files",
+    "Install, upgrade, inspect and roll back releases safely from a pipeline",
+    "Debug a chart with `helm lint`, `helm template` and dry runs before it touches a cluster"
+  ],
+  "sections": [
+    {
+      "heading": "Charts, values and releases",
+      "blocks": [
+        { "type": "p", "text": "A **chart** is a directory of templated Kubernetes manifests plus metadata. **Values** are the parameters you feed into those templates. A **release** is one installed instance of a chart in a cluster, with a name. Install the same chart twice with different names and values and you get two independent releases. Every upgrade or rollback of a release creates a new numbered **revision**, which Helm stores in the cluster as a Secret in the release's namespace." },
+        { "type": "code", "lang": "text", "code": "orders/\n  Chart.yaml            # name, chart version, appVersion, dependencies\n  values.yaml           # default values: the chart's public interface\n  templates/\n    deployment.yaml\n    service.yaml\n    ingress.yaml\n    _helpers.tpl        # named template snippets; files starting with _ render nothing\n    NOTES.txt           # message printed after install\n  charts/               # downloaded dependency charts" },
+        { "type": "code", "lang": "yaml", "caption": "Chart.yaml", "code": "apiVersion: v2\nname: orders\ndescription: Orders API\ntype: application\nversion: 0.3.1          # version of the CHART (packaging); bump on any chart change\nappVersion: \"1.4.2\"     # version of the APPLICATION it deploys; informational" },
+        { "type": "p", "text": "Those two versions are independent, and mixing them up is a common confusion. Change a template and you bump `version`. Ship a new build of the app and `appVersion`, or more commonly the image tag in values, changes." }
+      ]
+    },
+    {
+      "heading": "Using charts other people wrote",
+      "blocks": [
+        { "type": "p", "text": "Much of your first Helm use is installing third-party software: an ingress controller, cert-manager, Prometheus. Charts are distributed through **repositories** or, increasingly, as **OCI artifacts** in the same registries that hold your images." },
+        { "type": "code", "lang": "bash", "code": "helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx\nhelm repo update\nhelm search repo ingress-nginx --versions | head\n\nhelm show values ingress-nginx/ingress-nginx > defaults.yaml    # every knob the chart offers\n\nhelm upgrade --install ingress ingress-nginx/ingress-nginx \\\n  --namespace ingress --create-namespace \\\n  --version 4.11.3 \\\n  -f ingress-values.yaml" },
+        { "type": "p", "text": "Three habits are worth forming at once. Use `helm upgrade --install`, which is idempotent: it installs if the release is missing and upgrades if it exists, so a pipeline can run the same command every time. Always pin `--version`, or you get whatever chart is newest on the day. And keep your overrides in a values file under version control instead of a growing list of `--set` flags." },
+        { "type": "callout", "kind": "note", "text": "The chart version shown is an example. Look up the current one with `helm search repo`, and read the chart's changelog before a major-version upgrade." }
+      ]
+    },
+    {
+      "heading": "Writing templates",
+      "blocks": [
+        { "type": "p", "text": "Templates are Kubernetes YAML with Go template actions inside `{{ }}`. At render time Helm gives each template a set of built-in objects: `.Values` (merged values), `.Release` (name, namespace, revision), `.Chart` (the contents of `Chart.yaml`) and `.Capabilities` (what the cluster supports)." },
+        { "type": "code", "lang": "helm", "caption": "templates/deployment.yaml", "code": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: {{ include \"orders.fullname\" . }}\n  labels:\n    {{- include \"orders.labels\" . | nindent 4 }}\nspec:\n  replicas: {{ .Values.replicaCount }}\n  selector:\n    matchLabels:\n      {{- include \"orders.selectorLabels\" . | nindent 6 }}\n  template:\n    metadata:\n      labels:\n        {{- include \"orders.selectorLabels\" . | nindent 8 }}\n      annotations:\n        checksum/config: {{ include (print $.Template.BasePath \"/configmap.yaml\") . | sha256sum }}\n    spec:\n      containers:\n        - name: orders\n          image: \"{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}\"\n          ports:\n            - containerPort: {{ .Values.service.targetPort }}\n          {{- with .Values.resources }}\n          resources:\n            {{- toYaml . | nindent 12 }}\n          {{- end }}" },
+        { "type": "list", "items": [
+          "**Pipelines** pass a value through functions, left to right: `{{ .Values.image.tag | default .Chart.AppVersion | quote }}`.",
+          "**Whitespace control**: `{{-` trims whitespace before the action and `-}}` trims after it. YAML is indentation-sensitive, so this matters.",
+          "**`toYaml` plus `nindent`** is how you drop a whole block from values (resources, tolerations, annotations) into the right indentation.",
+          "**`include`** renders a named template from `_helpers.tpl` and, unlike the built-in `template` action, its output can be piped onward.",
+          "**`with`** changes the scope and skips the block when the value is empty; **`if`** and **`range`** give conditionals and loops.",
+          "The **checksum annotation** solves the problem from the Kubernetes module: when the ConfigMap's content changes, the pod template changes too, so pods are rolled automatically."
+        ]},
+        { "type": "code", "lang": "helm", "caption": "templates/ingress.yaml: a conditional and a loop", "code": "{{- if .Values.ingress.enabled }}\napiVersion: networking.k8s.io/v1\nkind: Ingress\nmetadata:\n  name: {{ include \"orders.fullname\" . }}\nspec:\n  ingressClassName: {{ .Values.ingress.className }}\n  rules:\n    {{- range .Values.ingress.hosts }}\n    - host: {{ . | quote }}\n      http:\n        paths:\n          - path: /\n            pathType: Prefix\n            backend:\n              service:\n                name: {{ include \"orders.fullname\" $ }}\n                port:\n                  number: {{ $.Values.service.port }}\n    {{- end }}\n{{- end }}" },
+        { "type": "p", "text": "Inside `range`, the dot becomes the current item. Use `$` to reach the root scope, as the example does for `$.Values`. Forgetting that is the most common template error." }
+      ]
+    },
+    {
+      "heading": "One chart, many environments",
+      "blocks": [
+        { "type": "p", "text": "`values.yaml` holds sensible defaults and documents the chart's interface. Each environment gets a small file containing **only what differs**. Values are merged in order, and later sources win: chart defaults, then each `-f` file from left to right, then `--set` flags." },
+        { "type": "code", "lang": "yaml", "caption": "values.yaml (defaults)", "code": "replicaCount: 2\nimage:\n  repository: ghcr.io/acme/orders-api\n  tag: \"\"                 # empty means: use the chart's appVersion\nservice:\n  port: 80\n  targetPort: 8000\ningress:\n  enabled: false\n  className: nginx\n  hosts: []\nresources:\n  requests:\n    cpu: 100m\n    memory: 128Mi" },
+        { "type": "code", "lang": "yaml", "caption": "values-prod.yaml (overrides only)", "code": "replicaCount: 6\ningress:\n  enabled: true\n  hosts:\n    - shop.example.com\nresources:\n  requests:\n    cpu: 500m\n    memory: 512Mi\n  limits:\n    memory: 1Gi" },
+        { "type": "code", "lang": "bash", "code": "helm upgrade --install orders ./orders \\\n  --namespace shop-prod --create-namespace \\\n  -f values-prod.yaml \\\n  --set image.tag=\"$GIT_SHA\" \\\n  --atomic --timeout 5m" },
+        { "type": "p", "text": "This is \"build once, promote everywhere\" for Kubernetes: the same chart and the same image move through environments, and only a values file and an image tag change. `--atomic` waits for the resources to become ready and rolls the release back automatically if they do not within the timeout, which is what you want in a pipeline. Maps merge key by key, but **lists are replaced whole**, so an environment file that sets `hosts` replaces the default list entirely." },
+        { "type": "callout", "kind": "warning", "text": "Do not put secrets in values files committed to Git, and remember that release values are stored in the cluster. Reference an existing Kubernetes Secret by name from the chart, and populate that Secret from a secret manager." }
+      ]
+    },
+    {
+      "heading": "Operating releases",
+      "blocks": [
+        { "type": "code", "lang": "bash", "code": "helm list -A                                   # every release in every namespace\nhelm status orders -n shop-prod\nhelm history orders -n shop-prod               # revisions, with status and chart version\nhelm get values orders -n shop-prod            # the values this release was given\nhelm get manifest orders -n shop-prod          # the exact YAML Helm applied\n\nhelm rollback orders 7 -n shop-prod --wait     # back to revision 7 (creates a new revision)\nhelm uninstall orders -n shop-prod" },
+        { "type": "p", "text": "A rollback re-applies the manifests of an earlier revision. It does not undo what happened outside Kubernetes: a database migration that ran during the upgrade stays applied. That is one reason schema changes should be backwards compatible, a theme that returns in the SRE track's module on safe releases." },
+        { "type": "p", "text": "Helm only knows about changes made through Helm. If someone runs `kubectl edit` on a resource that a release owns, the cluster drifts from what Helm recorded, and the next upgrade may overwrite the change or behave unexpectedly. Make every change through the chart. The GitOps module takes that discipline to its conclusion." }
+      ]
+    },
+    {
+      "heading": "Test before it reaches a cluster",
+      "blocks": [
+        { "type": "p", "text": "Template bugs are cheap to catch locally and expensive to catch in production. Build these commands into CI for every chart change." },
+        { "type": "code", "lang": "bash", "code": "helm lint ./orders -f values-prod.yaml              # structural problems and bad practice\nhelm template orders ./orders -f values-prod.yaml   # render to stdout; no cluster needed\nhelm template orders ./orders -f values-prod.yaml | kubectl apply --dry-run=server -f -\n\nhelm upgrade --install orders ./orders -f values-prod.yaml --dry-run --debug\n\nhelm dependency update ./orders                     # fetch subcharts listed in Chart.yaml\nhelm package ./orders                               # orders-0.3.1.tgz\nhelm push orders-0.3.1.tgz oci://ghcr.io/acme/charts" },
+        { "type": "p", "text": "`helm template` piped into a server-side dry run is the most valuable of these: the API server validates the rendered objects against the real schemas without creating anything. Render once per environment file, because a template can be valid with one set of values and broken with another. The `helm-diff` plugin adds `helm diff upgrade`, which shows exactly what an upgrade would change and is well worth adding to pull-request checks." },
+        { "type": "callout", "kind": "tip", "text": "Helm is not the only option. **Kustomize**, built into `kubectl`, patches plain YAML without templates and suits simpler cases. Many teams use Helm for third-party software and either tool for their own services." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Turn your manifests into a chart",
+    "steps": [
+      "Run `helm create orders` and read the generated `_helpers.tpl`, `deployment.yaml` and `values.yaml` to see the conventions. Then delete the templates you do not need.",
+      "Move your Deployment, Service and ConfigMap from the Kubernetes module into `templates/`, replacing the image, replica count, ports and resources with values.",
+      "Run `helm lint` and `helm template`, and pipe the rendered output into `kubectl apply --dry-run=server -f -` until it is clean.",
+      "Create `values-dev.yaml` and `values-prod.yaml` containing only differences. Install both as separate releases in separate namespaces of your local cluster with `helm upgrade --install`.",
+      "Add the ConfigMap checksum annotation. Change a config value, upgrade, and confirm the pods roll without any manual restart.",
+      "Upgrade to an image tag that does not exist, using `--atomic --timeout 2m`. Watch Helm roll back by itself, then inspect `helm history`.",
+      "Package the chart, push it to an OCI registry, and install it from there with a pinned `--version`."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Chart = templates + default values. Release = an installed chart with a name. Every change is a numbered revision.",
+      "`version` is the chart's own version; `appVersion` is the application's. They move independently.",
+      "`helm upgrade --install` is idempotent; add `--atomic` in pipelines; always pin `--version` for third-party charts.",
+      "Values precedence: chart defaults, then `-f` files left to right, then `--set`. Maps merge, lists are replaced.",
+      "Inside `range` and `with`, the dot changes. Use `$` for the root scope.",
+      "`toYaml ... | nindent N` for blocks, `{{-` and `-}}` for whitespace.",
+      "Render and validate in CI: `helm lint`, `helm template`, server-side dry run.",
+      "Change things only through Helm, and keep secrets out of values files."
+    ],
+    "groups": [
+      {
+        "title": "Install and upgrade",
+        "items": [
+          { "syntax": "helm repo add NAME URL && helm repo update", "desc": "Register a chart repository and refresh its index" },
+          { "syntax": "helm search repo KEYWORD --versions", "desc": "Find charts and available versions" },
+          { "syntax": "helm show values CHART", "desc": "Print a chart's default values" },
+          { "syntax": "helm upgrade --install REL CHART -n NS --create-namespace", "desc": "Install or upgrade, idempotently" },
+          { "syntax": "-f values-prod.yaml --set image.tag=abc123", "desc": "Override values; `--set` wins over files" },
+          { "syntax": "--version X.Y.Z", "desc": "Pin the chart version" },
+          { "syntax": "--atomic --timeout 5m", "desc": "Wait for readiness; roll back automatically on failure" }
+        ]
+      },
+      {
+        "title": "Inspect and recover",
+        "items": [
+          { "syntax": "helm list -A", "desc": "All releases in all namespaces" },
+          { "syntax": "helm status REL -n NS", "desc": "Current state of a release" },
+          { "syntax": "helm history REL -n NS", "desc": "Revisions and their outcome" },
+          { "syntax": "helm get values REL -n NS", "desc": "User-supplied values (`--all` includes defaults)" },
+          { "syntax": "helm get manifest REL -n NS", "desc": "The rendered YAML that was applied" },
+          { "syntax": "helm rollback REL REVISION -n NS", "desc": "Re-apply an earlier revision" },
+          { "syntax": "helm uninstall REL -n NS", "desc": "Remove the release and its resources" }
+        ]
+      },
+      {
+        "title": "Develop and test",
+        "items": [
+          { "syntax": "helm create NAME", "desc": "Scaffold a chart with conventional helpers" },
+          { "syntax": "helm lint CHART -f VALUES", "desc": "Static checks" },
+          { "syntax": "helm template REL CHART -f VALUES", "desc": "Render locally without a cluster" },
+          { "syntax": "... | kubectl apply --dry-run=server -f -", "desc": "Validate rendered objects against the API server" },
+          { "syntax": "helm upgrade --install ... --dry-run --debug", "desc": "Simulate against the cluster and print the output" },
+          { "syntax": "helm dependency update CHART", "desc": "Download subcharts from `Chart.yaml`" },
+          { "syntax": "helm package CHART && helm push FILE.tgz oci://REGISTRY/PATH", "desc": "Publish a chart as an OCI artifact" }
+        ]
+      },
+      {
+        "title": "Template syntax",
+        "items": [
+          { "syntax": "{{ .Values.key.sub }}", "desc": "Read a value" },
+          { "syntax": "{{ .Release.Name }} / {{ .Release.Namespace }}", "desc": "Release metadata" },
+          { "syntax": "{{ .Chart.Name }} / {{ .Chart.AppVersion }}", "desc": "Chart metadata" },
+          { "syntax": "{{ .Values.x | default \"y\" | quote }}", "desc": "Pipeline with a default, then quoting" },
+          { "syntax": "{{- toYaml .Values.resources | nindent 12 }}", "desc": "Insert a YAML block at the right indentation" },
+          { "syntax": "{{- if .Values.x }} ... {{- else }} ... {{- end }}", "desc": "Conditional" },
+          { "syntax": "{{- range .Values.list }} {{ . }} {{- end }}", "desc": "Loop; `.` is the item, `$` is the root" },
+          { "syntax": "{{ include \"chart.name\" . }}", "desc": "Render a named template; output can be piped" },
+          { "syntax": "{{ required \"image.tag is required\" .Values.image.tag }}", "desc": "Fail rendering with a message if a value is missing" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Using `.Values` inside a `range` block, where the dot has changed, instead of `$.Values`.",
+      "Wrong indentation from a missing `nindent`, which yields YAML that is valid but means something else.",
+      "Expecting an environment's list value to merge with the default list; it replaces it.",
+      "Installing third-party charts without `--version`, so that re-running the pipeline silently upgrades them.",
+      "Editing Helm-managed resources with `kubectl edit`, causing drift that the next upgrade overwrites.",
+      "Assuming `helm rollback` also reverses database migrations or other external side effects."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "You run `helm upgrade --install orders ./orders -f values.yaml -f values-prod.yaml --set replicaCount=8`. `values.yaml` says 2 and `values-prod.yaml` says 6. How many replicas result?",
+      "options": ["8", "6", "2", "16"],
+      "answer": 0,
+      "explain": "Later sources override earlier ones: chart defaults, then each `-f` file in order, then `--set`, which has the highest precedence."
+    },
+    {
+      "q": "Inside `{{- range .Values.ingress.hosts }}`, the template uses `{{ .Values.service.port }}` and rendering fails. Why?",
+      "options": [
+        "Inside range the dot is the current host, so the root must be reached with $",
+        "Values cannot be read inside loops, only inside conditionals",
+        "service.port must be declared in Chart.yaml before it can be used",
+        "range requires every referenced value to be a list"
+      ],
+      "answer": 0,
+      "explain": "`range` rebinds `.` to each item, here a hostname string, which has no `.Values`. `$` always refers to the root context, so `$.Values.service.port` works."
+    },
+    {
+      "q": "What does `--atomic` add to `helm upgrade --install` in a deployment pipeline?",
+      "options": [
+        "It waits for resources to be ready and rolls back automatically if they are not",
+        "It applies every manifest in a single API request so nothing is half-applied",
+        "It prevents other users from upgrading the release at the same time",
+        "It deletes the namespace and reinstalls the chart from scratch"
+      ],
+      "answer": 0,
+      "explain": "`--atomic` implies waiting for readiness within `--timeout`, and on failure restores the previous revision, so a bad deploy does not leave a half-broken release behind."
+    },
+    {
+      "q": "You changed only a template in your chart; the application image is unchanged. Which field in `Chart.yaml` should you bump?",
+      "options": [
+        "version, because the chart's packaging changed",
+        "appVersion, because a new release will be created",
+        "apiVersion, because the template syntax changed",
+        "Neither, since versions only apply to third-party charts"
+      ],
+      "answer": 0,
+      "explain": "`version` tracks the chart itself and must change whenever the chart does. `appVersion` describes the application being deployed, which has not changed."
+    },
+    {
+      "q": "A teammate fixed an urgent problem with `kubectl edit deployment orders`. The release is managed by Helm. What is the risk?",
+      "options": [
+        "The next helm upgrade may silently overwrite the fix, because Helm never recorded it",
+        "Helm will refuse all future upgrades until the release is reinstalled",
+        "Kubernetes rejects manual edits to any resource created by Helm",
+        "The edit changes the chart's version number inside the cluster"
+      ],
+      "answer": 0,
+      "explain": "Helm tracks only what it applied. Out-of-band edits create drift, and an upgrade re-applies the chart's view. The durable fix is to change the chart or its values and upgrade."
+    }
+  ]
+}

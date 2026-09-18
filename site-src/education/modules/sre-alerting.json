@@ -1,0 +1,492 @@
+{
+  "id": "sre-alerting",
+  "minutes": 35,
+  "intro": "Alerting is where monitoring meets a human being, usually at the worst possible time. A team that pages on every CPU spike learns to ignore its pager, and then misses the one page that mattered. A team that pages only when users are affected, with enough context to act, sleeps better and responds faster. This module shows you how to alert on symptoms instead of causes, how to build the multi-window burn-rate alerts that SLO-based teams rely on, and how to cut an inherited pile of noisy alerts down to the few that deserve to wake someone.",
+  "objectives": [
+    "Distinguish symptom-based from cause-based alerts, and decide what deserves a page, a ticket or nothing",
+    "Explain why simple threshold alerts on error rate perform badly, in terms of precision, recall, detection time and reset time",
+    "Build multi-window, multi-burn-rate alerts from an SLO, and verify the arithmetic behind the thresholds",
+    "Write Prometheus alerting rules and route them with Alertmanager grouping, inhibition and silences",
+    "Run a regular alert review that reduces noise and keeps every page actionable"
+  ],
+  "sections": [
+    {
+      "heading": "Symptoms, not causes",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A **symptom** is something users experience: requests failing, pages loading slowly, data going stale. A **cause** is something inside the system that may or may not lead to a symptom: high CPU, a restarted pod, a full connection pool, a failed node."
+        },
+        {
+          "type": "p",
+          "text": "Cause-based alerts fail in both directions. They fire when nothing is wrong for users: a pod restarts and Kubernetes replaces it, or CPU sits at 90% on a batch host that is meant to be busy. And they miss real problems, because you can never list every possible cause in advance. The failure that hurts you is, almost by definition, the one you did not think to write an alert for. A symptom-based alert on the user's experience catches it anyway, whatever lies behind it."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Cause-based (avoid as a page)",
+            "Symptom-based (page on this)"
+          ],
+          "rows": [
+            [
+              "CPU above 90% for 5 minutes",
+              "Checkout error budget is burning 14 times too fast"
+            ],
+            [
+              "A pod restarted",
+              "Fewer than half the expected requests are being served"
+            ],
+            [
+              "Database connections above 80%",
+              "99th percentile latency has breached the SLO threshold for 10% of requests"
+            ],
+            [
+              "Disk at 85%",
+              "The nightly export has not completed by its deadline"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "Causes still matter, in two places. They belong on **dashboards**, where they help the person who was paged find out why. And a few causes deserve **tickets**, not pages, when they predict a future symptom with time to spare: a disk that will fill in four days, or a certificate that expires in two weeks. Nobody needs to be woken for those, but somebody must deal with them during working hours."
+        },
+        {
+          "type": "p",
+          "text": "Every notification should fall into one of three classes, and the test for the first is strict."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Class",
+            "Test",
+            "Delivery"
+          ],
+          "rows": [
+            [
+              "**Page**",
+              "Users are affected now, or will be very soon, and a human must act immediately",
+              "Pager, phone call; wakes people up"
+            ],
+            [
+              "**Ticket**",
+              "A human must act, but it can wait until working hours",
+              "Ticket queue, reviewed daily"
+            ],
+            [
+              "**Log / dashboard**",
+              "No action is needed; it is context for investigation",
+              "Nowhere. Not email, not a chat channel nobody reads"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "kind": "warning",
+          "text": "An alert that goes to an email folder or a muted chat channel is not an alert. It is noise that trains everyone to ignore notifications, and it gives a false sense of coverage. If nobody needs to act, delete it."
+        }
+      ]
+    },
+    {
+      "heading": "Why simple thresholds disappoint",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "The Google SRE Workbook evaluates alerting strategies on four properties."
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Precision**: the share of alerts that corresponded to a real, significant event. Low precision means false alarms.",
+            "**Recall**: the share of significant events that produced an alert. Low recall means missed incidents.",
+            "**Detection time**: how long a problem lasts before the alert fires.",
+            "**Reset time**: how long the alert keeps firing after the problem is fixed."
+          ]
+        },
+        {
+          "type": "p",
+          "text": "Take an SLO of 99.9%, so the allowed error rate is 0.1%. The obvious alert is \"error rate above 0.1% over the last 10 minutes\". It has good recall and fast detection, but terrible precision. A ten-minute blip at 0.15% errors fires the pager, yet it consumes only about 0.035% of a thirty-day budget. At that sensitivity you could be paged over a hundred times a month and still meet the SLO comfortably."
+        },
+        {
+          "type": "p",
+          "text": "Lengthen the window to 36 hours and precision improves, but now a total outage takes far too long to detect, and the alert keeps firing for a day and a half after the fix. Adding a `for: 1h` clause fails differently: the condition has to hold continuously, so an outage that flaps resets the timer each time and never alerts, and a complete outage still goes unreported for a full hour."
+        },
+        {
+          "type": "p",
+          "text": "The root of the problem is that error rate alone is the wrong quantity. What you care about is **how much error budget is being consumed, and how fast**. A high error rate for two minutes and a slightly raised rate for three days can do the same damage to the SLO, and they call for different urgency. That is what burn rate captures."
+        }
+      ]
+    },
+    {
+      "heading": "Burn-rate alerts",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "From the SLO module: **burn rate** is how fast you consume the budget relative to the rate that would spend it exactly over the SLO period. At burn rate 1 the budget lasts the whole period. At burn rate 10 it is gone in a tenth of it."
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "code": "burn rate            = observed error rate / (1 - SLO)\nbudget consumed      = burn rate x alert window / SLO period\nburn rate threshold  = budget share you are willing to lose x SLO period / alert window\n\nFor a 30-day SLO period (720 hours):\n\n  lose 2% of the budget in 1 hour    ->  0.02 x 720 / 1   = 14.4\n  lose 5% of the budget in 6 hours   ->  0.05 x 720 / 6   = 6\n  lose 10% of the budget in 3 days   ->  0.10 x 720 / 72  = 1\n\nWith SLO 99.9% (allowed error rate 0.1%), the error-rate thresholds are:\n  14.4 x 0.1% = 1.44%        6 x 0.1% = 0.6%        1 x 0.1% = 0.1%"
+        },
+        {
+          "type": "p",
+          "text": "That gives the recommended starting set: two **pages** for fast burns and one **ticket** for a slow burn. The fast-burn alerts catch outages, and the slow one catches the quiet, persistent degradation that would otherwise consume the budget without anyone noticing."
+        },
+        {
+          "type": "p",
+          "text": "One problem remains. An alert over a one-hour window keeps firing for up to an hour after the errors stop, which is a poor reset time, and it invites people to distrust the alert. The fix is a **second, short window**, conventionally one twelfth of the long one, evaluated against the same threshold. The alert fires only when **both** exceed it."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Severity",
+            "Windows (long + short)",
+            "Burn rate",
+            "Budget consumed"
+          ],
+          "rows": [
+            [
+              "Page",
+              "1 hour + 5 minutes",
+              "14.4",
+              "2%"
+            ],
+            [
+              "Page",
+              "6 hours + 30 minutes",
+              "6",
+              "5%"
+            ],
+            [
+              "Ticket",
+              "3 days + 6 hours",
+              "1",
+              "10%"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "The long window establishes that the burn is significant, and the short window confirms that it is **still happening**. Once the problem is fixed, the five-minute rate drops within minutes and the alert clears, even though the one-hour average is still high. This is the **multi-window, multi-burn-rate** alert, and it scores well on all four properties at once."
+        },
+        {
+          "type": "callout",
+          "kind": "note",
+          "text": "These numbers are a starting point for a 30-day period, not a law. If your period is 28 days, recompute the thresholds with 672 hours. If a service has very little traffic, a handful of failed requests can produce a huge burn rate; low-traffic services need longer windows, synthetic traffic to raise the volume, or a minimum request count in the alert condition."
+        }
+      ]
+    },
+    {
+      "heading": "Implementing it in Prometheus",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "First record the error ratio over each window you need, so that the alert expressions stay short and the dashboard uses the same definition."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "caption": "rules/checkout-slo-recording.yml",
+          "code": "groups:\n  - name: checkout-slo-recording\n    rules:\n      - record: job:slo_errors_per_request:ratio_rate5m\n        expr: |\n          sum by (job) (rate(http_requests_total{job=\"checkout\", code=~\"5..\"}[5m]))\n          /\n          sum by (job) (rate(http_requests_total{job=\"checkout\"}[5m]))\n      - record: job:slo_errors_per_request:ratio_rate1h\n        expr: |\n          sum by (job) (rate(http_requests_total{job=\"checkout\", code=~\"5..\"}[1h]))\n          /\n          sum by (job) (rate(http_requests_total{job=\"checkout\"}[1h]))\n      # ...repeat for 30m, 6h and 3d"
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "caption": "rules/checkout-slo-alerts.yml",
+          "code": "groups:\n  - name: checkout-slo-alerts\n    rules:\n      - alert: CheckoutErrorBudgetFastBurn\n        expr: |\n          (\n            job:slo_errors_per_request:ratio_rate1h{job=\"checkout\"} > (14.4 * 0.001)\n            and\n            job:slo_errors_per_request:ratio_rate5m{job=\"checkout\"} > (14.4 * 0.001)\n          )\n          or\n          (\n            job:slo_errors_per_request:ratio_rate6h{job=\"checkout\"} > (6 * 0.001)\n            and\n            job:slo_errors_per_request:ratio_rate30m{job=\"checkout\"} > (6 * 0.001)\n          )\n        labels:\n          severity: page\n          team: checkout\n        annotations:\n          summary: \"Checkout is burning its error budget fast\"\n          description: \"Error ratio over 1h is {{ $value | humanizePercentage }}. SLO is 99.9%.\"\n          runbook_url: \"https://runbooks.example.com/checkout/error-budget-burn\"\n          dashboard: \"https://grafana.example.com/d/checkout\"\n\n      - alert: CheckoutErrorBudgetSlowBurn\n        expr: |\n          job:slo_errors_per_request:ratio_rate3d{job=\"checkout\"} > (1 * 0.001)\n          and\n          job:slo_errors_per_request:ratio_rate6h{job=\"checkout\"} > (1 * 0.001)\n        labels:\n          severity: ticket\n          team: checkout\n        annotations:\n          summary: \"Checkout is slowly exhausting its error budget\""
+        },
+        {
+          "type": "list",
+          "items": [
+            "`0.001` is `1 - SLO` for 99.9%. Keeping it visible in the expression documents where the threshold came from.",
+            "**Labels** drive routing: `severity` and `team` decide who is notified and how. **Annotations** carry information for the human: what is happening, how bad it is, and links.",
+            "Every page needs a **runbook link** and a **dashboard link**. The person paged at three in the morning should be one click from what to do and one click from the picture.",
+            "The `for:` clause is unnecessary here, because the long window already provides the smoothing. Where you do use `for:`, remember that the condition must hold continuously for that whole time.",
+            "Unit-test the rules with `promtool test rules`, feeding in a synthetic series and asserting which alerts fire. Open-source generators such as Sloth and Pyrra produce the whole rule set from a short SLO definition."
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "Routing, grouping and silencing",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Prometheus decides **whether** an alert is firing. **Alertmanager** decides **who hears about it, and how**. It deduplicates, groups related alerts into one notification, routes by label, suppresses alerts that are consequences of others, and honours silences."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "caption": "alertmanager.yml",
+          "code": "route:\n  receiver: default-tickets\n  group_by: [alertname, team]\n  group_wait: 30s          # wait to collect related alerts before the first notification\n  group_interval: 5m       # wait before notifying about new alerts added to the group\n  repeat_interval: 4h      # re-notify if still firing\n  routes:\n    - matchers: ['severity=\"page\"']\n      receiver: oncall-pager\n    - matchers: ['severity=\"ticket\"']\n      receiver: default-tickets\n\ninhibit_rules:\n  - source_matchers: ['alertname=\"ClusterUnreachable\"']\n    target_matchers: ['severity=\"page\"']\n    equal: [cluster]\n\nreceivers:\n  - name: oncall-pager\n    pagerduty_configs:\n      - routing_key_file: /etc/alertmanager/secrets/pagerduty-key\n  - name: default-tickets\n    webhook_configs:\n      - url: http://ticket-bridge:8080/alerts"
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Grouping** turns fifty alerts from one failing cluster into a single notification listing fifty instances, instead of fifty pages.",
+            "**Inhibition** mutes alerts that are downstream consequences. If the whole cluster is unreachable, there is no value in also being told about every service inside it.",
+            "**Silences** mute matching alerts for a fixed period, for planned maintenance. Always give them an expiry, an author and a comment, and never use one to hide a noisy alert indefinitely. Fix or delete the alert instead.",
+            "**Escalation**, acknowledgement and schedules live in the paging tool. If the primary does not acknowledge within a few minutes, the page goes to the secondary."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "code": "amtool check-config alertmanager.yml\namtool alert query severity=page\namtool silence add alertname=CheckoutErrorBudgetFastBurn \\\n  --duration 2h --author jane --comment \"planned database failover, change CHG-1042\"\namtool silence query\npromtool check rules rules/checkout-slo-alerts.yml"
+        },
+        {
+          "type": "callout",
+          "kind": "tip",
+          "text": "Who watches the watcher? Add one alert that always fires, often called a dead man's switch, and route it to an external heartbeat service. If the heartbeats stop arriving, that service pages you, which covers the case where Prometheus, Alertmanager or the network path between them has failed silently."
+        }
+      ]
+    },
+    {
+      "heading": "Killing alert fatigue",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "**Alert fatigue** sets in when people are paged so often, or for so little, that they stop responding with care. It is a safety problem, not merely an annoyance: fatigued responders acknowledge and ignore, and the one real page is lost among the false ones. The Google SRE book suggests that an on-call shift should see no more than about two incidents, which leaves time to handle each one properly and follow up afterwards."
+        },
+        {
+          "type": "p",
+          "text": "Hold a short **alert review** every week or two. Go through every page since the last review and ask the same questions of each."
+        },
+        {
+          "type": "steps",
+          "items": [
+            "Was it **actionable**? Did the responder do something that mattered, beyond acknowledging it?",
+            "Was it **urgent**? Could it have waited until morning as a ticket?",
+            "Did it reflect **user impact**, or an internal condition that users never noticed?",
+            "Was it a **duplicate** of another alert for the same underlying problem?",
+            "Did the alert carry enough **context**, with a runbook that helped?"
+          ]
+        },
+        {
+          "type": "p",
+          "text": "Then act on the answers. Delete alerts that were never actionable. Demote the non-urgent to tickets. Replace groups of cause-based alerts with one SLO burn-rate alert. Fix the underlying problem for alerts that fire repeatedly with the same manual remedy, because that is toil. Rewrite alerts that lacked context. Track pages per shift, the share outside working hours, and the share that was actionable, and expect all three to improve."
+        },
+        {
+          "type": "p",
+          "text": "Deleting an alert feels risky, which is why noisy alerts survive. The symptom-based SLO alerts are your safety net: if they are in place and trusted, a removed cause-based alert cannot hide a user-facing problem. It can only remove a warning that you were not acting on anyway."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Replace noisy alerts with burn-rate alerts",
+    "steps": [
+      "List every alert that currently pages for one service. Mark each as symptom or cause, and as actionable or not, based on the last time it fired.",
+      "Using the service's SLO, calculate the burn-rate thresholds for 2% in 1 hour, 5% in 6 hours and 10% in 3 days, for your own SLO period. Convert each to an error-rate threshold.",
+      "Write recording rules for the error ratio over 5m, 30m, 1h, 6h and 3d, then the two alerts from this module. Validate them with `promtool check rules`.",
+      "Inject errors into your test service at about 2% for ten minutes. Note when the fast-burn alert fires, then stop the errors and time how long it takes to clear. Explain the reset time using the short window.",
+      "Inject a low error rate, slightly above the allowed rate, for a longer period and confirm that only the ticket-level alert would catch it.",
+      "Configure Alertmanager with routes for `severity=page` and `severity=ticket`, grouping by `alertname` and `team`, and one inhibition rule. Check it with `amtool check-config`.",
+      "Add summary, description, runbook and dashboard annotations to each alert, and write the first version of the runbook the link points to.",
+      "Propose which of the original alerts to delete, demote or keep, and present the before and after page counts to your team."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Page on symptoms users feel, not on internal causes. Causes go on dashboards, or become tickets if they predict trouble.",
+      "A page must be urgent, actionable and about user impact. Everything else is a ticket or nothing.",
+      "Judge alerts on precision, recall, detection time and reset time.",
+      "Burn rate = error rate / (1 - SLO). Threshold = budget share x SLO period / window.",
+      "Standard set for 30 days: 14.4 over 1h and 5m (page), 6 over 6h and 30m (page), 1 over 3d and 6h (ticket).",
+      "The short window, one twelfth of the long one, makes the alert clear quickly once the problem is fixed.",
+      "Labels route the alert; annotations inform the human. Every page links to a runbook and a dashboard.",
+      "Review every page regularly. Delete, demote, merge or fix. Aim for no more than about two incidents per shift."
+    ],
+    "groups": [
+      {
+        "title": "Burn-rate arithmetic (30-day period = 720 h)",
+        "items": [
+          {
+            "syntax": "burn rate = error rate / (1 - SLO)",
+            "desc": "1 means the budget lasts exactly the period"
+          },
+          {
+            "syntax": "budget consumed = burn rate x window / period",
+            "desc": "14.4 x 1 h / 720 h = 2%"
+          },
+          {
+            "syntax": "threshold = budget share x period / window",
+            "desc": "0.05 x 720 / 6 = 6"
+          },
+          {
+            "syntax": "14.4 -> 1h + 5m",
+            "desc": "Page: 2% of budget in an hour"
+          },
+          {
+            "syntax": "6 -> 6h + 30m",
+            "desc": "Page: 5% of budget in six hours"
+          },
+          {
+            "syntax": "1 -> 3d + 6h",
+            "desc": "Ticket: 10% of budget in three days"
+          },
+          {
+            "syntax": "error-rate threshold = burn rate x (1 - SLO)",
+            "desc": "14.4 x 0.1% = 1.44% for a 99.9% SLO"
+          }
+        ]
+      },
+      {
+        "title": "Alerting rule fields",
+        "items": [
+          {
+            "syntax": "alert: NAME",
+            "desc": "CamelCase name that states the condition"
+          },
+          {
+            "syntax": "expr: PROMQL",
+            "desc": "Fires for every series the expression returns"
+          },
+          {
+            "syntax": "for: 5m",
+            "desc": "Condition must hold continuously this long before firing"
+          },
+          {
+            "syntax": "labels: { severity: page, team: X }",
+            "desc": "Used by Alertmanager for routing and grouping"
+          },
+          {
+            "syntax": "annotations: { summary, description, runbook_url }",
+            "desc": "Human-readable context; templates allowed"
+          },
+          {
+            "syntax": "{{ $value }} / {{ $labels.instance }}",
+            "desc": "Template variables in annotations"
+          },
+          {
+            "syntax": "A and B / A or B / A unless B",
+            "desc": "Combine conditions on matching label sets"
+          }
+        ]
+      },
+      {
+        "title": "Alertmanager",
+        "items": [
+          {
+            "syntax": "group_by: [alertname, team]",
+            "desc": "Combine related alerts into one notification"
+          },
+          {
+            "syntax": "group_wait / group_interval / repeat_interval",
+            "desc": "Initial wait / wait for group updates / re-notify period"
+          },
+          {
+            "syntax": "routes: - matchers: ['severity=\"page\"']",
+            "desc": "Send matching alerts to a specific receiver"
+          },
+          {
+            "syntax": "inhibit_rules",
+            "desc": "Mute target alerts while a source alert is firing"
+          },
+          {
+            "syntax": "amtool silence add MATCHER --duration 2h --comment TEXT",
+            "desc": "Mute temporarily, with a reason"
+          },
+          {
+            "syntax": "amtool check-config FILE",
+            "desc": "Validate the configuration"
+          }
+        ]
+      },
+      {
+        "title": "Alert review questions",
+        "items": [
+          {
+            "syntax": "Actionable?",
+            "desc": "Did someone have to do something?"
+          },
+          {
+            "syntax": "Urgent?",
+            "desc": "Could it have waited until morning?"
+          },
+          {
+            "syntax": "User impact?",
+            "desc": "Did users notice, or would they have soon?"
+          },
+          {
+            "syntax": "Duplicate?",
+            "desc": "Same root problem as another alert?"
+          },
+          {
+            "syntax": "Context?",
+            "desc": "Did the runbook and links help?"
+          },
+          {
+            "syntax": "Outcome",
+            "desc": "Delete, demote to ticket, merge, fix the cause, or improve the text"
+          }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Paging on CPU, memory or pod restarts instead of on what users experience.",
+      "Sending non-actionable alerts to email or chat, which trains everyone to ignore notifications.",
+      "Alerting when the error rate crosses the SLO threshold over a short window, which pages constantly for insignificant blips.",
+      "Relying on a long `for:` clause, which resets on every flap and delays detection of total outages.",
+      "Pages with no runbook or dashboard link, leaving the responder to start from nothing.",
+      "Silencing a noisy alert indefinitely instead of fixing or deleting it."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "Which of these is the best candidate for a page that wakes someone at night?",
+      "options": [
+        "The checkout error budget is burning at 14 times the sustainable rate",
+        "CPU utilisation on a checkout pod has been above 90% for five minutes",
+        "A checkout pod restarted and was replaced automatically by Kubernetes",
+        "The checkout database disk will be full in approximately six days"
+      ],
+      "answer": 0,
+      "explain": "It describes significant, current user impact that needs a human now. High CPU and a replaced pod may affect nobody, and a disk filling in six days is a ticket for working hours."
+    },
+    {
+      "q": "For a 30-day SLO period, which burn rate corresponds to consuming 5% of the error budget in 6 hours?",
+      "options": [
+        "6",
+        "14.4",
+        "1",
+        "30"
+      ],
+      "answer": 0,
+      "explain": "Burn rate is budget share times period divided by window: 0.05 times 720 hours, divided by 6 hours, equals 6."
+    },
+    {
+      "q": "In a multi-window burn-rate alert, what is the purpose of the short window, such as 5 minutes alongside 1 hour?",
+      "options": [
+        "It confirms the burn is still happening, so the alert clears soon after a fix",
+        "It makes the alert fire much earlier than the long window would by itself",
+        "It lowers the threshold so that small, brief error spikes are also caught",
+        "It reduces the load on Prometheus, because less data has to be evaluated"
+      ],
+      "answer": 0,
+      "explain": "Both windows must exceed the threshold. After a fix, the short-window rate drops within minutes and the alert stops, while the long-window average would stay high for up to an hour."
+    },
+    {
+      "q": "A node fails, and the on-call engineer receives 40 separate pages, one for each service that was running on it. Which Alertmanager features address this?",
+      "options": [
+        "Group related alerts into one notification, and inhibit those caused by the node",
+        "Lengthen the scrape interval, so that fewer alert rules are evaluated per minute",
+        "Add a permanent silence that covers every one of the service-level alerts",
+        "Raise repeat_interval, so that the same pages are re-sent much less often"
+      ],
+      "answer": 0,
+      "explain": "Grouping merges alerts that share labels into a single notification, and inhibition suppresses consequences while the underlying cause is firing. A permanent silence would hide real problems."
+    },
+    {
+      "q": "During an alert review, a team finds a page that fired 12 times last month. Each time, the on-call acknowledged it and took no action, and users were unaffected. What should they do?",
+      "options": [
+        "Delete it or demote it to a dashboard, as it is not actionable or user-facing",
+        "Keep it, because removing any alert always reduces monitoring coverage",
+        "Route it to a second engineer as well, so that the paging load is shared",
+        "Raise its severity, so that the on-call engineers take it more seriously"
+      ],
+      "answer": 0,
+      "explain": "An alert that never leads to action only creates fatigue and makes real pages easier to miss. With symptom-based SLO alerts in place, removing it loses nothing."
+    }
+  ]
+}

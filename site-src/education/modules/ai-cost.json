@@ -1,0 +1,268 @@
+{
+  "id": "ai-cost",
+  "minutes": 30,
+  "intro": "A prototype that costs a few cents per conversation looks free. Multiply it by a hundred thousand users, a system prompt of many thousands of tokens, and an agent that takes fifteen turns, and the same feature becomes a line on the budget that gets a meeting of its own. Latency follows the same curve: three seconds is fine in a demonstration, and unusable in an autocomplete. This module applies the FinOps thinking of the DevOps track to language models: know where the tokens go, take the free savings first, and only then trade quality for cost, with an evaluation to tell you what you gave up.",
+  "objectives": [
+    "Build a cost and latency model for an LLM feature, from token counts",
+    "Choose the right model for each task, and route easy work to cheaper models",
+    "Structure prompts so that prompt caching works, and verify that it does",
+    "Use streaming, response caching and batch processing where they fit",
+    "Set token budgets, handle rate limits, and measure cost per completed task"
+  ],
+  "sections": [
+    {
+      "heading": "Where the money and the time go",
+      "blocks": [
+        { "type": "p", "text": "Pricing is per token, and quoted separately for **input** and **output**. Output tokens usually cost several times as much as input tokens, because they are generated one at a time, while the input is processed in parallel. Most providers also sell cached input at a steep discount, and asynchronous batch processing at a substantial one. Prices change often, so put them in configuration, and never in code or in your head." },
+        { "type": "code", "lang": "text", "code": "cost per request  = input_tokens  x input_price\n                  + cached_tokens x cached_price        (much cheaper than input_price)\n                  + output_tokens x output_price        (usually the most expensive per token)\n\ncost per task     = the sum over every model call that the task needed\n                    (an agent that takes 15 turns resends the growing history 15 times)\n\nlatency           = time to first token  +  output_tokens / tokens per second\n                    (queueing + reading the input)   (generation: usually the larger part)" },
+        { "type": "code", "lang": "python", "code": "from dataclasses import dataclass\n\n\n@dataclass\nclass Prices:\n    \"\"\"Per million tokens. Load these from configuration; they change.\"\"\"\n    input: float\n    cached_input: float\n    output: float\n\n\ndef request_cost(prices: Prices, input_tokens: int, cached_tokens: int, output_tokens: int) -> float:\n    uncached = input_tokens - cached_tokens\n    return (uncached * prices.input\n            + cached_tokens * prices.cached_input\n            + output_tokens * prices.output) / 1_000_000\n\n\ndef monthly_cost(prices: Prices, requests_per_day: int, input_tokens: int,\n                 cached_tokens: int, output_tokens: int) -> float:\n    return 30 * requests_per_day * request_cost(prices, input_tokens, cached_tokens, output_tokens)" },
+        { "type": "p", "text": "Before optimising anything, **measure**. Every API response reports its token usage. Log it for every call, tagged with the feature, the prompt version and the model, exactly as the FinOps module tagged cloud resources. You will nearly always find that a small number of features, or one bloated prompt, account for most of the spend, and that the expensive part is not the part you expected." },
+        { "type": "callout", "kind": "note", "text": "Judge cost **per completed task**, not per request. A cheaper model that needs three attempts, or an agent that takes twice as many turns, is not cheaper. A more capable model that gets it right the first time, in fewer steps, frequently wins on total cost." }
+      ]
+    },
+    {
+      "heading": "Free wins first",
+      "blocks": [
+        { "type": "p", "text": "Some savings cost nothing in quality. Take every one of them before you consider a trade-off." },
+        { "type": "list", "items": [
+          "**Trim the input.** Remove boilerplate, duplicated instructions, unused examples and tool definitions that are never called. Retrieve five relevant passages and not twenty. Every token in a system prompt is paid for on every single request.",
+          "**Keep tool results small**, as the tool-use module said. In an agent, a bloated result is paid for again on every later turn.",
+          "**Bound the output.** Ask for the length you need, and set a maximum. Output is the expensive side, and it is also the slow one. \"Answer in two sentences\" is both a cost optimisation and a latency optimisation.",
+          "**Do not ask for what you will throw away.** If your code needs a label, do not request a label together with a paragraph of explanation, unless that explanation measurably improves the label.",
+          "**Stop wasteful loops.** Cap the turns of an agent, detect repeated tool calls, and do not retry failures that cannot succeed.",
+          "**Cache the prompt prefix**, covered next. For many applications it is the largest saving available.",
+          "**Use batch processing** for anything that nobody is waiting for.",
+          "**Do not call the model at all** where a regular expression, a database lookup or a rule gives the right answer. The cheapest call is the one you never make."
+        ]}
+      ]
+    },
+    {
+      "heading": "Prompt caching",
+      "blocks": [
+        { "type": "p", "text": "Most applications send the same long opening on every request: the system prompt, the tool definitions, a reference document, the few-shot examples. **Prompt caching** lets the provider store its processed form of that prefix, and reuse it. Cached tokens are billed at a fraction of the normal input price, and they are faster too, since the work of reading them has already been done. Some providers cache automatically, and others need you to mark what should be cached. In either case, the same rule governs whether it works." },
+        { "type": "p", "text": "**A cache is a prefix match.** The provider can reuse the cached computation only for a request whose beginning is identical, byte for byte, to a previous one, up to the point that was cached. A single changed character early in the prompt invalidates everything that follows it. The whole technique follows from that: **stable content first, variable content last.**" },
+        { "type": "code", "lang": "text", "code": "GOOD: the stable prefix is reused on every request\n  [tool definitions] [system prompt] [reference document] [few-shot examples] | [the user's question]\n   ^------------------------- identical every time -------------------------^   ^--- varies ---^\n\nBAD: a changing value near the top destroys the cache for everything after it\n  [system prompt: \"Current time: 14:02:11 ...\"] [tool definitions] [reference document] ...\n                   ^ changes every second, so nothing after it can ever be reused" },
+        { "type": "table", "headers": ["Silent cache breaker", "Fix"], "rows": [
+          ["A timestamp, a request ID or a random value in the system prompt", "Move it to the end, into the user's turn, or remove it. Give the date, and not the time, if that is enough."],
+          ["The user's name or profile placed at the top", "Put per-user content after the shared prefix"],
+          ["Tools listed in a different order from one request to the next", "Sort them deterministically, and keep the set fixed"],
+          ["JSON serialised with unstable key order", "Serialise with sorted keys"],
+          ["Retrieved documents placed ahead of the instructions", "Stable instructions first, then the material that varies"],
+          ["Editing an earlier message in a conversation", "Only ever append. Editing the history invalidates everything after the edit."],
+          ["A prefix shorter than the provider's minimum", "Providers cache only above a minimum length; short prompts gain nothing"]
+        ]},
+        { "type": "list", "items": [
+          "**Verify it.** The usage data in each response reports how many input tokens were read from the cache. If that number stays at zero across repeated requests, something in your prefix is changing. Compare two consecutive requests byte for byte to find it.",
+          "Caches **expire** after a short period without use, typically minutes. They pay off for steady traffic, for multi-turn conversations, and for agent loops, where every turn sends the whole earlier history again.",
+          "Writing to the cache may cost slightly more than ordinary input. The saving comes from the reads, so caching a prefix that is used once gains nothing.",
+          "Caches are specific to a model. Switching models part of the way through a conversation throws away the accumulated cache.",
+          "Caching makes a long, detailed system prompt affordable. Without it, there is a constant pressure to cut useful context."
+        ]}
+      ]
+    },
+    {
+      "heading": "Choosing and routing models",
+      "blocks": [
+        { "type": "p", "text": "Providers offer families of models, from small, fast and cheap to large, slower and much more capable, with prices that can differ by an order of magnitude or more. No model is right for everything. Match the model to the task, and let your **evaluation set** make the decision, not your intuition." },
+        { "type": "table", "headers": ["Tier", "Suits", "Risk if misused"], "rows": [
+          ["**Small and fast**", "Classification, routing, extraction, simple summaries, high volume, latency-sensitive work", "Quietly poor results on tasks that need reasoning"],
+          ["**Mid-range**", "Most production work: question answering, RAG, routine coding, tool use", "A good default; test whether a smaller one will do"],
+          ["**Most capable**", "Hard reasoning, long agentic tasks, complex code, anything where mistakes are expensive", "Paying premium prices for tasks that a small model handles perfectly"]
+        ]},
+        { "type": "p", "text": "**Routing** sends each request to the cheapest model that can handle it. A small model, or a simple rule, classifies the request, and only the hard ones reach the expensive model. A **cascade** tries the cheap model first, and escalates when a check fails: low confidence, a failed validation, or an \"unsure\" answer." },
+        { "type": "code", "lang": "python", "code": "def answer(question: str, context: str) -> dict:\n    \"\"\"A cascade: cheap model first, escalating only when a check fails.\n    call_llm is a stand-in, and the model names come from configuration.\"\"\"\n    draft = call_llm(build_prompt(question, context), model=CONFIG[\"small_model\"], max_tokens=400)\n\n    if passes_checks(draft, context):                 # cites the context, valid format, not \"unsure\"\n        return {\"answer\": draft, \"model\": \"small\"}\n\n    final = call_llm(build_prompt(question, context), model=CONFIG[\"large_model\"], max_tokens=400)\n    return {\"answer\": final, \"model\": \"large\"}" },
+        { "type": "list", "items": [
+          "A cascade helps only if most requests pass at the cheap tier. If half of them escalate, you pay for both calls half of the time, and add latency as well.",
+          "Many current models have a **reasoning effort** or thinking setting. Before building a multi-model cascade, test the simpler alternative: one capable model at a lower effort setting. It is often competitive, and it keeps one cache and one set of prompts.",
+          "In multi-agent designs, run the orchestrator on a capable model, and the narrow, reading-heavy sub-tasks on a cheaper one.",
+          "Re-run the evals whenever you change a model. \"It seemed fine\" is not a measurement."
+        ]}
+      ]
+    },
+    {
+      "heading": "Latency: streaming, parallelism and caching responses",
+      "blocks": [
+        { "type": "list", "items": [
+          "**Streaming** returns tokens as they are generated. The total time is unchanged, and the **perceived** latency falls from many seconds to a fraction of one, because the user starts reading almost at once. Use it for anything that a person watches. It also avoids HTTP timeouts on long generations. Streaming does not help when code has to have the whole response before it can act.",
+          "**Shorter output is faster output.** Generation time is roughly proportional to output length, so tightening the requested length is the most direct lever on latency.",
+          "**Parallelise independent calls.** Three classifications that do not depend on one another should run concurrently, not one after another.",
+          "**Reduce round trips.** Each turn of an agent is a full request. Tools that return what is needed in one call, and models that call several tools in parallel, reduce the number of turns.",
+          "**Pick the model for the latency you need.** Smaller models are much faster. An autocomplete needs a fast model, and a nightly report does not.",
+          "**Warm the cache** before a known burst of traffic, where your provider supports it, so that the first real user does not pay for the cache write."
+        ]},
+        { "type": "p", "text": "A **response cache** avoids the call altogether. If the same question recurs, keep the answer." },
+        { "type": "code", "lang": "python", "code": "import hashlib\nimport json\n\n\ndef cache_key(model: str, messages: list[dict], params: dict) -> str:\n    \"\"\"An exact-match key. Every input that affects the output must be part of it.\"\"\"\n    payload = json.dumps({\"model\": model, \"messages\": messages, \"params\": params},\n                         sort_keys=True, ensure_ascii=False)\n    return hashlib.sha256(payload.encode(\"utf-8\")).hexdigest()\n\n\ndef cached_call(store, model: str, messages: list[dict], **params) -> str:\n    key = cache_key(model, messages, params)\n    hit = store.get(key)\n    if hit is not None:\n        return hit\n    result = call_llm(messages, model=model, **params)\n    store.set(key, result, ttl_seconds=3600)\n    return result" },
+        { "type": "list", "items": [
+          "Exact-match caching suits deterministic tasks at low temperature: classification, extraction, and frequently asked questions that are normalised before hashing.",
+          "Include the **prompt version** and the model in the key, or a change to the prompt will go on serving stale answers.",
+          "**Semantic caching** matches questions that are similar, using embeddings. It catches more repeats, and it carries a real risk: \"how do I enable X?\" and \"how do I disable X?\" are close together in embedding space. Use a strict similarity threshold, and do not use it where a wrong answer is costly.",
+          "Never share cached responses between users if the answer depends on private data, or on the user's permissions."
+        ]}
+      ]
+    },
+    {
+      "heading": "Batch work, budgets and rate limits",
+      "blocks": [
+        { "type": "p", "text": "A great deal of LLM work is not interactive: classifying last month's tickets, generating embeddings for a corpus, running evals, writing summaries overnight. **Batch APIs** accept a file of requests, process them asynchronously, typically within a day, and charge substantially less than the interactive price. Give every request in a batch an identifier of your own, because results come back in arbitrary order, and must be matched by that identifier and never by position. Batches also do not count against your interactive rate limits in the same way, so a large job does not starve live traffic." },
+        { "type": "p", "text": "Providers enforce **rate limits** in requests and in tokens per minute. When you exceed them you receive an HTTP `429`, usually with a `Retry-After` header. Handle it with the retry discipline of the failure-modes module: exponential backoff with jitter, respect for `Retry-After`, a bounded number of attempts, and a queue that smooths out bursts in place of a stampede." },
+        { "type": "list", "items": [
+          "**Set budgets at every level**: a maximum output per call, a token and turn budget per task, a daily limit per user, and a monthly limit per feature, with alerts on the forecast as well as on the total.",
+          "**Protect yourself against abuse.** A public endpoint backed by an LLM is a way for strangers to spend your money. Require authentication, apply rate limits per user, and cap the length of input.",
+          "**Degrade gracefully** when a budget or a limit is reached: fall back to a smaller model, to a cached answer, or to an honest \"try again shortly\", in preference to an error.",
+          "**Track the unit economics**: cost per conversation, per resolved ticket, per active user. Compare the figure with the value of that outcome, which is the only way to tell whether the feature pays for itself.",
+          "**Watch the trend.** Prompts grow, histories lengthen, and someone adds five tools. Put cost per task on a dashboard, with an alert when it drifts."
+        ]},
+        { "type": "callout", "kind": "tip", "text": "Work in the order of this module: measure, then take the free wins, then fix caching, then right-size the model, and only then consider trading quality for cost. At that last step, run your eval suite before and after. A saving that you cannot show to be harmless to quality is not a saving. It is a risk that you have not measured." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Profile and halve the cost of a real feature",
+    "steps": [
+      "Take an LLM feature that you have built in this track, such as the RAG assistant or the tool-using agent. Log the input, cached and output tokens, and the latency, for every model call, tagged with the feature and the prompt version.",
+      "Run twenty realistic tasks, and build a profile: tokens per call, calls per task, cost per task with your provider's current prices loaded from a configuration file, time to first token, and total time.",
+      "Find the biggest contributor. Trim the input: remove unused tools and examples, reduce the retrieved passages, and shrink the tool results. Measure again.",
+      "Bound the output with a specific instruction about length, and a maximum. Measure the cost and latency, and run your evals to confirm that quality held.",
+      "Restructure the prompt so that everything stable comes first. Make two identical requests, and confirm in the usage data that the second one read tokens from the cache. Then add a timestamp to the top of the system prompt, and watch the cache reads fall to zero.",
+      "Run your eval suite on a smaller model, or at a lower reasoning-effort setting. Record quality, cost and latency side by side, and decide with the numbers.",
+      "Turn on streaming for the user-facing path, and compare the time to first token with the total time.",
+      "Move one non-interactive job, such as running the evals or embedding a corpus, to your provider's batch API. Compare the cost, and match the results by your own identifiers."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Cost is tokens times price, summed over every call in a task. Output tokens are the expensive and slow ones.",
+      "Measure first: log usage for every call, tagged by feature, prompt version and model.",
+      "Judge cost per completed task, not per request. Retries and extra turns erase cheap per-call prices.",
+      "Free wins: trim the input, bound the output, keep tool results small, stop wasteful loops, skip needless calls.",
+      "Prompt caching is a prefix match: stable content first, variable content last, and append only. Verify the cache reads in the usage data.",
+      "Timestamps, per-user data at the top, unordered tools and unsorted JSON silently break the cache.",
+      "Right-size the model using evals. Test a lower effort setting on one capable model before building a cascade.",
+      "Stream for perceived latency, batch for work nobody is waiting on, and set budgets at every level."
+    ],
+    "groups": [
+      {
+        "title": "Formulas",
+        "items": [
+          { "syntax": "cost = in x p_in + cached x p_cached + out x p_out", "desc": "Per request; prices are per token" },
+          { "syntax": "cost per task = sum over all calls", "desc": "Agents resend a growing history on every turn" },
+          { "syntax": "latency = TTFT + out_tokens / tokens_per_second", "desc": "Output length dominates" },
+          { "syntax": "monthly = 30 x requests per day x cost per request", "desc": "For planning and for budgets" },
+          { "syntax": "cache hit ratio = cached input / total input", "desc": "From the usage data; should be high for stable prefixes" },
+          { "syntax": "unit cost = spend / business outcomes", "desc": "Per resolved ticket, per active user" }
+        ]
+      },
+      {
+        "title": "Prompt layout for caching",
+        "items": [
+          { "syntax": "1. tool definitions", "desc": "A fixed set, in a deterministic order" },
+          { "syntax": "2. system prompt", "desc": "No timestamps, no IDs, no per-user data" },
+          { "syntax": "3. shared documents and examples", "desc": "Identical across requests" },
+          { "syntax": "4. conversation history", "desc": "Append only; never edit earlier turns" },
+          { "syntax": "5. the current request", "desc": "Everything that varies goes last" },
+          { "syntax": "json.dumps(obj, sort_keys=True)", "desc": "A stable serialisation" },
+          { "syntax": "check cached-token counts in usage", "desc": "Zero means that something in the prefix changes" }
+        ]
+      },
+      {
+        "title": "Levers, in order",
+        "items": [
+          { "syntax": "1. measure", "desc": "A token and latency profile per feature" },
+          { "syntax": "2. trim input / bound output", "desc": "Free, and it speeds things up too" },
+          { "syntax": "3. prompt caching", "desc": "Often the largest single saving" },
+          { "syntax": "4. batch the offline work", "desc": "A substantial discount for waiting" },
+          { "syntax": "5. response cache", "desc": "For repeated, deterministic requests" },
+          { "syntax": "6. lower effort / smaller model", "desc": "A quality trade-off: gate it with evals" },
+          { "syntax": "7. routing or a cascade", "desc": "Only if most traffic passes at the cheap tier" }
+        ]
+      },
+      {
+        "title": "Latency",
+        "items": [
+          { "syntax": "stream=True (or the provider's equivalent)", "desc": "Perceived latency falls to the time to first token" },
+          { "syntax": "shorter output", "desc": "The most direct lever on total time" },
+          { "syntax": "run independent calls concurrently", "desc": "Do not serialise what does not depend" },
+          { "syntax": "fewer agent turns", "desc": "Better tools, and parallel tool calls" },
+          { "syntax": "smaller model", "desc": "Much faster; verify the quality" },
+          { "syntax": "cached prefix", "desc": "Also reduces the time to first token" }
+        ]
+      },
+      {
+        "title": "Limits and budgets",
+        "items": [
+          { "syntax": "max_tokens on every call", "desc": "Bounds cost and latency" },
+          { "syntax": "per-task turn and token budget", "desc": "Stops runaway agents" },
+          { "syntax": "per-user daily cap", "desc": "Protection against abuse" },
+          { "syntax": "per-feature monthly budget + forecast alert", "desc": "No surprises on the invoice" },
+          { "syntax": "HTTP 429 -> backoff with jitter, honour Retry-After", "desc": "Handling of rate limits" },
+          { "syntax": "batch results: match by your own ID", "desc": "The order is not guaranteed" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Optimising without measuring, and working on a prompt that was never the expensive part.",
+      "Putting the current time or a request ID at the top of the system prompt, and disabling caching for everything.",
+      "Comparing models on price per token, instead of on cost per successfully completed task.",
+      "Switching to a cheaper model without running the evals, and finding the loss of quality in production.",
+      "Using a semantic response cache where near-identical questions have opposite answers.",
+      "Exposing an LLM endpoint with no per-user limits, so that anyone can run up the bill."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A chat feature sends a 6,000-token system prompt and a 200-token question, and receives a 300-token answer. Which change is most likely to give the largest cost saving with no loss of quality?",
+      "options": [
+        "Cache the stable system prompt, so that most input tokens are billed at the cached rate",
+        "Ask the model to shorten its 300-token answers to about 250 tokens",
+        "Remove the punctuation from the user's 200-token question",
+        "Raise the temperature, so that the model answers more efficiently"
+      ],
+      "answer": 0,
+      "explain": "The system prompt dominates the token count, and it is identical on every request, which is the ideal case for prompt caching. Trimming 50 output tokens helps slightly, and the other two options do nothing useful."
+    },
+    {
+      "q": "Prompt caching is enabled, but the usage data shows zero cached tokens on every request. The system prompt begins with: \"Current time: 2026-09-17T14:02:11Z\". What is wrong?",
+      "options": [
+        "The timestamp changes on every request, so the prefix never matches a cached one",
+        "Timestamps are not valid tokens, so the provider refuses to cache the prompt",
+        "Caching only applies to the user's message, and never to the system prompt",
+        "The cache needs at least one hour of traffic before it begins to return hits"
+      ],
+      "answer": 0,
+      "explain": "A cache is a prefix match. A value that changes at the very start makes every request differ from the first byte, so nothing after it can be reused. Move volatile values to the end, or drop them."
+    },
+    {
+      "q": "Model A costs a third as much per token as model B. On your task, A succeeds 60% of the time, with failures retried up to three times, while B succeeds 97% of the time at the first attempt. What should you compare?",
+      "options": [
+        "Cost and latency per successfully completed task, retries included",
+        "Price per million input tokens only, since that is the published figure",
+        "The context window sizes, since the larger window is always the cheaper",
+        "The number of parameters in each model, as a proxy for value for money"
+      ],
+      "answer": 0,
+      "explain": "Retries multiply the cost and the latency of the cheap model, and some tasks still fail. Only cost per completed task, measured on your own evals, shows which model is cheaper in practice."
+    },
+    {
+      "q": "A user-facing assistant takes eight seconds to produce an answer. Which change most improves the experience, without changing the answer?",
+      "options": [
+        "Stream the response, so that the user starts reading within a fraction of a second",
+        "Send the request through the batch API, to take advantage of its lower price",
+        "Add a response cache keyed on the user's session identifier",
+        "Raise the maximum output tokens, so that the model has more room to finish"
+      ],
+      "answer": 0,
+      "explain": "Streaming does not shorten the total generation time. It removes the long silent wait, which is what users notice. Batch processing is asynchronous, and unsuitable for interactive use."
+    },
+    {
+      "q": "You need to classify two million archived support tickets, and nobody needs the results before next week. What is the best approach?",
+      "options": [
+        "Submit them through the batch API, matching results by your own identifiers",
+        "Send them all concurrently through the interactive API, as fast as possible",
+        "Process them one at a time, with streaming enabled for each request",
+        "Use the most capable model, at the highest reasoning-effort setting"
+      ],
+      "answer": 0,
+      "explain": "Work that nobody is waiting on belongs in a batch job, which is substantially cheaper and does not compete with live traffic for rate limits. Results arrive in arbitrary order, so they must be matched by an identifier. Classification rarely needs the most capable model."
+    }
+  ]
+}

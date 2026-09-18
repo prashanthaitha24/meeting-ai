@@ -1,0 +1,233 @@
+{
+  "id": "devops-terraform",
+  "minutes": 35,
+  "intro": "Infrastructure created by clicking in a cloud console cannot be reviewed, repeated or rolled back, and six months later nobody remembers why it looks the way it does. Infrastructure as Code fixes that by describing networks, clusters and databases in files that go through the same pull requests and pipelines as application code. Terraform is the most widely used tool for it. This module covers the workflow, the state file that makes it work, and the discipline that keeps it safe.",
+  "objectives": [
+    "Explain the Terraform workflow of write, init, plan, apply, and what each step does",
+    "Write configuration using providers, resources, data sources, variables, locals and outputs",
+    "Describe what state is, why it must be remote and locked, and what belongs in it",
+    "Structure reusable modules and separate environments safely",
+    "Read a plan critically, and handle drift, imports and destructive changes without surprises"
+  ],
+  "sections": [
+    {
+      "heading": "Declarative infrastructure",
+      "blocks": [
+        { "type": "p", "text": "Terraform configuration, written in **HCL**, declares the infrastructure you want. Terraform compares that with what it believes exists, works out the difference, and makes the API calls to close it. This is the same desired-state idea as Kubernetes, with one important difference: Terraform reconciles only when you run it, not continuously." },
+        { "type": "p", "text": "A **provider** is a plugin that translates HCL into calls to one API: AWS, Azure, Google Cloud, Cloudflare, GitHub, Kubernetes and thousands more. A **resource** is one thing the provider manages. Terraform builds a **dependency graph** from the references between resources, so it creates things in the right order and in parallel where it can." },
+        { "type": "code", "lang": "hcl", "caption": "main.tf", "code": "terraform {\n  required_version = \">= 1.6\"\n  required_providers {\n    aws = {\n      source  = \"hashicorp/aws\"\n      version = \"~> 5.0\"\n    }\n  }\n}\n\nprovider \"aws\" {\n  region = var.region\n}\n\nresource \"aws_s3_bucket\" \"artifacts\" {\n  bucket = \"acme-${var.environment}-artifacts\"\n  tags   = local.common_tags\n}\n\nresource \"aws_s3_bucket_versioning\" \"artifacts\" {\n  bucket = aws_s3_bucket.artifacts.id      # a reference: creates the dependency\n  versioning_configuration {\n    status = \"Enabled\"\n  }\n}" },
+        { "type": "p", "text": "A resource address has the form `TYPE.NAME`, here `aws_s3_bucket.artifacts`. The name is local to your configuration and is how other resources refer to it. `~> 5.0` allows any 5.x provider release but not 6.0, and `terraform init` records the exact version chosen in `.terraform.lock.hcl`, which you commit, for the same reproducibility reasons as any other lockfile." }
+      ]
+    },
+    {
+      "heading": "The core workflow",
+      "blocks": [
+        { "type": "code", "lang": "bash", "code": "terraform init              # download providers and modules, configure the backend\nterraform fmt -recursive     # canonical formatting\nterraform validate           # syntax and internal consistency\nterraform plan -out=tfplan   # compute the changes and save them\nterraform apply tfplan       # execute exactly the saved plan\nterraform destroy            # remove everything this configuration manages" },
+        { "type": "p", "text": "The **plan** is the heart of Terraform's safety. It lists every change before anything happens, using symbols you must learn to read." },
+        { "type": "table", "headers": ["Symbol", "Meaning", "Risk"], "rows": [
+          ["`+`", "Create", "Low"],
+          ["`~`", "Update in place", "Usually low; check what is changing"],
+          ["`-`", "Destroy", "High: data may be lost"],
+          ["`-/+`", "Destroy, then create a replacement", "High: downtime and data loss; look for \"forces replacement\""]
+        ]},
+        { "type": "p", "text": "Some attributes cannot be changed on a live resource, so changing them makes Terraform replace it. Renaming a database instance can therefore mean deleting the database. Read the summary line, `Plan: 2 to add, 1 to change, 0 to destroy`, every single time, and treat any unexpected destroy as a stop sign." },
+        { "type": "callout", "kind": "tip", "text": "Saving the plan with `-out` and applying that file guarantees that what was reviewed is what runs. Without it, `apply` computes a fresh plan, and the world may have changed since you looked." }
+      ]
+    },
+    {
+      "heading": "State: Terraform's memory",
+      "blocks": [
+        { "type": "p", "text": "Terraform records every resource it manages in a **state file**, mapping addresses such as `aws_s3_bucket.artifacts` to real IDs in the provider. Without state it could not know that a bucket already exists, which resources to delete when you remove a block, or what depends on what. By default state is a local `terraform.tfstate` file, which fails the moment a second person or a pipeline is involved." },
+        { "type": "p", "text": "Teams use a **remote backend**: shared storage for the state, with **locking** so two applies cannot run at once and corrupt it." },
+        { "type": "code", "lang": "hcl", "caption": "backend.tf", "code": "terraform {\n  backend \"s3\" {\n    bucket       = \"acme-terraform-state\"\n    key          = \"shop/prod/terraform.tfstate\"\n    region       = \"eu-west-1\"\n    encrypt      = true\n    use_lockfile = true\n  }\n}" },
+        { "type": "list", "items": [
+          "**State contains secrets.** Generated passwords, private keys and connection strings are stored in it in plain text. Encrypt the backend, restrict who can read it, and never commit state to Git.",
+          "**Never edit state by hand.** Use the `terraform state` subcommands, or better, the declarative `moved`, `import` and `removed` blocks.",
+          "**Turn on versioning** for the storage that holds state, so a bad write can be recovered.",
+          "**Keep states small.** One state for the whole company means every plan is slow and every mistake has an enormous blast radius. Split by environment and by layer, for example network, cluster and application."
+        ]},
+        { "type": "callout", "kind": "note", "text": "Locking options depend on the backend and the Terraform version. Older S3 setups use a DynamoDB table for locks; newer versions can use a lock file in the bucket. Check the backend documentation for the version you run." }
+      ]
+    },
+    {
+      "heading": "Variables, locals, outputs and data sources",
+      "blocks": [
+        { "type": "code", "lang": "hcl", "code": "variable \"environment\" {\n  type        = string\n  description = \"Deployment environment\"\n  validation {\n    condition     = contains([\"dev\", \"staging\", \"prod\"], var.environment)\n    error_message = \"environment must be dev, staging or prod.\"\n  }\n}\n\nvariable \"instance_count\" {\n  type    = number\n  default = 2\n}\n\nvariable \"db_password\" {\n  type      = string\n  sensitive = true          # redacted in plan output; still stored in state\n}\n\nlocals {\n  common_tags = {\n    Environment = var.environment\n    ManagedBy   = \"terraform\"\n    Team        = \"shop\"\n  }\n}\n\ndata \"aws_caller_identity\" \"current\" {}     # read-only lookup of something that exists\n\noutput \"bucket_name\" {\n  value = aws_s3_bucket.artifacts.bucket\n}" },
+        { "type": "p", "text": "**Variables** are a configuration's inputs, **outputs** are its results, and **locals** are named expressions that save you repeating yourself. A **data source** reads information about something Terraform does not manage, such as the current account, the newest machine image or an existing network." },
+        { "type": "p", "text": "Variable values are resolved in a fixed order, with later sources winning: the `default`, then `TF_VAR_name` environment variables, then `terraform.tfvars`, then `*.auto.tfvars`, then `-var-file` and `-var` on the command line. Pipelines typically pass secrets as `TF_VAR_` environment variables and everything else in a per-environment `.tfvars` file." },
+        { "type": "code", "lang": "hcl", "code": "# one resource per item, addressed by key: aws_iam_user.team[\"alice\"]\nresource \"aws_iam_user\" \"team\" {\n  for_each = toset([\"alice\", \"bob\", \"carol\"])\n  name     = each.key\n}" },
+        { "type": "p", "text": "Prefer `for_each` to `count` for collections. With `count`, resources are addressed by position, so removing the first item shifts every index and Terraform plans to destroy and recreate the rest. With `for_each` they are addressed by key, and removing one touches only that one." }
+      ]
+    },
+    {
+      "heading": "Modules and environments",
+      "blocks": [
+        { "type": "p", "text": "A **module** is a directory of `.tf` files with variables as inputs and outputs as results, the unit of reuse. The directory where you run Terraform is the **root module**; it calls child modules. Write a module when you need the same group of resources more than once, or want to enforce a standard such as \"every bucket is encrypted and versioned\"." },
+        { "type": "code", "lang": "hcl", "code": "module \"network\" {\n  source = \"./modules/network\"\n\n  environment = var.environment\n  cidr_block  = \"10.20.0.0/16\"\n}\n\nmodule \"cluster\" {\n  source  = \"terraform-aws-modules/eks/aws\"   # from the public registry\n  version = \"~> 20.0\"                         # always pin registry modules\n\n  cluster_name = \"shop-${var.environment}\"\n  vpc_id       = module.network.vpc_id         # a module output\n  subnet_ids   = module.network.private_subnet_ids\n}" },
+        { "type": "p", "text": "For environments, the robust pattern is one directory per environment, each with its own backend and therefore its own state, all calling the same modules with different inputs." },
+        { "type": "code", "lang": "text", "code": "infra/\n  modules/\n    network/   cluster/   database/\n  envs/\n    dev/       main.tf  backend.tf  terraform.tfvars\n    staging/   main.tf  backend.tf  terraform.tfvars\n    prod/      main.tf  backend.tf  terraform.tfvars" },
+        { "type": "p", "text": "Separate states mean that a mistake in `dev` cannot touch `prod`, and you can grant different people access to each. Terraform **workspaces** offer several states for one configuration, but every workspace shares the same backend and code, which makes it easy to apply to the wrong one. They suit short-lived copies better than the split between production and everything else." }
+      ]
+    },
+    {
+      "heading": "Drift, imports and guard rails",
+      "blocks": [
+        { "type": "p", "text": "**Drift** is when real infrastructure no longer matches the configuration because someone changed it by hand. `terraform plan` reveals it as an unexpected change. You then either revert the manual change by applying, or accept it by updating the code. Running a scheduled plan in CI and alerting on any difference catches drift early." },
+        { "type": "code", "lang": "hcl", "code": "# adopt an existing resource into state without recreating it\nimport {\n  to = aws_s3_bucket.legacy\n  id = \"acme-legacy-uploads\"\n}\n\n# rename or move a resource in code without destroying it\nmoved {\n  from = aws_s3_bucket.artifacts\n  to   = aws_s3_bucket.build_artifacts\n}\n\nresource \"aws_db_instance\" \"main\" {\n  # ...arguments...\n  lifecycle {\n    prevent_destroy = true        # any plan that would destroy this fails\n    ignore_changes  = [tags[\"LastPatched\"]]\n  }\n}" },
+        { "type": "p", "text": "Renaming a resource block without a `moved` block looks to Terraform like \"delete the old one, create a new one\", which for a database is catastrophic. Put `prevent_destroy` on anything stateful." },
+        { "type": "p", "text": "In a team, nobody applies from a laptop. A pull request runs `fmt -check`, `validate`, a linter such as `tflint`, a security scanner, and `plan`, posting the plan for review. After merge, the pipeline applies that plan using short-lived cloud credentials obtained through OIDC. OpenTofu, the open-source fork of Terraform, uses the same language and workflow, so everything here applies to it too." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Build, change and protect real infrastructure",
+    "steps": [
+      "Install Terraform or OpenTofu. Use a free-tier cloud account, or avoid cloud cost entirely with the `hashicorp/local` and `hashicorp/random` providers, or the `kreuzwerker/docker` provider against your local Docker.",
+      "Write a configuration with a pinned provider, two resources where one references the other, a variable with validation, and an output. Run `init`, `fmt`, `validate`, `plan -out=tfplan` and `apply tfplan`.",
+      "Open `terraform.tfstate` and read it. Find the resource IDs, and find any sensitive value stored in plain text. Then run `terraform state list` and `terraform state show` on one resource.",
+      "Change an attribute that updates in place, then one that forces replacement. Compare the `~` and `-/+` plans and find the \"forces replacement\" note.",
+      "Convert a `count`-based list of resources to `for_each`, remove the first item, and compare the plan with what `count` would have done.",
+      "Create drift: change or delete a resource outside Terraform, run `plan`, and resolve it both ways, once by re-applying and once by updating the code.",
+      "Extract your resources into `modules/` and call the module from `envs/dev` and `envs/prod` with separate state. Add `prevent_destroy` to one resource and confirm `terraform destroy` refuses."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Workflow: `init`, `fmt`, `validate`, `plan -out`, review, `apply` the saved plan.",
+      "Read every plan. `-/+` and `-` mean destruction; find out why before approving.",
+      "State maps your code to real resources. It must be remote, locked, encrypted and versioned, and it contains secrets.",
+      "One state per environment and layer keeps the blast radius small.",
+      "Prefer `for_each` to `count`, so removing one item does not reshuffle the rest.",
+      "Rename with `moved`, adopt with `import`, protect stateful resources with `prevent_destroy`.",
+      "Pin provider and module versions and commit `.terraform.lock.hcl`.",
+      "Apply from a pipeline, not a laptop."
+    ],
+    "groups": [
+      {
+        "title": "Core commands",
+        "items": [
+          { "syntax": "terraform init", "desc": "Install providers and modules; set up the backend" },
+          { "syntax": "terraform init -upgrade", "desc": "Move to newer provider versions within constraints" },
+          { "syntax": "terraform fmt -recursive", "desc": "Format all files (`-check` in CI)" },
+          { "syntax": "terraform validate", "desc": "Check syntax and references" },
+          { "syntax": "terraform plan -out=tfplan", "desc": "Compute and save the change set" },
+          { "syntax": "terraform apply tfplan", "desc": "Execute exactly the saved plan" },
+          { "syntax": "terraform plan -var-file=prod.tfvars", "desc": "Supply variable values from a file" },
+          { "syntax": "terraform destroy", "desc": "Remove everything in this state" }
+        ]
+      },
+      {
+        "title": "Inspect and repair state",
+        "items": [
+          { "syntax": "terraform state list", "desc": "Every resource address in state" },
+          { "syntax": "terraform state show ADDRESS", "desc": "All recorded attributes of one resource" },
+          { "syntax": "terraform output", "desc": "Print output values (`-json` for scripts)" },
+          { "syntax": "terraform plan -refresh-only", "desc": "Show drift without proposing config changes" },
+          { "syntax": "terraform state mv OLD NEW", "desc": "Rename in state (prefer a `moved` block)" },
+          { "syntax": "terraform state rm ADDRESS", "desc": "Stop managing a resource without deleting it" },
+          { "syntax": "terraform force-unlock LOCK_ID", "desc": "Release a stale lock; be certain nothing is running" }
+        ]
+      },
+      {
+        "title": "HCL building blocks",
+        "items": [
+          { "syntax": "resource \"TYPE\" \"NAME\" { ... }", "desc": "Something Terraform creates and manages" },
+          { "syntax": "data \"TYPE\" \"NAME\" { ... }", "desc": "Read-only lookup of existing infrastructure" },
+          { "syntax": "variable \"NAME\" { type = string }", "desc": "Input; read as `var.NAME`" },
+          { "syntax": "locals { NAME = expression }", "desc": "Named expression; read as `local.NAME`" },
+          { "syntax": "output \"NAME\" { value = ... }", "desc": "Result exposed to callers and the CLI" },
+          { "syntax": "module \"NAME\" { source = \"...\" }", "desc": "Call a module; read results as `module.NAME.OUTPUT`" },
+          { "syntax": "TYPE.NAME.ATTRIBUTE", "desc": "Reference, which also creates a dependency" },
+          { "syntax": "\"prefix-${var.environment}\"", "desc": "String interpolation" }
+        ]
+      },
+      {
+        "title": "Meta-arguments and lifecycle",
+        "items": [
+          { "syntax": "for_each = toset([...]) / each.key", "desc": "One instance per item, addressed by key" },
+          { "syntax": "count = N / count.index", "desc": "N instances, addressed by position" },
+          { "syntax": "depends_on = [RESOURCE]", "desc": "Explicit dependency when no reference exists" },
+          { "syntax": "lifecycle { prevent_destroy = true }", "desc": "Fail any plan that destroys this resource" },
+          { "syntax": "lifecycle { create_before_destroy = true }", "desc": "Build the replacement first to avoid downtime" },
+          { "syntax": "lifecycle { ignore_changes = [ATTR] }", "desc": "Do not revert external changes to an attribute" },
+          { "syntax": "import { to = ADDRESS  id = \"ID\" }", "desc": "Adopt an existing resource" },
+          { "syntax": "moved { from = OLD  to = NEW }", "desc": "Rename without destroy and recreate" }
+        ]
+      },
+      {
+        "title": "Variable precedence (lowest to highest)",
+        "items": [
+          { "syntax": "default in the variable block", "desc": "Used when nothing else sets it" },
+          { "syntax": "TF_VAR_name environment variable", "desc": "Common for secrets in pipelines" },
+          { "syntax": "terraform.tfvars, then *.auto.tfvars", "desc": "Loaded automatically" },
+          { "syntax": "-var-file=FILE, -var 'name=value'", "desc": "Command line; wins over everything" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Approving a plan without noticing that a rename produced `-/+` on a database.",
+      "Keeping state locally or in Git, where it conflicts, leaks secrets and gets lost.",
+      "Putting every environment in one state, so a `dev` experiment can break `prod`.",
+      "Using `count` for a list, then removing an early element and recreating everything after it.",
+      "Fixing things in the cloud console \"just this once\", creating drift that the next apply reverts.",
+      "Leaving provider and module versions unpinned, so the same code behaves differently next month."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A plan shows `-/+ aws_db_instance.main (forces replacement)` after you changed one argument. What will `apply` do?",
+      "options": [
+        "Destroy the existing database and create a new one in its place",
+        "Update the database in place with a short restart",
+        "Create a second database and keep the old one running alongside",
+        "Skip the resource, since replacements need a separate command"
+      ],
+      "answer": 0,
+      "explain": "`-/+` means destroy then create, because that argument cannot be changed on a live resource. For a database that is data loss unless you have planned for it, which is why `prevent_destroy` belongs on stateful resources."
+    },
+    {
+      "q": "Why do teams keep Terraform state in a remote backend with locking?",
+      "options": [
+        "So everyone shares one source of truth and two applies cannot corrupt it at once",
+        "Because providers cannot be downloaded without a remote backend",
+        "So that state no longer needs to contain any sensitive values",
+        "Because remote state makes plans run without calling the cloud API"
+      ],
+      "answer": 0,
+      "explain": "State is Terraform's record of what it manages. Sharing it lets a team and a pipeline work on the same infrastructure, and the lock stops concurrent writes. Remote state still contains secrets, so it must be encrypted and access-controlled."
+    },
+    {
+      "q": "Three IAM users are created with `count = 3` from the list `[\"alice\", \"bob\", \"carol\"]`. You remove \"alice\". What does the plan show?",
+      "options": [
+        "Changes to all positions, because every index shifted down by one",
+        "Only the alice user is destroyed and the others are untouched",
+        "Nothing, because count ignores changes to the underlying list",
+        "An error, because count lists cannot shrink after creation"
+      ],
+      "answer": 0,
+      "explain": "`count` addresses instances by index. After the removal, index 0 is bob and index 1 is carol, so Terraform renames or recreates them and destroys index 2. `for_each` addresses by key and would touch only alice."
+    },
+    {
+      "q": "You rename `resource \"aws_s3_bucket\" \"data\"` to `\"customer_data\"` in the code. How do you keep Terraform from deleting the bucket?",
+      "options": [
+        "Add a moved block from the old address to the new one",
+        "Run terraform init again so the new name is registered",
+        "Add depends_on pointing at the old resource name",
+        "Mark the bucket variable as sensitive before applying"
+      ],
+      "answer": 0,
+      "explain": "Without guidance, Terraform sees one resource removed and another added. A `moved` block tells it the address changed, so state is updated and the real bucket is untouched."
+    },
+    {
+      "q": "Someone enlarged a disk in the cloud console. Your configuration still has the old size. What does the next `terraform plan` show?",
+      "options": [
+        "A change to set the disk back to the size in the configuration",
+        "No changes, because Terraform only compares code with its own state",
+        "An error telling you to import the modified resource again",
+        "A new second disk created at the size from the configuration"
+      ],
+      "answer": 0,
+      "explain": "Plan refreshes real attributes first, notices the drift, and proposes to make reality match the code. You then either apply to revert the manual change or update the code to accept it."
+    }
+  ]
+}

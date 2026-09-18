@@ -1,0 +1,262 @@
+{
+  "id": "ai-evals",
+  "minutes": 30,
+  "intro": "Ordinary software is deterministic, so a test passes or it fails. An LLM application is probabilistic, its outputs are free text, and a change to a prompt, a model or a retrieval setting can improve ten cases and quietly break five. Teams that ship on the strength of \"I tried a few, and it looked good\" find out in production. Evaluations, usually shortened to evals, are the tests of AI engineering: a fixed dataset, an automated grader, and a number that you watch. This module shows how to build them so that every change becomes a measurement instead of a guess.",
+  "objectives": [
+    "Explain why LLM applications need evals, and what makes them different from unit tests",
+    "Build a golden dataset from real traffic, edge cases and past failures",
+    "Choose the right grader for a task: code-based checks, similarity, LLM-as-judge or human review",
+    "Design an LLM judge with a rubric, and control its known biases",
+    "Run evals as a regression suite in CI, and keep them alive with production feedback"
+  ],
+  "sections": [
+    {
+      "heading": "Why vibes do not scale",
+      "blocks": [
+        { "type": "p", "text": "Checking by eye fails for predictable reasons. You try the handful of inputs that you thought of, which are the ones the system already handles. You remember the impressive answers and forget the mediocre ones. You cannot tell whether version seven is better than version six, because you did not run the same inputs through both. And when the provider updates the model, you have no means of knowing what changed for you." },
+        { "type": "p", "text": "An **eval** has three parts: a **dataset** of inputs, a **task** that runs your system on each of them, and a **grader** that scores each output. Run it, and you get a number that you can compare across versions. That number turns arguments into experiments: should we use the cheaper model, a shorter prompt, more retrieved passages? Run the eval and look." },
+        { "type": "table", "headers": ["", "Unit test", "Eval"], "rows": [
+          ["Output", "Deterministic", "Varies from run to run"],
+          ["Result", "Pass or fail for each test", "A score across many cases; some failures are expected"],
+          ["Judging", "Exact assertion", "Often fuzzy: is this summary faithful and useful?"],
+          ["Goal", "No failures", "Above a threshold, and no worse than last time"],
+          ["Cost", "Free and instant", "Model calls cost money and take minutes"]
+        ]},
+        { "type": "p", "text": "Because the outputs vary, a single case tells you little, and even a whole run carries noise. With 50 cases, each case is worth two percentage points, so a move from 84% to 86% is one case, and could easily be chance. Use more cases where you can, run the noisy evals several times, and be suspicious of small differences." }
+      ]
+    },
+    {
+      "heading": "Building the golden dataset",
+      "blocks": [
+        { "type": "p", "text": "The dataset is the asset. Graders and prompts come and go, and a well-chosen set of cases keeps its value for years. It must resemble reality, which means most of it should come from reality." },
+        { "type": "list", "items": [
+          "**Real traffic.** Sample actual user inputs from logs, tickets and search queries, with personal data removed. They are messier, shorter and stranger than anything you would invent.",
+          "**Every failure you have seen.** Each bug report and each bad answer becomes a permanent case. This is the rule that stops regressions from coming back.",
+          "**Edge cases.** Empty input, very long input, another language, several questions in one, a question the system should decline, a question whose answer is not in your data.",
+          "**Adversarial cases.** Attempts to override the instructions, extract the system prompt, or provoke harmful output.",
+          "**Coverage.** Include every category and every kind of user in realistic proportions, so that an improvement for the common case does not conceal a collapse in a rare, important one."
+        ]},
+        { "type": "code", "lang": "json", "caption": "One line of cases.jsonl", "code": "{\n  \"id\": \"rag-0042\",\n  \"input\": \"how do I roll back the checkout service?\",\n  \"expected\": {\n    \"must_mention\": [\"kubectl rollout undo\", \"deployment/checkout\"],\n    \"must_not_mention\": [\"kubectl delete\"],\n    \"relevant_chunks\": [\"kb-12#3\"],\n    \"reference_answer\": \"Run kubectl rollout undo deployment/checkout -n shop, then confirm with kubectl rollout status.\"\n  },\n  \"tags\": [\"runbook\", \"kubernetes\", \"from-incident-2304\"],\n  \"added\": \"2026-09-02\"\n}" },
+        { "type": "p", "text": "Start small. Twenty to fifty good cases are enough to catch the large problems and to make the habit stick, and a small eval that you run is worth more than a large one that you never finish. Write the expected results down yourself, or with a domain expert. Doing so forces you to define what \"good\" means, which is often the most valuable result of the whole exercise. You can use a model to help draft variations, provided that a person reviews them, since purely synthetic cases tend to be tidier and easier than real ones." },
+        { "type": "callout", "kind": "warning", "text": "Keep a **held-out** portion of the dataset that you never look at while tuning prompts. If you adjust the prompt until every visible case passes, you have overfitted to those cases, exactly as the core ML module described, and only the held-out set will tell you whether the system actually improved." }
+      ]
+    },
+    {
+      "heading": "Choosing a grader",
+      "blocks": [
+        { "type": "p", "text": "Use the cheapest, most deterministic grader that can judge the property you care about. Code-based checks are fast, free and perfectly consistent, so use them wherever they apply, and keep model-based judging for what truly needs judgement." },
+        { "type": "table", "headers": ["Grader", "Use for", "Notes"], "rows": [
+          ["**Exact or normalised match**", "Classification, extraction, routing, yes/no", "Normalise case and whitespace first"],
+          ["**Code-based checks**", "Valid JSON, matches a schema, contains a required string, correct length, the code compiles and its tests pass, the SQL runs", "Fast, free, reliable. Surprisingly many quality properties can be checked this way."],
+          ["**Similarity**", "Closeness to a reference answer", "Embedding similarity is lenient on wording, and blind to a wrong number or a missing \"not\""],
+          ["**LLM-as-judge**", "Faithfulness, helpfulness, tone, completeness: anything that needs reading", "Flexible and scalable; must itself be validated"],
+          ["**Human review**", "The ground truth, and calibrating every other grader", "Slow and costly; use samples"]
+        ]},
+        { "type": "code", "lang": "python", "code": "import json\n\n\ndef grade_structured(output: str, expected: dict) -> dict:\n    \"\"\"Code-based grading: deterministic, free, and run on every case.\"\"\"\n    checks = {}\n    try:\n        data = json.loads(output)\n        checks[\"valid_json\"] = True\n    except json.JSONDecodeError:\n        return {\"valid_json\": False, \"passed\": False}\n\n    checks[\"category_correct\"] = data.get(\"category\") == expected[\"category\"]\n    checks[\"urgency_in_range\"] = isinstance(data.get(\"urgency\"), int) and 1 <= data[\"urgency\"] <= 5\n    checks[\"reason_present\"] = bool(data.get(\"reason\", \"\").strip())\n    checks[\"passed\"] = all(checks.values())\n    return checks\n\n\ndef grade_text(output: str, expected: dict) -> dict:\n    text = output.lower()\n    missing = [s for s in expected.get(\"must_mention\", []) if s.lower() not in text]\n    forbidden = [s for s in expected.get(\"must_not_mention\", []) if s.lower() in text]\n    return {\"missing\": missing, \"forbidden\": forbidden, \"passed\": not missing and not forbidden}" },
+        { "type": "p", "text": "Break quality down into separate, specific properties, and grade each one by itself: is it valid JSON, is the category right, is every claim supported by the source, does it cite a real passage, is it under 100 words? A single \"quality score from 1 to 10\" conceals which of those went wrong, and is much noisier than several narrow checks." }
+      ]
+    },
+    {
+      "heading": "LLM-as-judge, done properly",
+      "blocks": [
+        { "type": "p", "text": "Using a model to grade another model's output sounds circular, and it works, because judging is easier than generating: checking whether a summary is supported by a document is a simpler task than writing the summary. But a judge is a model too, with failure modes of its own, so it has to be built with care and checked against people." },
+        { "type": "code", "lang": "python", "code": "import json\n\nJUDGE_SYSTEM = \"\"\"You are grading the answer given by a documentation assistant.\nYou will receive the source passages, the question, and the answer.\n\nGrade ONE property only: faithfulness.\nAn answer is faithful if every factual claim and every command in it is directly\nsupported by the passages. Information that is true, but is not in the passages,\ncounts as unfaithful.\n\nFirst write your reasoning: list each claim in the answer, and say whether a passage\nsupports it, quoting the supporting text. Then give the verdict.\n\nRespond with a JSON object: {\"reasoning\": \"...\", \"unsupported_claims\": [...], \"verdict\": \"pass\" or \"fail\"}\"\"\"\n\n\ndef judge_faithfulness(passages: str, question: str, answer: str) -> dict:\n    \"\"\"call_llm is a stand-in: wire it to whichever provider you use.\"\"\"\n    user = (f\"<passages>\\n{passages}\\n</passages>\\n\\n\"\n            f\"<question>\\n{question}\\n</question>\\n\\n<answer>\\n{answer}\\n</answer>\")\n    raw = call_llm(\n        [{\"role\": \"system\", \"content\": JUDGE_SYSTEM}, {\"role\": \"user\", \"content\": user}],\n        temperature=0, max_tokens=800,\n    )\n    return json.loads(raw)" },
+        { "type": "list", "items": [
+          "**One property per judge.** Ask a precise question with a clear definition. \"Is this good?\" gives noise.",
+          "**Binary or a small scale.** Pass or fail, or three to five levels, each one described. Models do not use a 1 to 100 scale consistently.",
+          "**Reasoning before the verdict.** Having the judge write out its analysis first improves accuracy, and gives you an explanation to read when you disagree with it.",
+          "**Give it what it needs.** A faithfulness judge needs the source, and a correctness judge needs the reference answer. A judge that has neither is merely checking whether the answer sounds good.",
+          "**Use a capable model for judging**, and low temperature, so that the grades are consistent."
+        ]},
+        { "type": "table", "headers": ["Known bias", "What happens", "Mitigation"], "rows": [
+          ["**Position bias**", "In a comparison of two answers, the one shown first, or the one shown second, is favoured", "Run each comparison twice with the order swapped, and count a win only when both runs agree"],
+          ["**Verbosity bias**", "Longer answers score higher, whatever their quality", "Make the rubric specific about what earns credit; penalise padding explicitly"],
+          ["**Self-preference**", "A model tends to rate outputs from its own family more highly", "Use a different model as the judge when comparing models"],
+          ["**Leniency**", "Judges are reluctant to fail a fluent, confident answer", "Demand quoted evidence for every claim; include known-bad examples when you validate"]
+        ]},
+        { "type": "p", "text": "Most important of all, **validate the judge against human labels**. Have a person grade 50 to 100 outputs, run the judge on the same ones, and measure how often the two agree. Read the disagreements: sometimes the judge is wrong, and sometimes it has caught something the human missed. If agreement is poor, improve the rubric before you trust any number that the judge produces. Repeat the check from time to time, and whenever you change the judge's model or its prompt." }
+      ]
+    },
+    {
+      "heading": "A harness, and a gate in CI",
+      "blocks": [
+        { "type": "code", "lang": "python", "code": "import json\nimport sys\nfrom pathlib import Path\n\nTHRESHOLD = 0.90            # minimum pass rate\nMAX_DROP = 0.03             # largest allowed fall against the stored baseline\n\n\ndef run_eval(cases_path: str, system_under_test, grade) -> dict:\n    cases = [json.loads(line) for line in Path(cases_path).read_text().splitlines() if line.strip()]\n    results = []\n    for case in cases:\n        output = system_under_test(case[\"input\"])\n        verdict = grade(output, case[\"expected\"])\n        results.append({\"id\": case[\"id\"], \"tags\": case.get(\"tags\", []),\n                        \"output\": output, **verdict})\n    passed = sum(r[\"passed\"] for r in results)\n    return {\"pass_rate\": passed / len(results), \"n\": len(results), \"results\": results}\n\n\nif __name__ == \"__main__\":\n    report = run_eval(\"cases.jsonl\", system_under_test=my_app, grade=grade_text)\n    Path(\"eval_report.json\").write_text(json.dumps(report, indent=2))\n\n    baseline = json.loads(Path(\"eval_baseline.json\").read_text())[\"pass_rate\"]\n    print(f\"pass rate {report['pass_rate']:.1%} (baseline {baseline:.1%}, n={report['n']})\")\n    for r in report[\"results\"]:\n        if not r[\"passed\"]:\n            print(f\"  FAIL {r['id']} {r['tags']}\")\n\n    if report[\"pass_rate\"] < THRESHOLD or report[\"pass_rate\"] < baseline - MAX_DROP:\n        sys.exit(1)             # non-zero exit fails the pipeline" },
+        { "type": "p", "text": "This is the pipeline idea from the DevOps track, applied to AI. A change to a prompt, a model version, a retrieval parameter or a tool definition is a change to production, and it should pass through a gate before it ships. A few practical points follow." },
+        { "type": "list", "items": [
+          "**Tier the suites.** Run a small, fast, code-graded suite on every pull request, and the full suite with LLM judges every night and before each release, because judges cost money and time.",
+          "**Report by tag**, not only in total. An overall pass rate of 92% can conceal a collapse from 95% to 60% on Spanish inputs.",
+          "**Store the full outputs**, not only the scores, so that you can compare two versions side by side and read what changed.",
+          "**Record the versions**: the prompt, the model, the retrieval configuration and the dataset. A score without them cannot be reproduced.",
+          "**Cache the unchanged parts.** If only the generation prompt changed, there is no need to run retrieval again.",
+          "**Track cost and latency** alongside quality. A change that gains one point of quality for three times the cost is rarely a win.",
+          "**Pin the model version** and re-run the suite before adopting a new one. This is how you decide about an upgrade using evidence."
+        ]}
+      ]
+    },
+    {
+      "heading": "Evals never finish",
+      "blocks": [
+        { "type": "p", "text": "An offline eval measures the cases that you thought of. Production supplies the ones you did not. The two form a loop." },
+        { "type": "steps", "items": [
+          "**Log** inputs, outputs, the context retrieved, versions, latency and cost, with sensitive data removed.",
+          "**Collect signals.** Explicit ones, such as thumbs up or down, and implicit ones, such as the user rephrasing the question, abandoning the session, copying the answer, or escalating to a person.",
+          "**Sample and review.** Read a random sample of real conversations every week. There is no substitute for it, and it is where you discover kinds of failure that no metric was watching for.",
+          "**Run judges online**, on a sample of live traffic, to follow faithfulness or tone over time, and alert on a fall.",
+          "**Promote failures into the dataset.** Every confirmed bad output becomes a permanent eval case, with a tag recording where it came from.",
+          "**Fix, re-run and ship**, and start the loop again."
+        ]},
+        { "type": "p", "text": "Beware of optimising the number instead of the product. If the judge rewards long answers, your prompts will drift towards padding. If the dataset grows stale, scores rise while users become less happy. Refresh the cases, re-validate the judges against people, and keep reading real outputs yourself. The LLM observability module in the final stage continues this loop in production." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Put an eval gate on a real prompt",
+    "steps": [
+      "Take the RAG system or the classification prompt from an earlier module. Assemble 40 cases in a `cases.jsonl` file, using real inputs wherever you can, including five edge cases and five inputs that the system should decline or answer with \"not found\". Set 10 aside as held-out.",
+      "Write the code-based graders first: valid output, required strings present, forbidden strings absent, citations that refer to real passages. Run them and record a baseline.",
+      "Write an LLM judge for one property that needs judgement, such as faithfulness. It should check a single property, with a definition, reasoning before the verdict, and a pass or fail result.",
+      "Grade 30 outputs by hand, without looking at the judge's verdicts. Then compare. Work out the agreement rate, read every disagreement, and refine the rubric once.",
+      "Create two variants of your prompt. Compare them with a pairwise judge, running every comparison in both orders. Count how often the verdict flips when the order changes.",
+      "Wrap everything in a script that writes a JSON report, prints the failures with their tags, and exits with a non-zero status below a threshold or on a fall against the baseline.",
+      "Add it to your pipeline, so that a pull request that changes a prompt runs the fast suite. Break the prompt on purpose, and watch the gate stop it.",
+      "Run the final prompt on the held-out cases, and compare that score with the one on the cases you tuned against."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "An eval is a dataset, a task and a grader, producing a number you can compare across versions.",
+      "The dataset is the lasting asset. Build it from real traffic, edge cases, adversarial inputs and every failure you have seen.",
+      "Keep a held-out set, or you will overfit your prompt to the cases you can see.",
+      "Use the cheapest grader that works: code-based checks first, a model judge only for what needs judgement.",
+      "Split quality into specific properties, and grade each one separately.",
+      "An LLM judge checks one property against a clear rubric, reasons before its verdict, and uses a binary or small scale.",
+      "Control position, verbosity and self-preference bias, and validate the judge against human labels.",
+      "Gate changes in CI on a threshold and on regression from a baseline, reported by tag. Feed production failures back into the dataset."
+    ],
+    "groups": [
+      {
+        "title": "Dataset sources",
+        "items": [
+          { "syntax": "real traffic (scrubbed)", "desc": "What users actually ask, in their own words" },
+          { "syntax": "past failures", "desc": "Every bug becomes a permanent case" },
+          { "syntax": "edge cases", "desc": "Empty, huge, multilingual, multi-part, out of scope" },
+          { "syntax": "adversarial cases", "desc": "Injection, prompt extraction, policy violations" },
+          { "syntax": "unanswerable cases", "desc": "Checks that the system says \"I don't know\"" },
+          { "syntax": "held-out split", "desc": "Never looked at while tuning" },
+          { "syntax": "tags per case", "desc": "Category, language, source, difficulty" }
+        ]
+      },
+      {
+        "title": "Grader ladder",
+        "items": [
+          { "syntax": "exact / normalised match", "desc": "Labels, routes, extracted fields" },
+          { "syntax": "schema validation", "desc": "Structure and types of JSON output" },
+          { "syntax": "contains / does not contain", "desc": "Required commands, forbidden content" },
+          { "syntax": "execute it", "desc": "Code compiles, tests pass, the SQL runs and returns the expected rows" },
+          { "syntax": "embedding similarity to a reference", "desc": "Tolerant of wording; blind to small factual errors" },
+          { "syntax": "LLM judge with a rubric", "desc": "Faithfulness, completeness, tone, helpfulness" },
+          { "syntax": "human review of a sample", "desc": "The ground truth, and calibration for everything else" }
+        ]
+      },
+      {
+        "title": "Judge prompt checklist",
+        "items": [
+          { "syntax": "one property, defined precisely", "desc": "With examples of pass and fail, if helpful" },
+          { "syntax": "all the evidence supplied", "desc": "Source passages, reference answer, the question" },
+          { "syntax": "reasoning first, verdict last", "desc": "More accurate, and explainable" },
+          { "syntax": "pass/fail, or 3-5 described levels", "desc": "Not 1 to 100" },
+          { "syntax": "structured output", "desc": "So that code can read the verdict" },
+          { "syntax": "temperature 0, capable model", "desc": "Consistency" },
+          { "syntax": "pairwise: run both orders", "desc": "Count a win only if both runs agree" },
+          { "syntax": "agreement with human labels", "desc": "Measure it before trusting the judge" }
+        ]
+      },
+      {
+        "title": "Statistics to remember",
+        "items": [
+          { "syntax": "1 case out of n = 100 / n percentage points", "desc": "With n = 50, each case is 2 points" },
+          { "syntax": "small differences are often noise", "desc": "Re-run, or add cases, before concluding" },
+          { "syntax": "pass rate by tag", "desc": "Averages hide the collapse of a subgroup" },
+          { "syntax": "judge agreement = matching verdicts / total", "desc": "Against human labels on the same outputs" },
+          { "syntax": "quality, cost and latency together", "desc": "A change is judged on all three" }
+        ]
+      },
+      {
+        "title": "CI gate",
+        "items": [
+          { "syntax": "fast suite on every pull request", "desc": "Code-graded, a few minutes" },
+          { "syntax": "full suite nightly and before release", "desc": "Includes LLM judges" },
+          { "syntax": "fail if pass rate < threshold", "desc": "An absolute quality floor" },
+          { "syntax": "fail if pass rate < baseline - tolerance", "desc": "No silent regressions" },
+          { "syntax": "sys.exit(1)", "desc": "A non-zero exit fails the pipeline" },
+          { "syntax": "store outputs and versions", "desc": "Prompt, model, retrieval config, dataset" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Shipping on the strength of a few manual tries that happened to look good.",
+      "Building the dataset from invented inputs that are tidier and easier than real ones.",
+      "Tuning the prompt until every visible case passes, with no held-out set to reveal the overfitting.",
+      "Asking a judge for one overall quality score from 1 to 10, with no rubric.",
+      "Trusting an LLM judge that has never been compared with human labels.",
+      "Reading small score differences on a small dataset as real improvements."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A team's eval has 50 cases. Version A scores 86%, and version B scores 88%. What is the most reasonable conclusion?",
+      "options": [
+        "The difference is one case, and may well be noise",
+        "Version B is clearly better, and should be shipped at once",
+        "Version A is better, since lower scores mean stricter grading",
+        "The eval is broken, since the scores should be identical"
+      ],
+      "answer": 0,
+      "explain": "With 50 cases, each one is worth two points, so the two versions differ by a single case. Outputs also vary from run to run. More cases, repeated runs, and a look at which case changed are needed before concluding anything."
+    },
+    {
+      "q": "You need to check that a model's output is valid JSON with a `category` field taken from a fixed list. Which grader is best?",
+      "options": [
+        "A code-based check that parses the JSON and validates the field",
+        "An LLM judge that is asked whether the output looks like valid JSON",
+        "Embedding similarity between the output and a reference JSON string",
+        "A human reviewer who reads a sample of the outputs every week"
+      ],
+      "answer": 0,
+      "explain": "This property is fully deterministic, so code can check it perfectly, instantly and free of charge. Keep model judges and human review for properties that need reading and judgement."
+    },
+    {
+      "q": "In a pairwise comparison, your LLM judge prefers answer A when A is shown first, and prefers B when B is shown first. What is this, and how do you handle it?",
+      "options": [
+        "Position bias: run both orders, and count a win only when they agree",
+        "Verbosity bias: shorten both answers to the same number of words",
+        "Self-preference: switch the judge to the same model that wrote A",
+        "Normal variation: average the two verdicts and report a tie score"
+      ],
+      "answer": 0,
+      "explain": "Judges can favour a position regardless of content. Swapping the order and requiring consistent verdicts removes the effect, and the inconsistent pairs are best treated as ties."
+    },
+    {
+      "q": "Why should an LLM judge write out its reasoning before it gives its verdict?",
+      "options": [
+        "The verdict can then build on the analysis, and you can see why it decided",
+        "Reasoning text makes the judge's response cheaper to generate",
+        "Verdicts that come after reasoning are exempt from position bias",
+        "It lets the judge skip reading the source passages altogether"
+      ],
+      "answer": 0,
+      "explain": "Generation is sequential, so a verdict that follows a written analysis is better grounded than one produced first. The reasoning also lets you audit any disagreement between the judge and a person."
+    },
+    {
+      "q": "A user reports a badly wrong answer in production. After fixing the prompt, what is the most important follow-up?",
+      "options": [
+        "Add the input to the eval dataset as a permanent regression case",
+        "Delete the conversation from the logs, so that it cannot recur",
+        "Raise the judge's pass threshold, so that fewer answers fail",
+        "Re-run only that one input, to confirm that the fix worked"
+      ],
+      "answer": 0,
+      "explain": "Promoting every confirmed failure into the dataset ensures that a later change to the prompt or the model cannot silently bring it back. Testing only the one input would miss regressions elsewhere."
+    }
+  ]
+}

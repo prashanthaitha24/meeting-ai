@@ -1,0 +1,250 @@
+{
+  "id": "ai-llm",
+  "minutes": 30,
+  "intro": "A large language model can write code, summarise a contract and explain a stack trace, and it can also state something false with complete confidence. Both behaviours come from the same mechanism, and once you understand that mechanism, LLMs stop being magic and become a component you can engineer with. This module explains what a model actually does when you call it, and what that means for cost, latency, limits and reliability in the applications you build.",
+  "objectives": [
+    "Explain next-token prediction, and how pretraining and instruction tuning produce an assistant",
+    "Reason about tokens as the unit of cost, speed and limits",
+    "Treat the context window as the model's only working memory, and the API as stateless",
+    "Control output with temperature, top-p, maximum tokens and stop sequences",
+    "Explain why models hallucinate, and use embeddings to find relevant text"
+  ],
+  "sections": [
+    {
+      "heading": "One thing, done repeatedly: predict the next token",
+      "blocks": [
+        { "type": "p", "text": "An LLM is the decoder-only transformer from the previous module, at very large scale. Given a sequence of tokens, it outputs a probability for every token in its vocabulary as the one that comes next. To generate text, the application picks one token from that distribution, appends it to the sequence, and runs the model again. It repeats until the model emits a special end token, or a limit is reached. This loop is called **autoregressive generation**." },
+        { "type": "code", "lang": "text", "code": "input:   \"The capital of France is\"\n\nmodel -> \" Paris\"   0.92\n         \" the\"     0.03\n         \" located\" 0.01\n         ...every other token in the vocabulary...\n\npick \" Paris\" -> input becomes \"The capital of France is Paris\" -> run the model again -> ..." },
+        { "type": "p", "text": "Everything else follows from this. The model has no database of facts and no separate reasoning engine. It has billions of numerical weights that encode statistical patterns of language, and those patterns happen to capture a remarkable amount of knowledge and problem-solving ability. It also means that output is produced **one token at a time, strictly in order**, which is why generation is slow compared with reading, why responses can be streamed as they are produced, and why the model cannot revise an earlier sentence once it has been written." },
+        { "type": "p", "text": "A model becomes an assistant in stages." },
+        { "type": "table", "headers": ["Stage", "Data", "Result"], "rows": [
+          ["**Pretraining**", "A very large corpus of text and code; the task is simply to predict the next token", "A base model: fluent and knowledgeable, but it only continues text. Ask it a question and it may reply with more questions."],
+          ["**Instruction tuning**", "Curated examples of instructions paired with good responses", "A model that follows instructions and holds a conversation"],
+          ["**Preference tuning**", "Human or AI judgements about which of two responses is better (RLHF and related methods)", "Responses that are more helpful, more honest and safer"]
+        ]},
+        { "type": "p", "text": "Two practical facts follow. A model's knowledge stops at its **training cutoff**: it knows nothing about later events, or about your private data, unless you put that information into the prompt. And the model you call through an API is a fixed snapshot. It does not learn from your conversations." }
+      ]
+    },
+    {
+      "heading": "Tokens: the unit of everything",
+      "blocks": [
+        { "type": "p", "text": "Models read and write **tokens**, not characters or words. A tokeniser splits text into pieces from a fixed vocabulary, using an algorithm such as byte-pair encoding that gives short codes to common sequences. Frequent English words are usually one token. Rare words, names, code, numbers and text in many other languages break into several." },
+        { "type": "code", "lang": "text", "code": "\"Hello world\"            -> [\"Hello\", \" world\"]                        2 tokens\n\"Kubernetes\"             -> [\"Kub\", \"ernetes\"]                         2 tokens (illustrative)\n\"antidisestablishment\"   -> [\"ant\", \"idis\", \"establish\", \"ment\"]       4 tokens (illustrative)\n\"2026-09-17T14:02:11Z\"   -> many small pieces                          10+ tokens\n\nRule of thumb for English prose:  1 token is about 4 characters, or 0.75 words.\n                                  1,000 words is about 1,300 tokens.\nThe exact split differs between model families. Count with the provider's tokeniser." },
+        { "type": "list", "items": [
+          "**Cost** is charged per token, separately for input and output. Output tokens usually cost several times more than input tokens.",
+          "**Latency** depends mostly on the number of **output** tokens, because they are generated one after another. A long prompt adds a little; a long answer adds a lot.",
+          "**Limits** are in tokens: the context window, the maximum output, and your rate limits per minute.",
+          "**Non-English text and structured data** such as JSON, logs and UUIDs can use far more tokens than their length suggests, which affects cost and how much fits.",
+          "**Character-level tasks are hard.** The model sees `[\"Kub\", \"ernetes\"]`, not letters, so counting the letters in a word, reversing a string, or exact arithmetic on long numbers is unreliable. Have it write code that does such work, or use a tool."
+        ]},
+        { "type": "code", "lang": "python", "code": "def estimate_tokens(text: str) -> int:\n    \"\"\"Rough estimate for English prose. Use the provider's tokeniser for real budgeting.\"\"\"\n    return max(1, round(len(text) / 4))\n\n\ndef fits(prompt: str, context_window: int, reserve_for_output: int) -> bool:\n    return estimate_tokens(prompt) + reserve_for_output <= context_window" }
+      ]
+    },
+    {
+      "heading": "The context window, and statelessness",
+      "blocks": [
+        { "type": "p", "text": "The **context window** is the maximum number of tokens the model can consider at once, counting everything: system instructions, conversation history, documents you pasted in, tool definitions and results, and the response being generated. It is the model's **only working memory**. Whatever is not in the window does not exist for the model on that call." },
+        { "type": "p", "text": "The most important architectural fact for application builders is that **the API is stateless**. The model remembers nothing between calls. A chat application creates the appearance of memory by sending the whole conversation again with every request." },
+        { "type": "code", "lang": "python", "code": "# call_llm is a stand-in: wire it to whichever provider you use.\n# It takes a list of messages and returns the assistant's reply as a string.\n\nmessages = [\n    {\"role\": \"system\", \"content\": \"You are a concise assistant for on-call engineers.\"},\n    {\"role\": \"user\", \"content\": \"What does exit code 137 mean in Kubernetes?\"},\n]\nreply = call_llm(messages)\nmessages.append({\"role\": \"assistant\", \"content\": reply})\n\n# The follow-up only makes sense because the WHOLE history is sent again\nmessages.append({\"role\": \"user\", \"content\": \"How do I find out which container it was?\"})\nreply = call_llm(messages)" },
+        { "type": "list", "items": [
+          "Each turn costs more than the last, because the history grows. A fifty-turn conversation pays for the first message fifty times.",
+          "When the history would overflow the window, you must do something: truncate the oldest turns, summarise them, or retrieve only the relevant parts. That decision is yours, not the model's.",
+          "\"Memory\" features in products are built the same way: something stores notes outside the model, and places the relevant ones into the prompt.",
+          "A larger window is not a substitute for selecting well. Models attend less reliably to material buried in the middle of a very long context, more tokens mean more cost and latency, and irrelevant text dilutes the relevant. Put in what is needed, clearly organised.",
+          "Roles matter. The **system** message sets behaviour for the whole conversation. **User** and **assistant** messages alternate. Providers differ in the details, and the pattern is universal."
+        ]}
+      ]
+    },
+    {
+      "heading": "Sampling: controlling the output",
+      "blocks": [
+        { "type": "p", "text": "The model outputs a probability distribution, and the **sampling** settings decide how a token is chosen from it. These are the main controls you have at request time." },
+        { "type": "table", "headers": ["Parameter", "Effect", "Guidance"], "rows": [
+          ["**Temperature**", "Divides the logits before the softmax. Low values sharpen the distribution; high values flatten it.", "Around 0 for extraction, classification and code. Higher for brainstorming and creative writing."],
+          ["**Top-p** (nucleus)", "Samples only from the smallest set of tokens whose probabilities add up to p", "Leave at the default, or adjust temperature or top-p, not both"],
+          ["**Top-k**", "Samples only from the k most likely tokens", "Offered by some providers; rarely needs changing"],
+          ["**Max output tokens**", "A hard cap on the length of the response", "Always set it. It bounds cost and latency, and stops runaway output."],
+          ["**Stop sequences**", "Strings at which generation halts", "Useful for structured formats and for ending at a delimiter"]
+        ]},
+        { "type": "p", "text": "Temperature 0 makes the model pick the most likely token every time, which is called greedy decoding. It makes output far more repeatable, and **still not perfectly deterministic**, because of floating-point behaviour on parallel hardware and because providers update models. Do not build anything that requires byte-identical output from one call to the next. If a response ends abruptly, check the **stop reason** that the API returns: a value indicating that the token limit was reached means the output was cut off, not that the model had finished." },
+        { "type": "code", "lang": "python", "code": "# Deterministic-leaning task: extract fields from a log line\nextraction = call_llm(messages, temperature=0, max_tokens=300)\n\n# Open-ended task: propose names for an internal tool\nideas = call_llm(messages, temperature=1.0, max_tokens=500)" },
+        { "type": "callout", "kind": "note", "text": "Some recent models that reason at length before answering fix or restrict certain sampling parameters. Check the documentation for the model you are using instead of assuming that every setting is available." }
+      ]
+    },
+    {
+      "heading": "Why models hallucinate",
+      "blocks": [
+        { "type": "p", "text": "A **hallucination** is output that is fluent, confident and false: a function that does not exist, an invented citation, a plausible configuration flag. It is not a malfunction. It is the normal mechanism operating where it lacks grounding. The model is trained to produce a **likely** continuation. It has no internal marker that separates \"I know this\" from \"this is the kind of thing that usually comes next\", and a text that says \"I am not sure\" is, in most training data, less common than a text that answers." },
+        { "type": "list", "items": [
+          "Hallucination is most likely for **specifics**: exact names, numbers, quotations, URLs, API signatures, version details, anything recent or obscure, and anything about your private systems.",
+          "It is least likely where the answer is **in the context**. A model asked to answer from a document you have supplied is far more reliable than one asked from memory. This is the basis of retrieval-augmented generation, two modules ahead.",
+          "**Give it a way out.** Instruct the model to say when the provided material does not contain the answer, and hallucination falls noticeably.",
+          "**Ask for evidence.** Have it quote the passage that supports each claim, then check that the quote really appears in the source.",
+          "**Give it tools** for what it is bad at: a calculator, a code interpreter, a search, a database query. A later module covers tool use.",
+          "**Verify mechanically** whatever can be verified: compile the code, run the tests, validate the JSON against a schema, check that the URL exists.",
+          "**Keep a human in the loop** in proportion to the stakes."
+        ]},
+        { "type": "callout", "kind": "warning", "text": "Fluency is not evidence of correctness. Models write with the same assured tone whether they are right or wrong, and people are strongly inclined to trust well-written text. Design your application on the assumption that any unverified specific may be wrong." }
+      ]
+    },
+    {
+      "heading": "Embeddings",
+      "blocks": [
+        { "type": "p", "text": "An **embedding model** is a related kind of model that, instead of generating text, turns a piece of text into a single vector which represents its meaning. Texts with similar meanings produce vectors that point in similar directions, so **cosine similarity**, from the maths module, measures how closely two texts are related, even when they share no words at all." },
+        { "type": "code", "lang": "python", "code": "import numpy as np\n\n# embed is a stand-in: it takes a list of strings and returns an array (n, dimension)\ndocs = [\n    \"Pod is in CrashLoopBackOff after the deploy\",\n    \"How to request annual leave\",\n    \"Container keeps restarting with exit code 137\",\n]\ndoc_vecs = embed(docs)\nquery_vec = embed([\"my application restarts over and over\"])[0]\n\n\ndef normalise(v: np.ndarray) -> np.ndarray:\n    return v / np.linalg.norm(v, axis=-1, keepdims=True)\n\n\nscores = normalise(doc_vecs) @ normalise(query_vec)     # cosine similarities, shape (3,)\nfor i in np.argsort(-scores):\n    print(f\"{scores[i]:.3f}  {docs[i]}\")\n# the two restart-related documents rank first, despite sharing few words with the query" },
+        { "type": "list", "items": [
+          "Uses: semantic search, retrieval for RAG, clustering similar tickets or incidents, removing near-duplicates, recommendations, and classification with very few examples.",
+          "Embedding calls are far cheaper and faster than generation, and the vectors can be calculated once and stored.",
+          "Vectors from **different embedding models cannot be compared** with each other. If you change the model, you must embed everything again.",
+          "Embedding models have their own input limits, so long documents are split into chunks first. How to chunk is a design decision that the RAG module covers.",
+          "Similar does not mean correct, or relevant to the question. \"How do I enable feature X?\" and \"How do I disable feature X?\" are close together in embedding space."
+        ]}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Probe a model's behaviour",
+    "steps": [
+      "Get API access to any LLM provider, or run a small open model locally. Write a `call_llm(messages, **params)` function that wraps it, and print the token usage that the API reports with each response.",
+      "Use the provider's tokeniser or token-counting endpoint on an English paragraph, the same paragraph in another language, a block of JSON, and a block of code. Compare tokens per character across them.",
+      "Prove that the API is stateless. Tell the model your name in one call, and ask for it in a separate call with no history. Then send both turns together.",
+      "Run the same creative prompt five times at temperature 0 and five times at temperature 1. Compare the variation. Then run an extraction task both ways, and note which setting you would ship.",
+      "Set a very low maximum output, ask for a long answer, and find the field in the response that tells you the output was cut off.",
+      "Provoke a hallucination: ask for the exact signature of an obscure function in a niche library, or for a citation. Then supply the real documentation in the prompt, with an instruction to answer only from it, and compare.",
+      "Ask the model to count the letter \"r\" in a long word, and then ask it to write and reason through Python code that does so. Explain the difference in terms of tokens.",
+      "Embed ten short sentences on two or three topics. Compute the matrix of cosine similarities, and check whether sentences on the same topic score highest with each other."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "An LLM predicts the next token, repeatedly. There is no fact database and no separate reasoning engine.",
+      "Pretraining gives knowledge; instruction and preference tuning make it an assistant. Knowledge stops at the training cutoff.",
+      "Tokens are the unit of cost, latency and limits. Output tokens are the slow and expensive ones.",
+      "The context window is the model's only memory, and the API is stateless: you send the history again every time.",
+      "Temperature near 0 for extraction and code, higher for creative work. Always set a maximum output, and check the stop reason.",
+      "Low temperature is repeatable, not deterministic.",
+      "Hallucination is likely output without grounding. Supply the source, allow \"I don't know\", ask for quotes, and verify.",
+      "Embeddings turn text into vectors, and cosine similarity finds related text. Never mix vectors from different models."
+    ],
+    "groups": [
+      {
+        "title": "Token rules of thumb (English)",
+        "items": [
+          { "syntax": "1 token ~ 4 characters ~ 0.75 words", "desc": "Rough average for prose" },
+          { "syntax": "1,000 words ~ 1,300 tokens", "desc": "For estimating documents" },
+          { "syntax": "code, JSON, logs, IDs", "desc": "More tokens per character than prose" },
+          { "syntax": "non-English text", "desc": "Often noticeably more tokens for the same meaning" },
+          { "syntax": "cost = in_tokens x in_price + out_tokens x out_price", "desc": "Output is usually priced higher" },
+          { "syntax": "latency ~ time to first token + out_tokens / tokens per second", "desc": "Output length dominates" }
+        ]
+      },
+      {
+        "title": "Request parameters",
+        "items": [
+          { "syntax": "temperature = 0", "desc": "Most likely token each time; repeatable; for extraction, classification, code" },
+          { "syntax": "temperature ~ 0.7 to 1.0", "desc": "More varied; for ideas and prose" },
+          { "syntax": "top_p", "desc": "Sample from the smallest set of tokens totalling probability p" },
+          { "syntax": "max_tokens", "desc": "Hard cap on output length; always set it" },
+          { "syntax": "stop sequences", "desc": "Halt when any of these strings is generated" },
+          { "syntax": "stop reason", "desc": "Why generation ended: natural end, length limit, stop sequence, tool call" }
+        ]
+      },
+      {
+        "title": "Message structure",
+        "items": [
+          { "syntax": "{\"role\": \"system\", \"content\": ...}", "desc": "Standing instructions and persona" },
+          { "syntax": "{\"role\": \"user\", \"content\": ...}", "desc": "The person's turn, or your application's request" },
+          { "syntax": "{\"role\": \"assistant\", \"content\": ...}", "desc": "The model's earlier replies, sent back as history" },
+          { "syntax": "messages.append(...)", "desc": "You maintain the history; the API remembers nothing" },
+          { "syntax": "truncate / summarise / retrieve", "desc": "Three ways to keep history inside the window" }
+        ]
+      },
+      {
+        "title": "Reducing hallucination",
+        "items": [
+          { "syntax": "ground it", "desc": "Put the source material in the prompt" },
+          { "syntax": "allow a way out", "desc": "\"If the answer is not in the text, say so\"" },
+          { "syntax": "ask for quotes", "desc": "Then check that they appear in the source" },
+          { "syntax": "use tools", "desc": "Calculator, code execution, search, database" },
+          { "syntax": "verify mechanically", "desc": "Compile, test, validate against a schema, resolve the link" },
+          { "syntax": "human review", "desc": "In proportion to the stakes" }
+        ]
+      },
+      {
+        "title": "Embeddings",
+        "items": [
+          { "syntax": "embed(texts) -> array (n, d)", "desc": "One vector per text" },
+          { "syntax": "v / np.linalg.norm(v)", "desc": "Normalise, so that a dot product is cosine similarity" },
+          { "syntax": "docs_n @ query_n", "desc": "Similarity of one query to every document" },
+          { "syntax": "np.argsort(-scores)[:k]", "desc": "Indices of the k most similar" },
+          { "syntax": "same model for queries and documents", "desc": "Vectors from different models are not comparable" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Assuming that the model remembers earlier calls, when it sees only what you send this time.",
+      "Letting conversation history grow without limit, until cost climbs and the window overflows.",
+      "Leaving the maximum output unset, and paying for, and waiting on, runaway responses.",
+      "Relying on temperature 0 for byte-identical output.",
+      "Trusting a fluent answer about a specific API, number or citation without checking it.",
+      "Asking the model for character-level or exact arithmetic work that a line of code would do reliably."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A chatbot answers a follow-up question correctly, using details from earlier in the conversation. How does the model know those details?",
+      "options": [
+        "The application sends the whole conversation history again with each request",
+        "The model stores each user's conversation in its weights between calls",
+        "The provider keeps a session on the server that the model reads from",
+        "The model was fine-tuned on this user's messages after the first turn"
+      ],
+      "answer": 0,
+      "explain": "The API is stateless, and the context window is the model's only memory. Chat applications resend the accumulated messages every turn, which is why long conversations cost more with each turn."
+    },
+    {
+      "q": "Which change will reduce the latency of an LLM response the most?",
+      "options": [
+        "Asking for a shorter answer, so that fewer output tokens are generated",
+        "Removing two sentences from a long system prompt",
+        "Lowering the temperature from 1.0 to 0",
+        "Writing the prompt in capital letters for emphasis"
+      ],
+      "answer": 0,
+      "explain": "Output tokens are generated one after another, so their number dominates response time. Input is processed in parallel and adds comparatively little. Temperature does not affect speed."
+    },
+    {
+      "q": "A model confidently gives the signature of a function that does not exist in the library you named. What is the best explanation?",
+      "options": [
+        "It produces likely-looking text, and has no internal check that a specific detail is real",
+        "It deliberately invents answers when the temperature is set above zero",
+        "The library was removed from its database after the training cutoff",
+        "Its context window was too small to hold the whole of the question"
+      ],
+      "answer": 0,
+      "explain": "The model predicts plausible continuations and has no separate record of facts to check against. Exact names and signatures are where this shows most. Supplying the real documentation in the prompt is the remedy."
+    },
+    {
+      "q": "For a task that extracts an invoice number and a total from text into JSON, which settings are most appropriate?",
+      "options": [
+        "Temperature 0, with a modest limit on output tokens",
+        "Temperature 1.2, with no limit on output tokens",
+        "Temperature 0.9, with top-p raised to its maximum value",
+        "Whatever the defaults are, since settings do not affect extraction"
+      ],
+      "answer": 0,
+      "explain": "Extraction has one right answer, so you want the most likely tokens and repeatable output. A cap on output bounds cost and guards against runaway generation."
+    },
+    {
+      "q": "You embedded 50,000 documents with one embedding model, and then switched to a different model for embedding queries. Search quality collapsed. Why?",
+      "options": [
+        "Vectors from different models live in unrelated spaces and cannot be compared",
+        "Cosine similarity only works when there are fewer than 10,000 documents",
+        "The new model's vectors must be un-normalised before they are compared",
+        "Embedding models expire, so the old document vectors became invalid"
+      ],
+      "answer": 0,
+      "explain": "Each embedding model learns its own coordinate system. Similarity between a vector from one model and a vector from another is meaningless, so all documents must be embedded again with the new model."
+    }
+  ]
+}

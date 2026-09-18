@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Distributed-systems failure modes — Site Reliability | ThavionAI Education</title>
+  <meta name="description" content="Timeouts, retries with jitter, backpressure, circuit breakers, cascading failure." />
+  <meta property="og:title" content="Distributed-systems failure modes — ThavionAI Education" />
+  <meta property="og:description" content="Timeouts, retries with jitter, backpressure, circuit breakers, cascading failure." />
+  <meta property="og:type" content="article" />
+  <link rel="canonical" href="https://thavionai.com/education/sre-failure.html" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-sre" data-module="sre-failure">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><div class="nav-logo-icon">T</div>ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html#features">Features</a>
+    <a href="../index.html#products">Products</a>
+    <a href="../education.html" class="active">Education</a>
+    <a href="../index.html#about">About</a>
+    <a href="../index.html#pricing">Pricing</a>
+    <a href="../index.html#contact" class="nav-cta">Contact Us</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#sre">Site Reliability</a> › Stage 4: Engineering for resilience</div>
+    <h1>Distributed-systems failure modes</h1>
+    <p class="lede">Timeouts, retries with jitter, backpressure, circuit breakers, cascading failure.</p>
+    <div class="meta">
+      <span class="chip">Advanced</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 13 of 16</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">In a distributed system something is always failing: a network hiccup, a slow disk, a node being replaced, a dependency having a bad minute. None of that is an outage. The outage comes from how the rest of the system reacts. A slow database that makes callers retry harder, which slows it further, until every service in the chain is down, is a cascading failure, and well-meant code causes most of them. This module teaches the defensive patterns that contain failure: timeouts, careful retries, backpressure and circuit breakers.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Explain why slow is worse than down, and how resource exhaustion turns a local fault into a cascading failure</li><li>Set timeouts and propagate deadlines so that no caller waits longer than is useful</li><li>Implement retries safely with exponential backoff, jitter, retry budgets and idempotency keys</li><li>Apply backpressure and load shedding so that an overloaded service degrades instead of collapsing</li><li>Use circuit breakers and bulkheads to isolate a failing dependency</li></ul>
+    </div>
+    <section id="slow-is-worse-than-down"><h2>Slow is worse than down</h2>
+    <p>A dependency that is completely down fails fast: connections are refused, errors return in milliseconds, and callers can react. A dependency that is <strong>slow</strong> is far more dangerous, because every call to it holds resources while it waits: a thread, a connection from the pool, memory for the request, a slot in a queue.</p>
+    <p>Follow what happens. Service A calls service B, which has become slow. A's worker threads block waiting for B. New requests keep arriving at A, and soon every thread is waiting on B. Now A cannot serve <strong>any</strong> request, including those that never needed B. A's callers see A as slow, and the same thing happens to them. The fault travels <strong>up</strong> the call graph until the whole product is down because of one struggling component several layers deep. This is a <strong>cascading failure</strong>.</p>
+    <p>Several mechanisms feed it, and they reinforce one another.</p>
+    <ul><li><strong>Resource exhaustion</strong>: threads, connection pools, file descriptors and memory are consumed by waiting requests.</li><li><strong>Retries</strong> multiply the load on the component that is already struggling.</li><li><strong>Load redistribution</strong>: when one overloaded instance dies, its traffic moves to the others, which pushes them over too.</li><li><strong>Cold start</strong>: instances that restart have empty caches and unopened connections, so they are slowest exactly when demand is highest.</li><li><strong>Health checks that kill</strong>: liveness probes fail on overloaded instances, the orchestrator restarts them, and capacity falls further.</li></ul>
+    <p>The defensive goal is always the same. <strong>Fail fast, bound every resource, and never let one dependency's problem consume everything you have.</strong></p></section>
+  <section id="timeouts-and-deadlines"><h2>Timeouts and deadlines</h2>
+    <p>Every call that crosses a process boundary needs a timeout. Many client libraries default to <strong>no timeout at all</strong>, which means that a hung dependency holds your thread for ever. Set two: a <strong>connection timeout</strong>, which is short because establishing a connection should take milliseconds, and a <strong>request timeout</strong> for the whole exchange.</p>
+    <div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import requests
+
+# (connect timeout, read timeout) in seconds. Never call without one.
+resp = requests.get("https://inventory.internal/stock/SKU-9917", timeout=(0.5, 2.0))</code></pre></div>
+    <p>Choose the value from data, not from instinct. Look at the dependency's latency distribution and set the timeout a little above its normal high percentile, for example its p99.9. If the p99 is 200 ms, a 30-second timeout protects nothing: by the time it fires, the user has long since gone, and you held a thread the whole time. A timeout that is too tight, on the other hand, turns ordinary slowness into errors, so check how often it fires.</p>
+    <p>Timeouts should also get <strong>shorter as you go down</strong> the call chain. If the edge gives a request 3 seconds, a service two layers down that allows itself 10 seconds is doing work nobody will ever see. <strong>Deadline propagation</strong> makes this exact: the first service sets an absolute deadline, passes it along with the request, and each service checks the time remaining before starting expensive work and uses it to bound its own outgoing calls. gRPC does this natively, and with HTTP you can pass a header.</p>
+    <div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import time
+
+
+class DeadlineExceeded(Exception):
+    pass
+
+
+def remaining(deadline: float, reserve: float = 0.05) -&gt; float:
+    """Seconds left before an absolute deadline (time.monotonic based)."""
+    left = deadline - time.monotonic() - reserve
+    if left &lt;= 0:
+        raise DeadlineExceeded("no time left; not starting more work")
+    return left
+
+
+def handle_checkout(order, deadline: float):
+    stock = call_inventory(order, timeout=min(1.0, remaining(deadline)))
+    payment = call_payments(order, timeout=min(2.0, remaining(deadline)))
+    return confirm(order, stock, payment)</code></pre></div>
+    <div class="callout callout-tip"><strong>Tip</strong><p>When a request is cancelled or times out, <strong>stop working on it</strong>. Cancel the downstream calls and abandon the query. Work done for a caller who has already given up is pure waste, and during an overload it is the waste that kills you.</p></div></section>
+  <section id="retries-that-help-instead-of-harm"><h2>Retries that help instead of harm</h2>
+    <p>Retries hide transient faults, such as a dropped packet, a pod being replaced or a brief leader election. They are also the most common way a small problem becomes a large one, because a retry is <strong>extra load, applied at the moment the system can least bear it</strong>.</p>
+    <p>The arithmetic is unforgiving. If three layers of services each make up to 3 attempts, one user request can become 3 x 3 x 3 = <strong>27</strong> requests at the bottom layer. A database that was 20% over capacity is suddenly facing many times its normal load, and it can never recover while the retries continue.</p>
+    <div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import random
+import time
+
+RETRYABLE = (ConnectionError, TimeoutError)
+
+
+def call_with_retries(fn, max_attempts: int = 3, base: float = 0.1, cap: float = 2.0):
+    """Exponential backoff with full jitter."""
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except RETRYABLE:
+            if attempt == max_attempts - 1:
+                raise
+            # full jitter: a random wait between 0 and the exponential ceiling
+            time.sleep(random.uniform(0, min(cap, base * 2 ** attempt)))</code></pre></div>
+    <ul><li><strong>Exponential backoff</strong> doubles the wait ceiling after each failure, which gives the dependency room to recover.</li><li><strong>Jitter</strong> randomises the wait. Without it, every client that failed at the same moment retries at the same moment, and the dependency is hit by synchronised waves. This is the <strong>thundering herd</strong>. Full jitter, a uniform random wait between zero and the ceiling, spreads them out.</li><li><strong>Few attempts.</strong> Two or three in total. If three attempts failed, a fourth is very unlikely to succeed and certain to add load.</li><li><strong>Retry only what can succeed.</strong> Connection errors, timeouts, <code>503</code> and <code>429</code> are candidates. A <code>400</code>, <code>401</code>, <code>403</code> or <code>404</code> will fail identically every time. Honour a <code>Retry-After</code> header when the server sends one.</li><li><strong>Retry at one layer only</strong>, normally the one closest to the failure. If every layer retries, the counts multiply.</li></ul>
+    <p>A <strong>retry budget</strong> puts a hard limit on the damage. Instead of bounding attempts per request, bound retries as a share of all traffic, for example no more than 10% of requests. In healthy times that allows every transient fault to be retried. In an outage, where everything is failing, it caps the extra load at 10% instead of 200%.</p>
+    <p>Retrying is only safe if the operation is <strong>idempotent</strong>, meaning that doing it twice has the same effect as doing it once. Reads are. "Charge this card" is not: a timeout tells you nothing about whether the charge went through. The fix is an <strong>idempotency key</strong>. The client generates a unique ID for the operation and sends it with every attempt, and the server records the keys it has processed and returns the stored result for a repeat instead of acting again.</p>
+    <div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>curl -fsS -X POST https://payments.internal/v1/charges \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: 7c1f3e9a-2b44-4c1e-9d07-5a6e8b1f0c33' \
+  -d '{"order_id": "o-1842", "amount": 4999, "currency": "EUR"}'</code></pre></div></section>
+  <section id="backpressure-and-load-shedding"><h2>Backpressure and load shedding</h2>
+    <p>Every service has a limit. What matters is what happens beyond it. A service with no protection accepts everything, queues it, slows down for everyone, runs out of memory, and dies, after which it serves nobody. A protected service recognises its limit and <strong>refuses the excess quickly and cheaply</strong>, so that the work it does accept is still served well. Serving 80% of users properly is far better than serving 100% of them a timeout.</p>
+    <ul><li><strong>Bound every queue.</strong> An unbounded queue hides overload and converts it into latency and then into memory exhaustion. When a bounded queue is full, reject.</li><li><strong>Limit concurrency.</strong> Cap the number of in-flight requests to what the service can handle, and return <code>503</code> or <code>429</code> at once beyond that. Rejecting costs microseconds; accepting a request you cannot finish costs a thread and the client's time.</li><li><strong>Shed by priority.</strong> Drop the least valuable work first: background refreshes, recommendations and analytics before checkout, and unauthenticated traffic before paying customers.</li><li><strong>Degrade gracefully.</strong> Serve cached or simplified responses, and switch off expensive features, before refusing outright.</li><li><strong>Prefer newer requests under sustained overload.</strong> If the queue is long, the oldest requests have probably been abandoned by callers who timed out. Serving them is wasted work. Dropping the oldest, or serving last-in first-out, keeps the work useful.</li></ul>
+    <div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import threading
+
+
+class Overloaded(Exception):
+    """Translate to HTTP 503 with a Retry-After header."""
+
+
+class ConcurrencyLimiter:
+    def __init__(self, max_in_flight: int):
+        self._slots = threading.BoundedSemaphore(max_in_flight)
+
+    def run(self, fn):
+        if not self._slots.acquire(blocking=False):     # never wait for a slot
+            raise Overloaded("at capacity; shedding load")
+        try:
+            return fn()
+        finally:
+            self._slots.release()
+
+
+limiter = ConcurrencyLimiter(max_in_flight=64)</code></pre></div>
+    <p><strong>Backpressure</strong> is the same idea applied between components: a consumer that cannot keep up signals the producer to slow down, instead of letting work pile up in between. Bounded queues that block the producer, flow control in TCP and in gRPC streams, and <code>429</code> responses with <code>Retry-After</code> are all forms of it. Rate limiting per client, often with a token bucket, additionally stops one noisy client from consuming capacity that belongs to everyone.</p>
+    <div class="callout callout-warning"><strong>Watch out</strong><p>Make health checks overload-aware. If a liveness probe shares the saturated request pool, an overloaded but otherwise healthy instance fails its probe, gets restarted, and returns with cold caches. Keep liveness checks trivial and independent of load, and use readiness to take an instance out of rotation without killing it.</p></div></section>
+  <section id="circuit-breakers-and-bulkheads"><h2>Circuit breakers and bulkheads</h2>
+    <p>When a dependency is clearly failing, continuing to call it wastes your resources and prevents its recovery. A <strong>circuit breaker</strong> wraps the calls and tracks failures. It has three states.</p>
+    <div class="table-wrap"><table><thead><tr><th>State</th><th>Behaviour</th><th>Moves when</th></tr></thead><tbody><tr><td><strong>Closed</strong></td><td>Calls pass through as normal; failures are counted</td><td>The failure rate crosses a threshold: it opens</td></tr><tr><td><strong>Open</strong></td><td>Calls fail at once, without touching the dependency; a fallback is used</td><td>A cool-down period elapses: it becomes half-open</td></tr><tr><td><strong>Half-open</strong></td><td>A small number of trial calls are let through</td><td>They succeed: it closes. They fail: it opens again</td></tr></tbody></table></div>
+    <figure class="diagram" id="fig-circuit-breaker"><div class="diagram-scroll"><svg viewBox="0 0 570 248" role="img" aria-label="Three states. Closed: calls pass through and failures are counted. When failures cross the threshold it moves to Open: calls fail immediately and the fallback is used. After the cool-down it moves to Half-open: a few trial calls are allowed. If they succeed it returns to Closed; if they fail it returns to Open." style="width:100%;max-width:570px;min-width:540px;height:auto;display:block"><defs><marker id="circuit-breaker-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="circuit-breaker-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="circuit-breaker-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="circuit-breaker-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="circuit-breaker-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><polyline points="171.0,70.0 371.0,70.0" fill="none" style="stroke:#f87171" stroke-width="1.6" marker-end="url(#circuit-breaker-arrow-danger)"/><rect x="201.9" y="24.0" width="138.1" height="16" rx="4" class="dg-label-bg"/><text x="271.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:#f87171">failures &gt;= threshold</text><polyline points="461.0,98.0 461.0,198.0 341.0,198.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#circuit-breaker-arrow-default)"/><rect x="344.1" y="179.0" width="113.7" height="16" rx="4" class="dg-label-bg"/><text x="401.0" y="187.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">cool-down elapsed</text><polyline points="201.0,158.0 81.0,158.0 81.0,98.0" fill="none" style="stroke:#34d399" stroke-width="1.6" marker-end="url(#circuit-breaker-arrow-ok)"/><rect x="93.3" y="139.0" width="95.4" height="16" rx="4" class="dg-label-bg"/><text x="141.0" y="147.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:#34d399">trial succeeds</text><polyline points="341.0,158.0 421.0,158.0 421.0,98.0" fill="none" style="stroke:#f87171" stroke-width="1.6" marker-end="url(#circuit-breaker-arrow-danger)"/><rect x="342.4" y="139.0" width="77.1" height="16" rx="4" class="dg-label-bg"/><text x="381.0" y="147.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:#f87171">trial fails</text><rect x="31" y="42.0" width="140" height="56" rx="8" class="dg-node dg-ok"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#6ee7b7">CLOSED</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">calls pass, count</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-danger"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#fca5a5">OPEN</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">fail fast, fallback</text><rect x="201" y="150.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="271.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">HALF-OPEN</text><text x="271.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">a few trial calls</text></svg></div><figcaption>The circuit breaker state machine: calls flow while closed, a run of failures opens it so that callers fail fast and use the fallback, and after a cool-down a few trial calls decide whether it closes again.</figcaption></figure>
+    <div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import time
+
+
+class CircuitOpen(Exception):
+    pass
+
+
+class CircuitBreaker:
+    def __init__(self, failure_threshold: int = 5, cooldown: float = 30.0):
+        self.failure_threshold = failure_threshold
+        self.cooldown = cooldown
+        self.failures = 0
+        self.opened_at = None                 # None means closed
+
+    def call(self, fn):
+        if self.opened_at is not None:
+            if time.monotonic() - self.opened_at &lt; self.cooldown:
+                raise CircuitOpen("failing fast; dependency is unhealthy")
+            # cool-down over: half-open, let this one trial call through
+        try:
+            result = fn()
+        except Exception:
+            self.failures += 1
+            if self.opened_at is not None or self.failures &gt;= self.failure_threshold:
+                self.opened_at = time.monotonic()      # open, or re-open after a failed trial
+            raise
+        self.failures = 0
+        self.opened_at = None                          # success closes the circuit
+        return result</code></pre></div>
+    <p>That sketch shows the state machine. In production, use a maintained library or a service mesh, which add rolling failure-rate windows, limits on concurrent trial calls, thread safety and metrics. Whatever you use, export the breaker's state as a metric and alert when it stays open, because an open breaker means a feature is degraded.</p>
+    <p>A breaker is only as good as its <strong>fallback</strong>. Decide in advance what each caller does when the dependency is unavailable: serve a cached value, return a sensible default, hide the feature, or queue the work for later. If the honest answer is "return an error", the dependency is a hard one, and its reliability limits yours, as the embracing-risk module calculated.</p>
+    <p><strong>Bulkheads</strong>, named after the watertight compartments of a ship, stop one failure from flooding everything. Give each dependency its <strong>own</strong> bounded connection pool or concurrency limit, instead of one shared pool. When the recommendations service hangs, it can exhaust only its own twenty connections, and checkout carries on untouched. The same principle applies at larger scale: separate worker pools for critical and background work, separate clusters or <strong>cells</strong> for groups of customers, so that a bad deploy or a poisoned request takes out one cell and not the whole fleet.</p></section>
+  <section id="putting-it-together"><h2>Putting it together</h2>
+    <p>These patterns are layers of one defence, and each covers a gap left by the others.</p>
+    <div class="table-wrap"><table><thead><tr><th>Pattern</th><th>Protects against</th><th>Without it</th></tr></thead><tbody><tr><td>Timeouts and deadlines</td><td>Slow dependencies holding resources</td><td>One hang consumes every thread</td></tr><tr><td>Backoff, jitter, retry budget</td><td>Transient faults, without amplification</td><td>Retries multiply load and block recovery</td></tr><tr><td>Idempotency keys</td><td>Duplicate side effects from retries</td><td>Double charges, duplicate orders</td></tr><tr><td>Concurrency limits, load shedding</td><td>Overload</td><td>The service collapses instead of degrading</td></tr><tr><td>Circuit breaker with fallback</td><td>A persistently failing dependency</td><td>Resources wasted on calls that are doomed</td></tr><tr><td>Bulkheads and cells</td><td>One failure spreading</td><td>A minor feature takes down the critical path</td></tr></tbody></table></div>
+    <p>You rarely need to write these by hand. A <strong>service mesh</strong> such as Istio or Linkerd, or a proxy such as Envoy, applies timeouts, retries with budgets, circuit breaking and outlier detection uniformly, outside the application, and resilience libraries exist for every major language. What no tool can decide for you is the policy: which timeout, which calls are idempotent, which dependencies are soft, and what the fallback is. Those are design decisions, and they belong in the production readiness review.</p>
+    <p>Finally, none of this can be trusted until it has been exercised. A timeout that was never triggered and a fallback that was never used are hopes, not defences. The chaos engineering module shows how to test them on purpose.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Break a dependency and watch the caller survive</h2>
+    <ol><li>Build two small HTTP services. A calls B on every request. Give B an endpoint that can be told to sleep for a configurable time or to fail a configurable share of requests.</li><li>Give A a small, fixed worker pool and no timeout on its calls to B. Make B sleep 30 seconds, send steady load to A, and watch A stop serving even an endpoint that never calls B. You have produced a cascading failure.</li><li>Add connect and read timeouts to A, chosen from B's measured p99. Repeat the test and compare A's behaviour and thread usage.</li><li>Add retries to A with no backoff, make B fail 50% of requests, and measure how much extra load B receives. Then add exponential backoff with full jitter and a 10% retry budget, and measure again.</li><li>Make B's write endpoint non-idempotent, such as incrementing a counter. Show that a retried timeout double-counts, then fix it with an idempotency key.</li><li>Add a concurrency limiter to A that returns <code>503</code> when full. Push load beyond capacity and compare the success rate and latency of accepted requests with and without it.</li><li>Wrap the call to B in a circuit breaker with a cached fallback. Take B down entirely and confirm that A keeps serving, quickly, in degraded mode, and that the breaker closes again when B returns.</li><li>Give the call to B its own connection pool, separate from A's other dependencies, and show that exhausting it leaves the rest of A healthy.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Distributed-systems failure modes — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Slow is worse than down: waiting calls hold threads, connections and memory, and the failure travels up the call graph.</li><li>Every remote call has a connect timeout and a request timeout, chosen from measured latency, shorter at each layer down.</li><li>Propagate deadlines, and stop working on requests that the caller has abandoned.</li><li>Retries add load at the worst moment. Few attempts, exponential backoff, full jitter, one layer only, plus a retry budget.</li><li>Three layers times three attempts is 27 times the load at the bottom.</li><li>Retry only idempotent operations, and make writes idempotent with an idempotency key.</li><li>Bound every queue and shed load early and cheaply. Serving 80% well beats serving 100% a timeout.</li><li>Circuit breakers need a fallback, and bulkheads keep one dependency from consuming every resource.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Formulas and numbers</h3><table><tbody><tr><td><code>sleep = random(0, min(cap, base * 2^attempt))</code></td><td>Exponential backoff with full jitter</td></tr><tr><td><code>load amplification = attempts ^ layers</code></td><td>3 attempts over 3 layers = 27x</td></tr><tr><td><code>retry budget: retries &lt;= 10% of requests</code></td><td>Caps extra load during an outage at 10%</td></tr><tr><td><code>timeout ~ dependency p99.9 + margin</code></td><td>From data, never the library default</td></tr><tr><td><code>downstream timeout &lt; upstream timeout</code></td><td>Never work past the caller's patience</td></tr><tr><td><code>remaining = deadline - now - reserve</code></td><td>Budget for each outgoing call</td></tr></tbody></table></div><div class="cheat-group"><h3>What to retry</h3><table><tbody><tr><td><code>connection error, timeout</code></td><td>Retry, if the operation is idempotent</td></tr><tr><td><code>503 Service Unavailable</code></td><td>Retry with backoff; honour Retry-After</td></tr><tr><td><code>429 Too Many Requests</code></td><td>Retry later; honour Retry-After</td></tr><tr><td><code>500 Internal Server Error</code></td><td>Sometimes; often a bug that will repeat</td></tr><tr><td><code>400, 401, 403, 404, 422</code></td><td>Never; the request itself is wrong</td></tr><tr><td><code>Idempotency-Key: UUID</code></td><td>Makes a non-idempotent write safe to retry</td></tr></tbody></table></div><div class="cheat-group"><h3>Circuit breaker states</h3><table><tbody><tr><td><code>Closed</code></td><td>Normal operation; failures counted</td></tr><tr><td><code>Closed -&gt; Open</code></td><td>Failure rate crosses the threshold</td></tr><tr><td><code>Open</code></td><td>Fail fast, use the fallback, do not call the dependency</td></tr><tr><td><code>Open -&gt; Half-open</code></td><td>After the cool-down period</td></tr><tr><td><code>Half-open</code></td><td>A few trial calls: success closes, failure re-opens</td></tr><tr><td><code>Fallback options</code></td><td>Cached value, default, hide the feature, queue for later</td></tr></tbody></table></div><div class="cheat-group"><h3>Overload defences</h3><table><tbody><tr><td><code>bounded queue</code></td><td>Reject when full instead of growing</td></tr><tr><td><code>concurrency limit</code></td><td>Cap in-flight requests; 503 beyond it</td></tr><tr><td><code>priority shedding</code></td><td>Drop background and optional work first</td></tr><tr><td><code>graceful degradation</code></td><td>Cached or simplified responses before refusal</td></tr><tr><td><code>rate limit per client (token bucket)</code></td><td>One noisy client cannot starve the rest</td></tr><tr><td><code>drop oldest / serve newest</code></td><td>Old queued requests have probably been abandoned</td></tr><tr><td><code>load-independent liveness probe</code></td><td>Overload must not trigger restarts</td></tr></tbody></table></div><div class="cheat-group"><h3>Isolation</h3><table><tbody><tr><td><code>pool per dependency</code></td><td>A hung dependency exhausts only its own connections</td></tr><tr><td><code>separate worker pools</code></td><td>Critical and background work do not compete</td></tr><tr><td><code>cells / shards</code></td><td>A bad deploy or request affects one slice of users</td></tr><tr><td><code>soft dependency</code></td><td>The request succeeds without it</td></tr><tr><td><code>service mesh policies</code></td><td>Timeouts, retries, breakers and outlier detection outside the app</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Relying on a client library's default timeout, which is often no timeout at all.</li><li>Retrying immediately, without backoff or jitter, and hammering a service that is trying to recover.</li><li>Retrying at every layer of the stack, so that attempts multiply.</li><li>Retrying a non-idempotent write after a timeout and charging the customer twice.</li><li>Using unbounded queues, which turn overload into latency and then into an out-of-memory crash.</li><li>A liveness probe that fails under load, so that the orchestrator restarts overloaded instances and deepens the outage.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "Service A has 50 worker threads and calls service B with no timeout. B starts taking 60 seconds per request. What happens to A?", "options": ["All threads block on B, so A stops serving every request, even unrelated ones", "A returns errors quickly for the calls to B and serves the rest as normal", "A is unaffected, because the slowness is confined to B's own processes", "A scales up automatically until it has enough threads for the slow calls"], "answer": 0, "explain": "Each call to B holds a thread for a minute, so the pool is soon exhausted and nothing else can be served. A timeout, a per-dependency pool and a circuit breaker each would have contained it."}, {"q": "Four layers of services each make up to 3 attempts on failure. In the worst case, how many requests reach the bottom layer for one user request?", "options": ["81", "12", "27", "7"], "answer": 0, "explain": "Attempts multiply across layers: 3 to the power of 4 is 81. This is why retries belong at one layer, with a budget, and not at every layer."}, {"q": "Why is jitter added to exponential backoff?", "options": ["To spread retries out in time, so that clients do not all retry in synchronised waves", "To make each retry faster than the last, so that recovery is detected sooner", "To make the waiting time predictable, which helps when setting timeouts", "To raise the number of retry attempts that fit in the same overall time"], "answer": 0, "explain": "Clients that failed together would otherwise retry together, hitting the recovering service with repeated spikes. Randomising the wait turns those spikes into a smooth, lower load."}, {"q": "A client's call to `POST /charges` times out. Is it safe to retry?", "options": ["Only with an idempotency key, since the charge may already have been made", "Yes, always, because a timeout means that the server never got the request", "No, never, because a POST request must not be retried in any circumstances", "Yes, provided that the retry is delayed with exponential backoff and jitter"], "answer": 0, "explain": "A timeout says nothing about whether the server acted. With an idempotency key the server recognises the repeat and returns the original result instead of charging again. Backoff does not make a write idempotent."}, {"q": "A service is receiving twice the traffic it can handle. Which behaviour gives users the best outcome?", "options": ["Reject the excess at once with 503, and serve the accepted requests at normal speed", "Accept everything into an unbounded queue, so that no request is ever refused", "Slow every response down equally, so that the load is shared fairly by all users", "Restart the instances one after another to clear the accumulated backlog"], "answer": 0, "explain": "Load shedding keeps the accepted half well served, and rejection is cheap. An unbounded queue makes every request slow, then times them all out, then exhausts memory. Restarting removes capacity when it is most needed."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="sre-runbooks.html"><span>← Previous</span><strong>Runbooks &amp; operational readiness</strong></a>
+    <a class="pager-up" href="../education.html#sre">All Site Reliability modules</a>
+    <a class="pager-link pager-next" href="sre-capacity.html"><span>Next →</span><strong>Capacity planning &amp; load testing</strong></a>
+  </nav>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="mailto:support@thavionai.com?subject=Education%20feedback%3A%20sre-failure">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

@@ -1,0 +1,222 @@
+{
+  "id": "devops-docker",
+  "minutes": 35,
+  "intro": "Containers solved \"it works on my machine\" by shipping the machine along with the code: your application, its runtime and its libraries in one immutable image that runs the same on a laptop, in CI and in production. Everything later in this track, from CI/CD to Kubernetes, moves images around. This module teaches you to build images that are small, fast to rebuild and safe to run.",
+  "objectives": [
+    "Explain what a container is in terms of processes, namespaces and images, and how it differs from a virtual machine",
+    "Write a Dockerfile that uses the layer cache well and produces a small image with a multi-stage build",
+    "Run, inspect and debug containers: ports, environment, volumes, logs and `exec`",
+    "Describe a multi-service development environment with Docker Compose",
+    "Apply the basic hardening rules: non-root user, minimal base image, pinned versions, no secrets in layers"
+  ],
+  "sections": [
+    {
+      "heading": "What a container actually is",
+      "blocks": [
+        { "type": "p", "text": "A container is not a small virtual machine. It is an ordinary Linux **process** that the kernel has isolated. **Namespaces** give it its own view of the process list, network interfaces, hostname and filesystem; **cgroups** cap how much CPU and memory it may use. There is no guest operating system and no boot, which is why a container starts in milliseconds and a host can run hundreds." },
+        { "type": "p", "text": "An **image** is the read-only template: a filesystem plus metadata such as the default command. A **container** is a running (or stopped) instance of an image with a thin writable layer on top. Delete the container and that layer is gone, so anything worth keeping must live in a volume or an external service. Images are stored in and pulled from a **registry**." },
+        { "type": "table", "headers": ["", "Virtual machine", "Container"], "rows": [
+          ["Isolation", "Own kernel, virtual hardware", "Shares the host kernel"],
+          ["Start time", "Tens of seconds", "Well under a second"],
+          ["Size", "Gigabytes", "Megabytes to a few hundred"],
+          ["Boundary strength", "Strong", "Weaker: a kernel bug affects everyone"]
+        ]},
+        { "type": "callout", "kind": "note", "text": "Because containers share the host kernel, Linux containers need a Linux kernel. Docker Desktop on macOS and Windows quietly runs a small Linux VM for you." }
+      ]
+    },
+    {
+      "heading": "Running and inspecting containers",
+      "blocks": [
+        { "type": "code", "lang": "bash", "code": "docker run --rm -it ubuntu:24.04 bash     # interactive shell, removed on exit\ndocker run -d --name web -p 8080:80 nginx:1.27   # detached; host 8080 -> container 80\ndocker ps                                  # running containers (-a includes stopped)\ndocker logs -f web                         # follow stdout/stderr\ndocker exec -it web sh                     # a shell inside the running container\ndocker inspect web                         # full JSON: mounts, network, env, state\ndocker stop web && docker rm web           # SIGTERM, then remove" },
+        { "type": "p", "text": "Three flags carry most real-world configuration. `-p HOST:CONTAINER` publishes a port. `-e NAME=value` sets an environment variable, which is how twelve-factor apps receive configuration. `-v` mounts storage: a **named volume** (`-v pgdata:/var/lib/postgresql/data`) is managed by Docker and survives the container, while a **bind mount** (`-v \"$PWD\":/app`) maps a host directory in, which is handy in development." },
+        { "type": "p", "text": "`docker stop` sends `SIGTERM`, waits ten seconds by default, then sends `SIGKILL`, exactly the sequence from the Linux module. A container that always takes ten seconds to stop is one whose main process is not handling `SIGTERM`." }
+      ]
+    },
+    {
+      "heading": "Dockerfiles and the layer cache",
+      "blocks": [
+        { "type": "p", "text": "A Dockerfile is the recipe for an image. Each instruction produces a **layer**, and layers are cached: if an instruction and everything it depends on are unchanged, Docker reuses the previous result. The moment one layer changes, every layer after it is rebuilt. So the ordering rule is: **put what changes least first**." },
+        { "type": "code", "lang": "dockerfile", "code": "FROM python:3.12-slim\n\nWORKDIR /app\n\n# 1. dependencies change rarely: copy only the manifest, then install\nCOPY requirements.txt .\nRUN pip install --no-cache-dir -r requirements.txt\n\n# 2. source code changes constantly: copy it last\nCOPY . .\n\nRUN useradd --create-home appuser\nUSER appuser\n\nEXPOSE 8000\nCMD [\"gunicorn\", \"--bind\", \"0.0.0.0:8000\", \"app:app\"]" },
+        { "type": "p", "text": "With that order, editing a source file invalidates only the final `COPY`, and the slow dependency install is served from cache. Copying everything before `pip install` would reinstall every dependency on every build." },
+        { "type": "list", "items": [
+          "A `.dockerignore` file keeps `.git`, `node_modules`, virtualenvs and local `.env` files out of the build context, which speeds up builds and prevents secrets from leaking into the image.",
+          "`CMD` in **exec form** (a JSON array) runs your program as PID 1 so it receives signals. The shell form (`CMD gunicorn ...`) wraps it in `/bin/sh -c`, and the shell may not forward `SIGTERM`.",
+          "`ENTRYPOINT` fixes the executable and `CMD` supplies default arguments that `docker run IMAGE args` can override.",
+          "`EXPOSE` is documentation only. Publishing a port still needs `-p`.",
+          "Chain related commands in one `RUN` and clean up in the same instruction; a file deleted in a later layer still takes up space in the earlier one."
+        ]},
+        { "type": "code", "lang": "bash", "code": "docker build -t myapp:1.4.0 .          # build from ./Dockerfile with context .\ndocker history myapp:1.4.0             # size of each layer\ndocker images                          # local images and their sizes" }
+      ]
+    },
+    {
+      "heading": "Multi-stage builds",
+      "blocks": [
+        { "type": "p", "text": "Compilers, build tools and dev dependencies are needed to build your app but not to run it. A **multi-stage build** uses one stage with the full toolchain to produce the artifact, then copies only that artifact into a clean, minimal final image. Everything in the earlier stages is discarded." },
+        { "type": "code", "lang": "dockerfile", "code": "# ---- build stage: full Go toolchain ----\nFROM golang:1.23 AS build\nWORKDIR /src\nCOPY go.mod go.sum ./\nRUN go mod download\nCOPY . .\nRUN CGO_ENABLED=0 go build -o /out/server ./cmd/server\n\n# ---- final stage: just the binary ----\nFROM gcr.io/distroless/static-debian12\nCOPY --from=build /out/server /server\nUSER nonroot\nENTRYPOINT [\"/server\"]" },
+        { "type": "p", "text": "The build stage is hundreds of megabytes; the final image is the size of the binary plus a few megabytes. A smaller image pulls faster, starts faster on a new node, and above all contains less software that can have vulnerabilities. The same pattern works for Node (build the bundle, serve it from a slim image), Java (build with a JDK, run on a JRE) and Python (build wheels, install them into a slim image)." },
+        { "type": "table", "headers": ["Base image", "Character"], "rows": [
+          ["`ubuntu`, `debian`", "Full distribution. Easy to debug, large, many packages to patch."],
+          ["`*-slim`", "Trimmed Debian. A good default for interpreted languages."],
+          ["`alpine`", "Very small, but uses musl libc, which occasionally breaks native Python or Node modules."],
+          ["distroless / `scratch`", "No shell or package manager at all. Smallest attack surface, harder to debug."]
+        ]}
+      ]
+    },
+    {
+      "heading": "Compose for multi-container development",
+      "blocks": [
+        { "type": "p", "text": "Real applications need a database, a cache, perhaps a queue. **Docker Compose** describes the whole set in one `compose.yaml` and starts it with one command. Every service joins a private network where it can reach the others **by service name**, so the app connects to the hostname `db`, not to `localhost`." },
+        { "type": "code", "lang": "yaml", "code": "services:\n  app:\n    build: .\n    ports:\n      - \"8000:8000\"\n    environment:\n      DATABASE_URL: postgres://app:devpassword@db:5432/app\n    depends_on:\n      db:\n        condition: service_healthy\n  db:\n    image: postgres:16\n    environment:\n      POSTGRES_USER: app\n      POSTGRES_PASSWORD: devpassword\n      POSTGRES_DB: app\n    volumes:\n      - pgdata:/var/lib/postgresql/data\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U app\"]\n      interval: 5s\n      retries: 10\nvolumes:\n  pgdata:" },
+        { "type": "code", "lang": "bash", "code": "docker compose up -d --build     # build, create and start everything\ndocker compose ps                # status, including health\ndocker compose logs -f app       # follow one service\ndocker compose exec db psql -U app   # run a command in a service\ndocker compose down              # stop and remove (add -v to delete volumes too)" },
+        { "type": "p", "text": "Plain `depends_on` only orders start-up; it does not wait for the database to accept connections. The `healthcheck` plus `condition: service_healthy` does. Compose is a development and single-host tool. In production the same images run under an orchestrator, which is the Kubernetes module." }
+      ]
+    },
+    {
+      "heading": "Small and secure by default",
+      "blocks": [
+        { "type": "list", "items": [
+          "**Do not run as root.** By default the process in a container is root, and a container escape then lands as root on the host. Add a `USER` instruction.",
+          "**Pin the base image.** `FROM python:latest` means tomorrow's build may differ from today's. Pin a specific version, and for full reproducibility pin the digest (`image@sha256:...`).",
+          "**Never bake secrets in.** `ENV`, `ARG` and `COPY` all persist in image layers and show up in `docker history`. Inject secrets at runtime, or use BuildKit's `RUN --mount=type=secret` for build-time credentials.",
+          "**Keep it minimal and rebuild often.** Fewer packages means fewer CVEs. Rebuilding regularly picks up base-image patches; scanning is covered in the supply chain module.",
+          "**One concern per container.** Logs go to stdout and stderr, where `docker logs` and every orchestrator collect them."
+        ]},
+        { "type": "callout", "kind": "warning", "text": "Mounting `/var/run/docker.sock` into a container, or running with `--privileged`, hands that container control of the host. Treat both as equivalent to giving it root on the machine." }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Shrink an image and wire it to a database",
+    "steps": [
+      "Take a small web app in any language (a ten-line Flask or Express app is enough). Write a naive Dockerfile with a full base image and `COPY . .` before the dependency install. Build it and record the size from `docker images`.",
+      "Change one line of source and rebuild. Watch the dependency install run again. Reorder the Dockerfile so dependencies are installed before the source is copied, rebuild twice, and see the install served from cache.",
+      "Add a `.dockerignore`, switch to a slim base, add a non-root `USER`, and use exec-form `CMD`. If the language is compiled or has a build step, make it multi-stage. Compare the size and the `docker history` output.",
+      "Run it with `-p`, confirm `docker exec CONTAINER id` shows a non-root user, and time `docker stop`. If it takes ten seconds, make the app handle `SIGTERM`.",
+      "Write a `compose.yaml` with the app and PostgreSQL, a named volume, and a healthcheck with `condition: service_healthy`. Prove the data survives `docker compose down` followed by `up`.",
+      "Run `docker compose down -v`, bring it back up, and confirm the data is gone. Be sure you can explain why."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "A container is an isolated process sharing the host kernel, not a VM. An image is the immutable template.",
+      "Layer cache: order instructions from least to most frequently changing. Copy the dependency manifest, install, then copy source.",
+      "Multi-stage builds: build with the toolchain, ship only the artifact.",
+      "The container filesystem is disposable. Persistent data belongs in volumes or external services.",
+      "Run as non-root, pin base image versions, never put secrets in `ENV`, `ARG` or `COPY`.",
+      "Exec-form `CMD` so the app is PID 1 and receives `SIGTERM`.",
+      "In Compose, services reach each other by service name, and `depends_on` needs a healthcheck to truly wait."
+    ],
+    "groups": [
+      {
+        "title": "Run and inspect",
+        "items": [
+          { "syntax": "docker run --rm -it IMAGE sh", "desc": "Throwaway interactive container" },
+          { "syntax": "docker run -d --name NAME -p 8080:80 IMAGE", "desc": "Detached, host port 8080 to container port 80" },
+          { "syntax": "docker run -e KEY=value -v VOL:/path IMAGE", "desc": "Environment variable and volume" },
+          { "syntax": "docker ps -a", "desc": "All containers, including stopped" },
+          { "syntax": "docker logs -f --tail 100 NAME", "desc": "Follow the last 100 log lines" },
+          { "syntax": "docker exec -it NAME sh", "desc": "Shell in a running container" },
+          { "syntax": "docker inspect NAME", "desc": "Full configuration and state as JSON" },
+          { "syntax": "docker stats", "desc": "Live CPU and memory per container" }
+        ]
+      },
+      {
+        "title": "Build and publish",
+        "items": [
+          { "syntax": "docker build -t NAME:TAG .", "desc": "Build from the Dockerfile in the current directory" },
+          { "syntax": "docker build --target STAGE -t NAME:TAG .", "desc": "Stop at a named stage of a multi-stage build" },
+          { "syntax": "docker history NAME:TAG", "desc": "Layers and their sizes" },
+          { "syntax": "docker tag NAME:TAG REGISTRY/REPO:TAG", "desc": "Add a registry-qualified name" },
+          { "syntax": "docker push REGISTRY/REPO:TAG", "desc": "Upload to a registry (after `docker login`)" },
+          { "syntax": "docker system prune", "desc": "Remove stopped containers, unused networks, dangling images" }
+        ]
+      },
+      {
+        "title": "Dockerfile instructions",
+        "items": [
+          { "syntax": "FROM image:tag AS name", "desc": "Base image; `AS` names a stage" },
+          { "syntax": "WORKDIR /app", "desc": "Set (and create) the working directory" },
+          { "syntax": "COPY src dest", "desc": "Copy from the build context" },
+          { "syntax": "COPY --from=build /out/app /app", "desc": "Copy from an earlier stage" },
+          { "syntax": "RUN command", "desc": "Execute at build time; creates a layer" },
+          { "syntax": "ENV KEY=value", "desc": "Default environment variable (visible in the image)" },
+          { "syntax": "USER appuser", "desc": "Drop root for the rest of the build and at runtime" },
+          { "syntax": "CMD [\"prog\", \"arg\"]", "desc": "Default command, exec form" },
+          { "syntax": "ENTRYPOINT [\"prog\"]", "desc": "Fixed executable; CMD becomes its default args" },
+          { "syntax": "HEALTHCHECK CMD curl -f http://localhost:8000/ || exit 1", "desc": "How Docker decides the container is healthy" }
+        ]
+      },
+      {
+        "title": "Compose",
+        "items": [
+          { "syntax": "docker compose up -d --build", "desc": "Build and start all services in the background" },
+          { "syntax": "docker compose ps", "desc": "Service status and health" },
+          { "syntax": "docker compose logs -f SERVICE", "desc": "Follow a service's logs" },
+          { "syntax": "docker compose exec SERVICE sh", "desc": "Shell into a running service" },
+          { "syntax": "docker compose down", "desc": "Stop and remove containers and the network" },
+          { "syntax": "docker compose down -v", "desc": "Also delete named volumes (data loss)" }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "`COPY . .` before installing dependencies, which defeats the cache and reinstalls everything on each build.",
+      "Storing data in the container's writable layer and losing it when the container is replaced.",
+      "Using the `latest` tag, so nobody can say which version is actually running.",
+      "Passing a secret with `ARG` or `ENV`, where it remains readable in the image history.",
+      "Connecting to `localhost` from one Compose service to another instead of using the service name.",
+      "Shell-form `CMD`, which leaves the app deaf to `SIGTERM` and makes every stop take ten seconds."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "Every build of your image spends two minutes reinstalling dependencies, even when only one source file changed. Which Dockerfile change fixes it?",
+      "options": [
+        "Copy the dependency manifest and install before copying the source code",
+        "Move the dependency install into the final CMD instruction",
+        "Replace COPY with a bind mount in the Dockerfile",
+        "Add EXPOSE before the dependency installation step"
+      ],
+      "answer": 0,
+      "explain": "A changed layer invalidates every layer after it. If the manifest is copied and installed first, a source edit only invalidates the later `COPY`, and the install layer comes from cache."
+    },
+    {
+      "q": "What is the main benefit of a multi-stage build?",
+      "options": [
+        "The final image contains only the runtime artifact, not the build toolchain",
+        "Each stage runs on a different host, so builds finish faster",
+        "The image can be run on hosts that do not have Docker installed",
+        "Stages let one container run several applications side by side"
+      ],
+      "answer": 0,
+      "explain": "Only what you explicitly `COPY --from` an earlier stage reaches the final image. Compilers and dev dependencies are left behind, so the image is smaller and has fewer vulnerabilities."
+    },
+    {
+      "q": "In a Compose project with services `app` and `db`, which hostname should `app` use to reach PostgreSQL?",
+      "options": ["db", "localhost", "127.0.0.1", "host.docker.internal"],
+      "answer": 0,
+      "explain": "Compose puts services on a shared network with DNS by service name. Inside the `app` container, `localhost` is the app container itself, where no database is listening."
+    },
+    {
+      "q": "A teammate adds `ARG DB_PASSWORD` and uses it in a `RUN` step, arguing that build arguments are not kept in the final image. Why is that still unsafe?",
+      "options": [
+        "Build argument values are recorded in the image history and can be read back",
+        "Build arguments are automatically printed to the container's logs at start-up",
+        "ARG values are exported as environment variables to every running container",
+        "Docker uploads build arguments to the registry as public metadata"
+      ],
+      "answer": 0,
+      "explain": "The value becomes part of the layer metadata, visible with `docker history`. Use runtime injection or a BuildKit secret mount, which is not persisted in any layer."
+    },
+    {
+      "q": "`docker stop api` always takes exactly ten seconds. What is the most likely reason?",
+      "options": [
+        "The app never handles SIGTERM, so Docker waits and then sends SIGKILL",
+        "Docker always waits ten seconds before sending any signal",
+        "The container has a volume that must be flushed to disk first",
+        "The image is large, so removing its layers takes that long"
+      ],
+      "answer": 0,
+      "explain": "`docker stop` sends `SIGTERM` and waits up to ten seconds by default before `SIGKILL`. Hitting the full timeout means the main process ignored the signal, often because shell-form `CMD` put a shell at PID 1."
+    }
+  ]
+}

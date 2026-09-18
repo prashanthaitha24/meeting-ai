@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Metrics with Prometheus — Site Reliability | ThavionAI Education</title>
+  <meta name="description" content="The four golden signals, PromQL, histograms, recording rules, cardinality pitfalls." />
+  <meta property="og:title" content="Metrics with Prometheus — ThavionAI Education" />
+  <meta property="og:description" content="The four golden signals, PromQL, histograms, recording rules, cardinality pitfalls." />
+  <meta property="og:type" content="article" />
+  <link rel="canonical" href="https://thavionai.com/education/sre-prometheus.html" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-sre" data-module="sre-prometheus">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><div class="nav-logo-icon">T</div>ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html#features">Features</a>
+    <a href="../index.html#products">Products</a>
+    <a href="../education.html" class="active">Education</a>
+    <a href="../index.html#about">About</a>
+    <a href="../index.html#pricing">Pricing</a>
+    <a href="../index.html#contact" class="nav-cta">Contact Us</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#sre">Site Reliability</a> › Stage 2: Observability</div>
+    <h1>Metrics with Prometheus</h1>
+    <p class="lede">The four golden signals, PromQL, histograms, recording rules, cardinality pitfalls.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">~40 min read</span>
+      <span class="chip">Module 5 of 16</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">You cannot manage an SLO you cannot measure. Metrics are the cheapest and most powerful signal you have: a few numbers per service, sampled every few seconds, that show at once whether users are being served, how fast, and how close the system is to its limits. Prometheus is the de facto standard for metrics in cloud-native systems, and its query language, PromQL, is a skill you will use every day on call. This module covers the data model, the four golden signals, the queries that matter, and the mistakes that take a Prometheus server down.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Describe how Prometheus collects data: the pull model, targets, exporters and service discovery</li><li>Choose the right metric type, and name and label metrics without creating a cardinality problem</li><li>Instrument and query the four golden signals: latency, traffic, errors and saturation</li><li>Write correct PromQL using <code>rate</code>, aggregation, and <code>histogram_quantile</code></li><li>Use recording rules to make SLI and dashboard queries fast and consistent</li></ul>
+    </div>
+    <section id="how-prometheus-works"><h2>How Prometheus works</h2>
+    <p>Prometheus <strong>pulls</strong>. Each application exposes its current metric values as plain text on an HTTP endpoint, conventionally <code>/metrics</code>. On a fixed <strong>scrape interval</strong>, commonly 15 to 60 seconds, Prometheus fetches that page from every <strong>target</strong>, timestamps the values and stores them in its local time series database. Software you cannot instrument, such as a Linux host, PostgreSQL or an HTTP endpoint you want to probe, is covered by an <strong>exporter</strong>: a small process that translates its state into the same format.</p>
+    <div class="code"><div class="code-cap">What a /metrics endpoint returns</div><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># HELP http_requests_total Total HTTP requests handled.
+# TYPE http_requests_total counter
+http_requests_total{method="GET",route="/orders",code="200"} 184223
+http_requests_total{method="GET",route="/orders",code="500"} 37
+http_requests_total{method="POST",route="/orders",code="201"} 9120
+# HELP process_resident_memory_bytes Resident memory size in bytes.
+# TYPE process_resident_memory_bytes gauge
+process_resident_memory_bytes 1.2843008e+08</code></pre></div>
+    <p>Pulling has practical advantages. Prometheus knows what it expects to scrape, so a target that stops answering is itself a signal: the automatic <code>up</code> metric becomes <code>0</code>. You can open any <code>/metrics</code> page in a browser to debug it. And the monitoring system, not each application, controls the load.</p>
+    <div class="code"><div class="code-cap">prometheus.yml</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+rule_files:
+  - rules/*.yml
+
+scrape_configs:
+  - job_name: orders
+    static_configs:
+      - targets: ["orders-1:8000", "orders-2:8000"]
+
+  - job_name: kubernetes-pods
+    kubernetes_sd_configs:
+      - role: pod
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: "true"</code></pre></div>
+    <figure class="diagram" id="fig-prometheus-arch"><div class="diagram-scroll"><svg viewBox="0 0 740 356" role="img" aria-label="Prometheus scrapes the /metrics endpoints of an application, a node exporter and kube-state-metrics, discovering them through the Kubernetes API. It evaluates rules and sends alerts to Alertmanager, which pages the on-call engineer. Grafana queries Prometheus for dashboards. Prometheus optionally writes samples to a long-term store." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="prometheus-arch-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="prometheus-arch-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="prometheus-arch-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="prometheus-arch-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="prometheus-arch-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><rect x="20" y="19" width="162" height="318" rx="10" class="dg-group"/><text x="30" y="330" font-size="10" font-weight="700" letter-spacing="1" class="dg-group-label">SCRAPE TARGETS</text><polyline points="371.0,178.0 182.0,178.0" fill="none" style="stroke:var(--accent)" stroke-width="1.6" marker-end="url(#prometheus-arch-arrow-accent)"/><rect x="204.4" y="132.0" width="144.2" height="16" rx="4" class="dg-label-bg"/><text x="276.5" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--accent)">GET /metrics every 30s</text><polyline points="341.0,45.0 416.0,45.0 416.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#prometheus-arch-arrow-default)"/><rect x="419.0" y="89.5" width="95.4" height="16" rx="4" class="dg-label-bg"/><text x="423.0" y="97.5" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">what to scrape</text><polyline points="541.0,95.0 466.0,95.0 466.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#prometheus-arch-arrow-default)"/><rect x="455.8" y="76.0" width="95.4" height="16" rx="4" class="dg-label-bg"/><text x="503.5" y="84.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">PromQL queries</text><polyline points="511.0,178.0 541.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#prometheus-arch-arrow-default)"/><rect x="481.4" y="132.0" width="89.3" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">firing alerts</text><polyline points="611.0,206.0 611.0,258.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#prometheus-arch-arrow-default)"/><rect x="614.0" y="224.0" width="46.6" height="16" rx="4" class="dg-label-bg"/><text x="618.0" y="232.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">notify</text><polyline points="441.0,206.0 441.0,258.0" fill="none" style="stroke:rgba(148,163,184,0.55)" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#prometheus-arch-arrow-muted)"/><rect x="444.0" y="224.0" width="83.2" height="16" rx="4" class="dg-label-bg"/><text x="448.0" y="232.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">remote_write</text><rect x="31" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Application</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">/metrics :9000</text><rect x="31" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="101.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">node_exporter</text><text x="101.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">host metrics</text><rect x="31" y="258.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="101.0" y="279.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">kube-state</text><text x="101.0" y="297.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">metrics: objects</text><rect x="201" y="42.0" width="140" height="56" rx="8" class="dg-node dg-muted"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text2)">Discovery</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">Kubernetes API</text><rect x="371" y="150.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Prometheus</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">TSDB + rules</text><rect x="541" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Grafana</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">dashboards</text><rect x="541" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="611.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Alertmanager</text><text x="611.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">group, route, silence</text><rect x="541" y="258.0" width="140" height="56" rx="28.0" class="dg-node dg-actor"/><text x="611.0" y="279.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">On-call</text><text x="611.0" y="297.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">page or ticket</text><path d="M371,265.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M371,265.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="441.0" y="279.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Long-term store</text><text x="441.0" y="297.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">Thanos, Mimir</text></svg></div><figcaption>How the pieces fit: Prometheus pulls metrics from applications and exporters on a schedule, evaluates recording and alerting rules, hands firing alerts to Alertmanager, answers Grafana's queries, and can forward samples to a long-term store.</figcaption></figure>
+    <p>In dynamic environments you do not list targets by hand. <strong>Service discovery</strong> asks Kubernetes, a cloud API or Consul what exists, and <strong>relabelling</strong> decides which of those to scrape and which labels to attach. In Kubernetes most teams install the Prometheus Operator, usually through the <code>kube-prometheus-stack</code> Helm chart, and describe targets with <code>ServiceMonitor</code> objects instead of editing this file.</p>
+    <p>Every sample belongs to a <strong>time series</strong>, identified by a metric name plus a set of <strong>labels</strong>. <code>http_requests_total{method="GET",code="200"}</code> and <code>http_requests_total{method="GET",code="500"}</code> are two different series. Prometheus adds <code>job</code> and <code>instance</code> labels to everything it scrapes.</p></section>
+  <section id="metric-types-names-and-labels"><h2>Metric types, names and labels</h2>
+    <div class="table-wrap"><table><thead><tr><th>Type</th><th>Behaviour</th><th>Use for</th><th>Query with</th></tr></thead><tbody><tr><td><strong>Counter</strong></td><td>Only goes up; resets to zero on restart</td><td>Requests, errors, bytes sent, jobs completed</td><td><code>rate()</code> or <code>increase()</code>, never the raw value</td></tr><tr><td><strong>Gauge</strong></td><td>Goes up and down</td><td>Memory in use, queue depth, temperature, in-flight requests</td><td>The value itself, <code>avg_over_time</code>, <code>max_over_time</code></td></tr><tr><td><strong>Histogram</strong></td><td>Counts observations into cumulative buckets, plus <code>_sum</code> and <code>_count</code></td><td>Request latency, response size</td><td><code>histogram_quantile()</code>, or a bucket ratio</td></tr><tr><td><strong>Summary</strong></td><td>Quantiles calculated inside the client</td><td>Rarely the right choice</td><td>Cannot be aggregated across instances</td></tr></tbody></table></div>
+    <p>Prefer a histogram to a summary. Histogram buckets from many instances can be added together and a quantile computed over the whole service, while quantiles precomputed by a summary cannot be meaningfully averaged. Choose bucket boundaries around the values you care about, and put one <strong>exactly at your SLO threshold</strong>, so that "proportion of requests under 500 ms" is an exact count and not an estimate.</p>
+    <div class="code"><div class="code-cap">Instrumenting a service with the official Python client</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import time
+
+from prometheus_client import Counter, Gauge, Histogram, start_http_server
+
+REQUESTS = Counter(
+    "http_requests_total", "Total HTTP requests handled.", ["method", "route", "code"]
+)
+LATENCY = Histogram(
+    "http_request_duration_seconds", "Request latency in seconds.", ["route"],
+    buckets=[0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+)
+IN_FLIGHT = Gauge("http_requests_in_flight", "Requests currently being served.")
+
+
+def handle(method: str, route: str) -&gt; None:
+    IN_FLIGHT.inc()
+    start = time.perf_counter()
+    code = "500"
+    try:
+        code = do_work(route)                  # returns the status code as a string
+    finally:
+        LATENCY.labels(route=route).observe(time.perf_counter() - start)
+        REQUESTS.labels(method=method, route=route, code=code).inc()
+        IN_FLIGHT.dec()
+
+
+start_http_server(9000)                        # serves /metrics on port 9000</code></pre></div>
+    <ul><li><strong>Names</strong> state what is measured and end with the <strong>base unit</strong>: <code>_seconds</code>, <code>_bytes</code>, and <code>_total</code> for counters. Never milliseconds or megabytes; conversion is the dashboard's job.</li><li><strong>Labels</strong> are dimensions you will want to filter or group by: <code>method</code>, <code>route</code>, <code>code</code>.</li><li>Label the <strong>route template</strong>, such as <code>/orders/{id}</code>, never the raw path <code>/orders/48213</code>.</li></ul>
+    <div class="callout callout-warning"><strong>Watch out</strong><p>Every distinct combination of label values is a separate time series held in memory. This is <strong>cardinality</strong>, and it is the most common way to break Prometheus. Five methods times twenty routes times ten status codes is 1,000 series per instance, which is fine. Add a <code>user_id</code> label with a million values and you have created a billion. Never use labels for user IDs, email addresses, request IDs, raw URLs or error messages. Those belong in logs and traces.</p></div></section>
+  <section id="the-four-golden-signals"><h2>The four golden signals</h2>
+    <p>The Google SRE book names four signals that, if you could measure only four things about a user-facing service, you should choose. They line up with the SLIs from the previous stage.</p>
+    <div class="table-wrap"><table><thead><tr><th>Signal</th><th>Question</th><th>Typical metric</th></tr></thead><tbody><tr><td><strong>Latency</strong></td><td>How long do requests take? Track successes and failures separately.</td><td><code>http_request_duration_seconds</code> histogram</td></tr><tr><td><strong>Traffic</strong></td><td>How much demand is there?</td><td><code>rate(http_requests_total[5m])</code></td></tr><tr><td><strong>Errors</strong></td><td>What share of requests fail?</td><td>Ratio of <code>code=~"5.."</code> to all requests</td></tr><tr><td><strong>Saturation</strong></td><td>How full is the most constrained resource?</td><td>CPU, memory, queue depth, connection pool usage</td></tr></tbody></table></div>
+    <p>Two related checklists are worth knowing. <strong>RED</strong>, for request-driven services, is Rate, Errors and Duration, which is the first three golden signals. <strong>USE</strong>, for resources such as CPUs, disks and network links, is Utilisation, Saturation and Errors. Use RED for every service and USE for every resource it depends on.</p>
+    <p>Latency needs care in two ways. A fast error is still an error: if failing requests return in five milliseconds, a wave of failures makes your average latency look better, so track the latency of successful requests separately. And averages hide the experience of the users who suffer most, which is why you work with percentiles from histograms.</p></section>
+  <section id="promql-you-will-use-every-day"><h2>PromQL you will use every day</h2>
+    <p>A <strong>selector</strong> such as <code>http_requests_total{job="orders", code=~"5.."}</code> returns an <strong>instant vector</strong>: the latest value of each matching series. Adding a range, <code>[5m]</code>, returns a <strong>range vector</strong>: all samples from the last five minutes. Functions like <code>rate()</code> take a range vector and return an instant vector. Matchers are <code>=</code>, <code>!=</code>, <code>=~</code> for a regular expression match and <code>!~</code> for its negation.</p>
+    <div class="code"><div class="code-head"><span>promql</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># TRAFFIC: requests per second, per route
+sum by (route) (rate(http_requests_total{job="orders"}[5m]))
+
+# ERRORS: share of requests failing with a 5xx
+sum(rate(http_requests_total{job="orders", code=~"5.."}[5m]))
+/
+sum(rate(http_requests_total{job="orders"}[5m]))
+
+# LATENCY: 99th percentile across all instances
+histogram_quantile(
+  0.99,
+  sum by (le) (rate(http_request_duration_seconds_bucket{job="orders"}[5m]))
+)
+
+# LATENCY as an SLI: proportion of requests served within 500 ms
+sum(rate(http_request_duration_seconds_bucket{job="orders", le="0.5"}[5m]))
+/
+sum(rate(http_request_duration_seconds_count{job="orders"}[5m]))
+
+# SATURATION: memory used as a share of the container limit
+container_memory_working_set_bytes{container="orders"}
+/
+container_spec_memory_limit_bytes{container="orders"}</code></pre></div>
+    <ul><li><strong>Always <code>rate()</code> a counter.</strong> The raw value is a large number that depends on when the process last restarted. <code>rate()</code> gives the per-second increase over the window and handles counter resets for you. <code>increase()</code> is the same thing multiplied by the window length.</li><li><strong><code>rate</code> first, then <code>sum</code>.</strong> Take the rate of each series and then aggregate. Summing first destroys the reset detection, so one restarting pod produces a huge false spike.</li><li><strong>Keep <code>le</code> when aggregating histogram buckets.</strong> <code>histogram_quantile</code> needs the bucket boundaries, so write <code>sum by (le)</code>, adding any other labels you want to break down by, such as <code>sum by (le, route)</code>.</li><li><strong>Make the range at least four times the scrape interval</strong>, so that each window always contains enough samples. With a 30 second scrape, <code>[2m]</code> is the minimum and <code>[5m]</code> is a comfortable default.</li><li><strong>Never average percentiles.</strong> The average of each pod's 99th percentile is not the service's 99th percentile. Aggregate the buckets, then compute the quantile once.</li><li><code>sum by (label)</code> keeps the labels you name. <code>sum without (label)</code> drops the ones you name and keeps the rest.</li></ul>
+    <div class="code"><div class="code-head"><span>promql</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>up{job="orders"} == 0                                   # targets that are failing to scrape
+topk(5, sum by (route) (rate(http_requests_total[5m])))  # the five busiest routes
+absent(up{job="orders"})                                # returns 1 if the series does not exist at all
+predict_linear(node_filesystem_avail_bytes[6h], 4 * 3600) &lt; 0   # disk full within 4 hours?
+rate(http_requests_total[5m] offset 1w)                 # the same query, one week ago</code></pre></div></section>
+  <section id="recording-rules"><h2>Recording rules</h2>
+    <p>Some expressions are expensive, and some are used in many places: dashboards, alerts, SLO reports. A <strong>recording rule</strong> evaluates an expression on a schedule and stores the result as a new time series. Queries then read one precomputed series instead of aggregating thousands. Just as important, the definition of "error ratio" exists in exactly one place, so the dashboard and the alert cannot disagree.</p>
+    <div class="code"><div class="code-cap">rules/orders.yml</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>groups:
+  - name: orders-sli
+    interval: 30s
+    rules:
+      - record: job:http_requests:rate5m
+        expr: sum by (job) (rate(http_requests_total[5m]))
+
+      - record: job:http_requests_errors:ratio_rate5m
+        expr: |
+          sum by (job) (rate(http_requests_total{code=~"5.."}[5m]))
+          /
+          sum by (job) (rate(http_requests_total[5m]))
+
+      - record: job:http_request_duration_seconds:p99_5m
+        expr: |
+          histogram_quantile(0.99,
+            sum by (job, le) (rate(http_request_duration_seconds_bucket[5m])))</code></pre></div>
+    <p>The naming convention is <code>level:metric:operations</code>. <code>level</code> lists the labels that remain after aggregation, <code>metric</code> is the original metric name, and <code>operations</code> lists what was applied, newest first. <code>job:http_requests_errors:ratio_rate5m</code> therefore reads as: aggregated to the job level, from the requests metric, a ratio of five-minute rates.</p>
+    <div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>promtool check config prometheus.yml          # validates the config and every rule file it references
+promtool check rules rules/orders.yml
+promtool test rules tests/orders_test.yml     # unit tests for rules and alerts
+curl -s -X POST http://localhost:9090/-/reload   # reload; needs --web.enable-lifecycle</code></pre></div>
+    <p>Treat rules as code: keep them in Git, validate them with <code>promtool</code> in CI, and review changes. The alerting module builds burn-rate alerts directly on top of recording rules like these.</p></section>
+  <section id="running-it-in-production"><h2>Running it in production</h2>
+    <ul><li><strong>Local storage is not long-term storage.</strong> A single Prometheus keeps data on local disk, with a default retention of 15 days, and is not clustered. For high availability, run two identical servers scraping the same targets. For long retention and a global view across clusters, add a system built for it, such as Thanos, Grafana Mimir or Cortex, fed through <code>remote_write</code>.</li><li><strong>Watch your own cardinality.</strong> <code>prometheus_tsdb_head_series</code> shows the number of active series. The query <code>topk(10, count by (__name__) ({__name__=~".+"}))</code> lists the metrics with the most series. Drop unwanted series or labels at scrape time with <code>metric_relabel_configs</code>.</li><li><strong>Monitor the monitor.</strong> Alert on <code>up == 0</code>, on scrape failures, and on rule evaluation failures. Add a dead man's switch: an alert that always fires, routed to an external service that raises the alarm when it stops arriving.</li><li><strong>Short-lived jobs</strong> cannot be scraped reliably. Batch jobs push their final metrics to the <strong>Pushgateway</strong>, which Prometheus then scrapes. Use it only for that purpose, never as a general way to push metrics.</li><li><strong>Metrics tell you that something is wrong and where.</strong> They rarely tell you why for one specific request. That is the job of logs and traces, covered in the OpenTelemetry module.</li></ul>
+    <div class="callout callout-tip"><strong>Tip</strong><p>On Kubernetes, the <code>kube-prometheus-stack</code> chart installs Prometheus, Alertmanager, Grafana, <code>node_exporter</code>, <code>kube-state-metrics</code> and a sensible set of default rules in one step. It is the quickest route to a working setup that you can then adapt.</p></div></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Instrument a service and query its golden signals</h2>
+    <ol><li>Run Prometheus locally with Docker (<code>prom/prometheus</code>), mounting a <code>prometheus.yml</code> that scrapes Prometheus itself. Open the web UI on port 9090, find the Targets page, and run <code>up</code>.</li><li>Add the Prometheus client library to a small web service. Expose a request counter labelled by method, route template and status code, and a latency histogram with a bucket exactly at your SLO threshold.</li><li>Open the service's <code>/metrics</code> endpoint in a browser and read it. Add the service as a scrape target and confirm that <code>up{job="YOUR_JOB"}</code> is <code>1</code>.</li><li>Generate traffic with a loop of <code>curl</code> commands or a load tool, including some requests that fail. Then write queries for all four golden signals.</li><li>Compute the 99th percentile latency with <code>histogram_quantile</code>, then the proportion of requests under your threshold using the bucket ratio. Note which one is exact.</li><li>Add a label containing a random ID to one metric, and watch <code>prometheus_tsdb_head_series</code> climb. Remove it, and write down in one sentence why it was a mistake.</li><li>Move your error-ratio and latency queries into recording rules using the <code>level:metric:operations</code> convention, validate them with <code>promtool check rules</code>, and query the new series.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Metrics with Prometheus — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Prometheus pulls <code>/metrics</code> on an interval. A target that stops answering shows up as <code>up == 0</code>.</li><li>Counter: only rises, always query with <code>rate()</code>. Gauge: read directly. Histogram: for latency and sizes.</li><li>Every unique label combination is a time series. Never label with user IDs, request IDs, raw paths or messages.</li><li>Four golden signals: latency, traffic, errors, saturation. RED for services, USE for resources.</li><li><code>rate()</code> first, then <code>sum</code>. Keep <code>le</code> when aggregating histogram buckets. Range at least four times the scrape interval.</li><li>Never average percentiles; aggregate buckets, then call <code>histogram_quantile</code> once.</li><li>Put a histogram bucket exactly at your SLO threshold.</li><li>Recording rules: <code>level:metric:operations</code>, one definition shared by dashboards and alerts.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Selectors and ranges</h3><table><tbody><tr><td><code>metric{label="value"}</code></td><td>Instant vector: latest sample of each matching series</td></tr><tr><td><code>{label=~"5.."} / {label!~"2.."}</code></td><td>Regex match / negative regex match</td></tr><tr><td><code>metric[5m]</code></td><td>Range vector: all samples in the last 5 minutes</td></tr><tr><td><code>metric offset 1w</code></td><td>The value one week ago</td></tr><tr><td><code>up</code></td><td>1 if the last scrape of the target succeeded, else 0</td></tr></tbody></table></div><div class="cheat-group"><h3>Functions</h3><table><tbody><tr><td><code>rate(counter[5m])</code></td><td>Per-second increase, averaged over the window; handles resets</td></tr><tr><td><code>irate(counter[5m])</code></td><td>Rate from the last two samples; very responsive, very noisy</td></tr><tr><td><code>increase(counter[1h])</code></td><td>Total increase over the window</td></tr><tr><td><code>histogram_quantile(0.99, sum by (le) (rate(x_bucket[5m])))</code></td><td>Estimated 99th percentile</td></tr><tr><td><code>avg_over_time(gauge[1h]) / max_over_time(gauge[1h])</code></td><td>Aggregate a gauge over time</td></tr><tr><td><code>predict_linear(gauge[6h], 4 * 3600)</code></td><td>Linear forecast 4 hours ahead</td></tr><tr><td><code>absent(metric)</code></td><td>1 if no such series exists; catches missing data</td></tr></tbody></table></div><div class="cheat-group"><h3>Aggregation</h3><table><tbody><tr><td><code>sum by (route) (...)</code></td><td>Keep only the named labels</td></tr><tr><td><code>sum without (instance) (...)</code></td><td>Drop the named labels, keep the rest</td></tr><tr><td><code>avg / min / max / count</code></td><td>Other aggregation operators</td></tr><tr><td><code>topk(5, ...) / bottomk(5, ...)</code></td><td>Largest or smallest N series</td></tr><tr><td><code>count by (__name__) ({__name__=~".+"})</code></td><td>Series count per metric name, for cardinality hunting</td></tr></tbody></table></div><div class="cheat-group"><h3>Golden signal queries</h3><table><tbody><tr><td><code>sum(rate(http_requests_total[5m]))</code></td><td>Traffic: requests per second</td></tr><tr><td><code>sum(rate(http_requests_total{code=~"5.."}[5m])) / sum(rate(http_requests_total[5m]))</code></td><td>Error ratio</td></tr><tr><td><code>sum(rate(x_bucket{le="0.5"}[5m])) / sum(rate(x_count[5m]))</code></td><td>Latency SLI: proportion under 500 ms</td></tr><tr><td><code>sum(rate(x_sum[5m])) / sum(rate(x_count[5m]))</code></td><td>Average latency; use only alongside percentiles</td></tr><tr><td><code>working_set_bytes / limit_bytes</code></td><td>Saturation: memory against its limit</td></tr></tbody></table></div><div class="cheat-group"><h3>Naming and tooling</h3><table><tbody><tr><td><code>NAME_total</code></td><td>Counter suffix</td></tr><tr><td><code>NAME_seconds / NAME_bytes</code></td><td>Base units only</td></tr><tr><td><code>NAME_bucket{le="..."}, NAME_sum, NAME_count</code></td><td>The three series a histogram exposes</td></tr><tr><td><code>level:metric:operations</code></td><td>Recording rule name, e.g. job:http_requests:rate5m</td></tr><tr><td><code>promtool check config FILE / check rules FILE</code></td><td>Validate before deploying</td></tr><tr><td><code>curl -X POST HOST:9090/-/reload</code></td><td>Reload config; requires --web.enable-lifecycle</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Graphing or alerting on the raw value of a counter instead of its <code>rate()</code>.</li><li>Adding a high-cardinality label such as user ID or full URL and running the server out of memory.</li><li>Writing <code>rate(sum(...))</code>, which breaks counter-reset handling and produces false spikes.</li><li>Averaging per-instance percentiles and presenting the result as the service's percentile.</li><li>Dropping the <code>le</code> label when aggregating buckets, so that <code>histogram_quantile</code> returns nothing useful.</li><li>Using a <code>rate()</code> window shorter than a few scrape intervals, which gives gaps and erratic values.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "Which query correctly gives the total requests per second across all instances of a service?", "options": ["sum(rate(http_requests_total{job=\"orders\"}[5m]))", "rate(sum(http_requests_total{job=\"orders\"})[5m])", "sum(http_requests_total{job=\"orders\"})", "avg(http_requests_total{job=\"orders\"}[5m])"], "answer": 0, "explain": "Take the rate of each series, then sum. Summing first hides counter resets from `rate()`, so a restarting pod causes a false spike. The raw counter value is not a rate at all."}, {"q": "A developer adds a `customer_id` label to `http_requests_total`. The service has 400,000 customers. What is the likely consequence?", "options": ["Series count explodes and Prometheus memory use grows until it struggles or crashes", "Queries become faster, because each customer now has an index", "Nothing changes, because labels are stored separately from samples", "The counter stops incrementing once the label limit is reached"], "answer": 0, "explain": "Each distinct label combination is its own time series held in memory. Multiplying existing series by 400,000 customers creates a cardinality explosion. Per-customer detail belongs in logs or traces."}, {"q": "You want the 95th percentile latency for a service running 12 pods. Which approach is correct?", "options": ["Sum the bucket rates across pods by le, then apply histogram_quantile once", "Compute histogram_quantile for each pod and take the average", "Divide the _sum series by the _count series", "Take the maximum of each pod's summary quantile"], "answer": 0, "explain": "Percentiles cannot be averaged. Histogram buckets can be added, so aggregate them across pods while keeping `le`, then compute the quantile. `_sum` divided by `_count` is the mean, not a percentile."}, {"q": "Your latency SLO is \"99% of requests under 300 ms\". How should the histogram be set up to measure it accurately?", "options": ["Include a bucket boundary at exactly 0.3 seconds", "Use only two buckets, at 0.1 and 10 seconds, to save memory", "Record latency in milliseconds with a bucket at 300", "Use a gauge that stores the most recent request's latency"], "answer": 0, "explain": "With a bucket at the threshold, the share of requests under 300 ms is an exact ratio of two counters. Without it, the value must be interpolated between neighbouring buckets. Base units mean seconds, not milliseconds."}, {"q": "What is the main benefit of defining an error ratio as a recording rule?", "options": ["It is precomputed once, so dashboards and alerts are fast and share one definition", "It lets Prometheus store the metric for longer than the retention period", "It removes the need to instrument the application with counters", "It converts the underlying counter into a gauge automatically"], "answer": 0, "explain": "A recording rule evaluates an expression on a schedule and stores the result as a new series. Expensive aggregations become cheap to read, and every consumer uses the same definition."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="sre-risk.html"><span>← Previous</span><strong>Embracing risk</strong></a>
+    <a class="pager-up" href="../education.html#sre">All Site Reliability modules</a>
+    <a class="pager-link pager-next" href="sre-grafana.html"><span>Next →</span><strong>Dashboards with Grafana</strong></a>
+  </nav>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="mailto:support@thavionai.com?subject=Education%20feedback%3A%20sre-prometheus">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>
