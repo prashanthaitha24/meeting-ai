@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Storage formats &amp; the lakehouse — Data | ThavionAI Education</title>
+  <meta name="description" content="Row vs columnar, Parquet, object storage layouts, table formats (Iceberg, Delta) and partitioning." />
+  <meta property="og:title" content="Storage formats &amp; the lakehouse — ThavionAI Education" />
+  <meta property="og:description" content="Row vs columnar, Parquet, object storage layouts, table formats (Iceberg, Delta) and partitioning." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/de-storage.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-data" data-module="de-storage">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../index.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=de-storage&amp;page=/education/de-storage.html&amp;title=Storage%20formats%20%26%20the%20lakehouse">Feedback</a>
+    <a href="../education.html#data" class="nav-cta">All Data modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#data">Data</a> › Stage 1: Foundations</div>
+    <h1>Storage formats &amp; the lakehouse</h1>
+    <p class="lede">Row vs columnar, Parquet, object storage layouts, table formats (Iceberg, Delta) and partitioning.</p>
+    <div class="meta">
+      <span class="chip">Beginner</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 4 of 16</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">Where and how data is stored decides what every later query costs. A row-oriented file must be read in full to sum one column; a columnar file reads only that column. A folder of ten thousand small files is slow to list before a single byte is read; a well-partitioned layout lets a query skip almost everything. And a plain folder of files cannot be updated safely by two writers or read consistently while it changes, which is the problem open table formats solve. This module explains row versus columnar storage, why Parquet is the standard file, how to lay data out in object storage, and how table formats such as Apache Iceberg and Delta Lake turn a bucket into a database-like table — the foundation of the lakehouse.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Explain row-oriented versus columnar storage and choose the right one for a workload</li><li>Read and configure Parquet: row groups, compression, statistics and predicate pushdown</li><li>Lay out data in object storage with partitioning and file sizing that queries can exploit</li><li>Describe what an open table format adds: ACID transactions, schema evolution, time travel, hidden partitioning</li><li>Choose between a warehouse, a lake and a lakehouse for a given team and workload</li></ul>
+    </div>
+    <section id="rows-versus-columns"><h2>Rows versus columns</h2>
+    <p>A <strong>row store</strong> keeps all the fields of one record together (CSV, JSON lines, a transactional database's heap). It is right for reading or writing whole records: fetch order 1042, insert a new order. A <strong>column store</strong> keeps all the values of one column together (Parquet, ORC, every analytical warehouse). It is right for scanning a few columns over many rows: total <code>amount</code> for last quarter touches one column and ignores the other forty. Columnar data also compresses far better, because a column holds similar values (many repeated countries, sorted timestamps), and encodings like dictionary and run-length exploit that.</p>
+    <div class="table-wrap"><table><thead><tr><th>Workload</th><th>Row store</th><th>Column store</th></tr></thead><tbody><tr><td>Fetch one record by key</td><td>Fast: one location</td><td>Slow: one value from each column file</td></tr><tr><td>Sum one column over a billion rows</td><td>Reads everything</td><td>Reads one column, compressed</td></tr><tr><td>Frequent small updates</td><td>Natural</td><td>Rewrite files or use a table format</td></tr><tr><td>Compression ratio</td><td>Modest</td><td>High: similar values together</td></tr></tbody></table></div>
+    <p>This is why operational databases and analytical systems differ, and why pipelines typically move data from row-oriented sources into columnar files or warehouses. The conversion point is usually the first thing a pipeline does after landing raw data.</p></section>
+  <section id="parquet-properly"><h2>Parquet, properly</h2>
+    <p>A <strong>Parquet</strong> file is split into <strong>row groups</strong> (typically 64 to 512 MB of rows), each containing one <strong>column chunk</strong> per column, each chunk in <strong>pages</strong>. The footer holds the schema and, per column chunk, statistics: min, max, null count, and optionally bloom filters. A reader that wants <code>WHERE ordered_at &gt;= '2026-03-01'</code> inspects the statistics and skips every row group whose max is earlier — <strong>predicate pushdown</strong> — and reads only the columns the query names — <strong>projection pushdown</strong>. Sorting data within a file by the columns you filter on makes the statistics tight and the skipping effective.</p>
+    <div class="code"><div class="code-cap">Inspecting what a reader sees: schema, row groups and per-column statistics. If min and max span the whole range, sorting will help.</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import pyarrow.parquet as pq
+
+f = pq.ParquetFile("orders/month=2026-03/part-0.parquet")
+print(f.schema_arrow)
+meta = f.metadata
+print("row groups:", meta.num_row_groups, "rows:", meta.num_rows)
+
+col_idx = f.schema_arrow.get_field_index("ordered_at")
+for rg in range(meta.num_row_groups):
+    col = meta.row_group(rg).column(col_idx)
+    st = col.statistics
+    print(rg, col.path_in_schema, st.min, st.max, "nulls:", st.null_count,
+          "compressed MB:", round(col.total_compressed_size / 1e6, 1))</code></pre></div>
+    <p>Write with sensible settings: zstd or snappy compression, row groups of around 128 MB, dictionary encoding on (the default), and timestamps with an explicit unit and timezone. Avoid many tiny files: each file costs a listing and a footer read, and a query over ten thousand 1 MB files is slower than over eighty 128 MB files holding the same data. Compaction — periodically rewriting small files into large ones — is routine maintenance.</p>
+    <div class="callout callout-note"><strong>Note</strong><p>Parquet is an immutable file. "Updating a row" means rewriting the file that contains it. That constraint is what table formats manage for you.</p></div></section>
+  <section id="layout-in-object-storage"><h2>Layout in object storage</h2>
+    <p>Object storage (S3, GCS, Azure Blob) is cheap, durable and effectively infinite, with two properties that shape layout: listing is slow and per-object requests have latency, so large objects and shallow prefixes win. <strong>Partitioning</strong> organises files into prefixes by a column with low cardinality that queries filter on, typically date: <code>orders/dt=2026-03-01/part-0.parquet</code>. A query for one week lists seven prefixes and reads only those files. Over-partitioning (by hour, by customer id) produces thousands of tiny files and slow listings; under-partitioning forces full scans. Aim for partitions of hundreds of MB to a few GB.</p>
+    <div class="code"><div class="code-cap">A lake layout with zones and partitioning. Raw is immutable; everything else can be rebuilt from it.</div><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>s3://acme-lake/
+  raw/                              immutable, as received, partitioned by arrival
+    orders_api/dt=2026-03-01/hour=13/batch-7f3c.jsonl.gz
+  bronze/                           parsed to Parquet, typed, still one row per source record
+    orders/dt=2026-03-01/part-0000.parquet
+  silver/                           cleaned, deduplicated, conformed; table-format managed
+    orders/                         (Iceberg table: metadata/ + data/)
+  gold/                             business-level models and aggregates
+    daily_revenue_by_region/
+
+rules
+  raw:    never modified; retention by policy; replay source for everything below
+  files:  128 MB - 1 GB Parquet, zstd; compaction job weekly
+  keys:   partition by date of the event, not date of load</code></pre></div>
+    <p>The zone names vary (raw/bronze/silver/gold, landing/staging/curated); the idea is constant: an immutable raw layer you can always replay, progressively cleaner layers built by code, and business models at the top. Store the raw data compressed in its original form, because parsing bugs are discovered later and the raw bytes are the only thing that can fix them.</p></section>
+  <section id="table-formats-the-lakehouse"><h2>Table formats: the lakehouse</h2>
+    <p>A folder of Parquet files has no transactions: a reader can see a half-written batch, two writers can corrupt each other, a schema change means rewriting everything, and deleting a customer's rows for a privacy request means finding and rewriting the right files by hand. <strong>Open table formats</strong> — Apache Iceberg, Delta Lake, Apache Hudi — add a metadata layer over the files: a log of snapshots, each listing exactly which files make up the table at that version. Writers commit new snapshots atomically; readers see one consistent snapshot; old snapshots enable <strong>time travel</strong> and rollback; and the metadata carries the schema, so columns can be added, renamed or reordered without rewriting data.</p>
+    <div class="table-wrap"><table><thead><tr><th>Capability</th><th>Plain Parquet folder</th><th>Iceberg / Delta table</th></tr></thead><tbody><tr><td>Concurrent writers</td><td>Corruption risk</td><td>Optimistic concurrency, atomic commits</td></tr><tr><td>Consistent reads during writes</td><td>No</td><td>Snapshot isolation</td></tr><tr><td>Update / delete rows</td><td>Rewrite files by hand</td><td>MERGE, DELETE with row-level tracking</td></tr><tr><td>Schema change</td><td>Rewrite everything</td><td>Add, rename, drop, reorder columns in metadata</td></tr><tr><td>Partition change</td><td>Rewrite everything</td><td>Iceberg: partition spec evolution, hidden partitioning</td></tr><tr><td>Time travel</td><td>No</td><td>Query any past snapshot; roll back</td></tr></tbody></table></div>
+    <div class="code"><div class="code-cap">Iceberg from the engine's point of view (Spark SQL shown): create with hidden partitioning, merge, then read the table as it was yesterday.</div><div class="code-head"><span>sql</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>CREATE TABLE lake.silver.orders (
+  order_id    BIGINT,
+  customer_id BIGINT,
+  ordered_at  TIMESTAMP,
+  status      STRING,
+  amount      DECIMAL(12,2)
+) USING iceberg
+PARTITIONED BY (days(ordered_at));        -- hidden partitioning: queries filter on ordered_at, not a dt column
+
+MERGE INTO lake.silver.orders t
+USING lake.bronze.orders_batch s
+ON t.order_id = s.order_id
+WHEN MATCHED THEN UPDATE SET *
+WHEN NOT MATCHED THEN INSERT *;
+
+-- what did the table look like before today's merge?
+SELECT COUNT(*) FROM lake.silver.orders TIMESTAMP AS OF '2026-03-01 00:00:00';
+
+-- maintenance: compact small files and expire old snapshots
+CALL lake.system.rewrite_data_files('silver.orders');
+CALL lake.system.expire_snapshots('silver.orders', TIMESTAMP '2026-02-01 00:00:00');</code></pre></div>
+    <figure class="diagram" id="fig-lakehouse-layers"><div class="diagram-scroll"><svg viewBox="0 0 910 248" role="img" aria-label="Sources on the left send data into a raw zone of immutable compressed files in object storage. A pipeline parses them into a bronze zone of typed Parquet, then into silver and gold zones managed by an open table format whose metadata layer records snapshots, schema and partitions. A catalog maps table names to the current metadata. On the right, Spark, Trino, DuckDB and a cloud warehouse all query the same tables through the catalog." style="width:100%;max-width:910px;min-width:540px;height:auto;display:block"><defs><marker id="lakehouse-layers-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="lakehouse-layers-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="lakehouse-layers-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="lakehouse-layers-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="lakehouse-layers-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><rect x="190" y="19" width="502" height="210" rx="10" class="dg-group"/><text x="200" y="222" font-size="10" font-weight="700" letter-spacing="1" class="dg-group-label">OBJECT STORAGE: ONE COPY OF THE DATA</text><polyline points="171.0,70.0 201.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#lakehouse-layers-arrow-default)"/><rect x="132.2" y="24.0" width="107.6" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">land, never edit</text><polyline points="341.0,70.0 371.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#lakehouse-layers-arrow-default)"/><rect x="335.8" y="24.0" width="40.5" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">parse</text><polyline points="511.0,70.0 541.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#lakehouse-layers-arrow-default)"/><rect x="484.4" y="24.0" width="83.2" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">clean, merge</text><polyline points="441.0,150.0 441.0,98.0" fill="none" style="stroke:#34d399" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#lakehouse-layers-arrow-ok)"/><polyline points="611.0,98.0 611.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#lakehouse-layers-arrow-default)"/><rect x="614.0" y="116.0" width="101.5" height="16" rx="4" class="dg-label-bg"/><text x="618.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">commit snapshot</text><polyline points="681.0,178.0 711.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#lakehouse-layers-arrow-default)"/><rect x="645.2" y="132.0" width="101.5" height="16" rx="4" class="dg-label-bg"/><text x="696.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">current pointer</text><polyline points="781.0,150.0 781.0,98.0" fill="none" style="stroke:#34d399" stroke-width="1.6" marker-end="url(#lakehouse-layers-arrow-ok)"/><rect x="784.0" y="116.0" width="89.3" height="16" rx="4" class="dg-label-bg"/><text x="788.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:#34d399">resolve table</text><polyline points="711.0,70.0 681.0,70.0" fill="none" style="stroke:#34d399" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#lakehouse-layers-arrow-ok)"/><rect x="645.2" y="24.0" width="101.5" height="16" rx="4" class="dg-label-bg"/><text x="696.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:#34d399">read same files</text><rect x="31" y="42.0" width="140" height="56" rx="28.0" class="dg-node dg-actor"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Sources</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">APIs, DBs, events</text><path d="M201,49.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M201,49.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">raw/</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">immutable, as received</text><path d="M371,49.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M371,49.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">bronze/</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">typed Parquet</text><path d="M541,49.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M541,49.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">silver/ gold/</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">Iceberg tables</text><rect x="541" y="150.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="611.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Table metadata</text><text x="611.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">snapshots, schema</text><rect x="711" y="150.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="781.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Catalog</text><text x="781.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">name -&gt; snapshot</text><rect x="711" y="42.0" width="140" height="56" rx="28.0" class="dg-node dg-actor"/><text x="781.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Engines</text><text x="781.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">Spark, Trino, DuckDB</text><rect x="371" y="150.0" width="140" height="56" rx="8" class="dg-node dg-ok"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#6ee7b7">Pipeline</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">parse, clean, MERGE</text></svg></div><figcaption>A lakehouse in one picture: immutable raw files land in object storage, pipelines turn them into Parquet in progressively cleaner layers, a table format's metadata makes the silver and gold layers transactional, a catalog holds the pointer to each table's current snapshot, and every engine reads the same files through that catalog.</figcaption></figure>
+    <p>The result is the <strong>lakehouse</strong>: warehouse-like tables (ACID, schema, SQL) on lake storage (cheap, open files, many engines). Spark, Trino, Flink, DuckDB and the major cloud warehouses can all read Iceberg tables in the same bucket, which removes the copy-the-data-into-each-tool problem. A <strong>catalog</strong> (REST, Glue, Nessie, Unity) holds the pointer from table name to current metadata file; it is the one component every engine must agree on.</p></section>
+  <section id="warehouse-lake-or-lakehouse"><h2>Warehouse, lake, or lakehouse</h2>
+    <p>A <strong>cloud warehouse</strong> (BigQuery, Snowflake, Redshift, and similar) is the simplest to run: load data, write SQL, pay for storage and compute, get performance without managing files. A <strong>data lake</strong> is object storage with files and a query engine on top: cheapest and most flexible, most operational work, historically weakest on consistency. A <strong>lakehouse</strong> is the lake with table formats, closing most of the gap. The choice is less about technology than about the team: who operates it, which tools must read the data, how much data there is, and whether machine learning and streaming workloads need direct file access.</p>
+    <ul><li>Small team, mostly SQL analytics, moderate data: a warehouse, with Parquet exports to a lake for ML and archive.</li><li>Many engines (Spark for ML, Trino for ad hoc, Flink for streams) over the same data: a lakehouse with Iceberg and a shared catalog.</li><li>Regulatory needs for deletion and audit: a table format with row-level delete and snapshot history, whichever platform.</li><li>Whatever you pick: an immutable raw layer, Parquet as the interchange format, and business models defined in code.</li></ul>
+    <div class="callout callout-tip"><strong>Tip</strong><p>Most warehouses now read Iceberg tables directly and some write them. Designing the lake layer with an open table format keeps the option to change engines without a migration project.</p></div></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>From CSV to a time-travelling table</h2>
+    <ol><li>Generate a five-million-row orders CSV with Python (random dates over a year, a few hundred customers). Time <code>SELECT SUM(amount) WHERE ordered_at &gt;= '2026-03-01'</code> over the CSV in DuckDB.</li><li>Convert it to a single Parquet file with zstd compression, then to a Parquet dataset partitioned by month. Time the same query on each and record file sizes.</li><li>Inspect the partitioned files with <code>pyarrow.parquet</code>: row groups, statistics for <code>ordered_at</code>. Rewrite one month sorted by <code>ordered_at</code> and compare the min/max spread per row group.</li><li>Deliberately write the same month as 500 tiny files (chunked writes) and time the query; then compact them and time again.</li><li>Install PyIceberg (or use Spark/DuckDB with the Iceberg extension) with a local SQLite or REST catalog. Create an Iceberg table from the Parquet data with day partitioning on <code>ordered_at</code>.</li><li>Append a second batch, then run a delete for one customer. List the snapshots and query the table as of the first snapshot to confirm the deleted rows are still visible there.</li><li>Add a column to the table's schema without rewriting data, write a batch with the new column, and read the whole table back.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Storage formats &amp; the lakehouse — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Columnar for scans over many rows and few columns; row-oriented for whole-record reads and writes</li><li>Parquet: row groups with min/max statistics enable predicate pushdown; sort by filter columns; 128 MB to 1 GB files, zstd</li><li>Partition object storage by event date at a grain that yields hundreds of MB per partition; compact small files</li><li>Immutable raw layer, then progressively cleaner layers; everything below raw is rebuildable</li><li>Table formats add ACID commits, snapshot isolation, MERGE/DELETE, schema and partition evolution, time travel</li><li>Choose warehouse vs lakehouse by team and engines; keep Parquet and an open table format as the interchange</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Formats</h3><table><tbody><tr><td><code>CSV / JSONL</code></td><td>Row-oriented, untyped; ingest only</td></tr><tr><td><code>Parquet / ORC</code></td><td>Columnar, typed, compressed, statistics</td></tr><tr><td><code>Avro</code></td><td>Row-oriented with schema; streaming and records</td></tr><tr><td><code>compression: zstd (ratio) or snappy (speed)</code></td><td>Both splittable inside Parquet</td></tr><tr><td><code>dictionary + run-length encoding</code></td><td>Why columns compress so well</td></tr></tbody></table></div><div class="cheat-group"><h3>Parquet internals</h3><table><tbody><tr><td><code>file -&gt; row groups -&gt; column chunks -&gt; pages</code></td><td>Structure</td></tr><tr><td><code>footer: schema + per-chunk min/max/nulls</code></td><td>Read first; drives skipping</td></tr><tr><td><code>predicate pushdown / projection pushdown</code></td><td>Skip row groups / read only needed columns</td></tr><tr><td><code>pq.ParquetFile(p).metadata.row_group(i).column(j).statistics</code></td><td>Inspect what readers see</td></tr><tr><td><code>row_group_size ~128 MB; sort by filter columns</code></td><td>Tight statistics, effective skipping</td></tr></tbody></table></div><div class="cheat-group"><h3>Lake layout</h3><table><tbody><tr><td><code>table/dt=YYYY-MM-DD/part-N.parquet</code></td><td>Date partitioning by event time</td></tr><tr><td><code>raw -&gt; bronze -&gt; silver -&gt; gold</code></td><td>Immutable source, then cleaner layers</td></tr><tr><td><code>avoid &gt; ~10k files per table; compact weekly</code></td><td>Listing and footer costs</td></tr><tr><td><code>partition size: 100s of MB to a few GB</code></td><td>Not by hour, not by high-cardinality keys</td></tr><tr><td><code>raw retained compressed, never modified</code></td><td>The replay source</td></tr></tbody></table></div><div class="cheat-group"><h3>Table formats</h3><table><tbody><tr><td><code>USING iceberg PARTITIONED BY (days(ts))</code></td><td>Hidden partitioning; filter on ts directly</td></tr><tr><td><code>MERGE INTO t USING s ON ... WHEN MATCHED UPDATE / NOT MATCHED INSERT</code></td><td>Upsert into a lake table</td></tr><tr><td><code>SELECT ... TIMESTAMP AS OF / VERSION AS OF</code></td><td>Time travel</td></tr><tr><td><code>rewrite_data_files / expire_snapshots</code></td><td>Compaction and metadata cleanup</td></tr><tr><td><code>catalog: REST / Glue / Nessie / Unity</code></td><td>Table name -&gt; current metadata pointer</td></tr><tr><td><code>schema evolution: add/rename/drop in metadata</code></td><td>No data rewrite</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Partitioning by hour or by a high-cardinality key and creating a million tiny files.</li><li>Writing CSV between pipeline stages, losing types and paying for full scans forever.</li><li>Never compacting, so the table gets slower every day even though data volume is flat.</li><li>Modifying the raw layer, so the one source that could rebuild everything is now suspect.</li><li>Two jobs writing the same Parquet folder without a table format, corrupting each other.</li><li>Partitioning by load date when queries filter by event date.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "A query sums one numeric column over a two-billion-row table with forty columns. Why is Parquet dramatically faster than CSV here?", "options": ["Parquet reads only that column's chunks and can skip row groups using statistics, while CSV must be parsed in full", "Parquet files are always smaller than 100 MB so they fit in memory", "CSV files cannot be read by more than one thread", "Parquet stores the sum precomputed in its footer"], "answer": 0, "explain": "Columnar layout gives projection pushdown (one column of forty) and statistics give predicate pushdown; CSV has neither. Parquet does not precompute aggregates, and file sizes vary."}, {"q": "A table in object storage is partitioned by `customer_id`, producing 400,000 small files. Most queries filter by date. What is the right layout change?", "options": ["Partition by event date at a grain that gives partitions of hundreds of MB, and compact files to around 128 MB or more", "Partition by both customer_id and date to make every query fast", "Remove partitioning entirely and write one giant file", "Increase the number of partitions so each file is even smaller"], "answer": 0, "explain": "Partition by what queries filter on, at low cardinality; keep files large. Adding date under customer multiplies the file explosion, one giant file loses parallelism and skipping, and smaller files make listing worse."}, {"q": "Two nightly jobs write to the same plain Parquet folder, and a dashboard sometimes shows partial results while they run. What solves both problems?", "options": ["An open table format (Iceberg or Delta) providing atomic commits and snapshot isolation over the same files", "Running the two jobs at different times of night", "Converting the folder to CSV so writes are line-by-line", "Adding a lock file that jobs check before writing"], "answer": 0, "explain": "Table formats give writers atomic commits and readers a consistent snapshot; that is exactly the missing layer. Scheduling and ad hoc lock files are fragile and do not fix readers seeing half-written batches."}, {"q": "What does Iceberg's hidden partitioning change for people writing queries?", "options": ["They filter on the real column (`ordered_at`) and the engine prunes partitions; no separate `dt` column must be known or maintained", "Partitions are encrypted so users cannot see which files hold their data", "Queries must specify the partition path explicitly in the FROM clause", "The table cannot be partitioned by time columns"], "answer": 0, "explain": "The partition transform (`days(ordered_at)`) is metadata; users query the natural column and pruning still happens. It also lets the partition scheme change later without rewriting data."}, {"q": "A parsing bug is found six weeks after go-live: a field was truncated in the bronze layer. What makes recovery straightforward?", "options": ["An immutable, retained raw layer from which bronze and everything above can be rebuilt with the fixed parser", "Daily database backups of the gold layer", "Time travel on the bronze table, which restores the untruncated values", "The dashboards' cached query results"], "answer": 0, "explain": "Only the raw bytes contain the untruncated data; the bug happened when parsing them. Time travel on bronze would return the same truncated values, and downstream backups inherit the error."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="de-python-data.html"><span>← Previous</span><strong>Python for data work</strong></a>
+    <a class="pager-up" href="../education.html#data">All Data modules</a>
+    <a class="pager-link pager-next" href="de-etl.html"><span>Next →</span><strong>Batch pipeline design</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=de-storage&amp;page=/education/de-storage.html&amp;title=Storage%20formats%20%26%20the%20lakehouse">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=de-storage&amp;page=/education/de-storage.html&amp;title=Storage%20formats%20%26%20the%20lakehouse">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

@@ -1,0 +1,187 @@
+{
+  "id": "de-cdc",
+  "minutes": 35,
+  "intro": "The batch module left a problem open: timestamp-based extraction cannot see deletes, misses rows whose `updated_at` was never set, and hammers the source with full scans of hot tables. Change data capture reads the database's own transaction log instead — the same log the database uses for replication — and turns every insert, update and delete into an event, in commit order, with almost no load on the source. It is how a warehouse or a lakehouse becomes a faithful, near-real-time replica of production, and how downstream systems learn about changes without polling. This module covers how log-based CDC works, the Debezium-style pipeline through Kafka, applying changes into a table format with merges, initial snapshots, schema changes, and the trade-offs that decide between CDC and simpler batch.",
+  "objectives": [
+    "Explain log-based CDC and why it beats query-based extraction for correctness and source load",
+    "Set up a Postgres to Kafka CDC pipeline with Debezium: replication slot, publication, connector, change event shape",
+    "Apply change events into a lakehouse or warehouse table with idempotent merges, including deletes",
+    "Handle initial snapshots, schema evolution and connector restarts without losing or duplicating changes",
+    "Decide when CDC is worth its operational cost"
+  ],
+  "sections": [
+    {
+      "heading": "Why the log, not the table",
+      "blocks": [
+        {"type": "p", "text": "Every transactional database writes changes to a **write-ahead log** (Postgres WAL, MySQL binlog, SQL Server transaction log) before applying them, and uses that log for crash recovery and replication. **Log-based CDC** attaches a reader to that log and decodes it into change events: for each committed row change, the table, the operation (create, update, delete), the row before and after, the transaction id and the commit position. Because it reads what the database already writes, it sees every change including deletes and columns without timestamps, in exact commit order, without querying the tables at all."},
+        {"type": "table", "headers": ["Property", "Query-based (timestamps)", "Log-based CDC"], "rows": [
+          ["Sees deletes", "No", "Yes"],
+          ["Sees every update, even rapid ones", "Only the last state per poll", "Every committed change"],
+          ["Load on the source", "Repeated scans of hot tables", "Reads the log; negligible"],
+          ["Latency", "Poll interval (minutes to hours)", "Seconds"],
+          ["Requires source changes", "A maintained updated_at column", "Logical replication enabled; slot management"],
+          ["Operational complexity", "Low", "Connector, Kafka, slot monitoring, schema handling"]
+        ]},
+        {"type": "callout", "kind": "note", "text": "Trigger-based CDC (database triggers writing to a change table) is a third option: works where log access is unavailable, but adds write latency to every transaction on the source. Prefer the log where you can."}
+      ]
+    },
+    {
+      "heading": "A Debezium pipeline from Postgres",
+      "blocks": [
+        {"type": "p", "text": "The most common open-source setup is **Debezium** running in Kafka Connect: a connector per source database reads the log and publishes one Kafka topic per table, keyed by the row's primary key. Postgres needs `wal_level = logical`, a **replication slot** (the server keeps WAL until the slot's consumer has read it) and a **publication** listing the tables. The connector records its position (LSN) in Kafka Connect's offset topic, so a restart resumes exactly where it stopped."},
+        {"type": "code", "lang": "bash", "caption": "Preparing Postgres: logical WAL, a replication user, and a publication for the tables to capture.", "code": "# postgresql.conf (restart required)\n#   wal_level = logical\n#   max_replication_slots = 10\n#   max_wal_senders = 10\n\npsql -U postgres -d shop <<'SQL'\nCREATE ROLE debezium WITH LOGIN REPLICATION PASSWORD 'REPLACE_ME';\nGRANT SELECT ON ALL TABLES IN SCHEMA public TO debezium;\nCREATE PUBLICATION shop_pub FOR TABLE public.orders, public.customers;\nALTER TABLE public.orders REPLICA IDENTITY FULL;   -- include full 'before' image on updates/deletes\nSQL"},
+        {"type": "code", "lang": "json", "caption": "The connector configuration submitted to Kafka Connect. The slot and publication names must match, and the snapshot mode decides how existing rows are captured.", "code": "{\n  \"name\": \"shop-postgres\",\n  \"config\": {\n    \"connector.class\": \"io.debezium.connector.postgresql.PostgresConnector\",\n    \"database.hostname\": \"db.internal\",\n    \"database.port\": \"5432\",\n    \"database.user\": \"debezium\",\n    \"database.password\": \"${secrets:shop/debezium:password}\",\n    \"database.dbname\": \"shop\",\n    \"topic.prefix\": \"shop\",\n    \"plugin.name\": \"pgoutput\",\n    \"slot.name\": \"debezium_shop\",\n    \"publication.name\": \"shop_pub\",\n    \"table.include.list\": \"public.orders,public.customers\",\n    \"snapshot.mode\": \"initial\",\n    \"tombstones.on.delete\": \"true\",\n    \"key.converter\": \"io.confluent.connect.avro.AvroConverter\",\n    \"value.converter\": \"io.confluent.connect.avro.AvroConverter\",\n    \"value.converter.schema.registry.url\": \"http://schema-registry:8081\",\n    \"heartbeat.interval.ms\": \"10000\"\n  }\n}"},
+        {"type": "p", "text": "Each change event carries an envelope: `op` (`c` create, `u` update, `d` delete, `r` read during snapshot), `before` and `after` row images, and `source` metadata (LSN, transaction id, commit timestamp). Deletes are followed by a **tombstone** (a null value for the key) so that log-compacted topics drop the key. The event is the unit of truth for everything downstream."},
+        {"type": "code", "lang": "json", "caption": "A Debezium update event for one order, simplified. Consumers merge `after` when op is c/u/r, and delete when op is d.", "code": "{\n  \"op\": \"u\",\n  \"ts_ms\": 1772352000123,\n  \"before\": {\"id\": 9001, \"customer_id\": 1042, \"status\": \"placed\", \"amount_cents\": 4250, \"updated_at\": 1772351940000},\n  \"after\":  {\"id\": 9001, \"customer_id\": 1042, \"status\": \"paid\",   \"amount_cents\": 4250, \"updated_at\": 1772352000000},\n  \"source\": {\"db\": \"shop\", \"schema\": \"public\", \"table\": \"orders\", \"lsn\": 48219044, \"txId\": 771203}\n}"}
+      ]
+    },
+    {
+      "heading": "Applying changes downstream",
+      "blocks": [
+        {"type": "p", "text": "The consumer side turns a stream of events into a table that mirrors the source. Two patterns. **Append-only changelog**: land every event as a row in a bronze table (cheap, complete history, the audit trail), then derive the current state with a windowed deduplication — latest event per key, excluding deletes. **Merge into a mirror**: apply events to a table-format table with `MERGE`, in micro-batches, ordered by commit position, so the silver table is always the source's current state. Most platforms do both: the changelog for history and reprocessing, the merged mirror for queries."},
+        {"type": "code", "lang": "sql", "caption": "Applying a micro-batch of change events to an Iceberg mirror. Events are deduplicated to the latest per key first, so out-of-order duplicates within the batch cannot flip state backwards.", "code": "MERGE INTO lake.silver.orders t\nUSING (\n  SELECT *\n  FROM (\n    SELECT\n      e.after.id            AS id,\n      e.after.customer_id   AS customer_id,\n      e.after.status        AS status,\n      e.after.amount_cents  AS amount_cents,\n      e.op,\n      e.source.lsn          AS lsn,\n      ROW_NUMBER() OVER (PARTITION BY COALESCE(e.after.id, e.before.id) ORDER BY e.source.lsn DESC) AS rn,\n      COALESCE(e.after.id, e.before.id) AS key_id\n    FROM lake.bronze.orders_changes e\n    WHERE e.ingested_at >= TIMESTAMP '2026-03-04 10:00:00'\n  ) WHERE rn = 1\n) s\nON t.id = s.key_id\nWHEN MATCHED AND s.op = 'd' THEN DELETE\nWHEN MATCHED AND s.lsn > t.last_lsn THEN UPDATE SET status = s.status, amount_cents = s.amount_cents, last_lsn = s.lsn\nWHEN NOT MATCHED AND s.op != 'd' THEN INSERT (id, customer_id, status, amount_cents, last_lsn)\n  VALUES (s.key_id, s.customer_id, s.status, s.amount_cents, s.lsn);"},
+        {"type": "p", "text": "Two details make this robust. Keeping `last_lsn` on the mirror and only applying newer events makes replays idempotent: a batch applied twice changes nothing. Handling deletes explicitly (`op = 'd'`) is the reason CDC was chosen; a mirror that ignores them drifts. For slowly changing dimensions the same events feed a Type 2 history table, with each change becoming a new versioned row and the previous row closed at the event's commit time."}
+      ]
+    },
+    {
+      "heading": "Snapshots, schema changes and restarts",
+      "blocks": [
+        {"type": "p", "text": "A new connector must capture the existing rows before it can stream changes: the **initial snapshot** reads each table (as `op = 'r'` events) at a consistent point and then continues from the log position recorded at the snapshot's start, so nothing between snapshot and streaming is missed. Snapshots of large tables take time and load; incremental snapshot features chunk them and interleave with streaming. Re-snapshotting a single table after a problem is a normal operation, and downstream merges handle it because `r` events apply like upserts."},
+        {"type": "list", "items": [
+          "**Schema changes** at the source (a new column, a type change) appear in the event schema; with a schema registry in backward mode, additive changes flow through, and downstream tables using `on_schema_change` or table-format evolution pick them up. Breaking changes need coordination, exactly as the data contract described.",
+          "**Slot growth**: if the connector stops, Postgres retains WAL for the slot indefinitely and the disk fills. Monitor slot lag (`pg_replication_slots`), alert on it, and drop slots for decommissioned connectors.",
+          "**Heartbeats**: on quiet databases the slot position does not advance; heartbeat events keep it moving so WAL can be released.",
+          "**Restarts** resume from the committed offset with at-least-once semantics; downstream idempotency (the `last_lsn` guard) absorbs the replayed events.",
+          "**Ordering** is per key within a partition; keying topics by primary key preserves per-row order, which is all a mirror needs."
+        ]},
+        {"type": "code", "lang": "sql", "caption": "The two queries to run on the source whenever CDC is in place: slot lag, and the WAL it is holding.", "code": "SELECT slot_name, active,\n       pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)) AS retained_wal\nFROM pg_replication_slots;\n\n-- alert if retained_wal exceeds a few GB, or if active is false for more than a few minutes"}
+      ]
+    },
+    {
+      "heading": "When CDC is worth it",
+      "blocks": [
+        {"type": "p", "text": "CDC is the right tool when deletes and every intermediate change matter (finance, inventory, auditing), when latency must be seconds to minutes, when the source cannot tolerate polling, or when many consumers need the same changes (a mirror, a search index, a cache, a fraud model). It is the wrong tool when a nightly snapshot of a small table is enough, when the team cannot operate Kafka and Connect, or when the source database team will not enable logical replication. Managed CDC services and warehouse-native connectors reduce the operational burden and are often the pragmatic middle."},
+        {"type": "callout", "kind": "tip", "text": "Start with one important table, land its changelog to bronze, build the merged mirror, and reconcile it against the source nightly (row counts, a checksum of key columns). A mirror that reconciles is one you can put downstream systems on."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Mirror a Postgres table with CDC",
+    "steps": [
+      "Run Postgres, Kafka (KRaft), Kafka Connect with the Debezium Postgres connector and a schema registry locally with Docker Compose (Debezium publishes example compose files). Enable `wal_level = logical`.",
+      "Create the `orders` table, insert 1,000 rows, then create the publication and register the connector with `snapshot.mode = initial`. Confirm 1,000 `op = 'r'` events on the `shop.public.orders` topic.",
+      "Run an UPDATE and a DELETE on the source and inspect the resulting events (and the tombstone) with the console consumer.",
+      "Write a consumer (Python, or Spark Structured Streaming) that lands events into a bronze Parquet or Iceberg changelog table with `ingested_at`, then apply the MERGE from the lesson into a silver mirror.",
+      "Stop the connector, run 500 more changes including deletes, restart it, and confirm the mirror catches up with exactly the source's row count and no duplicates.",
+      "Query `pg_replication_slots` while the connector is stopped and watch retained WAL grow; then write the alert condition you would use.",
+      "Add a nullable column to `orders`, insert a row using it, and confirm the change flows through the registry and into the mirror."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Log-based CDC reads the WAL: every insert, update, delete in commit order, with negligible source load",
+      "Debezium: replication slot + publication + connector; one topic per table keyed by primary key; op, before, after, source.lsn",
+      "Land the changelog to bronze (history), MERGE into a silver mirror (current state); guard with last_lsn for idempotency; apply deletes",
+      "Initial snapshot then stream; re-snapshot is normal; restarts are at-least-once",
+      "Monitor slot lag and retained WAL; heartbeats on quiet databases; drop dead slots",
+      "Use CDC when deletes, intermediate changes, low latency or many consumers matter; otherwise batch is simpler"
+    ],
+    "groups": [
+      {"title": "Postgres setup", "items": [
+        {"syntax": "wal_level = logical; max_replication_slots; max_wal_senders", "desc": "Server prerequisites (restart)"},
+        {"syntax": "CREATE ROLE debezium WITH LOGIN REPLICATION", "desc": "Replication user"},
+        {"syntax": "CREATE PUBLICATION pub FOR TABLE t1, t2", "desc": "Which tables to capture"},
+        {"syntax": "ALTER TABLE t REPLICA IDENTITY FULL", "desc": "Full before image on update/delete"},
+        {"syntax": "SELECT slot_name, active, pg_wal_lsn_diff(...) FROM pg_replication_slots", "desc": "Slot lag and retained WAL"}
+      ]},
+      {"title": "Connector", "items": [
+        {"syntax": "plugin.name=pgoutput, slot.name, publication.name", "desc": "Core Postgres connector settings"},
+        {"syntax": "snapshot.mode=initial | never | when_needed", "desc": "How existing rows are captured"},
+        {"syntax": "table.include.list", "desc": "Tables to stream"},
+        {"syntax": "tombstones.on.delete=true", "desc": "Null value after delete for compaction"},
+        {"syntax": "heartbeat.interval.ms", "desc": "Advance the slot on quiet databases"},
+        {"syntax": "Avro converters + schema registry", "desc": "Typed, evolvable events"}
+      ]},
+      {"title": "Event and apply", "items": [
+        {"syntax": "op: c | u | d | r", "desc": "Create, update, delete, snapshot read"},
+        {"syntax": "before / after / source.lsn / ts_ms", "desc": "Row images and ordering position"},
+        {"syntax": "ROW_NUMBER() OVER (PARTITION BY key ORDER BY lsn DESC) = 1", "desc": "Latest event per key in a batch"},
+        {"syntax": "MERGE ... WHEN MATCHED AND op='d' THEN DELETE", "desc": "Apply deletes explicitly"},
+        {"syntax": "WHEN MATCHED AND s.lsn > t.last_lsn THEN UPDATE", "desc": "Idempotent replay guard"},
+        {"syntax": "bronze changelog + silver mirror", "desc": "History and current state"}
+      ]},
+      {"title": "Operations", "items": [
+        {"syntax": "initial snapshot -> stream from recorded LSN", "desc": "No gap between the two"},
+        {"syntax": "incremental snapshot signal", "desc": "Re-capture one table without stopping"},
+        {"syntax": "alert: retained WAL > N GB or slot inactive > M min", "desc": "Prevent disk exhaustion"},
+        {"syntax": "backward-compatible schema changes flow; breaking ones coordinate", "desc": "Contracts apply"},
+        {"syntax": "nightly reconciliation: counts + checksums vs source", "desc": "Prove the mirror is faithful"}
+      ]}
+    ],
+    "pitfalls": [
+      "Forgetting that a stopped connector holds WAL forever via its slot, until the source disk fills.",
+      "Applying events without ordering or an LSN guard, so a replay or an out-of-order batch flips a row to an older state.",
+      "Ignoring delete events, so the mirror keeps rows the source removed — the exact problem CDC was meant to fix.",
+      "Default REPLICA IDENTITY, so update and delete events lack the before image needed for some consumers.",
+      "Running CDC for a small reference table that a nightly snapshot would handle with a tenth of the operational cost.",
+      "No reconciliation, so a silently broken connector is discovered by a wrong report."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A warehouse mirror built by timestamp polling still shows orders that were hard-deleted in the source last month. Which approach fixes the class of problem?",
+      "options": [
+        "Log-based CDC, which emits delete events from the transaction log that the mirror applies",
+        "Polling more frequently so deletes are noticed sooner",
+        "Adding an index on updated_at in the source",
+        "Truncating and reloading the mirror weekly"
+      ],
+      "answer": 0,
+      "explain": "Deletes leave nothing for a timestamp query to find; only the log records them. Frequent polling and indexes do not change that, and weekly reloads leave the mirror wrong for days and load the source."
+    },
+    {
+      "q": "A Debezium connector has been stopped for three days. What is the most urgent operational risk?",
+      "options": [
+        "The replication slot retains all WAL since the stop, and the source database's disk can fill",
+        "Kafka will delete the topic after 24 hours of inactivity",
+        "The connector's offsets expire and it must re-snapshot everything",
+        "The schema registry marks the schema as deprecated"
+      ],
+      "answer": 0,
+      "explain": "A slot pins WAL until its consumer confirms it, regardless of how long that takes. Monitoring retained WAL and slot activity is essential; the other statements are not how Kafka, Connect offsets or the registry behave."
+    },
+    {
+      "q": "A micro-batch of change events contains two updates for the same order, and after applying them the mirror shows the older status. What was missing?",
+      "options": [
+        "Deduplicating to the latest event per key by LSN before merging, and guarding updates with a last_lsn comparison",
+        "A tombstone record after each update",
+        "REPLICA IDENTITY FULL on the source table",
+        "A larger batch interval so both updates arrive together"
+      ],
+      "answer": 0,
+      "explain": "Within a batch, events must be reduced to the latest per key and applied only if newer than what the mirror holds. Otherwise ordering inside the merge is undefined and replays can regress state."
+    },
+    {
+      "q": "During the initial snapshot of a large table, rows keep changing. How does log-based CDC avoid missing changes made during the snapshot?",
+      "options": [
+        "It records the log position at the snapshot's start and streams from that position afterwards, so changes made during the snapshot are replayed",
+        "It locks the table for the duration of the snapshot",
+        "It re-reads the table a second time after the snapshot to catch differences",
+        "It relies on updated_at timestamps to fill the gap"
+      ],
+      "answer": 0,
+      "explain": "The snapshot and the stream are anchored to the same LSN; any change committed after that point is in the log and will be streamed, and the idempotent merge makes overlap harmless."
+    },
+    {
+      "q": "A team needs a nightly copy of a 5,000-row country reference table and is considering CDC. What is the sensible recommendation?",
+      "options": [
+        "Use a simple full nightly extract; CDC's operational cost is not justified for a small, slowly changing table",
+        "Deploy CDC, since it is the modern standard for all replication",
+        "Deploy CDC but disable delete events to keep it simple",
+        "Replicate the table by having the application write to both systems"
+      ],
+      "answer": 0,
+      "explain": "CDC pays off for latency, deletes, high change rates and many consumers. A tiny reference table is served perfectly by a full snapshot; dual writes create their own consistency problems."
+    }
+  ]
+}

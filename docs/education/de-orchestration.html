@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Orchestration with DAGs — Data | ThavionAI Education</title>
+  <meta name="description" content="Airflow-style scheduling, dependencies, retries, sensors, backfills and keeping DAGs boring." />
+  <meta property="og:title" content="Orchestration with DAGs — ThavionAI Education" />
+  <meta property="og:description" content="Airflow-style scheduling, dependencies, retries, sensors, backfills and keeping DAGs boring." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/de-orchestration.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-data" data-module="de-orchestration">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../index.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=de-orchestration&amp;page=/education/de-orchestration.html&amp;title=Orchestration%20with%20DAGs">Feedback</a>
+    <a href="../education.html#data" class="nav-cta">All Data modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#data">Data</a> › Stage 2: Pipelines</div>
+    <h1>Orchestration with DAGs</h1>
+    <p class="lede">Airflow-style scheduling, dependencies, retries, sensors, backfills and keeping DAGs boring.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 6 of 16</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">A cron entry runs a script at 02:00. It does not know that the script depends on a file that arrives at 02:15, that yesterday's run failed and today's should wait, that three other scripts need this one's output, or that someone needs to rerun last week. An orchestrator knows all of that. It models work as a directed acyclic graph of tasks, schedules it by logical date, retries what fails, records every run, and gives you one place to see what is late and why. This module uses Apache Airflow's vocabulary — the most widely deployed orchestrator — but the ideas apply to Dagster, Prefect and the managed equivalents: DAGs, tasks, dependencies, scheduling semantics, retries, sensors, backfills and the discipline of keeping DAGs boring.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Model a pipeline as a DAG with clear task boundaries and explicit dependencies</li><li>Explain scheduling semantics: logical date, data intervals, catch-up and backfill</li><li>Configure retries, timeouts, SLAs and alerts so failures are handled without a human at 3 a.m.</li><li>Use sensors and datasets to wait for inputs without polling loops in code</li><li>Keep DAG code thin, testable and idempotent, with heavy work delegated to the right engine</li></ul>
+    </div>
+    <section id="dags-and-tasks"><h2>DAGs and tasks</h2>
+    <p>A <strong>DAG</strong> (directed acyclic graph) is a set of <strong>tasks</strong> and the dependencies between them: extract must finish before transform, transform before publish, and publish fans out to three downstream notifications. Acyclic means no loops, so the orchestrator can always determine an order. Each task is one unit of work with a clear input and output that can be retried on its own. Good task boundaries follow the pipeline stages from the previous module: extract, stage, transform, validate, publish. A single task that does everything cannot be retried partially or observed meaningfully.</p>
+    <div class="code"><div class="code-cap">An Airflow DAG for the daily orders pipeline. Each task is small, parameterised by the run's data interval, and delegates real work to a function or an external engine.</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>from datetime import datetime, timedelta
+
+from airflow.decorators import dag, task
+from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
+
+
+@dag(
+    dag_id="orders_daily",
+    schedule="0 3 * * *",                 # 03:00 UTC, after the source's nightly close
+    start_date=datetime(2026, 1, 1),
+    catchup=False,
+    max_active_runs=1,
+    default_args={"retries": 3, "retry_delay": timedelta(minutes=5), "retry_exponential_backoff": True,
+                  "execution_timeout": timedelta(minutes=30), "owner": "data-platform"},
+    tags=["orders", "daily"],
+)
+def orders_daily():
+    @task
+    def extract(data_interval_start=None, data_interval_end=None) -&gt; str:
+        from pipelines.orders import extract_to_raw
+        return extract_to_raw(start=data_interval_start, end=data_interval_end)   # returns the raw path
+
+    @task
+    def validate_raw(path: str) -&gt; str:
+        from pipelines.orders import check_raw
+        check_raw(path)                     # raises on empty file or schema drift
+        return path
+
+    transform = SQLExecuteQueryOperator(
+        task_id="transform",
+        conn_id="warehouse",
+        sql="sql/orders_transform.sql",   # uses {{ data_interval_start }} for the partition
+    )
+
+    @task
+    def publish_metrics(**context):
+        from pipelines.orders import emit_run_metrics
+        emit_run_metrics(run_id=context["run_id"])
+
+    validate_raw(extract()) &gt;&gt; transform &gt;&gt; publish_metrics()
+
+
+orders_daily()</code></pre></div>
+    <figure class="diagram" id="fig-dag-run"><div class="diagram-scroll"><svg viewBox="0 0 910 356" role="img" aria-label="A single DAG run labelled with data interval March 1st. A sensor task waits for the partner file, then extract writes raw data to object storage, validate checks it, transform runs SQL in the warehouse, and publish updates the silver orders dataset. Each task shows its retry policy. An arrow from the dataset to a second DAG, orders reporting, shows data-aware scheduling." style="width:100%;max-width:910px;min-width:540px;height:auto;display:block"><defs><marker id="dag-run-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="dag-run-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="dag-run-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="dag-run-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="dag-run-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><rect x="20" y="19" width="842" height="102" rx="10" class="dg-group"/><text x="30" y="114" font-size="10" font-weight="700" letter-spacing="1" class="dg-group-label">ORDERS_DAILY RUN: DATA_INTERVAL_START = 2026-03-01</text><polyline points="171.0,70.0 201.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#dag-run-arrow-default)"/><rect x="144.4" y="24.0" width="83.2" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">file present</text><polyline points="341.0,70.0 371.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#dag-run-arrow-default)"/><rect x="323.6" y="24.0" width="64.9" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">path only</text><polyline points="511.0,70.0 541.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#dag-run-arrow-default)"/><rect x="514.9" y="24.0" width="22.2" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">ok</text><polyline points="681.0,70.0 711.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#dag-run-arrow-default)"/><polyline points="271.0,98.0 271.0,150.0" fill="none" style="stroke:rgba(148,163,184,0.55)" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#dag-run-arrow-muted)"/><rect x="274.0" y="116.0" width="46.6" height="16" rx="4" class="dg-label-bg"/><text x="278.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">writes</text><polyline points="611.0,98.0 611.0,150.0" fill="none" style="stroke:rgba(148,163,184,0.55)" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#dag-run-arrow-muted)"/><rect x="614.0" y="116.0" width="34.4" height="16" rx="4" class="dg-label-bg"/><text x="618.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">runs</text><polyline points="781.0,98.0 781.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#dag-run-arrow-default)"/><rect x="784.0" y="116.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="788.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">updates</text><polyline points="781.0,206.0 781.0,258.0" fill="none" style="stroke:#34d399" stroke-width="1.6" marker-end="url(#dag-run-arrow-ok)"/><rect x="784.0" y="224.0" width="58.8" height="16" rx="4" class="dg-label-bg"/><text x="788.0" y="232.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:#34d399">triggers</text><rect x="31" y="42.0" width="140" height="56" rx="8" class="dg-node dg-muted"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text2)">wait_for_file</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">deferrable, timeout</text><rect x="201" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">extract</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">retries 3, backoff</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">validate_raw</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">retries 0</text><rect x="541" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">transform</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">SQL in warehouse</text><rect x="711" y="42.0" width="140" height="56" rx="8" class="dg-node dg-ok"/><text x="781.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#6ee7b7">publish</text><text x="781.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">outlet: dataset</text><path d="M201,157.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M201,157.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="271.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">raw/dt=03-01</text><text x="271.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">object storage</text><path d="M541,157.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M541,157.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="611.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Warehouse</text><text x="611.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">does the heavy work</text><path d="M711,157.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M711,157.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="781.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">silver/orders</text><text x="781.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">Dataset updated</text><rect x="711" y="258.0" width="140" height="56" rx="8" class="dg-node dg-ok"/><text x="781.0" y="279.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#6ee7b7">orders_reporting</text><text x="781.0" y="297.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">schedule=[Dataset]</text></svg></div><figcaption>One run of the orders DAG for the March 1st interval: a sensor waits for the input, then extract, validate, transform and publish run in dependency order, each one parameterised by the same logical date, retried on transient failure, and delegating heavy work to the warehouse. The reporting DAG starts when the produced dataset updates, not on a guessed time.</figcaption></figure>
+    <p>Notice what the DAG does not do: it does not contain the transformation logic, it does not compute dates from the clock, and it does not hold data in memory between tasks. Tasks pass small references (a path, a partition key), never DataFrames. The heavy lifting runs in the warehouse, in a Spark job, in a container — anywhere but the orchestrator's own workers, which exist to coordinate.</p></section>
+  <section id="scheduling-semantics-the-logical-date"><h2>Scheduling semantics: the logical date</h2>
+    <p>The most misunderstood part of any orchestrator is <strong>when a run happens versus which data it covers</strong>. A daily DAG scheduled at 03:00 with a data interval of one day runs at 03:00 on March 2nd to process the interval March 1st 00:00 to March 2nd 00:00. The run's <strong>logical date</strong> (<code>data_interval_start</code>) is March 1st, even though the clock says March 2nd. Every task should derive its target partition from the interval it is given, never from <code>datetime.now()</code>. This is what makes reruns and backfills correct: rerunning the March 1st run in April still processes March 1st.</p>
+    <div class="table-wrap"><table><thead><tr><th>Setting</th><th>Meaning</th><th>Typical choice</th></tr></thead><tbody><tr><td><code>schedule</code></td><td>Cron or interval that defines data intervals</td><td><code>0 3 * * *</code> for daily after source close</td></tr><tr><td><code>start_date</code></td><td>First data interval to consider</td><td>A fixed date in the past, never <code>now()</code></td></tr><tr><td><code>catchup</code></td><td>Whether to run every missed interval since start_date on deploy</td><td><code>False</code> unless you want history built automatically</td></tr><tr><td><code>max_active_runs</code></td><td>How many intervals may run concurrently</td><td>1 for pipelines whose runs depend on order</td></tr><tr><td><code>depends_on_past</code></td><td>Wait for the previous interval's task to succeed</td><td>True for incremental loads that assume continuity</td></tr></tbody></table></div>
+    <div class="callout callout-warning"><strong>Watch out</strong><p>Setting <code>start_date</code> to a dynamic value or leaving <code>catchup=True</code> on a DAG with an old start date are the two classic first-day surprises: the first never schedules stably, the second launches hundreds of runs the moment the DAG is enabled.</p></div></section>
+  <section id="failure-handling-without-a-human"><h2>Failure handling without a human</h2>
+    <p>Tasks fail for transient reasons (a network blip, a warehouse queue) and for real ones (bad data, a bug). <strong>Retries</strong> with backoff absorb the first kind; a task that is idempotent can be retried safely, which is why idempotency kept coming up. <strong>Timeouts</strong> stop a hung task from blocking the day. When retries are exhausted, the failure should reach a human with context: which DAG, which interval, which task, the log, and a runbook link — through an on-failure callback to the alerting system, not through someone checking the UI. <strong>SLAs</strong> (or freshness checks on the output tables) catch the failure mode retries do not: the run that succeeds late, or never starts.</p>
+    <div class="code"><div class="code-cap">Failure and lateness reaching people with context: an on-failure callback and a per-task SLA.</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>from datetime import timedelta
+
+
+def page_on_failure(context):
+    from pipelines.alerts import send_alert
+    ti = context["task_instance"]
+    send_alert(
+        severity="high",
+        title=f"{ti.dag_id}.{ti.task_id} failed for {context['data_interval_start']:%Y-%m-%d}",
+        body=f"attempt {ti.try_number} of {ti.max_tries + 1}; log: {ti.log_url}",
+        runbook="https://runbooks.internal/data/orders_daily",
+    )
+
+
+default_args = {
+    "retries": 3,
+    "retry_delay": timedelta(minutes=5),
+    "retry_exponential_backoff": True,
+    "execution_timeout": timedelta(minutes=30),
+    "on_failure_callback": page_on_failure,
+    "sla": timedelta(hours=2),              # task should finish within 2 h of the interval's end
+}</code></pre></div>
+    <p>Decide per task whether downstream should run when it fails. The default (skip downstream) is right for a hard dependency; for optional enrichment a <strong>trigger rule</strong> such as <code>all_done</code> lets the pipeline continue and flag the gap. And separate "the data is bad" from "the task crashed": a validation task that fails on bad data should not be retried three times; it should stop the run and alert with the validation report.</p></section>
+  <section id="waiting-for-inputs-sensors-and-datasets"><h2>Waiting for inputs: sensors and datasets</h2>
+    <p>Pipelines wait: for a file to land, for an upstream DAG to finish, for a partition to appear in the warehouse. A <strong>sensor</strong> is a task that polls for a condition and succeeds when it holds, with a timeout so it does not wait forever. Use <strong>deferrable</strong> (or reschedule mode) sensors so a waiting task does not occupy a worker slot. Better than polling, where the platform supports it, is <strong>data-aware scheduling</strong>: a DAG declares that it produces a dataset, downstream DAGs declare they consume it, and the scheduler starts the consumer when the producer updates the dataset — no cron guessing about when upstream will be done.</p>
+    <div class="code"><div class="code-cap">A deferrable file sensor with a timeout, and dataset-driven scheduling so the downstream DAG runs exactly when its input is ready.</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>from datetime import datetime, timedelta
+
+from airflow.datasets import Dataset
+from airflow.decorators import dag, task
+from airflow.providers.amazon.aws.sensors.s3 import S3KeySensor
+
+ORDERS_SILVER = Dataset("s3://acme-lake/silver/orders/")
+
+
+@dag(dag_id="partner_file_ingest", schedule="0 4 * * *", start_date=datetime(2026, 1, 1), catchup=False)
+def partner_file_ingest():
+    wait_for_file = S3KeySensor(
+        task_id="wait_for_partner_file",
+        bucket_name="acme-inbound",
+        bucket_key="partner/orders_{{ data_interval_start | ds_nodash }}.csv",
+        deferrable=True,                       # frees the worker while waiting
+        timeout=6 * 60 * 60,                   # give up after 6 hours and alert
+        poke_interval=300,
+    )
+
+    @task(outlets=[ORDERS_SILVER])
+    def load_to_silver():
+        from pipelines.partner import load
+        load()
+
+    wait_for_file &gt;&gt; load_to_silver()
+
+
+@dag(dag_id="orders_reporting", schedule=[ORDERS_SILVER], start_date=datetime(2026, 1, 1), catchup=False)
+def orders_reporting():
+    @task
+    def build_reports():
+        from pipelines.reports import build
+        build()
+
+    build_reports()
+
+
+partner_file_ingest()
+orders_reporting()</code></pre></div>
+    <div class="callout callout-note"><strong>Note</strong><p>Newer Airflow versions call datasets "assets" and Dagster is built around the asset idea from the start: you declare the tables you produce and their dependencies, and the schedule follows. The concept is the same — schedule on data readiness, not on the clock.</p></div></section>
+  <section id="backfills-and-keeping-dags-boring"><h2>Backfills and keeping DAGs boring</h2>
+    <p>A <strong>backfill</strong> asks the orchestrator to run a DAG for a range of past intervals. Because each run gets its own logical date and every task is idempotent, the backfill is just many correct runs. Limit its concurrency so it does not starve the daily schedule or overwhelm the warehouse; clear only the tasks that need rerunning rather than the whole DAG; and watch the first few runs before letting the rest go. Backfills that need special handling (a different code path, skipped notifications) should get an explicit parameter, not a guess based on how old the interval is.</p>
+    <div class="code"><div class="code-cap">Operating a DAG from the CLI: a backfill with bounded concurrency, clearing a failed task, and testing one task locally before deploying.</div><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># rebuild a range with at most 2 intervals in flight, without triggering downstream datasets
+airflow dags backfill orders_daily --start-date 2026-02-01 --end-date 2026-02-28 --max-active-runs 2
+
+# rerun just the transform (and what depends on it) for one interval
+airflow tasks clear orders_daily --task-regex '^transform$' --downstream \
+  --start-date 2026-03-01 --end-date 2026-03-01 --yes
+
+# run one task for one interval locally, no scheduler needed
+airflow tasks test orders_daily extract 2026-03-01</code></pre></div>
+    <ul><li><strong>Thin DAG files</strong>: imports inside tasks, logic in a package with unit tests; the DAG file is parsed constantly and must be fast and side-effect free.</li><li><strong>No top-level work</strong>: no database calls or API requests at import time; they run every parse.</li><li><strong>Small payloads between tasks</strong>: paths and keys, not data; the metadata database is not a data store.</li><li><strong>One DAG per pipeline, one owner, tagged</strong>: hundreds of tasks in one DAG is hard to operate; hundreds of copy-paste DAGs is worse. Generate similar DAGs from configuration.</li><li><strong>Version the DAGs with the pipeline code</strong> and deploy through CI like any other code.</li></ul>
+    <p>The orchestrator's job is to make the pipeline's behaviour predictable and visible. When the DAG is thin, the tasks idempotent and the schedule data-aware, the interesting logic lives where it is tested, and the orchestrator becomes what it should be: the boring, reliable clock and ledger of the platform.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Orchestrate the pipeline from the previous module</h2>
+    <ol><li>Install Airflow locally in standalone mode (<code>airflow standalone</code>) or with the official Docker Compose file. Confirm the web UI loads and the example DAGs are disabled.</li><li>Wrap the idempotent orders pipeline from the batch module as a DAG with four tasks: extract, validate, transform, publish. Pass only the raw path between tasks. Use <code>data_interval_start</code> for the partition.</li><li>Set <code>catchup=False</code>, enable the DAG, trigger one run manually, and read each task's log. Then run <code>airflow tasks test</code> for the extract task with a past date and confirm it processed that date.</li><li>Make the validate task fail on an empty file, wire an on-failure callback that prints a formatted alert, and confirm retries are not attempted for validation failures (set <code>retries=0</code> on that task).</li><li>Add an S3 (or local filesystem) sensor with a 10-minute timeout in front of extract, in deferrable or reschedule mode, and watch it wait and then succeed when you create the file.</li><li>Split reporting into a second DAG scheduled on a Dataset produced by the first, and confirm it runs automatically after the first completes.</li><li>Backfill one week with <code>--max-active-runs 2</code>, then clear and rerun a single task for one day. Check the warehouse partitions are correct after each.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Orchestration with DAGs — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>A DAG is tasks with explicit dependencies; each task is a retryable unit with a clear input and output</li><li>Logical date = the data interval the run covers, not when it runs; derive partitions from it, never from now()</li><li>Fixed start_date, catchup=False unless history is wanted, max_active_runs=1 for ordered pipelines</li><li>Retries with backoff for transient failures; timeouts; on-failure callbacks with context; SLAs or freshness checks for lateness</li><li>Deferrable sensors with timeouts to wait; datasets/assets to schedule on data readiness</li><li>Thin DAG files, no top-level work, small payloads, logic in a tested package, backfills with bounded concurrency</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>DAG definition</h3><table><tbody><tr><td><code>@dag(dag_id, schedule, start_date, catchup, max_active_runs, default_args, tags)</code></td><td>The header that sets behaviour</td></tr><tr><td><code>@task def f(data_interval_start=None): ...</code></td><td>Python task receiving the interval</td></tr><tr><td><code>a &gt;&gt; b &gt;&gt; [c, d]</code></td><td>Dependencies; fan-out with lists</td></tr><tr><td><code>SQLExecuteQueryOperator(conn_id, sql='file.sql')</code></td><td>Run SQL in the warehouse; template dates</td></tr><tr><td><code>{{ data_interval_start | ds }}</code></td><td>Jinja: the logical date as YYYY-MM-DD</td></tr><tr><td><code>import inside the task function</code></td><td>Fast, side-effect-free parsing</td></tr></tbody></table></div><div class="cheat-group"><h3>Scheduling</h3><table><tbody><tr><td><code>schedule='0 3 * * *'</code></td><td>Cron; run at 03:00 for the previous day's interval</td></tr><tr><td><code>schedule=timedelta(hours=1)</code></td><td>Interval schedule</td></tr><tr><td><code>schedule=[Dataset(uri)]</code></td><td>Run when the dataset is updated</td></tr><tr><td><code>catchup=False</code></td><td>Do not run missed intervals on enable</td></tr><tr><td><code>depends_on_past=True</code></td><td>Serial runs for continuity-dependent loads</td></tr><tr><td><code>data_interval_start / data_interval_end</code></td><td>The window this run owns</td></tr></tbody></table></div><div class="cheat-group"><h3>Failure handling</h3><table><tbody><tr><td><code>retries=3, retry_delay, retry_exponential_backoff=True</code></td><td>Absorb transient failures</td></tr><tr><td><code>execution_timeout=timedelta(minutes=30)</code></td><td>No hung tasks</td></tr><tr><td><code>on_failure_callback=fn(context)</code></td><td>Alert with DAG, task, interval, log URL, runbook</td></tr><tr><td><code>sla=timedelta(hours=2) / output freshness check</code></td><td>Catch late or missing runs</td></tr><tr><td><code>trigger_rule='all_done'</code></td><td>Continue past optional failures</td></tr><tr><td><code>retries=0 on validation tasks</code></td><td>Bad data is not transient</td></tr></tbody></table></div><div class="cheat-group"><h3>Waiting and operating</h3><table><tbody><tr><td><code>S3KeySensor(..., deferrable=True, timeout=..., poke_interval=...)</code></td><td>Wait without holding a worker</td></tr><tr><td><code>@task(outlets=[Dataset(uri)])</code></td><td>Declare what a task produces</td></tr><tr><td><code>airflow dags backfill DAG --start-date --end-date --max-active-runs N</code></td><td>Bounded reprocessing</td></tr><tr><td><code>airflow tasks clear DAG --task-regex R --downstream --start-date --end-date</code></td><td>Rerun part of a run</td></tr><tr><td><code>airflow tasks test DAG TASK DATE</code></td><td>Run one task locally</td></tr><tr><td><code>XCom: paths and keys only</code></td><td>Never pass data between tasks</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Computing the date to process from the clock inside a task; backfills process the wrong day.</li><li>Dynamic start_date or catchup left True on an old start date; hundreds of surprise runs.</li><li>Heavy work on the orchestrator's workers and DataFrames in XCom; the scheduler becomes the bottleneck.</li><li>Database or API calls at DAG file top level; they run on every parse.</li><li>Retrying validation failures as if bad data were a network blip.</li><li>Sensors in poke mode with no timeout, silently occupying every worker slot.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "A daily DAG scheduled at `0 3 * * *` runs on March 2nd at 03:00. What is `data_interval_start` for that run, and which partition should its tasks build?", "options": ["March 1st; the run covers the interval that just closed, so tasks build the March 1st partition", "March 2nd; the run builds today's partition as of 03:00", "March 3rd; Airflow schedules one interval ahead", "Whatever `datetime.now()` returns in the task"], "answer": 0, "explain": "A run executes after its data interval ends. The logical date names the interval, not the wall-clock moment, which is what makes reruns and backfills process the right data."}, {"q": "A validation task fails because the raw file has a new column with a changed type. It is configured with three retries and backoff. What is wrong with that configuration?", "options": ["Bad data is not transient; retries waste time and delay the alert. Validation failures should stop the run immediately with the report", "Nothing; every task should retry to be safe", "Retries should be increased to ten so the file has time to be corrected upstream", "The task should use `trigger_rule='all_done'` so downstream continues"], "answer": 0, "explain": "Retries exist for failures that may succeed on a second attempt. A schema change will fail identically three times; set retries to zero on validation and alert with context. Continuing downstream with bad data is worse."}, {"q": "A reporting DAG is scheduled at 05:00 because the upstream orders DAG \"usually finishes by 04:30\". Twice a month it runs on stale data. What is the robust fix?", "options": ["Schedule the reporting DAG on the dataset the orders DAG produces, so it runs when the data is actually ready", "Move the reporting schedule to 06:00 to add margin", "Add a sleep at the start of the reporting DAG", "Merge both DAGs into one large DAG with all tasks"], "answer": 0, "explain": "Data-aware scheduling removes the guess entirely. Adding margin or sleeps trades staleness for lateness and still fails on slow days; one giant DAG is harder to own and operate."}, {"q": "A DAG file opens a database connection at module level to build its task list from a table. What problem does this cause?", "options": ["The scheduler parses DAG files continuously, so the connection is opened on every parse, slowing scheduling and hammering the database", "Airflow forbids database access anywhere in DAG code", "The task list will be empty because parsing happens before the database starts", "The connection will be shared between tasks and cause deadlocks"], "answer": 0, "explain": "Top-level code runs at parse time, repeatedly. Keep DAG files declarative, generate from static configuration, or use dynamic task mapping that reads inputs inside a task at run time."}, {"q": "A team needs to rebuild six weeks of a fact table after a bug fix without disrupting the daily run or overloading the warehouse. What is the appropriate approach?", "options": ["Run a backfill for the date range with bounded concurrency, relying on idempotent, date-parameterised tasks, and validate the first runs before continuing", "Trigger the DAG manually 42 times as fast as possible", "Temporarily change the DAG's start_date to six weeks ago with catchup=True", "Write a one-off script that bypasses the orchestrator"], "answer": 0, "explain": "Backfill is the orchestrator's mechanism for exactly this, and concurrency limits protect the daily schedule. Manual triggers lose interval semantics, editing start_date with catchup is a blunt instrument, and one-off scripts skip the idempotent tested path."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="de-etl.html"><span>← Previous</span><strong>Batch pipeline design</strong></a>
+    <a class="pager-up" href="../education.html#data">All Data modules</a>
+    <a class="pager-link pager-next" href="de-dbt.html"><span>Next →</span><strong>Transformations with dbt</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=de-orchestration&amp;page=/education/de-orchestration.html&amp;title=Orchestration%20with%20DAGs">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=de-orchestration&amp;page=/education/de-orchestration.html&amp;title=Orchestration%20with%20DAGs">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

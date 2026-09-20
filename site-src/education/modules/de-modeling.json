@@ -1,0 +1,177 @@
+{
+  "id": "de-modeling",
+  "minutes": 35,
+  "intro": "A pipeline moves data; a model decides what the data means. Get the model wrong and every query downstream fights it: joins that fan out, metrics that disagree between dashboards, a history nobody can reconstruct. Get it right and most analytics questions become a short query on an obvious table. This module covers the two modelling traditions you will meet — normalised schemas for systems that write, dimensional schemas for systems that read — and the decisions that matter in practice: choosing a grain, handling change over time with slowly changing dimensions, keys, and the modern variations that columnar warehouses make possible.",
+  "objectives": [
+    "Explain normalisation and why transactional systems use it",
+    "Design a star schema: declare a grain, separate facts from dimensions, choose surrogate keys",
+    "Handle change over time with the right slowly changing dimension type",
+    "Model events, snapshots and accumulating facts appropriately",
+    "Decide when to denormalise, when to use wide tables, and how to keep one definition per metric"
+  ],
+  "sections": [
+    {
+      "heading": "Normalised: the shape of a system that writes",
+      "blocks": [
+        {"type": "p", "text": "Operational databases are **normalised**: each fact is stored once, in the table that owns it, and related by keys. A customer's address lives in one row; an order references the customer by id; changing the address touches one place. The normal forms formalise this: no repeating groups (1NF), every non-key column depends on the whole key (2NF), and on nothing but the key (3NF). The payoff is write integrity: no update anomalies, no inconsistent copies. The cost is that answering a question means joining five tables, and the schema reflects how the application works, not how the business thinks."},
+        {"type": "code", "lang": "sql", "caption": "A normalised order model: each entity once, relationships by key, constraints enforced by the database.", "code": "CREATE TABLE customers (\n  id          bigint PRIMARY KEY,\n  email       text NOT NULL UNIQUE,\n  created_at  timestamptz NOT NULL\n);\nCREATE TABLE products (\n  id     bigint PRIMARY KEY,\n  sku    text NOT NULL UNIQUE,\n  name   text NOT NULL,\n  price  numeric(12,2) NOT NULL\n);\nCREATE TABLE orders (\n  id           bigint PRIMARY KEY,\n  customer_id  bigint NOT NULL REFERENCES customers(id),\n  ordered_at   timestamptz NOT NULL,\n  status       text NOT NULL CHECK (status IN ('placed','paid','shipped','refunded'))\n);\nCREATE TABLE order_items (\n  order_id    bigint NOT NULL REFERENCES orders(id),\n  product_id  bigint NOT NULL REFERENCES products(id),\n  quantity    int NOT NULL CHECK (quantity > 0),\n  unit_price  numeric(12,2) NOT NULL,   -- price at time of order, not a lookup\n  PRIMARY KEY (order_id, product_id)\n);"},
+        {"type": "p", "text": "Notice `unit_price` on the item: it is deliberately a copy, because the product's price changes and the order must remember what was charged. Normalisation is a default, not a law; the exceptions are chosen for a reason and documented."}
+      ]
+    },
+    {
+      "heading": "Dimensional: the shape of a system that reads",
+      "blocks": [
+        {"type": "p", "text": "Analytics wants the opposite trade: fast, simple reads over many rows, and a schema that matches how people ask questions (\"revenue by product category by month by region\"). The **star schema** delivers that. A **fact table** holds measurements at a declared grain, one row per event or per thing measured, with numeric measures and foreign keys. **Dimension tables** hold the descriptive context (who, what, where, when) with one row per entity and many descriptive columns. Queries filter and group by dimension attributes and aggregate fact measures; joins are always fact-to-dimension on a single key."},
+        {"type": "p", "text": "The first and most important decision is the **grain**: exactly what one row of the fact table represents. \"One row per order line\" and \"one row per order\" are different tables with different measures, and mixing grains in one table is the root of most fan-out and double-counting. Declare the grain in the table's documentation and make the fact table's primary key express it."},
+        {"type": "code", "lang": "sql", "caption": "A sales star at the order-line grain, with surrogate keys and a conformed date dimension.", "code": "CREATE TABLE dim_date (\n  date_key   int PRIMARY KEY,       -- 20260301\n  date       date NOT NULL,\n  year int, quarter int, month int, month_name text, day_of_week text, is_weekend boolean, fiscal_period text\n);\nCREATE TABLE dim_customer (\n  customer_key   bigint PRIMARY KEY,   -- surrogate\n  customer_id    bigint NOT NULL,      -- natural key from the source\n  email text, country text, segment text, signup_date date,\n  valid_from timestamptz NOT NULL, valid_to timestamptz, is_current boolean NOT NULL\n);\nCREATE TABLE dim_product (\n  product_key bigint PRIMARY KEY, product_id bigint NOT NULL,\n  sku text, name text, category text, brand text\n);\nCREATE TABLE fact_sales (\n  -- grain: one row per order line\n  order_id       bigint NOT NULL,\n  line_no        int    NOT NULL,\n  date_key       int    NOT NULL REFERENCES dim_date(date_key),\n  customer_key   bigint NOT NULL REFERENCES dim_customer(customer_key),\n  product_key    bigint NOT NULL REFERENCES dim_product(product_key),\n  quantity       int NOT NULL,\n  unit_price     numeric(12,2) NOT NULL,\n  line_amount    numeric(12,2) NOT NULL,\n  PRIMARY KEY (order_id, line_no)\n);"},
+        {"type": "callout", "kind": "note", "text": "Surrogate keys (`customer_key`) are integers the warehouse assigns, independent of the source system's ids. They make history possible (one customer id, several versions), insulate the warehouse from source key changes, and keep fact tables narrow."}
+      ]
+    },
+    {
+      "heading": "Change over time: slowly changing dimensions",
+      "blocks": [
+        {"type": "p", "text": "A customer moves from Berlin to Lisbon. Should last year's orders now count as Portuguese revenue? The answer depends on the question, and **slowly changing dimension** (SCD) types are the standard ways to encode the choice. **Type 1** overwrites: the dimension holds only the current value; history is lost, which is right for corrections (a typo in a name). **Type 2** adds a new row per version with validity dates and a current flag; facts reference the version that was current when they happened, so historical reports are stable. **Type 3** keeps a previous-value column for a limited comparison. Type 2 is the default for anything the business analyses over time."},
+        {"type": "code", "lang": "sql", "caption": "Applying a Type 2 change: close the old version, insert the new one. Facts loaded later pick up the new key; old facts keep the old one.", "code": "-- customer 1042 moved to Lisbon on 2026-03-01\nUPDATE dim_customer\n   SET valid_to = '2026-03-01', is_current = false\n WHERE customer_id = 1042 AND is_current;\n\nINSERT INTO dim_customer (customer_key, customer_id, email, country, segment, signup_date, valid_from, valid_to, is_current)\nSELECT nextval('dim_customer_key_seq'), customer_id, email, 'PT', segment, signup_date, '2026-03-01', NULL, true\n  FROM dim_customer WHERE customer_id = 1042 AND valid_to = '2026-03-01';\n\n-- point-in-time lookup when loading a fact\nSELECT customer_key FROM dim_customer\n WHERE customer_id = 1042\n   AND valid_from <= '2026-02-14' AND (valid_to IS NULL OR valid_to > '2026-02-14');"},
+        {"type": "p", "text": "Type 2 tables grow with change and need care: a `valid_to` of NULL for the current row, non-overlapping ranges, exactly one current row per natural key — all worth testing (the data quality module does exactly this). In modern warehouses the snapshot feature of transformation tools automates Type 2 from a source table, which is how most teams implement it today."}
+      ]
+    },
+    {
+      "heading": "Kinds of facts, and events",
+      "blocks": [
+        {"type": "p", "text": "Not every fact table is a list of transactions. A **transaction fact** has one row per event (a sale, a click); it is the most common and the easiest to reason about. A **periodic snapshot** has one row per entity per period (account balance per day, inventory per warehouse per week); it answers \"what was the state at time t\" without replaying events. An **accumulating snapshot** has one row per process instance with a column per milestone (order placed, paid, shipped, delivered), updated as milestones occur; it makes funnel and lag analysis trivial."},
+        {"type": "table", "headers": ["Fact type", "Grain", "Typical question"], "rows": [
+          ["Transaction", "One row per event", "How much did we sell yesterday by category?"],
+          ["Periodic snapshot", "One row per entity per period", "What was every account's balance on the 1st?"],
+          ["Accumulating snapshot", "One row per process, milestone columns", "Median days from order to delivery, by region?"]
+        ]},
+        {"type": "p", "text": "Event streams (product analytics, logs) are transaction facts at very fine grain, often with a flexible JSON payload. Model them with a stable core (event name, timestamp, user, session, device) as columns and the variable properties in a structured column, then build narrower, typed tables for the events the business actually analyses. Keep the raw events immutable and append-only; every downstream table can be rebuilt from them."}
+      ]
+    },
+    {
+      "heading": "Modern variations and one definition per metric",
+      "blocks": [
+        {"type": "p", "text": "Columnar warehouses changed some trade-offs. Wide, denormalised tables (**One Big Table**) with hundreds of columns are cheap to scan and remove joins for dashboards; they work well as a final presentation layer built from a star, not as the model itself. Nested and repeated columns (arrays, structs) let a line-item fact live inside its order row. The **snowflake** variant normalises dimensions (product to category to department) and mostly adds joins for little benefit; keep dimensions flat unless a sub-dimension is shared and large."},
+        {"type": "p", "text": "Whatever the shape, the property that matters most is **one definition per metric**. \"Revenue\" computed three ways in three dashboards is the most common trust failure in analytics. Define each metric once in the transformation layer (a model or a metrics layer), with its grain, filters and NULL handling stated, and have every consumer read that definition. The transformation module builds this; the modelling decision is to design the tables so the definition is simple to express."},
+        {"type": "code", "lang": "text", "caption": "A model document that states what future readers need. Two minutes to write, hours saved later.", "code": "fact_sales\n  grain:      one row per order line (order_id, line_no)\n  measures:   quantity, unit_price (as charged), line_amount = quantity * unit_price\n  keys:       date_key (order date), customer_key (SCD2 as of order date), product_key\n  excludes:   cancelled orders (status = 'cancelled'); refunds are separate rows in fact_refunds\n  source:     orders + order_items, loaded incrementally by ordered_at\n  metric:     revenue = SUM(line_amount) WHERE status IN ('paid','shipped')  -- the ONE definition"}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Model a small business end to end",
+    "steps": [
+      "Take a domain you know (a coffee shop chain, a SaaS subscription business, a library). List the business questions people would ask: at least ten, in plain words.",
+      "Write the normalised schema the operational application would use: four to six tables with keys and constraints, in SQL.",
+      "Design the star: declare the fact grain in one sentence, list measures, and design three dimensions including a date dimension. Write the DDL.",
+      "For the customer (or member, or account) dimension, decide which attributes are Type 1 and which are Type 2, and write the SQL that applies one Type 2 change.",
+      "Load a few dozen rows of sample data into both schemas (DuckDB is enough) and answer three of your business questions against the star. Note how many joins each needed.",
+      "Write the model document for the fact table in the lesson's format, including the one definition of the main metric.",
+      "Add a periodic snapshot table for one entity (daily inventory, daily subscription status) and write the query that produces it from the transaction facts."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Normalised for writes (each fact once, joins for reads); dimensional for reads (facts + dimensions, simple joins)",
+      "Declare the grain of every fact table in one sentence; the primary key should express it",
+      "Surrogate keys in dimensions; natural keys kept as attributes",
+      "SCD Type 2 for anything analysed over time: valid_from, valid_to, is_current, one current row per key",
+      "Transaction, periodic snapshot and accumulating snapshot facts answer different questions",
+      "One definition per metric, stated with grain, filters and NULL handling"
+    ],
+    "groups": [
+      {"title": "Normal forms and constraints", "items": [
+        {"syntax": "1NF / 2NF / 3NF", "desc": "No repeating groups / depends on whole key / on nothing but the key"},
+        {"syntax": "PRIMARY KEY, UNIQUE, REFERENCES, CHECK, NOT NULL", "desc": "Let the database enforce the model"},
+        {"syntax": "copy a value on purpose (unit_price at order time)", "desc": "Documented denormalisation for history"},
+        {"syntax": "numeric(12,2) for money", "desc": "Never float"}
+      ]},
+      {"title": "Star schema", "items": [
+        {"syntax": "fact_*: measures + foreign keys at one grain", "desc": "One row per event or measurement"},
+        {"syntax": "dim_*: one row per entity, many descriptive columns", "desc": "Filter and group here"},
+        {"syntax": "dim_date with date_key int (YYYYMMDD)", "desc": "Conformed calendar for every fact"},
+        {"syntax": "surrogate key + natural key column", "desc": "Versioning and source independence"},
+        {"syntax": "conformed dimensions", "desc": "Same dim_customer for every fact table"},
+        {"syntax": "degenerate dimension (order_id in the fact)", "desc": "Identifier with no attributes of its own"}
+      ]},
+      {"title": "Slowly changing dimensions", "items": [
+        {"syntax": "Type 1: overwrite", "desc": "Corrections; no history"},
+        {"syntax": "Type 2: new row, valid_from/valid_to/is_current", "desc": "Full history; facts point at the version in effect"},
+        {"syntax": "Type 3: previous_value column", "desc": "Limited before/after comparison"},
+        {"syntax": "point-in-time join: valid_from <= t < valid_to", "desc": "Look up the right version when loading facts"},
+        {"syntax": "tests: one current per key, no overlaps, no gaps", "desc": "SCD2 invariants"}
+      ]},
+      {"title": "Fact types and modern shapes", "items": [
+        {"syntax": "transaction fact", "desc": "Per event; sum freely"},
+        {"syntax": "periodic snapshot", "desc": "Per entity per period; state at time t"},
+        {"syntax": "accumulating snapshot", "desc": "Per process; milestone columns; lags"},
+        {"syntax": "raw events immutable + typed event tables", "desc": "Rebuildable downstream"},
+        {"syntax": "One Big Table as presentation layer", "desc": "Built from the star, not instead of it"},
+        {"syntax": "model doc: grain, measures, keys, excludes, metric definition", "desc": "Write it with the DDL"}
+      ]}
+    ],
+    "pitfalls": [
+      "Mixing grains in one fact table (order rows and line rows together); every sum is wrong.",
+      "Using the source system's id as the dimension key, making history impossible.",
+      "Overwriting dimension attributes (Type 1) that the business reports on over time; last year's numbers change.",
+      "Snowflaking dimensions into chains of small tables for no query benefit.",
+      "Letting each dashboard compute revenue its own way.",
+      "Storing money in floating point."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A fact table contains both one row per order and one row per order line, distinguished by a type column. What problem does this cause?",
+      "options": [
+        "Mixed grain: any sum over the table double counts unless every query remembers to filter by type, and joins to dimensions behave differently per row type",
+        "The table cannot have a primary key because order rows and line rows share ids",
+        "Dimension tables must be duplicated for each row type",
+        "Slowly changing dimensions cannot be applied to a table with a type column"
+      ],
+      "answer": 0,
+      "explain": "A fact table has one grain. Two grains in one table make measures ambiguous and every aggregate a trap. Split into two fact tables with declared grains."
+    },
+    {
+      "q": "A customer changes country. Finance needs last year's revenue by country to stay as it was reported; marketing wants current segmentation. Which dimension design serves both?",
+      "options": [
+        "Type 2: a new dimension row with validity dates; historical facts keep the old version's key, and a current-row flag serves the present view",
+        "Type 1: overwrite the country so all facts reflect the current country",
+        "Two separate customer dimensions, one for finance and one for marketing",
+        "Store the country on every fact row and never in the dimension"
+      ],
+      "answer": 0,
+      "explain": "Type 2 preserves the version in effect for each fact while exposing the current version through `is_current`. Overwriting rewrites history; two dimensions break conformance; country-on-every-fact loses the other attributes and the ability to correct."
+    },
+    {
+      "q": "Why do dimension tables in a warehouse use surrogate keys rather than the source system's natural keys?",
+      "options": [
+        "To allow multiple versions of the same entity over time and to insulate the warehouse from source key changes or merges",
+        "Because natural keys are usually strings and cannot be indexed",
+        "Because fact tables can only reference integer columns",
+        "To make the dimension smaller by removing the natural key entirely"
+      ],
+      "answer": 0,
+      "explain": "A natural key identifies an entity; a surrogate key identifies a version of it, which is what Type 2 history needs. The natural key stays as an attribute. Strings index fine and facts can reference any key type."
+    },
+    {
+      "q": "The business asks for the median number of days from order to delivery, by region, and for the count of orders stuck between payment and shipping. Which fact design makes both questions simple?",
+      "options": [
+        "An accumulating snapshot with one row per order and a column per milestone timestamp",
+        "A transaction fact with one row per status change event",
+        "A periodic snapshot with one row per order per day",
+        "A dimension table with the delivery date as an attribute"
+      ],
+      "answer": 0,
+      "explain": "With milestone columns on one row per order, lags are subtractions and stuck orders are rows with one timestamp filled and the next NULL. The event-per-status design can answer it but needs pivoting; a daily snapshot is far larger than needed."
+    },
+    {
+      "q": "Three dashboards show three different monthly revenue figures. What is the structural fix?",
+      "options": [
+        "Define revenue once in the transformation layer with its grain, filters and NULL handling, and have every dashboard read that model",
+        "Pick the dashboard with the highest figure as the official one",
+        "Add a footnote to each dashboard explaining its calculation",
+        "Restrict dashboard access to the finance team"
+      ],
+      "answer": 0,
+      "explain": "Divergent metrics come from divergent definitions. A single modelled definition consumed by all tools removes the divergence; footnotes document it, access control hides it, and picking a winner does not make it correct."
+    }
+  ]
+}

@@ -1,0 +1,176 @@
+{
+  "id": "de-sql",
+  "minutes": 35,
+  "intro": "Every data tool eventually turns into SQL: the warehouse runs it, the transformation framework generates it, the orchestrator schedules it, and the dashboard hides it behind a chart. Engineers who can read and write SQL fluently debug pipelines in minutes that take others a day, because they can see what the system is actually doing to the data. This module goes past the basics you probably know into the parts that matter for data work: joins that do not silently multiply rows, aggregation with grouping sets, window functions, common table expressions, and reading an execution plan to understand why a query is slow. Examples use PostgreSQL syntax, which most warehouses follow closely.",
+  "objectives": [
+    "Write joins deliberately and detect fan-out when a join multiplies rows",
+    "Use aggregation, HAVING, DISTINCT and conditional aggregates correctly",
+    "Apply window functions for rankings, running totals, deduplication and gaps",
+    "Structure complex queries with CTEs and know when a CTE hurts performance",
+    "Read an EXPLAIN plan and fix the most common causes of slow queries"
+  ],
+  "sections": [
+    {
+      "heading": "Joins, and the row-multiplication trap",
+      "blocks": [
+        {"type": "p", "text": "A join combines rows from two tables where a condition holds. **INNER** keeps only matching pairs; **LEFT** keeps every row from the left table and fills the right side with NULLs when nothing matches; **FULL** keeps everything from both. The mistake that produces wrong numbers in more reports than any other is **fan-out**: joining a one-row-per-customer table to a many-rows-per-customer table, then summing a column from the one side. Each customer's amount is counted once per matching row on the many side."},
+        {"type": "code", "lang": "sql", "caption": "Fan-out and its fix. The first query overstates revenue for any customer with more than one address; the second aggregates first, then joins.", "code": "-- WRONG: orders x addresses multiplies each order by the customer's address count\nSELECT c.id, SUM(o.amount) AS revenue\nFROM customers c\nJOIN orders o    ON o.customer_id = c.id\nJOIN addresses a ON a.customer_id = c.id\nGROUP BY c.id;\n\n-- RIGHT: reduce the many side to one row per key before joining\nWITH primary_address AS (\n  SELECT DISTINCT ON (customer_id) customer_id, city\n  FROM addresses\n  ORDER BY customer_id, is_primary DESC, created_at\n)\nSELECT c.id, pa.city, SUM(o.amount) AS revenue\nFROM customers c\nJOIN orders o ON o.customer_id = c.id\nLEFT JOIN primary_address pa ON pa.customer_id = c.id\nGROUP BY c.id, pa.city;"},
+        {"type": "p", "text": "Two habits prevent fan-out. Know the **grain** of every table you join (one row per what?), and check row counts before and after a join: if `COUNT(*)` grows when you add a table that should be one-to-one, you have found it. Also be careful with filters on the right side of a LEFT JOIN: putting `a.status = 'active'` in the WHERE clause turns the LEFT JOIN into an INNER JOIN because NULL rows fail the filter; put the condition in the ON clause to keep unmatched rows."},
+        {"type": "callout", "kind": "tip", "text": "Anti-joins answer \"which A have no B\": `LEFT JOIN b ... WHERE b.id IS NULL`, or `WHERE NOT EXISTS (SELECT 1 FROM b WHERE b.a_id = a.id)`. Prefer NOT EXISTS over NOT IN when the subquery can return NULLs; NOT IN with a NULL matches nothing."}
+      ]
+    },
+    {
+      "heading": "Aggregation done precisely",
+      "blocks": [
+        {"type": "p", "text": "`GROUP BY` collapses rows sharing the grouping columns; every column in the SELECT must be either grouped or aggregated. `HAVING` filters groups after aggregation, `WHERE` filters rows before it, and the difference is both correctness and performance. `COUNT(*)` counts rows, `COUNT(col)` counts non-NULL values, `COUNT(DISTINCT col)` counts distinct non-NULL values; mixing them up is a classic off-by-NULL error. Conditional aggregates (`SUM(CASE WHEN ...)` or PostgreSQL's `FILTER`) replace many self-joins."},
+        {"type": "code", "lang": "sql", "caption": "One pass over orders producing several conditional metrics per month, then keeping only busy months.", "code": "SELECT\n  date_trunc('month', ordered_at)                     AS month,\n  COUNT(*)                                            AS orders,\n  COUNT(DISTINCT customer_id)                         AS customers,\n  SUM(amount) FILTER (WHERE status = 'paid')          AS paid_revenue,\n  SUM(amount) FILTER (WHERE status = 'refunded')      AS refunds,\n  AVG(amount)                                         AS avg_order,\n  ROUND(100.0 * COUNT(*) FILTER (WHERE status = 'refunded') / COUNT(*), 2) AS refund_pct\nFROM orders\nWHERE ordered_at >= date '2026-01-01'\nGROUP BY 1\nHAVING COUNT(*) >= 100\nORDER BY 1;"},
+        {"type": "p", "text": "Integer division bites here: `COUNT(a) / COUNT(*)` is integer division in most databases and returns 0; multiply by `100.0` or cast first. And `AVG` ignores NULLs, so an average over a column with missing values is an average of the present values, which may or may not be what the business meant. State the treatment of NULLs explicitly in the query and in the column's documentation."},
+        {"type": "callout", "kind": "note", "text": "`GROUP BY ROLLUP (region, country)` or `GROUPING SETS` produce subtotals and grand totals in one query; they are the honest way to build the totals row rather than a second query that may disagree."}
+      ]
+    },
+    {
+      "heading": "Window functions: aggregate without collapsing",
+      "blocks": [
+        {"type": "p", "text": "A **window function** computes a value over a set of related rows (the window) while keeping every row. `OVER (PARTITION BY ... ORDER BY ...)` defines the window: partition restarts the calculation per group, order defines sequence for ranking and running calculations. They replace correlated subqueries and self-joins for rankings, running totals, moving averages, previous-row comparisons and deduplication, and they are usually faster."},
+        {"type": "code", "lang": "sql", "caption": "The four window patterns you will use weekly: ranking, deduplication, running totals and comparing with the previous row.", "code": "-- top 3 orders per customer\nSELECT * FROM (\n  SELECT o.*, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY amount DESC) AS rn\n  FROM orders o\n) t WHERE rn <= 3;\n\n-- keep the latest row per key (dedup after a re-load)\nSELECT * FROM (\n  SELECT e.*, ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY loaded_at DESC) AS rn\n  FROM events_raw e\n) t WHERE rn = 1;\n\n-- running revenue per customer, and the gap since their previous order\nSELECT\n  customer_id, ordered_at, amount,\n  SUM(amount)  OVER (PARTITION BY customer_id ORDER BY ordered_at\n                     ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total,\n  ordered_at - LAG(ordered_at) OVER (PARTITION BY customer_id ORDER BY ordered_at) AS since_previous\nFROM orders;"},
+        {"type": "p", "text": "`ROW_NUMBER` gives a unique sequence, `RANK` leaves gaps after ties, `DENSE_RANK` does not. The frame clause (`ROWS BETWEEN ...`) matters for running calculations: the default frame with ORDER BY is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, which treats tied order values as one group and can surprise you; say `ROWS` when you mean rows. Window functions run after WHERE and GROUP BY, so you cannot filter on them directly; wrap the query, as the examples do."}
+      ]
+    },
+    {
+      "heading": "CTEs and query structure",
+      "blocks": [
+        {"type": "p", "text": "A **common table expression** (`WITH name AS (...)`) names a subquery so a complex query reads top to bottom as a sequence of steps: clean, filter, aggregate, join, present. It is the unit of readability in analytics SQL and the unit that transformation frameworks like dbt turn into models. Two cautions. In PostgreSQL before version 12, CTEs were always materialised (an optimisation fence); modern versions inline them unless referenced more than once or marked `MATERIALIZED`. And a CTE referenced twice may be computed twice in some engines; check the plan."},
+        {"type": "code", "lang": "sql", "caption": "A query written as steps. Each CTE has one job and a name that says what it holds.", "code": "WITH paid_orders AS (\n  SELECT customer_id, ordered_at::date AS order_date, amount\n  FROM orders\n  WHERE status = 'paid' AND ordered_at >= date '2026-01-01'\n),\ndaily_customer AS (\n  SELECT customer_id, order_date, SUM(amount) AS day_amount\n  FROM paid_orders\n  GROUP BY customer_id, order_date\n),\nwith_streaks AS (\n  SELECT *,\n         order_date - (ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date))::int AS streak_key\n  FROM daily_customer\n)\nSELECT customer_id, MIN(order_date) AS streak_start, COUNT(*) AS consecutive_days, SUM(day_amount) AS streak_amount\nFROM with_streaks\nGROUP BY customer_id, streak_key\nHAVING COUNT(*) >= 3\nORDER BY consecutive_days DESC;"},
+        {"type": "p", "text": "The `streak_key` trick (date minus row number is constant within a run of consecutive days) is the standard gaps-and-islands technique; it is worth recognising because interview questions and real pipelines both use it. Recursive CTEs handle hierarchies (org charts, bill of materials) and sequences; they are the one place SQL loops."}
+      ]
+    },
+    {
+      "heading": "Reading the plan",
+      "blocks": [
+        {"type": "p", "text": "`EXPLAIN` shows how the planner intends to run a query; `EXPLAIN (ANALYZE, BUFFERS)` runs it and reports actual rows, time and I/O per step. Read plans from the innermost node outward and look for four things: **sequential scans** on large tables where an index would help, **row estimate errors** (estimated 100, actual 2 million, which means stale statistics and a wrong join strategy), **nested loop joins** over large inputs (usually a missing index on the inner side), and **sorts or hashes spilling to disk** (work memory too small for the operation)."},
+        {"type": "code", "lang": "sql", "caption": "A plan with the tell-tale signs: an estimate off by four orders of magnitude and a sequential scan under a nested loop.", "code": "EXPLAIN (ANALYZE, BUFFERS)\nSELECT c.email, o.amount\nFROM orders o JOIN customers c ON c.id = o.customer_id\nWHERE o.ordered_at >= now() - interval '1 day';\n\n-- Nested Loop  (cost=0.43..8.47 rows=1 width=40) (actual time=0.05..2411.9 rows=18230 loops=1)\n--   ->  Seq Scan on orders o  (cost=0..145213 rows=1 width=16) (actual time=0.02..2380.1 rows=18230 loops=1)\n--         Filter: (ordered_at >= (now() - '1 day'::interval))\n--         Rows Removed by Filter: 9981770\n--   ->  Index Scan using customers_pkey on customers c (actual time=0.001..0.001 rows=1 loops=18230)\n-- Planning Time: 0.3 ms   Execution Time: 2418.7 ms\n\n-- fixes: an index on orders(ordered_at), and fresh statistics\nCREATE INDEX CONCURRENTLY orders_ordered_at_idx ON orders (ordered_at);\nANALYZE orders;"},
+        {"type": "p", "text": "In columnar warehouses the vocabulary changes (partitions pruned, bytes scanned, shuffle) but the questions are the same: how much data is read, is the filter applied early, does a join move a large table across the network. The warehouse module goes deeper; the habit to build now is to look at the plan before guessing."},
+        {"type": "callout", "kind": "warning", "text": "Wrapping an indexed column in a function (`WHERE date(ordered_at) = ...`, `WHERE lower(email) = ...`) prevents the index from being used. Rewrite as a range (`ordered_at >= d AND ordered_at < d + 1`) or create an expression index."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Diagnose a wrong number and a slow query",
+    "steps": [
+      "Install DuckDB or PostgreSQL locally and create `customers`, `addresses` and `orders` tables with a few hundred generated rows; give some customers two addresses.",
+      "Write the fan-out query from the lesson and compare its revenue total with `SELECT SUM(amount) FROM orders`. Then write the fixed version and confirm the totals match.",
+      "Write the monthly metrics query with FILTER (or CASE WHEN in DuckDB) and verify `refund_pct` is not always 0; if it is, find the integer division.",
+      "Produce the top-3-orders-per-customer and latest-row-per-key queries with ROW_NUMBER. Change ROW_NUMBER to RANK and observe what happens with tied amounts.",
+      "Implement the consecutive-days streak query and hand-check one customer's result.",
+      "In PostgreSQL, load a million-row orders table, run the last-day query with EXPLAIN (ANALYZE, BUFFERS), note the time, add the index, ANALYZE, and run again. Record both plans."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Know the grain of every table; check COUNT(*) before and after each join to catch fan-out",
+      "Filter the right side of a LEFT JOIN in ON, not WHERE, or it becomes an INNER JOIN",
+      "COUNT(*) vs COUNT(col) vs COUNT(DISTINCT col); multiply by 100.0 to avoid integer division",
+      "Window functions keep rows: ROW_NUMBER for dedup and top-N, SUM OVER for running totals, LAG for previous row",
+      "CTEs are steps with names; check the plan if one is referenced twice",
+      "EXPLAIN ANALYZE: look for seq scans on big tables, bad row estimates, nested loops on large inputs, disk spills"
+    ],
+    "groups": [
+      {"title": "Joins", "items": [
+        {"syntax": "INNER / LEFT / FULL JOIN ... ON", "desc": "Matches only / all left rows / all rows both sides"},
+        {"syntax": "LEFT JOIN b ON b.a_id = a.id AND b.active", "desc": "Right-side filter in ON keeps unmatched rows"},
+        {"syntax": "WHERE NOT EXISTS (SELECT 1 FROM b WHERE b.a_id = a.id)", "desc": "Anti-join; safe with NULLs"},
+        {"syntax": "SELECT DISTINCT ON (key) ... ORDER BY key, priority", "desc": "One row per key before joining (PostgreSQL)"},
+        {"syntax": "COUNT(*) before vs after join", "desc": "Fan-out detector"}
+      ]},
+      {"title": "Aggregation", "items": [
+        {"syntax": "GROUP BY ... HAVING", "desc": "HAVING filters groups; WHERE filters rows"},
+        {"syntax": "SUM(x) FILTER (WHERE cond)", "desc": "Conditional aggregate (or SUM(CASE WHEN cond THEN x END))"},
+        {"syntax": "COUNT(DISTINCT col)", "desc": "Distinct non-NULL values"},
+        {"syntax": "100.0 * a / b", "desc": "Force decimal division"},
+        {"syntax": "GROUP BY ROLLUP (a, b) / GROUPING SETS", "desc": "Subtotals and totals in one query"},
+        {"syntax": "date_trunc('month', ts)", "desc": "Bucket timestamps"}
+      ]},
+      {"title": "Window functions", "items": [
+        {"syntax": "ROW_NUMBER() OVER (PARTITION BY k ORDER BY t DESC)", "desc": "Dedup (rn = 1) or top-N (rn <= N)"},
+        {"syntax": "RANK / DENSE_RANK", "desc": "Ties leave gaps / no gaps"},
+        {"syntax": "SUM(x) OVER (PARTITION BY k ORDER BY t ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)", "desc": "Running total; say ROWS explicitly"},
+        {"syntax": "LAG(x) / LEAD(x) OVER (...)", "desc": "Previous / next row's value"},
+        {"syntax": "AVG(x) OVER (ORDER BY t ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)", "desc": "7-row moving average"},
+        {"syntax": "wrap in a subquery to filter on a window result", "desc": "Windows run after WHERE"}
+      ]},
+      {"title": "CTEs and plans", "items": [
+        {"syntax": "WITH a AS (...), b AS (...) SELECT ...", "desc": "Named steps; one job each"},
+        {"syntax": "WITH RECURSIVE t AS (base UNION ALL step) SELECT ...", "desc": "Hierarchies and sequences"},
+        {"syntax": "date - ROW_NUMBER() = constant", "desc": "Gaps-and-islands streak key"},
+        {"syntax": "EXPLAIN (ANALYZE, BUFFERS) query", "desc": "Actual rows, time, I/O per node"},
+        {"syntax": "CREATE INDEX CONCURRENTLY ... ; ANALYZE t", "desc": "Fix scans and estimates without locking"},
+        {"syntax": "avoid f(col) = v; use ranges or expression indexes", "desc": "Keep indexes usable"}
+      ]}
+    ],
+    "pitfalls": [
+      "Summing a measure after joining a one-to-many table; the total silently multiplies.",
+      "Filtering a LEFT JOIN's right table in WHERE and losing the unmatched rows you wanted.",
+      "Integer division in percentages, returning 0 for everything.",
+      "Using RANGE frames by accident with ORDER BY on a column that has ties.",
+      "NOT IN with a subquery that can return NULL; it matches nothing.",
+      "Guessing at performance instead of reading the plan."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A revenue report joins `orders` to `order_items` and then to `customers`, and sums `orders.amount`. Totals are three times higher than the finance system. What is the most likely cause?",
+      "options": [
+        "Fan-out: each order's amount is counted once per item row after the one-to-many join",
+        "The customers table has duplicate emails, doubling the join output",
+        "The SUM function includes NULL amounts as zero, inflating the total",
+        "The report is missing a HAVING clause to remove small orders"
+      ],
+      "answer": 0,
+      "explain": "Joining the one side (orders) to the many side (items) repeats each order row per item, so summing an order-level measure multiplies it. Aggregate items to the order grain first, or sum item-level amounts instead."
+    },
+    {
+      "q": "You want every customer, with their active subscription if they have one. Which query is correct?",
+      "options": [
+        "`SELECT ... FROM customers c LEFT JOIN subscriptions s ON s.customer_id = c.id AND s.status = 'active'`",
+        "`SELECT ... FROM customers c LEFT JOIN subscriptions s ON s.customer_id = c.id WHERE s.status = 'active'`",
+        "`SELECT ... FROM customers c JOIN subscriptions s ON s.customer_id = c.id WHERE s.status = 'active'`",
+        "`SELECT ... FROM customers c FULL JOIN subscriptions s ON s.customer_id = c.id WHERE s.status = 'active'`"
+      ],
+      "answer": 0,
+      "explain": "Only the condition in the ON clause keeps customers without an active subscription (their subscription columns are NULL). A WHERE filter on the right table removes those NULL rows and turns the LEFT JOIN into an inner join."
+    },
+    {
+      "q": "After re-loading an events table, some events appear twice with different `loaded_at` values. Which query keeps only the latest copy of each event?",
+      "options": [
+        "Wrap `ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY loaded_at DESC)` in a subquery and keep rows where it equals 1",
+        "`SELECT DISTINCT * FROM events_raw`",
+        "`SELECT event_id, MAX(loaded_at) FROM events_raw GROUP BY event_id` and use it as the deduplicated table",
+        "`SELECT * FROM events_raw ORDER BY loaded_at DESC LIMIT 1`"
+      ],
+      "answer": 0,
+      "explain": "The window ranks copies within each event and the outer filter keeps the newest full row. DISTINCT does not remove rows that differ in `loaded_at`; the GROUP BY drops every other column; LIMIT 1 keeps a single row overall."
+    },
+    {
+      "q": "An `EXPLAIN ANALYZE` shows a Seq Scan on a ten-million-row table with `rows=1` estimated and `rows=18230` actual, under a Nested Loop. What are the likely fix and the reason?",
+      "options": [
+        "Add an index on the filtered column and run ANALYZE; the stale estimate chose a nested loop that would be wrong for 18,000 rows",
+        "Increase the LIMIT so the planner uses fewer rows",
+        "Replace the JOIN with a CTE so the planner materialises the table",
+        "Rewrite the query as a subquery, since nested loops only appear with JOIN syntax"
+      ],
+      "answer": 0,
+      "explain": "A large estimate error means statistics are stale, which leads to a poor join strategy; the sequential scan under a filter on a large table calls for an index. LIMIT, CTEs and subquery syntax do not address either problem."
+    },
+    {
+      "q": "Why does `WHERE date(ordered_at) = '2026-03-01'` run slowly even though `ordered_at` is indexed?",
+      "options": [
+        "Applying a function to the column prevents the index from being used; rewrite as a range on `ordered_at` or add an expression index",
+        "Date comparisons are always slower than timestamp comparisons in SQL",
+        "The index only works with `BETWEEN`, not with equality",
+        "The `date()` function locks the table while it runs"
+      ],
+      "answer": 0,
+      "explain": "The index is on `ordered_at`, not on `date(ordered_at)`, so the planner cannot use it for the transformed value. `ordered_at >= '2026-03-01' AND ordered_at < '2026-03-02'` uses the index directly."
+    }
+  ]
+}

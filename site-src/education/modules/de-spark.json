@@ -1,0 +1,187 @@
+{
+  "id": "de-spark",
+  "minutes": 40,
+  "intro": "When the data no longer fits on one machine, or the transformation needs code rather than SQL, the work is split across a cluster. Apache Spark is the engine most teams reach for: a DataFrame API in Python, Scala or SQL, lazy execution with a query optimiser, and a runtime that distributes the work across executors. It is also where the most expensive mistakes in data engineering happen, because a shuffle or a skewed join that is invisible in a test on a thousand rows becomes hours and dollars on a billion. This module covers the execution model you must understand to use Spark well, the DataFrame patterns that matter, shuffles and skew, reading the Spark UI, and the decision of when Spark is the wrong tool.",
+  "objectives": [
+    "Explain Spark's execution model: driver, executors, lazy plans, jobs, stages, tasks and partitions",
+    "Write DataFrame transformations that let the optimiser do its work",
+    "Identify and reduce shuffles; recognise and fix data skew",
+    "Read the Spark UI and the physical plan to find the slow stage",
+    "Choose between Spark, a warehouse and single-node engines for a given job"
+  ],
+  "sections": [
+    {
+      "heading": "The execution model",
+      "blocks": [
+        {"type": "p", "text": "A Spark application has a **driver** (your program: builds the plan, coordinates) and **executors** (worker processes that hold data partitions in memory and run tasks). Nothing runs until an **action** (`write`, `count`, `collect`) triggers a **job**. The job is split into **stages** at every point where data must be redistributed across executors — a **shuffle** — and each stage runs one **task** per partition of its input. Partitions are the unit of parallelism: two hundred partitions means up to two hundred tasks running concurrently, one task per core."},
+        {"type": "code", "lang": "python", "caption": "A complete Spark job: read Parquet, transform lazily, write. The three shuffle points are marked; everything else runs partition-local.", "code": "from pyspark.sql import SparkSession, functions as F\n\nspark = SparkSession.builder.appName(\"daily_revenue\").getOrCreate()\n\norders = spark.read.parquet(\"s3://acme-lake/silver/orders/\")          # lazy: nothing read yet\ncustomers = spark.read.parquet(\"s3://acme-lake/silver/customers/\")\n\nresult = (\n    orders\n    .filter(F.col(\"ordered_at\") >= \"2026-03-01\")                        # partition-local; pushed to the scan\n    .filter(F.col(\"status\") == \"paid\")\n    .join(customers.select(\"customer_id\", \"country\"), \"customer_id\")     # shuffle 1 (or broadcast, see below)\n    .groupBy(F.to_date(\"ordered_at\").alias(\"day\"), \"country\")            # shuffle 2: group by key\n    .agg(F.sum(\"amount\").alias(\"revenue\"), F.countDistinct(\"order_id\").alias(\"orders\"))\n    .repartition(1)                                                      # shuffle 3: single output file (small result)\n)\n\nresult.write.mode(\"overwrite\").partitionBy(\"day\").parquet(\"s3://acme-lake/gold/daily_revenue/\")  # action: runs the job"},
+        {"type": "p", "text": "The optimiser (Catalyst) rewrites the plan before execution: it pushes filters down to the scan so only the March partitions are read, prunes unused columns, and picks join strategies. Adaptive query execution (on by default in current versions) re-plans between stages using observed sizes: coalescing tiny partitions, switching join strategies, splitting skewed partitions. Your job is to write transformations the optimiser can see through — DataFrame operations and SQL — and to avoid Python UDFs and `collect()` that turn the plan opaque or pull data to the driver."},
+        {"type": "callout", "kind": "warning", "text": "`df.collect()` and `df.toPandas()` bring the whole result to the driver. On a big DataFrame that is an out-of-memory crash. Use them only on aggregates you know are small; write results to storage otherwise."}
+      ]
+    },
+    {
+      "heading": "Shuffles: the cost that matters",
+      "blocks": [
+        {"type": "p", "text": "A **shuffle** writes every partition's data to local disk grouped by key, then every executor fetches its share over the network. It is the most expensive thing Spark does and it happens on `groupBy`, `join`, `distinct`, `repartition`, window functions with `partitionBy`, and `orderBy`. Reducing shuffles, or the data that flows through them, is most of Spark tuning. Filter and project before the shuffle so less data moves; aggregate before joining when possible; and use a **broadcast join** when one side is small (under a few hundred MB): the small table is copied to every executor and the join runs partition-local with no shuffle of the big side."},
+        {"type": "code", "lang": "python", "caption": "Forcing a broadcast join for a small dimension and confirming the plan shows no shuffle on the large side.", "code": "from pyspark.sql import functions as F\n\ncountries = spark.read.parquet(\"s3://acme-lake/silver/countries/\")          # a few thousand rows\n\njoined = orders.join(F.broadcast(countries), \"country_code\")\njoined.explain(mode=\"formatted\")\n# look for: BroadcastHashJoin ... and no Exchange (shuffle) on the orders side\n\n# the threshold below which Spark broadcasts automatically (default 10 MB); raise for medium dimensions\nspark.conf.set(\"spark.sql.autoBroadcastJoinThreshold\", str(256 * 1024 * 1024))"},
+        {"type": "p", "text": "The number of shuffle partitions (`spark.sql.shuffle.partitions`, default 200) sets how many tasks the post-shuffle stage has. Too few means huge tasks and spills; too many means thousands of tiny tasks and files. Adaptive execution coalesces small partitions automatically, so the modern advice is to set the value high enough for the largest shuffle and let AQE shrink it. Output file counts follow from partition counts; a final `coalesce(n)` (no shuffle) or `repartition(n)` (shuffle, balanced) controls how many files land."}
+      ]
+    },
+    {
+      "heading": "Skew",
+      "blocks": [
+        {"type": "p", "text": "**Data skew** is when one key holds far more rows than the others: a NULL customer id, a default account, one giant tenant. After a shuffle on that key, one task gets most of the data and the whole stage waits for it; the Spark UI shows a stage where the median task took seconds and the maximum took an hour. AQE's skew join optimisation splits oversized partitions for sort-merge joins, which handles many cases automatically. When it does not, the fixes are manual: handle the hot key separately (filter it out and union its result), **salt** the key (append a random suffix on the big side and explode the small side to match, so the hot key spreads over N tasks), or broadcast the small side so no shuffle happens at all."},
+        {"type": "code", "lang": "python", "caption": "Salting a skewed join key: the big side gets a random suffix, the small side is replicated N times, the join spreads the hot key over N tasks.", "code": "from pyspark.sql import functions as F\n\nN = 16\nbig_salted = events.withColumn(\"salt\", (F.rand() * N).cast(\"int\"))\nsmall_replicated = users.crossJoin(spark.range(N).withColumnRenamed(\"id\", \"salt\"))\n\njoined = big_salted.join(\n    small_replicated,\n    on=[\"user_id\", \"salt\"],\n).drop(\"salt\")\n\n# confirm AQE settings that help before resorting to salting\nspark.conf.set(\"spark.sql.adaptive.enabled\", \"true\")\nspark.conf.set(\"spark.sql.adaptive.skewJoin.enabled\", \"true\")"},
+        {"type": "p", "text": "Find skew before it finds you: `df.groupBy(key).count().orderBy(F.desc('count')).show(10)` on a sample tells you whether one key dominates. Skew on `groupBy` keys is handled by two-phase aggregation (partial aggregates before the shuffle, which Spark does automatically for sums and counts but not for `collect_list` or `countDistinct` over a hot key)."}
+      ]
+    },
+    {
+      "heading": "Reading the Spark UI and the plan",
+      "blocks": [
+        {"type": "p", "text": "The Spark UI (port 4040 while running, the history server afterwards) is where every performance question is answered. **Jobs** tab: which action took the time. **Stages** tab: for the slow job, which stage; within it, the task duration distribution (skew shows as a long tail), shuffle read and write sizes (how much data moved), and spill (memory pressure). **SQL** tab: the physical plan with per-operator rows and time, where you see the scan's pushed filters, the join strategy and every `Exchange`. **Executors** tab: memory use, GC time, failed tasks — an executor spending half its time in garbage collection needs more memory or fewer cached DataFrames."},
+        {"type": "code", "lang": "text", "caption": "A physical plan excerpt with the things to look for annotated. Filters pushed into the scan, a broadcast join, and one Exchange for the aggregation.", "code": "== Physical Plan ==\nAdaptiveSparkPlan\n+- HashAggregate(keys=[day, country], functions=[sum(amount), count(distinct order_id)])\n   +- Exchange hashpartitioning(day, country, 200)          <- the one shuffle; check its size in the SQL tab\n      +- HashAggregate(keys=[day, country], functions=[partial_sum(amount), ...])   <- partial agg before shuffle\n         +- Project [day, country, amount, order_id]\n            +- BroadcastHashJoin [customer_id], [customer_id], Inner    <- small side broadcast: no shuffle of orders\n               :- Filter (status = paid)\n               :  +- FileScan parquet orders[...]\n               :       PartitionFilters: [ordered_at >= 2026-03-01]      <- partition pruning is working\n               :       PushedFilters: [EqualTo(status,paid)]             <- predicate pushed to the reader\n               +- BroadcastExchange\n                  +- FileScan parquet customers[customer_id, country]    <- column pruning: 2 of 40 columns"},
+        {"type": "list", "items": [
+          "No `PartitionFilters` on a partitioned table: the filter is not prunable; rewrite it.",
+          "`SortMergeJoin` with a tiny side: broadcast it.",
+          "An `Exchange` right after another `Exchange` on the same key: a repartition you did not need.",
+          "Stage with max task time far above median: skew.",
+          "Spill (memory and disk) on a stage: more partitions, more executor memory, or less cached data.",
+          "A `BatchEvalPython` operator: a Python UDF; replace with built-in functions or a pandas UDF."
+        ]}
+      ]
+    },
+    {
+      "heading": "When Spark is the wrong tool",
+      "blocks": [
+        {"type": "p", "text": "Spark's overhead is real: cluster start-up, scheduling, shuffles, and the operational weight of managing it. For data that fits on one large machine — which today means hundreds of GB — single-node engines (DuckDB, polars) are often faster end to end and far simpler. For SQL-expressible transformations over data already in the warehouse, the warehouse's engine is usually cheaper and needs no cluster. Spark earns its place when data is genuinely large, when the logic needs code (complex parsing, ML feature pipelines, custom algorithms), when it must read and write many formats and systems, or when streaming and batch share one codebase."},
+        {"type": "table", "headers": ["Situation", "Reach for"], "rows": [
+          ["Under a few hundred GB, transformation in SQL or DataFrame ops", "DuckDB or polars on one machine"],
+          ["Data already in the warehouse, SQL logic", "The warehouse via dbt"],
+          ["Multi-TB joins, custom code, ML features, many sources", "Spark (managed: Databricks, EMR, Dataproc, Synapse)"],
+          ["Sub-second streaming with complex event time", "Flink (Spark Structured Streaming for micro-batch needs)"]
+        ]},
+        {"type": "callout", "kind": "tip", "text": "Develop Spark jobs locally on a sample with `local[*]` and the same code; run tests with a tiny SparkSession in pytest. Most logic bugs are found on a thousand rows in seconds, not on a billion in an hour."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "See a shuffle, a skew and a broadcast",
+    "steps": [
+      "Install PySpark locally (`pip install pyspark`) and generate 20 million event rows with a `user_id` where 20% of rows share one hot id, plus a small users table. Write both as Parquet.",
+      "Run the daily revenue job from the lesson on the events with `explain(mode='formatted')`. Identify every Exchange and the join strategy.",
+      "Open the Spark UI on port 4040 during the run. In the Stages tab find the join stage and record median versus max task duration; the hot key should show as a long tail.",
+      "Force a broadcast of the users table and rerun. Confirm the plan shows BroadcastHashJoin and the stage count dropped.",
+      "Disable AQE, rerun the sort-merge join to see the skew in full, then re-enable AQE with skew join and compare stage times. Then implement salting and compare again.",
+      "Add a Python UDF for a trivial transformation and find `BatchEvalPython` in the plan; time it against the equivalent built-in function.",
+      "Run the same aggregation in DuckDB on the same Parquet files and compare wall-clock time on your laptop. Write down at what data size you would expect Spark to win."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Driver plans, executors run tasks; one task per partition per core; jobs split into stages at shuffles",
+      "Lazy plans let the optimiser push filters and prune columns; UDFs and collect() defeat it",
+      "Shuffles are the cost: filter and project first, aggregate before join, broadcast small sides",
+      "Skew: one hot key, one slow task; AQE skew join, separate the hot key, or salt",
+      "Spark UI: Jobs → Stages (task distribution, shuffle size, spill) → SQL (plan with Exchanges and pushed filters)",
+      "Use Spark for genuinely large data or code-heavy logic; DuckDB/polars or the warehouse otherwise"
+    ],
+    "groups": [
+      {"title": "Execution model", "items": [
+        {"syntax": "action (write/count/collect) -> job -> stages -> tasks", "desc": "Nothing runs until an action"},
+        {"syntax": "stage boundary = shuffle (Exchange)", "desc": "groupBy, join, distinct, repartition, window, orderBy"},
+        {"syntax": "partitions = parallelism; ~2-4 per core", "desc": "Too few: big tasks; too many: overhead"},
+        {"syntax": "spark.sql.shuffle.partitions (default 200) + AQE coalesce", "desc": "Set high, let AQE shrink"},
+        {"syntax": "df.explain(mode='formatted')", "desc": "See the physical plan before running"}
+      ]},
+      {"title": "DataFrame patterns", "items": [
+        {"syntax": "filter/select early", "desc": "Pushdown and pruning; less data through shuffles"},
+        {"syntax": "F.broadcast(small_df) in join", "desc": "No shuffle of the big side"},
+        {"syntax": "spark.sql.autoBroadcastJoinThreshold", "desc": "Auto-broadcast size (default 10 MB)"},
+        {"syntax": "built-in F.* functions over Python UDFs", "desc": "Optimiser-visible, JVM-native"},
+        {"syntax": "pandas_udf for vectorised custom logic", "desc": "When a UDF is unavoidable"},
+        {"syntax": "coalesce(n) vs repartition(n)", "desc": "Reduce files without shuffle vs rebalance with shuffle"},
+        {"syntax": "cache()/persist() only for reused DataFrames; unpersist()", "desc": "Memory is finite"}
+      ]},
+      {"title": "Skew and spill", "items": [
+        {"syntax": "df.groupBy(k).count().orderBy(F.desc('count'))", "desc": "Find hot keys first"},
+        {"syntax": "spark.sql.adaptive.skewJoin.enabled=true", "desc": "AQE splits skewed partitions"},
+        {"syntax": "filter hot key, process separately, union", "desc": "Manual skew handling"},
+        {"syntax": "salt: rand()*N on big side, crossJoin(range(N)) on small side", "desc": "Spread a hot key across N tasks"},
+        {"syntax": "spill -> more partitions / executor memory / less cache", "desc": "Memory pressure fixes"}
+      ]},
+      {"title": "UI and plan signals", "items": [
+        {"syntax": "PartitionFilters / PushedFilters in FileScan", "desc": "Pruning and pushdown working"},
+        {"syntax": "BroadcastHashJoin vs SortMergeJoin", "desc": "Small side broadcast vs both sides shuffled"},
+        {"syntax": "Exchange hashpartitioning(...)", "desc": "A shuffle; check its bytes"},
+        {"syntax": "task max >> median", "desc": "Skew"},
+        {"syntax": "BatchEvalPython", "desc": "Python UDF in the plan"},
+        {"syntax": "Executors tab: GC time, failed tasks", "desc": "Memory problems"}
+      ]}
+    ],
+    "pitfalls": [
+      "Calling collect() or toPandas() on a large DataFrame and crashing the driver.",
+      "Joining a big table to a small one with a sort-merge join because the small side was not broadcast.",
+      "A NULL or default key concentrating a shuffle on one task for an hour.",
+      "Python UDFs for logic that built-in functions cover, ten times slower and opaque to the optimiser.",
+      "Writing thousands of tiny output files because the shuffle partition count was left at 200 for a small result.",
+      "Standing up a Spark cluster for 50 GB that DuckDB would finish on a laptop."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A job joins a 2 TB events table with a 50 MB countries table using a sort-merge join, shuffling the events. What change removes the shuffle of the large side?",
+      "options": [
+        "Broadcast the countries table so the join runs partition-local on the events",
+        "Increase spark.sql.shuffle.partitions to 2000 so the shuffle finishes faster",
+        "Cache the events table before the join",
+        "Convert the join into a Python UDF that looks up the country per row"
+      ],
+      "answer": 0,
+      "explain": "A broadcast join copies the small side to every executor and avoids moving the big side entirely. More partitions still shuffle 2 TB, caching does not change the join strategy, and a UDF is slower and opaque."
+    },
+    {
+      "q": "In the Stages tab, a join stage shows median task time of 4 seconds and a maximum of 52 minutes. What is the diagnosis?",
+      "options": [
+        "Data skew: one partition holds a hot key; enable AQE skew handling, separate the hot key, or salt it",
+        "The cluster has too few executors, so most tasks queued",
+        "The shuffle partition count is too high, creating overhead",
+        "Garbage collection paused the driver during the stage"
+      ],
+      "answer": 0,
+      "explain": "A long tail on a single task with a normal median is the signature of skew. Executor count, partition count and driver GC would affect tasks more evenly."
+    },
+    {
+      "q": "A DataFrame pipeline calls `df.collect()` to compute a total, then continues with more transformations. On a 500 GB input it fails with an out-of-memory error. Why?",
+      "options": [
+        "collect() brings every row to the driver; the total should be computed with an aggregation and only the tiny result collected",
+        "Spark cannot process more than 100 GB in one job",
+        "The executors ran out of disk for the shuffle",
+        "The Parquet files were not partitioned"
+      ],
+      "answer": 0,
+      "explain": "Actions that return data to the driver must be reserved for small results. `df.agg(F.sum(...)).collect()` returns one row; `df.collect()` returns all of them."
+    },
+    {
+      "q": "The physical plan for a query on a table partitioned by `event_date` shows a FileScan with no PartitionFilters, and the job reads the whole table. The filter is `WHERE year(event_date) = 2026`. What is the fix?",
+      "options": [
+        "Rewrite the filter as a range on `event_date` so partition pruning applies",
+        "Increase executor memory so the full scan completes faster",
+        "Add a Python UDF to filter rows after reading",
+        "Repartition the table by year before filtering"
+      ],
+      "answer": 0,
+      "explain": "Pruning needs a predicate on the partition column the reader can evaluate against partition values. A function over the column is not pushed down; a range comparison is."
+    },
+    {
+      "q": "A team needs a nightly transformation over 80 GB of Parquet, expressible with DataFrame operations, and currently runs a 10-node Spark cluster for it. What should they consider?",
+      "options": [
+        "Running it on a single large machine with DuckDB or polars, which is likely faster end to end and far simpler to operate at this size",
+        "Doubling the cluster to 20 nodes to finish faster",
+        "Rewriting the logic as Python UDFs for flexibility",
+        "Moving the data to CSV so any tool can read it"
+      ],
+      "answer": 0,
+      "explain": "Tens to hundreds of GB fit comfortably on one machine, where single-node engines avoid cluster start-up, shuffles and operational overhead. Spark's advantages appear at much larger scale or with code-heavy logic."
+    }
+  ]
+}

@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Data modelling — Data | ThavionAI Education</title>
+  <meta name="description" content="Normalisation, star and snowflake schemas, slowly changing dimensions, and choosing a grain." />
+  <meta property="og:title" content="Data modelling — ThavionAI Education" />
+  <meta property="og:description" content="Normalisation, star and snowflake schemas, slowly changing dimensions, and choosing a grain." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/de-modeling.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-data" data-module="de-modeling">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../index.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=de-modeling&amp;page=/education/de-modeling.html&amp;title=Data%20modelling">Feedback</a>
+    <a href="../education.html#data" class="nav-cta">All Data modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#data">Data</a> › Stage 1: Foundations</div>
+    <h1>Data modelling</h1>
+    <p class="lede">Normalisation, star and snowflake schemas, slowly changing dimensions, and choosing a grain.</p>
+    <div class="meta">
+      <span class="chip">Beginner</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 2 of 16</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">A pipeline moves data; a model decides what the data means. Get the model wrong and every query downstream fights it: joins that fan out, metrics that disagree between dashboards, a history nobody can reconstruct. Get it right and most analytics questions become a short query on an obvious table. This module covers the two modelling traditions you will meet — normalised schemas for systems that write, dimensional schemas for systems that read — and the decisions that matter in practice: choosing a grain, handling change over time with slowly changing dimensions, keys, and the modern variations that columnar warehouses make possible.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Explain normalisation and why transactional systems use it</li><li>Design a star schema: declare a grain, separate facts from dimensions, choose surrogate keys</li><li>Handle change over time with the right slowly changing dimension type</li><li>Model events, snapshots and accumulating facts appropriately</li><li>Decide when to denormalise, when to use wide tables, and how to keep one definition per metric</li></ul>
+    </div>
+    <section id="normalised-the-shape-of-a-system-that-writes"><h2>Normalised: the shape of a system that writes</h2>
+    <p>Operational databases are <strong>normalised</strong>: each fact is stored once, in the table that owns it, and related by keys. A customer's address lives in one row; an order references the customer by id; changing the address touches one place. The normal forms formalise this: no repeating groups (1NF), every non-key column depends on the whole key (2NF), and on nothing but the key (3NF). The payoff is write integrity: no update anomalies, no inconsistent copies. The cost is that answering a question means joining five tables, and the schema reflects how the application works, not how the business thinks.</p>
+    <div class="code"><div class="code-cap">A normalised order model: each entity once, relationships by key, constraints enforced by the database.</div><div class="code-head"><span>sql</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>CREATE TABLE customers (
+  id          bigint PRIMARY KEY,
+  email       text NOT NULL UNIQUE,
+  created_at  timestamptz NOT NULL
+);
+CREATE TABLE products (
+  id     bigint PRIMARY KEY,
+  sku    text NOT NULL UNIQUE,
+  name   text NOT NULL,
+  price  numeric(12,2) NOT NULL
+);
+CREATE TABLE orders (
+  id           bigint PRIMARY KEY,
+  customer_id  bigint NOT NULL REFERENCES customers(id),
+  ordered_at   timestamptz NOT NULL,
+  status       text NOT NULL CHECK (status IN ('placed','paid','shipped','refunded'))
+);
+CREATE TABLE order_items (
+  order_id    bigint NOT NULL REFERENCES orders(id),
+  product_id  bigint NOT NULL REFERENCES products(id),
+  quantity    int NOT NULL CHECK (quantity &gt; 0),
+  unit_price  numeric(12,2) NOT NULL,   -- price at time of order, not a lookup
+  PRIMARY KEY (order_id, product_id)
+);</code></pre></div>
+    <p>Notice <code>unit_price</code> on the item: it is deliberately a copy, because the product's price changes and the order must remember what was charged. Normalisation is a default, not a law; the exceptions are chosen for a reason and documented.</p></section>
+  <section id="dimensional-the-shape-of-a-system-that-reads"><h2>Dimensional: the shape of a system that reads</h2>
+    <p>Analytics wants the opposite trade: fast, simple reads over many rows, and a schema that matches how people ask questions ("revenue by product category by month by region"). The <strong>star schema</strong> delivers that. A <strong>fact table</strong> holds measurements at a declared grain, one row per event or per thing measured, with numeric measures and foreign keys. <strong>Dimension tables</strong> hold the descriptive context (who, what, where, when) with one row per entity and many descriptive columns. Queries filter and group by dimension attributes and aggregate fact measures; joins are always fact-to-dimension on a single key.</p>
+    <p>The first and most important decision is the <strong>grain</strong>: exactly what one row of the fact table represents. "One row per order line" and "one row per order" are different tables with different measures, and mixing grains in one table is the root of most fan-out and double-counting. Declare the grain in the table's documentation and make the fact table's primary key express it.</p>
+    <div class="code"><div class="code-cap">A sales star at the order-line grain, with surrogate keys and a conformed date dimension.</div><div class="code-head"><span>sql</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>CREATE TABLE dim_date (
+  date_key   int PRIMARY KEY,       -- 20260301
+  date       date NOT NULL,
+  year int, quarter int, month int, month_name text, day_of_week text, is_weekend boolean, fiscal_period text
+);
+CREATE TABLE dim_customer (
+  customer_key   bigint PRIMARY KEY,   -- surrogate
+  customer_id    bigint NOT NULL,      -- natural key from the source
+  email text, country text, segment text, signup_date date,
+  valid_from timestamptz NOT NULL, valid_to timestamptz, is_current boolean NOT NULL
+);
+CREATE TABLE dim_product (
+  product_key bigint PRIMARY KEY, product_id bigint NOT NULL,
+  sku text, name text, category text, brand text
+);
+CREATE TABLE fact_sales (
+  -- grain: one row per order line
+  order_id       bigint NOT NULL,
+  line_no        int    NOT NULL,
+  date_key       int    NOT NULL REFERENCES dim_date(date_key),
+  customer_key   bigint NOT NULL REFERENCES dim_customer(customer_key),
+  product_key    bigint NOT NULL REFERENCES dim_product(product_key),
+  quantity       int NOT NULL,
+  unit_price     numeric(12,2) NOT NULL,
+  line_amount    numeric(12,2) NOT NULL,
+  PRIMARY KEY (order_id, line_no)
+);</code></pre></div>
+    <figure class="diagram" id="fig-star-schema"><div class="diagram-scroll"><svg viewBox="0 0 910 356" role="img" aria-label="The fact_sales table sits in the centre with its grain stated as one row per order line and its measures quantity, unit price and line amount. Four dimension tables surround it: dim_date, dim_customer with slowly changing dimension type 2 versioning, dim_product, and dim_store. Arrows from the fact to each dimension are labelled with the surrogate key used for the join." style="width:100%;max-width:910px;min-width:540px;height:auto;display:block"><defs><marker id="star-schema-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="star-schema-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="star-schema-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="star-schema-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="star-schema-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><polyline points="441.0,150.0 441.0,98.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#star-schema-arrow-default)"/><rect x="444.0" y="116.0" width="58.8" height="16" rx="4" class="dg-label-bg"/><text x="448.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">date_key</text><polyline points="371.0,178.0 171.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#star-schema-arrow-default)"/><rect x="229.4" y="132.0" width="83.2" height="16" rx="4" class="dg-label-bg"/><text x="271.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">customer_key</text><polyline points="511.0,178.0 711.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#star-schema-arrow-default)"/><rect x="572.5" y="132.0" width="77.1" height="16" rx="4" class="dg-label-bg"/><text x="611.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">product_key</text><polyline points="441.0,206.0 441.0,258.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#star-schema-arrow-default)"/><rect x="444.0" y="224.0" width="64.9" height="16" rx="4" class="dg-label-bg"/><text x="448.0" y="232.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">store_key</text><polyline points="781.0,98.0 781.0,150.0" fill="none" style="stroke:rgba(148,163,184,0.55)" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#star-schema-arrow-muted)"/><rect x="784.0" y="116.0" width="95.4" height="16" rx="4" class="dg-label-bg"/><text x="788.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">filter + group</text><rect x="371" y="150.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">fact_sales</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">grain: one order line</text><path d="M371,49.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M371,49.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">dim_date</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">calendar, fiscal</text><path d="M31,157.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M31,157.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="101.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">dim_customer</text><text x="101.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">SCD2: versions</text><path d="M711,157.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M711,157.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="781.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">dim_product</text><text x="781.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">category, brand</text><path d="M371,265.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M371,265.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="441.0" y="279.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">dim_store</text><text x="441.0" y="297.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">region, country</text><rect x="711" y="42.0" width="140" height="56" rx="28.0" class="dg-node dg-actor"/><text x="781.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Query</text><text x="781.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">group dims, sum facts</text></svg></div><figcaption>A star schema: one fact table at a declared grain in the middle, joined by surrogate keys to flat dimension tables around it. Every analytic query filters and groups on dimension attributes and aggregates fact measures, and every join is fact-to-dimension on a single key.</figcaption></figure>
+    <div class="callout callout-note"><strong>Note</strong><p>Surrogate keys (<code>customer_key</code>) are integers the warehouse assigns, independent of the source system's ids. They make history possible (one customer id, several versions), insulate the warehouse from source key changes, and keep fact tables narrow.</p></div></section>
+  <section id="change-over-time-slowly-changing-dimensions"><h2>Change over time: slowly changing dimensions</h2>
+    <p>A customer moves from Berlin to Lisbon. Should last year's orders now count as Portuguese revenue? The answer depends on the question, and <strong>slowly changing dimension</strong> (SCD) types are the standard ways to encode the choice. <strong>Type 1</strong> overwrites: the dimension holds only the current value; history is lost, which is right for corrections (a typo in a name). <strong>Type 2</strong> adds a new row per version with validity dates and a current flag; facts reference the version that was current when they happened, so historical reports are stable. <strong>Type 3</strong> keeps a previous-value column for a limited comparison. Type 2 is the default for anything the business analyses over time.</p>
+    <div class="code"><div class="code-cap">Applying a Type 2 change: close the old version, insert the new one. Facts loaded later pick up the new key; old facts keep the old one.</div><div class="code-head"><span>sql</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>-- customer 1042 moved to Lisbon on 2026-03-01
+UPDATE dim_customer
+   SET valid_to = '2026-03-01', is_current = false
+ WHERE customer_id = 1042 AND is_current;
+
+INSERT INTO dim_customer (customer_key, customer_id, email, country, segment, signup_date, valid_from, valid_to, is_current)
+SELECT nextval('dim_customer_key_seq'), customer_id, email, 'PT', segment, signup_date, '2026-03-01', NULL, true
+  FROM dim_customer WHERE customer_id = 1042 AND valid_to = '2026-03-01';
+
+-- point-in-time lookup when loading a fact
+SELECT customer_key FROM dim_customer
+ WHERE customer_id = 1042
+   AND valid_from &lt;= '2026-02-14' AND (valid_to IS NULL OR valid_to &gt; '2026-02-14');</code></pre></div>
+    <p>Type 2 tables grow with change and need care: a <code>valid_to</code> of NULL for the current row, non-overlapping ranges, exactly one current row per natural key — all worth testing (the data quality module does exactly this). In modern warehouses the snapshot feature of transformation tools automates Type 2 from a source table, which is how most teams implement it today.</p></section>
+  <section id="kinds-of-facts-and-events"><h2>Kinds of facts, and events</h2>
+    <p>Not every fact table is a list of transactions. A <strong>transaction fact</strong> has one row per event (a sale, a click); it is the most common and the easiest to reason about. A <strong>periodic snapshot</strong> has one row per entity per period (account balance per day, inventory per warehouse per week); it answers "what was the state at time t" without replaying events. An <strong>accumulating snapshot</strong> has one row per process instance with a column per milestone (order placed, paid, shipped, delivered), updated as milestones occur; it makes funnel and lag analysis trivial.</p>
+    <div class="table-wrap"><table><thead><tr><th>Fact type</th><th>Grain</th><th>Typical question</th></tr></thead><tbody><tr><td>Transaction</td><td>One row per event</td><td>How much did we sell yesterday by category?</td></tr><tr><td>Periodic snapshot</td><td>One row per entity per period</td><td>What was every account's balance on the 1st?</td></tr><tr><td>Accumulating snapshot</td><td>One row per process, milestone columns</td><td>Median days from order to delivery, by region?</td></tr></tbody></table></div>
+    <p>Event streams (product analytics, logs) are transaction facts at very fine grain, often with a flexible JSON payload. Model them with a stable core (event name, timestamp, user, session, device) as columns and the variable properties in a structured column, then build narrower, typed tables for the events the business actually analyses. Keep the raw events immutable and append-only; every downstream table can be rebuilt from them.</p></section>
+  <section id="modern-variations-and-one-definition-per-metric"><h2>Modern variations and one definition per metric</h2>
+    <p>Columnar warehouses changed some trade-offs. Wide, denormalised tables (<strong>One Big Table</strong>) with hundreds of columns are cheap to scan and remove joins for dashboards; they work well as a final presentation layer built from a star, not as the model itself. Nested and repeated columns (arrays, structs) let a line-item fact live inside its order row. The <strong>snowflake</strong> variant normalises dimensions (product to category to department) and mostly adds joins for little benefit; keep dimensions flat unless a sub-dimension is shared and large.</p>
+    <p>Whatever the shape, the property that matters most is <strong>one definition per metric</strong>. "Revenue" computed three ways in three dashboards is the most common trust failure in analytics. Define each metric once in the transformation layer (a model or a metrics layer), with its grain, filters and NULL handling stated, and have every consumer read that definition. The transformation module builds this; the modelling decision is to design the tables so the definition is simple to express.</p>
+    <div class="code"><div class="code-cap">A model document that states what future readers need. Two minutes to write, hours saved later.</div><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>fact_sales
+  grain:      one row per order line (order_id, line_no)
+  measures:   quantity, unit_price (as charged), line_amount = quantity * unit_price
+  keys:       date_key (order date), customer_key (SCD2 as of order date), product_key
+  excludes:   cancelled orders (status = 'cancelled'); refunds are separate rows in fact_refunds
+  source:     orders + order_items, loaded incrementally by ordered_at
+  metric:     revenue = SUM(line_amount) WHERE status IN ('paid','shipped')  -- the ONE definition</code></pre></div></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Model a small business end to end</h2>
+    <ol><li>Take a domain you know (a coffee shop chain, a SaaS subscription business, a library). List the business questions people would ask: at least ten, in plain words.</li><li>Write the normalised schema the operational application would use: four to six tables with keys and constraints, in SQL.</li><li>Design the star: declare the fact grain in one sentence, list measures, and design three dimensions including a date dimension. Write the DDL.</li><li>For the customer (or member, or account) dimension, decide which attributes are Type 1 and which are Type 2, and write the SQL that applies one Type 2 change.</li><li>Load a few dozen rows of sample data into both schemas (DuckDB is enough) and answer three of your business questions against the star. Note how many joins each needed.</li><li>Write the model document for the fact table in the lesson's format, including the one definition of the main metric.</li><li>Add a periodic snapshot table for one entity (daily inventory, daily subscription status) and write the query that produces it from the transaction facts.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Data modelling — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Normalised for writes (each fact once, joins for reads); dimensional for reads (facts + dimensions, simple joins)</li><li>Declare the grain of every fact table in one sentence; the primary key should express it</li><li>Surrogate keys in dimensions; natural keys kept as attributes</li><li>SCD Type 2 for anything analysed over time: valid_from, valid_to, is_current, one current row per key</li><li>Transaction, periodic snapshot and accumulating snapshot facts answer different questions</li><li>One definition per metric, stated with grain, filters and NULL handling</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Normal forms and constraints</h3><table><tbody><tr><td><code>1NF / 2NF / 3NF</code></td><td>No repeating groups / depends on whole key / on nothing but the key</td></tr><tr><td><code>PRIMARY KEY, UNIQUE, REFERENCES, CHECK, NOT NULL</code></td><td>Let the database enforce the model</td></tr><tr><td><code>copy a value on purpose (unit_price at order time)</code></td><td>Documented denormalisation for history</td></tr><tr><td><code>numeric(12,2) for money</code></td><td>Never float</td></tr></tbody></table></div><div class="cheat-group"><h3>Star schema</h3><table><tbody><tr><td><code>fact_*: measures + foreign keys at one grain</code></td><td>One row per event or measurement</td></tr><tr><td><code>dim_*: one row per entity, many descriptive columns</code></td><td>Filter and group here</td></tr><tr><td><code>dim_date with date_key int (YYYYMMDD)</code></td><td>Conformed calendar for every fact</td></tr><tr><td><code>surrogate key + natural key column</code></td><td>Versioning and source independence</td></tr><tr><td><code>conformed dimensions</code></td><td>Same dim_customer for every fact table</td></tr><tr><td><code>degenerate dimension (order_id in the fact)</code></td><td>Identifier with no attributes of its own</td></tr></tbody></table></div><div class="cheat-group"><h3>Slowly changing dimensions</h3><table><tbody><tr><td><code>Type 1: overwrite</code></td><td>Corrections; no history</td></tr><tr><td><code>Type 2: new row, valid_from/valid_to/is_current</code></td><td>Full history; facts point at the version in effect</td></tr><tr><td><code>Type 3: previous_value column</code></td><td>Limited before/after comparison</td></tr><tr><td><code>point-in-time join: valid_from &lt;= t &lt; valid_to</code></td><td>Look up the right version when loading facts</td></tr><tr><td><code>tests: one current per key, no overlaps, no gaps</code></td><td>SCD2 invariants</td></tr></tbody></table></div><div class="cheat-group"><h3>Fact types and modern shapes</h3><table><tbody><tr><td><code>transaction fact</code></td><td>Per event; sum freely</td></tr><tr><td><code>periodic snapshot</code></td><td>Per entity per period; state at time t</td></tr><tr><td><code>accumulating snapshot</code></td><td>Per process; milestone columns; lags</td></tr><tr><td><code>raw events immutable + typed event tables</code></td><td>Rebuildable downstream</td></tr><tr><td><code>One Big Table as presentation layer</code></td><td>Built from the star, not instead of it</td></tr><tr><td><code>model doc: grain, measures, keys, excludes, metric definition</code></td><td>Write it with the DDL</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Mixing grains in one fact table (order rows and line rows together); every sum is wrong.</li><li>Using the source system's id as the dimension key, making history impossible.</li><li>Overwriting dimension attributes (Type 1) that the business reports on over time; last year's numbers change.</li><li>Snowflaking dimensions into chains of small tables for no query benefit.</li><li>Letting each dashboard compute revenue its own way.</li><li>Storing money in floating point.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "A fact table contains both one row per order and one row per order line, distinguished by a type column. What problem does this cause?", "options": ["Mixed grain: any sum over the table double counts unless every query remembers to filter by type, and joins to dimensions behave differently per row type", "The table cannot have a primary key because order rows and line rows share ids", "Dimension tables must be duplicated for each row type", "Slowly changing dimensions cannot be applied to a table with a type column"], "answer": 0, "explain": "A fact table has one grain. Two grains in one table make measures ambiguous and every aggregate a trap. Split into two fact tables with declared grains."}, {"q": "A customer changes country. Finance needs last year's revenue by country to stay as it was reported; marketing wants current segmentation. Which dimension design serves both?", "options": ["Type 2: a new dimension row with validity dates; historical facts keep the old version's key, and a current-row flag serves the present view", "Type 1: overwrite the country so all facts reflect the current country", "Two separate customer dimensions, one for finance and one for marketing", "Store the country on every fact row and never in the dimension"], "answer": 0, "explain": "Type 2 preserves the version in effect for each fact while exposing the current version through `is_current`. Overwriting rewrites history; two dimensions break conformance; country-on-every-fact loses the other attributes and the ability to correct."}, {"q": "Why do dimension tables in a warehouse use surrogate keys rather than the source system's natural keys?", "options": ["To allow multiple versions of the same entity over time and to insulate the warehouse from source key changes or merges", "Because natural keys are usually strings and cannot be indexed", "Because fact tables can only reference integer columns", "To make the dimension smaller by removing the natural key entirely"], "answer": 0, "explain": "A natural key identifies an entity; a surrogate key identifies a version of it, which is what Type 2 history needs. The natural key stays as an attribute. Strings index fine and facts can reference any key type."}, {"q": "The business asks for the median number of days from order to delivery, by region, and for the count of orders stuck between payment and shipping. Which fact design makes both questions simple?", "options": ["An accumulating snapshot with one row per order and a column per milestone timestamp", "A transaction fact with one row per status change event", "A periodic snapshot with one row per order per day", "A dimension table with the delivery date as an attribute"], "answer": 0, "explain": "With milestone columns on one row per order, lags are subtractions and stuck orders are rows with one timestamp filled and the next NULL. The event-per-status design can answer it but needs pivoting; a daily snapshot is far larger than needed."}, {"q": "Three dashboards show three different monthly revenue figures. What is the structural fix?", "options": ["Define revenue once in the transformation layer with its grain, filters and NULL handling, and have every dashboard read that model", "Pick the dashboard with the highest figure as the official one", "Add a footnote to each dashboard explaining its calculation", "Restrict dashboard access to the finance team"], "answer": 0, "explain": "Divergent metrics come from divergent definitions. A single modelled definition consumed by all tools removes the divergence; footnotes document it, access control hides it, and picking a winner does not make it correct."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="de-sql.html"><span>← Previous</span><strong>SQL for engineers</strong></a>
+    <a class="pager-up" href="../education.html#data">All Data modules</a>
+    <a class="pager-link pager-next" href="de-python-data.html"><span>Next →</span><strong>Python for data work</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=de-modeling&amp;page=/education/de-modeling.html&amp;title=Data%20modelling">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=de-modeling&amp;page=/education/de-modeling.html&amp;title=Data%20modelling">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

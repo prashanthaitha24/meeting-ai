@@ -1,0 +1,375 @@
+{
+  "id": "de-storage",
+  "minutes": 35,
+  "intro": "Where and how data is stored decides what every later query costs. A row-oriented file must be read in full to sum one column; a columnar file reads only that column. A folder of ten thousand small files is slow to list before a single byte is read; a well-partitioned layout lets a query skip almost everything. And a plain folder of files cannot be updated safely by two writers or read consistently while it changes, which is the problem open table formats solve. This module explains row versus columnar storage, why Parquet is the standard file, how to lay data out in object storage, and how table formats such as Apache Iceberg and Delta Lake turn a bucket into a database-like table — the foundation of the lakehouse.",
+  "objectives": [
+    "Explain row-oriented versus columnar storage and choose the right one for a workload",
+    "Read and configure Parquet: row groups, compression, statistics and predicate pushdown",
+    "Lay out data in object storage with partitioning and file sizing that queries can exploit",
+    "Describe what an open table format adds: ACID transactions, schema evolution, time travel, hidden partitioning",
+    "Choose between a warehouse, a lake and a lakehouse for a given team and workload"
+  ],
+  "sections": [
+    {
+      "heading": "Rows versus columns",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A **row store** keeps all the fields of one record together (CSV, JSON lines, a transactional database's heap). It is right for reading or writing whole records: fetch order 1042, insert a new order. A **column store** keeps all the values of one column together (Parquet, ORC, every analytical warehouse). It is right for scanning a few columns over many rows: total `amount` for last quarter touches one column and ignores the other forty. Columnar data also compresses far better, because a column holds similar values (many repeated countries, sorted timestamps), and encodings like dictionary and run-length exploit that."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Workload",
+            "Row store",
+            "Column store"
+          ],
+          "rows": [
+            [
+              "Fetch one record by key",
+              "Fast: one location",
+              "Slow: one value from each column file"
+            ],
+            [
+              "Sum one column over a billion rows",
+              "Reads everything",
+              "Reads one column, compressed"
+            ],
+            [
+              "Frequent small updates",
+              "Natural",
+              "Rewrite files or use a table format"
+            ],
+            [
+              "Compression ratio",
+              "Modest",
+              "High: similar values together"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "This is why operational databases and analytical systems differ, and why pipelines typically move data from row-oriented sources into columnar files or warehouses. The conversion point is usually the first thing a pipeline does after landing raw data."
+        }
+      ]
+    },
+    {
+      "heading": "Parquet, properly",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A **Parquet** file is split into **row groups** (typically 64 to 512 MB of rows), each containing one **column chunk** per column, each chunk in **pages**. The footer holds the schema and, per column chunk, statistics: min, max, null count, and optionally bloom filters. A reader that wants `WHERE ordered_at >= '2026-03-01'` inspects the statistics and skips every row group whose max is earlier — **predicate pushdown** — and reads only the columns the query names — **projection pushdown**. Sorting data within a file by the columns you filter on makes the statistics tight and the skipping effective."
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "caption": "Inspecting what a reader sees: schema, row groups and per-column statistics. If min and max span the whole range, sorting will help.",
+          "code": "import pyarrow.parquet as pq\n\nf = pq.ParquetFile(\"orders/month=2026-03/part-0.parquet\")\nprint(f.schema_arrow)\nmeta = f.metadata\nprint(\"row groups:\", meta.num_row_groups, \"rows:\", meta.num_rows)\n\ncol_idx = f.schema_arrow.get_field_index(\"ordered_at\")\nfor rg in range(meta.num_row_groups):\n    col = meta.row_group(rg).column(col_idx)\n    st = col.statistics\n    print(rg, col.path_in_schema, st.min, st.max, \"nulls:\", st.null_count,\n          \"compressed MB:\", round(col.total_compressed_size / 1e6, 1))"
+        },
+        {
+          "type": "p",
+          "text": "Write with sensible settings: zstd or snappy compression, row groups of around 128 MB, dictionary encoding on (the default), and timestamps with an explicit unit and timezone. Avoid many tiny files: each file costs a listing and a footer read, and a query over ten thousand 1 MB files is slower than over eighty 128 MB files holding the same data. Compaction — periodically rewriting small files into large ones — is routine maintenance."
+        },
+        {
+          "type": "callout",
+          "kind": "note",
+          "text": "Parquet is an immutable file. \"Updating a row\" means rewriting the file that contains it. That constraint is what table formats manage for you."
+        }
+      ]
+    },
+    {
+      "heading": "Layout in object storage",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Object storage (S3, GCS, Azure Blob) is cheap, durable and effectively infinite, with two properties that shape layout: listing is slow and per-object requests have latency, so large objects and shallow prefixes win. **Partitioning** organises files into prefixes by a column with low cardinality that queries filter on, typically date: `orders/dt=2026-03-01/part-0.parquet`. A query for one week lists seven prefixes and reads only those files. Over-partitioning (by hour, by customer id) produces thousands of tiny files and slow listings; under-partitioning forces full scans. Aim for partitions of hundreds of MB to a few GB."
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "caption": "A lake layout with zones and partitioning. Raw is immutable; everything else can be rebuilt from it.",
+          "code": "s3://acme-lake/\n  raw/                              immutable, as received, partitioned by arrival\n    orders_api/dt=2026-03-01/hour=13/batch-7f3c.jsonl.gz\n  bronze/                           parsed to Parquet, typed, still one row per source record\n    orders/dt=2026-03-01/part-0000.parquet\n  silver/                           cleaned, deduplicated, conformed; table-format managed\n    orders/                         (Iceberg table: metadata/ + data/)\n  gold/                             business-level models and aggregates\n    daily_revenue_by_region/\n\nrules\n  raw:    never modified; retention by policy; replay source for everything below\n  files:  128 MB - 1 GB Parquet, zstd; compaction job weekly\n  keys:   partition by date of the event, not date of load"
+        },
+        {
+          "type": "p",
+          "text": "The zone names vary (raw/bronze/silver/gold, landing/staging/curated); the idea is constant: an immutable raw layer you can always replay, progressively cleaner layers built by code, and business models at the top. Store the raw data compressed in its original form, because parsing bugs are discovered later and the raw bytes are the only thing that can fix them."
+        }
+      ]
+    },
+    {
+      "heading": "Table formats: the lakehouse",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A folder of Parquet files has no transactions: a reader can see a half-written batch, two writers can corrupt each other, a schema change means rewriting everything, and deleting a customer's rows for a privacy request means finding and rewriting the right files by hand. **Open table formats** — Apache Iceberg, Delta Lake, Apache Hudi — add a metadata layer over the files: a log of snapshots, each listing exactly which files make up the table at that version. Writers commit new snapshots atomically; readers see one consistent snapshot; old snapshots enable **time travel** and rollback; and the metadata carries the schema, so columns can be added, renamed or reordered without rewriting data."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Capability",
+            "Plain Parquet folder",
+            "Iceberg / Delta table"
+          ],
+          "rows": [
+            [
+              "Concurrent writers",
+              "Corruption risk",
+              "Optimistic concurrency, atomic commits"
+            ],
+            [
+              "Consistent reads during writes",
+              "No",
+              "Snapshot isolation"
+            ],
+            [
+              "Update / delete rows",
+              "Rewrite files by hand",
+              "MERGE, DELETE with row-level tracking"
+            ],
+            [
+              "Schema change",
+              "Rewrite everything",
+              "Add, rename, drop, reorder columns in metadata"
+            ],
+            [
+              "Partition change",
+              "Rewrite everything",
+              "Iceberg: partition spec evolution, hidden partitioning"
+            ],
+            [
+              "Time travel",
+              "No",
+              "Query any past snapshot; roll back"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "sql",
+          "caption": "Iceberg from the engine's point of view (Spark SQL shown): create with hidden partitioning, merge, then read the table as it was yesterday.",
+          "code": "CREATE TABLE lake.silver.orders (\n  order_id    BIGINT,\n  customer_id BIGINT,\n  ordered_at  TIMESTAMP,\n  status      STRING,\n  amount      DECIMAL(12,2)\n) USING iceberg\nPARTITIONED BY (days(ordered_at));        -- hidden partitioning: queries filter on ordered_at, not a dt column\n\nMERGE INTO lake.silver.orders t\nUSING lake.bronze.orders_batch s\nON t.order_id = s.order_id\nWHEN MATCHED THEN UPDATE SET *\nWHEN NOT MATCHED THEN INSERT *;\n\n-- what did the table look like before today's merge?\nSELECT COUNT(*) FROM lake.silver.orders TIMESTAMP AS OF '2026-03-01 00:00:00';\n\n-- maintenance: compact small files and expire old snapshots\nCALL lake.system.rewrite_data_files('silver.orders');\nCALL lake.system.expire_snapshots('silver.orders', TIMESTAMP '2026-02-01 00:00:00');"
+        },
+        {
+          "type": "p",
+          "text": "The result is the **lakehouse**: warehouse-like tables (ACID, schema, SQL) on lake storage (cheap, open files, many engines). Spark, Trino, Flink, DuckDB and the major cloud warehouses can all read Iceberg tables in the same bucket, which removes the copy-the-data-into-each-tool problem. A **catalog** (REST, Glue, Nessie, Unity) holds the pointer from table name to current metadata file; it is the one component every engine must agree on."
+        }
+      ]
+    },
+    {
+      "heading": "Warehouse, lake, or lakehouse",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A **cloud warehouse** (BigQuery, Snowflake, Redshift, and similar) is the simplest to run: load data, write SQL, pay for storage and compute, get performance without managing files. A **data lake** is object storage with files and a query engine on top: cheapest and most flexible, most operational work, historically weakest on consistency. A **lakehouse** is the lake with table formats, closing most of the gap. The choice is less about technology than about the team: who operates it, which tools must read the data, how much data there is, and whether machine learning and streaming workloads need direct file access."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Small team, mostly SQL analytics, moderate data: a warehouse, with Parquet exports to a lake for ML and archive.",
+            "Many engines (Spark for ML, Trino for ad hoc, Flink for streams) over the same data: a lakehouse with Iceberg and a shared catalog.",
+            "Regulatory needs for deletion and audit: a table format with row-level delete and snapshot history, whichever platform.",
+            "Whatever you pick: an immutable raw layer, Parquet as the interchange format, and business models defined in code."
+          ]
+        },
+        {
+          "type": "callout",
+          "kind": "tip",
+          "text": "Most warehouses now read Iceberg tables directly and some write them. Designing the lake layer with an open table format keeps the option to change engines without a migration project."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "From CSV to a time-travelling table",
+    "steps": [
+      "Generate a five-million-row orders CSV with Python (random dates over a year, a few hundred customers). Time `SELECT SUM(amount) WHERE ordered_at >= '2026-03-01'` over the CSV in DuckDB.",
+      "Convert it to a single Parquet file with zstd compression, then to a Parquet dataset partitioned by month. Time the same query on each and record file sizes.",
+      "Inspect the partitioned files with `pyarrow.parquet`: row groups, statistics for `ordered_at`. Rewrite one month sorted by `ordered_at` and compare the min/max spread per row group.",
+      "Deliberately write the same month as 500 tiny files (chunked writes) and time the query; then compact them and time again.",
+      "Install PyIceberg (or use Spark/DuckDB with the Iceberg extension) with a local SQLite or REST catalog. Create an Iceberg table from the Parquet data with day partitioning on `ordered_at`.",
+      "Append a second batch, then run a delete for one customer. List the snapshots and query the table as of the first snapshot to confirm the deleted rows are still visible there.",
+      "Add a column to the table's schema without rewriting data, write a batch with the new column, and read the whole table back."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Columnar for scans over many rows and few columns; row-oriented for whole-record reads and writes",
+      "Parquet: row groups with min/max statistics enable predicate pushdown; sort by filter columns; 128 MB to 1 GB files, zstd",
+      "Partition object storage by event date at a grain that yields hundreds of MB per partition; compact small files",
+      "Immutable raw layer, then progressively cleaner layers; everything below raw is rebuildable",
+      "Table formats add ACID commits, snapshot isolation, MERGE/DELETE, schema and partition evolution, time travel",
+      "Choose warehouse vs lakehouse by team and engines; keep Parquet and an open table format as the interchange"
+    ],
+    "groups": [
+      {
+        "title": "Formats",
+        "items": [
+          {
+            "syntax": "CSV / JSONL",
+            "desc": "Row-oriented, untyped; ingest only"
+          },
+          {
+            "syntax": "Parquet / ORC",
+            "desc": "Columnar, typed, compressed, statistics"
+          },
+          {
+            "syntax": "Avro",
+            "desc": "Row-oriented with schema; streaming and records"
+          },
+          {
+            "syntax": "compression: zstd (ratio) or snappy (speed)",
+            "desc": "Both splittable inside Parquet"
+          },
+          {
+            "syntax": "dictionary + run-length encoding",
+            "desc": "Why columns compress so well"
+          }
+        ]
+      },
+      {
+        "title": "Parquet internals",
+        "items": [
+          {
+            "syntax": "file -> row groups -> column chunks -> pages",
+            "desc": "Structure"
+          },
+          {
+            "syntax": "footer: schema + per-chunk min/max/nulls",
+            "desc": "Read first; drives skipping"
+          },
+          {
+            "syntax": "predicate pushdown / projection pushdown",
+            "desc": "Skip row groups / read only needed columns"
+          },
+          {
+            "syntax": "pq.ParquetFile(p).metadata.row_group(i).column(j).statistics",
+            "desc": "Inspect what readers see"
+          },
+          {
+            "syntax": "row_group_size ~128 MB; sort by filter columns",
+            "desc": "Tight statistics, effective skipping"
+          }
+        ]
+      },
+      {
+        "title": "Lake layout",
+        "items": [
+          {
+            "syntax": "table/dt=YYYY-MM-DD/part-N.parquet",
+            "desc": "Date partitioning by event time"
+          },
+          {
+            "syntax": "raw -> bronze -> silver -> gold",
+            "desc": "Immutable source, then cleaner layers"
+          },
+          {
+            "syntax": "avoid > ~10k files per table; compact weekly",
+            "desc": "Listing and footer costs"
+          },
+          {
+            "syntax": "partition size: 100s of MB to a few GB",
+            "desc": "Not by hour, not by high-cardinality keys"
+          },
+          {
+            "syntax": "raw retained compressed, never modified",
+            "desc": "The replay source"
+          }
+        ]
+      },
+      {
+        "title": "Table formats",
+        "items": [
+          {
+            "syntax": "USING iceberg PARTITIONED BY (days(ts))",
+            "desc": "Hidden partitioning; filter on ts directly"
+          },
+          {
+            "syntax": "MERGE INTO t USING s ON ... WHEN MATCHED UPDATE / NOT MATCHED INSERT",
+            "desc": "Upsert into a lake table"
+          },
+          {
+            "syntax": "SELECT ... TIMESTAMP AS OF / VERSION AS OF",
+            "desc": "Time travel"
+          },
+          {
+            "syntax": "rewrite_data_files / expire_snapshots",
+            "desc": "Compaction and metadata cleanup"
+          },
+          {
+            "syntax": "catalog: REST / Glue / Nessie / Unity",
+            "desc": "Table name -> current metadata pointer"
+          },
+          {
+            "syntax": "schema evolution: add/rename/drop in metadata",
+            "desc": "No data rewrite"
+          }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Partitioning by hour or by a high-cardinality key and creating a million tiny files.",
+      "Writing CSV between pipeline stages, losing types and paying for full scans forever.",
+      "Never compacting, so the table gets slower every day even though data volume is flat.",
+      "Modifying the raw layer, so the one source that could rebuild everything is now suspect.",
+      "Two jobs writing the same Parquet folder without a table format, corrupting each other.",
+      "Partitioning by load date when queries filter by event date."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A query sums one numeric column over a two-billion-row table with forty columns. Why is Parquet dramatically faster than CSV here?",
+      "options": [
+        "Parquet reads only that column's chunks and can skip row groups using statistics, while CSV must be parsed in full",
+        "Parquet files are always smaller than 100 MB so they fit in memory",
+        "CSV files cannot be read by more than one thread",
+        "Parquet stores the sum precomputed in its footer"
+      ],
+      "answer": 0,
+      "explain": "Columnar layout gives projection pushdown (one column of forty) and statistics give predicate pushdown; CSV has neither. Parquet does not precompute aggregates, and file sizes vary."
+    },
+    {
+      "q": "A table in object storage is partitioned by `customer_id`, producing 400,000 small files. Most queries filter by date. What is the right layout change?",
+      "options": [
+        "Partition by event date at a grain that gives partitions of hundreds of MB, and compact files to around 128 MB or more",
+        "Partition by both customer_id and date to make every query fast",
+        "Remove partitioning entirely and write one giant file",
+        "Increase the number of partitions so each file is even smaller"
+      ],
+      "answer": 0,
+      "explain": "Partition by what queries filter on, at low cardinality; keep files large. Adding date under customer multiplies the file explosion, one giant file loses parallelism and skipping, and smaller files make listing worse."
+    },
+    {
+      "q": "Two nightly jobs write to the same plain Parquet folder, and a dashboard sometimes shows partial results while they run. What solves both problems?",
+      "options": [
+        "An open table format (Iceberg or Delta) providing atomic commits and snapshot isolation over the same files",
+        "Running the two jobs at different times of night",
+        "Converting the folder to CSV so writes are line-by-line",
+        "Adding a lock file that jobs check before writing"
+      ],
+      "answer": 0,
+      "explain": "Table formats give writers atomic commits and readers a consistent snapshot; that is exactly the missing layer. Scheduling and ad hoc lock files are fragile and do not fix readers seeing half-written batches."
+    },
+    {
+      "q": "What does Iceberg's hidden partitioning change for people writing queries?",
+      "options": [
+        "They filter on the real column (`ordered_at`) and the engine prunes partitions; no separate `dt` column must be known or maintained",
+        "Partitions are encrypted so users cannot see which files hold their data",
+        "Queries must specify the partition path explicitly in the FROM clause",
+        "The table cannot be partitioned by time columns"
+      ],
+      "answer": 0,
+      "explain": "The partition transform (`days(ordered_at)`) is metadata; users query the natural column and pruning still happens. It also lets the partition scheme change later without rewriting data."
+    },
+    {
+      "q": "A parsing bug is found six weeks after go-live: a field was truncated in the bronze layer. What makes recovery straightforward?",
+      "options": [
+        "An immutable, retained raw layer from which bronze and everything above can be rebuilt with the fixed parser",
+        "Daily database backups of the gold layer",
+        "Time travel on the bronze table, which restores the untruncated values",
+        "The dashboards' cached query results"
+      ],
+      "answer": 0,
+      "explain": "Only the raw bytes contain the untruncated data; the bug happened when parsing them. Time travel on bronze would return the same truncated values, and downstream backups inherit the error."
+    }
+  ]
+}

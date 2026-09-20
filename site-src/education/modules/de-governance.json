@@ -1,0 +1,176 @@
+{
+  "id": "de-governance",
+  "minutes": 30,
+  "intro": "A data platform that anyone can query is only useful if people can find the right table, know what it means, trust who owns it, and are prevented from seeing what they should not. Governance is the set of practices that makes that true: a catalogue with ownership and definitions, classification of sensitive data, access control that follows the classification, retention and deletion that satisfy the law, and an audit trail of who touched what. Done as policy documents it is ignored; done as code and platform features it is mostly invisible. This module covers the parts an engineer builds — catalogue, classification, row and column security, masking, retention, deletion and audit — with the Cybersecurity track's compliance module as the legal backdrop.",
+  "objectives": [
+    "Run a catalogue where every table has an owner, a description and a classification",
+    "Classify personal and sensitive data and tag it at the column level",
+    "Implement access control that follows classification: roles, row-level security, column masking",
+    "Implement retention and right-to-erasure across tables, files and backups",
+    "Keep an audit trail of data access and use it"
+  ],
+  "sections": [
+    {
+      "heading": "Catalogue and ownership",
+      "blocks": [
+        {"type": "p", "text": "The **catalogue** is the searchable inventory of data assets: tables, columns, dashboards, pipelines, with descriptions, owners, lineage, freshness and classification attached. It exists so that an analyst can find the revenue table without asking, understand its grain without guessing, and know who to contact when it looks wrong. Most of its content is generated: dbt descriptions and tests, orchestrator lineage, warehouse schemas, query logs for popularity. The human part is **ownership** — every tier-1 asset has a named team — and the definitions, which the modelling module said to write with the DDL."},
+        {"type": "code", "lang": "yaml", "caption": "Ownership and classification declared where the model lives. The catalogue reads this; access policies are generated from it.", "code": "models:\n  - name: dim_customers\n    description: One row per customer (SCD2). Natural key customer_id; surrogate customer_key.\n    meta:\n      owner: crm-data@acme.example\n      domain: customer\n      classification: confidential\n    columns:\n      - name: email\n        description: Login email; direct identifier.\n        meta: {pii: direct, mask: hash}\n      - name: date_of_birth\n        meta: {pii: indirect, mask: year_only}\n      - name: country\n        meta: {pii: none}\n      - name: segment\n        description: Marketing segment, recomputed nightly."},
+        {"type": "p", "text": "Ownership has to mean something: the owner reviews access requests, answers questions, approves schema changes and is paged for tier-1 incidents. An asset with no owner is a candidate for deletion, not for tolerance. Domains (customer, finance, product) group assets and owners, and a lightweight council of domain owners handles the cross-cutting decisions: shared definitions, classification rules, platform standards."}
+      ]
+    },
+    {
+      "heading": "Classification and personal data",
+      "blocks": [
+        {"type": "p", "text": "Classification decides how data is handled. A workable scheme has three or four levels — public, internal, confidential, restricted — plus column-level tags for **personal data** (direct identifiers such as email and name; indirect ones such as date of birth and postcode that identify in combination) and for special categories (health, payment, biometrics) that regulations single out. Classify at ingestion, in the contract or the source definition, so that the tag travels through lineage: a column derived from a PII column is PII unless it has been anonymised."},
+        {"type": "list", "items": [
+          "Keep a **record of processing**: which datasets hold personal data, why, for how long, who it is shared with. It is the GDPR requirement and the incident-response inventory in one.",
+          "**Minimise**: do not land fields you have no purpose for; drop or hash direct identifiers in analytical layers where the raw value is not needed.",
+          "**Pseudonymise** by default: analytics on a stable hashed id, with the mapping back to identity held in one restricted table.",
+          "Automated scanners can detect likely PII (emails, card numbers, national ids) in untagged columns; run them on new tables and treat hits as classification work."
+        ]},
+        {"type": "callout", "kind": "note", "text": "Anonymisation is hard: removing names is not enough when date of birth, postcode and gender identify most people. Treat aggregated or k-anonymised outputs as the only truly anonymous ones, and everything else as pseudonymous personal data."}
+      ]
+    },
+    {
+      "heading": "Access control that follows the data",
+      "blocks": [
+        {"type": "p", "text": "Access should be granted by role, scoped by classification, and enforced by the platform rather than by convention. **Roles** map job functions to grants (analyst, finance-analyst, data-engineer, service accounts per pipeline). **Row-level security** filters rows by the caller's attributes (a regional manager sees their region). **Column-level security and dynamic masking** hide or transform sensitive columns unless the role is entitled: an analyst sees a hashed email, a support agent sees the full one. Generate the policies from the classification tags so a newly tagged column is protected automatically."},
+        {"type": "code", "lang": "sql", "caption": "Dynamic masking and row-level security in Snowflake syntax; the concepts exist in every major warehouse.", "code": "-- column masking: full value for the support role, hashed for everyone else\nCREATE OR REPLACE MASKING POLICY mask_email AS (val STRING) RETURNS STRING ->\n  CASE WHEN CURRENT_ROLE() IN ('SUPPORT_AGENT', 'DATA_ENGINEER') THEN val\n       ELSE SHA2(val, 256) END;\nALTER TABLE analytics.dim_customers MODIFY COLUMN email SET MASKING POLICY mask_email;\n\n-- row access: regional analysts see only their region; central roles see everything\nCREATE OR REPLACE ROW ACCESS POLICY region_rows AS (region STRING) RETURNS BOOLEAN ->\n  CURRENT_ROLE() IN ('FINANCE_CENTRAL', 'DATA_ENGINEER')\n  OR EXISTS (SELECT 1 FROM governance.role_regions r\n             WHERE r.role_name = CURRENT_ROLE() AND r.region = region);\nALTER TABLE analytics.fct_orders ADD ROW ACCESS POLICY region_rows ON (region);\n\n-- grants by role, never by user\nGRANT SELECT ON ALL TABLES IN SCHEMA analytics TO ROLE ANALYST;\nGRANT SELECT ON TABLE analytics.dim_customers_full TO ROLE SUPPORT_AGENT;"},
+        {"type": "p", "text": "Federate roles to the identity provider (groups become roles) so joiners, movers and leavers are handled once, and review access quarterly with the owner approving. Service accounts for pipelines get their own roles with least privilege — the transformation role can write to the marts schema and read raw, and nothing else. Access to raw or restricted zones is exceptional, logged and time-boxed."}
+      ]
+    },
+    {
+      "heading": "Retention and the right to be forgotten",
+      "blocks": [
+        {"type": "p", "text": "Every data class gets a **retention** period in the record of processing, and a job enforces it: partitions expire in the warehouse and the lake, raw files age out by lifecycle policy, backups roll off. Where the data must stay for aggregate analytics but the person's identity must not, anonymise instead of delete. **Erasure requests** (a person asks to be forgotten) are the hard case: you must find every copy of their data — mirror tables, changelogs, event topics, feature stores, exports, backups within a reasonable window — and remove or anonymise it, with a record that you did. Table formats with row-level delete make the tables straightforward; the changelog and the object store need design."},
+        {"type": "code", "lang": "sql", "caption": "An erasure job over a lakehouse: delete or anonymise by key across the tables that hold the person, then log the run. The pseudonymous id lets analytics rows survive without identity.", "code": "-- 1. identity tables: delete\nDELETE FROM lake.silver.customers WHERE customer_id = 1042;\nDELETE FROM lake.bronze.customers_changes WHERE COALESCE(after.id, before.id) = 1042;\n\n-- 2. fact tables: keep the row for aggregates, sever the identity\nUPDATE lake.silver.orders SET customer_id = NULL, shipping_address = NULL WHERE customer_id = 1042;\nUPDATE lake.gold.customer_360 SET email = NULL, name = 'erased' WHERE customer_id = 1042;\n\n-- 3. record it (an auditor and the requester will ask)\nINSERT INTO governance.erasure_log (customer_id, requested_at, completed_at, tables_touched, operator)\nVALUES (1042, TIMESTAMP '2026-03-02 09:15:00', current_timestamp, 4, 'erasure-job');\n\n-- 4. table-format hygiene: expired snapshots still hold the old rows until they are removed\nCALL lake.system.expire_snapshots('silver.customers', current_timestamp - INTERVAL '1' DAY);"},
+        {"type": "p", "text": "Two traps. Time travel and snapshots retain deleted rows until snapshots expire, so erasure must include snapshot expiry within the promised window. And event topics with long retention hold the person's events; either keep personal fields out of events (reference ids only) or use per-key encryption where deleting the key erases the data — **crypto-shredding**. Design for erasure before the first request; the request always comes."}
+      ]
+    },
+    {
+      "heading": "Audit: who touched what",
+      "blocks": [
+        {"type": "p", "text": "Governance without an audit trail is a policy with no evidence. Warehouses log every query with user, role, tables, columns and rows scanned; lakehouse catalogs and object stores log access; the orchestrator logs which pipeline wrote which table. Keep these logs centrally with the same retention as the security logs (the Cybersecurity track's logging module), and use them: who queried the restricted schema this month; which service accounts read PII; which tables nobody has read in a year and can be retired; which dashboards drive the most queries and deserve tier-1 care."},
+        {"type": "code", "lang": "sql", "caption": "The monthly governance query: every access to restricted columns, by user and table, from the warehouse's access history.", "code": "SELECT\n  user_name,\n  obj.value:objectName::STRING     AS table_name,\n  col.value:columnName::STRING     AS column_name,\n  COUNT(*)                          AS accesses,\n  MIN(query_start_time)             AS first_seen,\n  MAX(query_start_time)             AS last_seen\nFROM snowflake.account_usage.access_history,\n     LATERAL FLATTEN(base_objects_accessed) obj,\n     LATERAL FLATTEN(obj.value:columns) col\nWHERE query_start_time >= DATEADD(month, -1, CURRENT_TIMESTAMP())\n  AND obj.value:objectName::STRING IN (SELECT full_name FROM governance.restricted_objects)\nGROUP BY 1, 2, 3\nORDER BY accesses DESC;"},
+        {"type": "callout", "kind": "tip", "text": "Turn governance into pipeline checks: a new column tagged PII without a masking policy fails CI; a model without an owner fails CI; a table unread for 180 days opens a retirement ticket. Rules that run beat rules that are read."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Classify, protect, erase, audit",
+    "steps": [
+      "Add `meta` blocks with owner, classification and per-column PII tags to the dbt models from earlier modules. Write a small script that fails when a model lacks an owner or a `pii: direct` column lacks a `mask` tag, and add it to CI.",
+      "Generate masking policies from the tags: for each column tagged `mask: hash`, emit the `CREATE MASKING POLICY` and `ALTER TABLE` statements (DuckDB users can emulate with views that hash the column for a non-privileged role).",
+      "Implement row-level security for `fct_orders` by region with a mapping table, and verify with two roles that each sees only its rows.",
+      "Write the record of processing for the project's datasets: dataset, personal data fields, purpose, retention, processors.",
+      "Implement the erasure job for one test customer across the mirror, the changelog and the gold tables, then confirm with time travel that the rows are gone after snapshot expiry.",
+      "Write a retention job that anonymises support tickets older than 24 months (from the compliance module) and schedule it in the orchestrator.",
+      "Run an access-history query (or inspect your local query log) to list every read of the customers table in the last week, by role."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Catalogue generated from code plus human ownership and definitions; no owner means retire",
+      "Classify at ingestion, tag PII at column level, let tags travel through lineage",
+      "Roles from the identity provider; row-level security and masking generated from tags; least privilege for service accounts",
+      "Retention per data class enforced by jobs; erasure designed before the first request, including snapshots and events",
+      "Audit access history centrally; use it for reviews, retirement and incident questions",
+      "Governance as CI checks and platform policies, not as documents"
+    ],
+    "groups": [
+      {"title": "Catalogue and tags", "items": [
+        {"syntax": "meta: {owner, domain, classification}", "desc": "On every model"},
+        {"syntax": "columns[].meta: {pii: direct|indirect|none, mask: ...}", "desc": "Column classification drives policy"},
+        {"syntax": "classification: public | internal | confidential | restricted", "desc": "Handling levels"},
+        {"syntax": "record of processing: dataset, fields, purpose, retention, processors", "desc": "Legal and operational inventory"},
+        {"syntax": "PII scanner on new tables", "desc": "Find untagged sensitive columns"}
+      ]},
+      {"title": "Access control", "items": [
+        {"syntax": "GRANT ... TO ROLE r (never to users)", "desc": "Roles map to IdP groups"},
+        {"syntax": "CREATE MASKING POLICY p AS (v) RETURNS ... -> CASE WHEN CURRENT_ROLE() ...", "desc": "Dynamic column masking"},
+        {"syntax": "CREATE ROW ACCESS POLICY p AS (col) RETURNS BOOLEAN -> ...", "desc": "Row-level security"},
+        {"syntax": "service role per pipeline: write marts, read raw", "desc": "Least privilege for automation"},
+        {"syntax": "quarterly access review by owner", "desc": "Evidence and hygiene"}
+      ]},
+      {"title": "Retention and erasure", "items": [
+        {"syntax": "partition expiration / lifecycle rules / backup roll-off", "desc": "Retention enforced by the platform"},
+        {"syntax": "delete identity rows; NULL identity columns on facts", "desc": "Keep aggregates, sever the person"},
+        {"syntax": "expire_snapshots within the erasure window", "desc": "Time travel retains deleted rows"},
+        {"syntax": "crypto-shredding: per-key encryption, delete the key", "desc": "Erasure for immutable logs and topics"},
+        {"syntax": "governance.erasure_log", "desc": "Proof for the requester and the auditor"}
+      ]},
+      {"title": "Audit", "items": [
+        {"syntax": "account_usage.access_history / INFORMATION_SCHEMA.JOBS", "desc": "Who read which tables and columns"},
+        {"syntax": "object store access logs; catalog audit events", "desc": "Lakehouse equivalents"},
+        {"syntax": "restricted objects x access per month", "desc": "The monthly review query"},
+        {"syntax": "unread for 180 days -> retirement ticket", "desc": "Shrink the estate"},
+        {"syntax": "CI: owner required; PII requires mask", "desc": "Governance as tests"}
+      ]}
+    ],
+    "pitfalls": [
+      "A catalogue nobody maintains, so descriptions are stale and ownership is a guess.",
+      "PII tagged at the source and lost downstream, so a derived table exposes the email in plain text.",
+      "Grants to individual users, accumulating for years and surviving job changes.",
+      "Erasure that deletes from the mirror but not from the changelog, the topic, the feature store or the snapshots.",
+      "Believing name removal is anonymisation.",
+      "Access logs that exist but are never queried, so misuse is discovered by accident."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "An analyst asks which table holds the official revenue figure and who owns it. What makes that answerable in seconds?",
+      "options": [
+        "A catalogue populated from the transformation layer with descriptions, owners and lineage, where fct_orders states its grain and metric definition",
+        "A quarterly email listing important tables",
+        "Searching the warehouse for tables with 'revenue' in the name",
+        "Asking the longest-tenured engineer"
+      ],
+      "answer": 0,
+      "explain": "A maintained, generated catalogue with ownership is the purpose of governance tooling. Name searches return many candidates with no authority; emails and tribal knowledge do not scale."
+    },
+    {
+      "q": "A column tagged as a direct identifier at ingestion is joined into a marketing mart where it appears unmasked. What governance mechanism should have prevented that?",
+      "options": [
+        "Classification tags propagating through lineage, with masking policies generated from tags and a CI check that PII columns have a mask",
+        "A rule that marketing may not query the warehouse",
+        "Encrypting the entire warehouse at rest",
+        "Renaming the column so it is harder to find"
+      ],
+      "answer": 0,
+      "explain": "Tags must follow the data, and policies must be enforced by the platform, not remembered by people. Encryption at rest does not control who sees decrypted query results."
+    },
+    {
+      "q": "A regional finance analyst must see only their region's orders while central finance sees everything, in the same table. Which control implements that?",
+      "options": [
+        "A row access policy on the region column that checks the caller's role against a role-to-region mapping",
+        "Separate copies of the table per region",
+        "A masking policy on the amount column",
+        "Granting the analyst SELECT on the table and trusting them to filter"
+      ],
+      "answer": 0,
+      "explain": "Row-level security enforces the filter in the platform for every query. Copies multiply maintenance and drift; masking hides values, not rows; trust is not a control."
+    },
+    {
+      "q": "After processing an erasure request by deleting the customer's rows from an Iceberg table, a time-travel query still returns them. Why, and what completes the erasure?",
+      "options": [
+        "Old snapshots retain the deleted rows; expiring snapshots within the promised window removes them",
+        "The delete was rolled back because Iceberg is append-only",
+        "Time travel reads from the source database, not the table",
+        "The rows must also be deleted from the Parquet files by hand"
+      ],
+      "answer": 0,
+      "explain": "Table formats keep history until snapshots expire; erasure must include snapshot expiry (and the same consideration for changelogs and topics). Iceberg supports deletes; the files are rewritten or marked by the format when snapshots are expired and compacted."
+    },
+    {
+      "q": "Which practice turns governance from a document into something that actually holds?",
+      "options": [
+        "CI checks that fail on models without owners or PII columns without masks, plus platform-enforced policies generated from tags",
+        "A signed policy document reviewed annually",
+        "A mandatory training video for all analysts",
+        "A governance committee that meets monthly"
+      ],
+      "answer": 0,
+      "explain": "Rules enforced by pipelines and the platform apply to every change automatically. Documents, training and committees have a place, but they do not stop an untagged PII column from being published."
+    }
+  ]
+}

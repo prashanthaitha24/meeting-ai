@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Python for data work — Data | ThavionAI Education</title>
+  <meta name="description" content="pandas and polars, typed records, files and APIs, idempotent scripts, and when to reach for SQL instead." />
+  <meta property="og:title" content="Python for data work — ThavionAI Education" />
+  <meta property="og:description" content="pandas and polars, typed records, files and APIs, idempotent scripts, and when to reach for SQL instead." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/de-python-data.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-data" data-module="de-python-data">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../index.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=de-python-data&amp;page=/education/de-python-data.html&amp;title=Python%20for%20data%20work">Feedback</a>
+    <a href="../education.html#data" class="nav-cta">All Data modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#data">Data</a> › Stage 1: Foundations</div>
+    <h1>Python for data work</h1>
+    <p class="lede">pandas and polars, typed records, files and APIs, idempotent scripts, and when to reach for SQL instead.</p>
+    <div class="meta">
+      <span class="chip">Beginner</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 3 of 16</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">SQL is the language of the warehouse; Python is the language of everything around it: pulling from APIs, reading awkward files, calling the warehouse, transforming what SQL cannot express, and gluing steps into a pipeline. The data engineer's Python is not the data scientist's notebook. It runs unattended, on a schedule, against data that changes shape, and it must be idempotent, typed enough to fail early, and honest about memory. This module covers the DataFrame libraries you will actually use (pandas and its faster successor polars), typed records, files and formats, calling APIs and databases robustly, and the structure of a script that can be re-run without fear.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Load, clean and reshape tabular data with pandas and polars, and know when each is the right tool</li><li>Use typed records (dataclasses, pydantic) to validate data at the boundary</li><li>Read and write CSV, JSON and Parquet correctly, including types, encodings and compression</li><li>Call APIs and databases with retries, pagination and parameterised queries</li><li>Structure a pipeline script so it is idempotent, testable and observable</li></ul>
+    </div>
+    <section id="dataframes-pandas-and-polars"><h2>DataFrames: pandas and polars</h2>
+    <p>A <strong>DataFrame</strong> is an in-memory table with typed columns. <strong>pandas</strong> is the long-standing standard: enormous ecosystem, every tutorial, single-threaded and memory-hungry (a rule of thumb is five to ten times the file size in RAM). <strong>polars</strong> is the modern alternative: multi-threaded, a lazy query engine that optimises whole pipelines, a stricter and more consistent API, and typically several times faster with far less memory. For new pipeline code polars is the better default; pandas remains necessary where libraries expect it and is fine for small data.</p>
+    <div class="code"><div class="code-cap">The same cleaning and aggregation in pandas and polars. Note the explicit dtypes, the lazy plan in polars, and that neither mutates in place.</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import pandas as pd
+import polars as pl
+
+# pandas: eager, one step at a time
+orders = pd.read_csv("orders.csv", dtype={"order_id": "int64", "customer_id": "int64"},
+                     parse_dates=["ordered_at"])
+revenue_pd = (
+    orders[orders["status"] == "paid"]
+    .assign(month=lambda d: d["ordered_at"].dt.to_period("M").dt.to_timestamp())
+    .groupby("month", as_index=False)
+    .agg(revenue=("amount", "sum"), orders=("order_id", "nunique"))
+)
+
+# polars: lazy plan, executed once, in parallel
+revenue_pl = (
+    pl.scan_csv("orders.csv", schema_overrides={"order_id": pl.Int64, "customer_id": pl.Int64},
+                try_parse_dates=True)
+    .filter(pl.col("status") == "paid")
+    .with_columns(pl.col("ordered_at").dt.truncate("1mo").alias("month"))
+    .group_by("month")
+    .agg(pl.col("amount").sum().alias("revenue"), pl.col("order_id").n_unique().alias("orders"))
+    .sort("month")
+    .collect()
+)</code></pre></div>
+    <p>Three habits apply to both. Set dtypes explicitly at load time; inferred types drift between files (an id column that becomes float because one row is empty is a classic). Chain transformations as expressions rather than mutating in place, so each step is inspectable and the code reads as a pipeline. And profile memory before scaling up: <code>df.memory_usage(deep=True)</code> in pandas, <code>df.estimated_size()</code> in polars. When data does not fit, the answer is usually not a bigger machine but pushing the work into the warehouse or a distributed engine, which later modules cover.</p>
+    <div class="callout callout-tip"><strong>Tip</strong><p>For local analytics on files, DuckDB reads CSV and Parquet directly with SQL, joins them, and returns pandas or polars frames. Many "which library" questions dissolve into "write the SQL in DuckDB and keep Python for the glue".</p></div></section>
+  <section id="types-at-the-boundary"><h2>Types at the boundary</h2>
+    <p>Data enters your code from files and APIs whose shape you do not control. Validate it at the boundary, once, into typed records, so that everything downstream can assume clean data. Python's <strong>dataclasses</strong> give structure; <strong>pydantic</strong> adds validation and coercion ("the string <code>"12.50"</code> becomes a Decimal, an invalid email fails with a clear message"). Rejecting or quarantining a bad record at ingestion, with a reason, is far cheaper than discovering it as a NULL in a report.</p>
+    <div class="code"><div class="code-cap">A typed record with validation. Bad input fails loudly with a message that says which field and why; good input is guaranteed downstream.</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>from datetime import datetime
+from decimal import Decimal
+from typing import Literal
+
+from pydantic import BaseModel, EmailStr, Field, ValidationError
+
+
+class OrderRecord(BaseModel):
+    order_id: int
+    customer_email: EmailStr
+    ordered_at: datetime
+    status: Literal["placed", "paid", "shipped", "refunded"]
+    amount: Decimal = Field(ge=0, max_digits=12, decimal_places=2)
+
+    model_config = {"extra": "forbid"}   # unexpected columns are a schema change, not noise
+
+
+def parse_rows(rows: list[dict]) -&gt; tuple[list[OrderRecord], list[dict]]:
+    good, bad = [], []
+    for row in rows:
+        try:
+            good.append(OrderRecord.model_validate(row))
+        except ValidationError as e:
+            bad.append({"row": row, "errors": e.errors()})
+    return good, bad</code></pre></div>
+    <p>Use <code>Decimal</code> for money and <code>datetime</code> with an explicit timezone for timestamps; floats and naive datetimes are the two most common sources of silently wrong numbers. When a schema changes upstream (a new column, a renamed field), <code>extra: forbid</code> turns it into an immediate, attributable failure instead of a quiet drift.</p></section>
+  <section id="files-and-formats"><h2>Files and formats</h2>
+    <p><strong>CSV</strong> is universal and terrible: no types, no schema, ambiguous quoting, encodings and line endings that vary by source. Always specify the encoding, the delimiter, the dtypes and how NULLs are spelled; treat every CSV as untrusted input. <strong>JSON</strong> carries structure and types but not tabular shape; newline-delimited JSON (one object per line) streams and splits well, while a single giant array does not. <strong>Parquet</strong> is the format to write: columnar, typed, compressed, with embedded schema and statistics that let readers skip data. Convert to Parquet as early as possible and keep the raw file for provenance.</p>
+    <div class="code"><div class="code-cap">Reading a hostile CSV explicitly, then writing Parquet partitioned by month for everything downstream.</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import polars as pl
+
+raw = pl.read_csv(
+    "export.csv",
+    encoding="utf8-lossy",             # replace undecodable bytes instead of crashing
+    separator=";",
+    null_values=["", "NULL", "N/A", "-"],
+    schema_overrides={"customer_id": pl.Int64, "amount": pl.Decimal(12, 2)},
+    try_parse_dates=True,
+    infer_schema_length=10_000,        # look further before guessing types
+)
+
+(raw.with_columns(pl.col("ordered_at").dt.strftime("%Y-%m").alias("month"))
+    .write_parquet("orders/", partition_by="month", compression="zstd"))
+
+# downstream reads only the months it needs; the filter is pushed into the file scan
+q = pl.scan_parquet("orders/**/*.parquet").filter(pl.col("month") == "2026-03")</code></pre></div>
+    <p>Large files should be processed in chunks or lazily rather than loaded whole: <code>pl.scan_*</code> builds a plan and streams; pandas <code>read_csv(chunksize=...)</code> iterates. Compression choice matters less than format choice; zstd or snappy for Parquet is a good default. The storage module goes deeper into layouts, partitioning and table formats.</p></section>
+  <section id="apis-and-databases-robustly"><h2>APIs and databases, robustly</h2>
+    <p>Unattended code meets unreliable networks. Every HTTP call gets a timeout, retries with exponential backoff on transient failures (429, 5xx, connection errors) and no retry on client errors (4xx other than 429). Paginate with the API's cursor, not by guessing page numbers, and persist the cursor so a restart resumes rather than repeats. Respect rate limits from headers. For databases, use parameterised queries always, stream large results with server-side cursors or batches, and keep transactions short.</p>
+    <div class="code"><div class="code-cap">A paginated API pull with timeouts, retries and backoff, yielding records so the caller can stream them.</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import time
+from collections.abc import Iterator
+
+import httpx
+
+RETRYABLE = {429, 500, 502, 503, 504}
+
+
+def fetch_all(client: httpx.Client, url: str, params: dict) -&gt; Iterator[dict]:
+    cursor = None
+    while True:
+        attempt = 0
+        while True:
+            try:
+                r = client.get(url, params={**params, "cursor": cursor} if cursor else params, timeout=30.0)
+                if r.status_code in RETRYABLE:
+                    raise httpx.HTTPStatusError("retryable", request=r.request, response=r)
+                r.raise_for_status()
+                break
+            except (httpx.TransportError, httpx.HTTPStatusError) as e:
+                attempt += 1
+                if attempt &gt; 5 or (isinstance(e, httpx.HTTPStatusError) and e.response.status_code not in RETRYABLE):
+                    raise
+                time.sleep(min(2 ** attempt, 60))
+        body = r.json()
+        yield from body["items"]
+        cursor = body.get("next_cursor")
+        if not cursor:
+            return</code></pre></div>
+    <div class="code"><div class="code-cap">Loading into Postgres safely: parameters, batches, one transaction per batch, and an upsert so a re-run is harmless.</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import psycopg
+
+UPSERT = """
+INSERT INTO orders (order_id, customer_email, ordered_at, status, amount)
+VALUES (%(order_id)s, %(customer_email)s, %(ordered_at)s, %(status)s, %(amount)s)
+ON CONFLICT (order_id) DO UPDATE
+  SET status = EXCLUDED.status, amount = EXCLUDED.amount
+"""
+
+
+def load(records: list[dict], dsn: str, batch: int = 1000) -&gt; int:
+    n = 0
+    with psycopg.connect(dsn) as conn:
+        for i in range(0, len(records), batch):
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.executemany(UPSERT, records[i:i + batch])
+            n += len(records[i:i + batch])
+    return n</code></pre></div></section>
+  <section id="the-shape-of-a-script-you-can-re-run"><h2>The shape of a script you can re-run</h2>
+    <p>A pipeline step will be re-run: after a failure, for a backfill, by someone testing. <strong>Idempotency</strong> means running it twice produces the same result as once: upserts instead of inserts, overwrite-the-partition instead of append, deterministic output paths derived from the run's logical date rather than from <code>now()</code>. Take the logical date as a parameter; never compute "yesterday" inside the script, because a re-run on Thursday for Monday's data must process Monday.</p>
+    <div class="code"><div class="code-cap">The skeleton: parameters in, one unit of work, structured logs, exit code out. Every function is testable on its own.</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import argparse
+import logging
+import sys
+from datetime import date
+
+log = logging.getLogger("orders_load")
+
+
+def extract(day: date) -&gt; list[dict]: ...
+def transform(rows: list[dict]) -&gt; tuple[list[dict], list[dict]]: ...
+def load_partition(day: date, rows: list[dict]) -&gt; int: ...
+
+
+def run(day: date) -&gt; int:
+    rows = extract(day)
+    good, bad = transform(rows)
+    if bad:
+        log.warning("quarantined %d bad rows for %s", len(bad), day)
+    n = load_partition(day, good)          # overwrites the day's partition: idempotent
+    log.info("loaded %d rows for %s", n, day)
+    return n
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    p = argparse.ArgumentParser()
+    p.add_argument("--day", type=date.fromisoformat, required=True, help="logical date to process")
+    args = p.parse_args()
+    try:
+        run(args.day)
+    except Exception:
+        log.exception("failed for %s", args.day)
+        sys.exit(1)</code></pre></div>
+    <p>Log counts at every stage (rows in, rows rejected, rows out) so a silent drop is visible; emit them as metrics if you have a metrics system. Configuration and secrets come from the environment or a secrets manager, never from the code. Package the pipeline as a proper project with pinned dependencies and tests for <code>transform</code> using small fixture files. The orchestration module takes this script and schedules it; everything it needs — parameters, idempotency, exit codes, logs — is already here.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Build an idempotent loader from a messy CSV</h2>
+    <ol><li>Create a deliberately messy <code>export.csv</code>: semicolon-separated, a Latin-1 encoded name, <code>N/A</code> for missing amounts, an amount written as <code>12,50</code>, and one extra unexpected column.</li><li>Read it with polars using explicit options until every column has the intended type. Note each option you needed and why.</li><li>Define <code>OrderRecord</code> with pydantic and run <code>parse_rows</code>; confirm the bad rows are quarantined with readable error messages and the extra column is reported as a schema change.</li><li>Write the good rows to Parquet partitioned by month with zstd compression. Read one month back with <code>scan_parquet</code> and a filter, and check the file sizes versus the CSV.</li><li>Load the records into a local Postgres (or DuckDB) with the upsert loader. Run it twice and confirm the row count does not change.</li><li>Wrap the steps in the <code>run(day)</code> skeleton with <code>--day</code> as a parameter, add a pytest for <code>transform</code> using a five-row fixture, and run the script for two different days.</li><li>Time the pandas and polars versions of the aggregation on a one-million-row generated file and record the difference.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Python for data work — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>polars for new pipeline code (lazy, parallel, strict); pandas where the ecosystem needs it; DuckDB for SQL over files</li><li>Set dtypes explicitly at load; chain expressions; profile memory before scaling</li><li>Validate at the boundary with pydantic: Decimal for money, timezone-aware datetimes, extra=forbid</li><li>CSV is untrusted input; write Parquet (typed, columnar, compressed) as early as possible</li><li>Timeouts, backoff retries on transient errors only, cursor pagination, parameterised queries, batched upserts</li><li>Idempotent by design: logical date as a parameter, overwrite partitions or upsert, counts logged at every stage</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>polars essentials</h3><table><tbody><tr><td><code>pl.scan_csv(...) / pl.scan_parquet(...)</code></td><td>Lazy plan; nothing runs until .collect()</td></tr><tr><td><code>.filter(pl.col('x') == v).with_columns(...).group_by(k).agg(...)</code></td><td>Expression pipeline</td></tr><tr><td><code>schema_overrides={'id': pl.Int64}</code></td><td>Explicit dtypes at load</td></tr><tr><td><code>.join(other, on='key', how='left')</code></td><td>Joins; check row counts for fan-out</td></tr><tr><td><code>df.write_parquet(path, partition_by='month', compression='zstd')</code></td><td>Partitioned, compressed output</td></tr><tr><td><code>df.estimated_size('mb')</code></td><td>Memory before scaling up</td></tr></tbody></table></div><div class="cheat-group"><h3>pandas essentials</h3><table><tbody><tr><td><code>pd.read_csv(path, dtype={...}, parse_dates=[...])</code></td><td>Explicit types and dates</td></tr><tr><td><code>df.assign(col=lambda d: ...)</code></td><td>Chainable column creation</td></tr><tr><td><code>df.groupby(k, as_index=False).agg(name=('col', 'sum'))</code></td><td>Named aggregation</td></tr><tr><td><code>pd.read_csv(path, chunksize=100_000)</code></td><td>Iterate large files</td></tr><tr><td><code>df.memory_usage(deep=True).sum()</code></td><td>Real memory footprint</td></tr></tbody></table></div><div class="cheat-group"><h3>Validation and formats</h3><table><tbody><tr><td><code>class R(BaseModel): amount: Decimal = Field(ge=0)</code></td><td>Typed, validated record</td></tr><tr><td><code>model_config = {'extra': 'forbid'}</code></td><td>Unknown fields fail loudly</td></tr><tr><td><code>R.model_validate(row) / ValidationError.errors()</code></td><td>Parse; collect readable errors</td></tr><tr><td><code>null_values=['', 'NULL', 'N/A'], encoding='utf8-lossy'</code></td><td>Hostile CSV options</td></tr><tr><td><code>newline-delimited JSON</code></td><td>Streams and splits; a giant array does not</td></tr><tr><td><code>Parquet + zstd</code></td><td>The format to write and read downstream</td></tr></tbody></table></div><div class="cheat-group"><h3>Network, database, structure</h3><table><tbody><tr><td><code>timeout=30, retry on {429, 5xx, transport}, sleep min(2**n, 60)</code></td><td>Robust HTTP</td></tr><tr><td><code>cursor = body['next_cursor']; persist it</code></td><td>Resumable pagination</td></tr><tr><td><code>cur.executemany(SQL, batch) inside conn.transaction()</code></td><td>Parameterised, batched loads</td></tr><tr><td><code>ON CONFLICT (key) DO UPDATE</code></td><td>Upsert: re-runs are harmless</td></tr><tr><td><code>--day YYYY-MM-DD (logical date)</code></td><td>Never compute 'yesterday' inside the script</td></tr><tr><td><code>log rows in / rejected / out; exit 1 on failure</code></td><td>Observable, schedulable</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Letting pandas infer dtypes and getting ids as floats because one row was empty.</li><li>Floats for money and naive datetimes; the numbers look right until they are not.</li><li>Appending on every run, so a retry doubles the data.</li><li>Computing the date to process from the clock, so backfills process the wrong day.</li><li>Retrying 4xx errors forever, or not retrying 429 at all.</li><li>Loading a 10 GB CSV into memory on a 16 GB machine instead of scanning lazily or using the warehouse.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "A daily script computes `yesterday = date.today() - timedelta(days=1)` and loads that day's data. On Thursday it is re-run to fix Monday's failed load. What happens?", "options": ["It processes Wednesday again instead of Monday; the logical date must be a parameter", "It correctly processes Monday because the failure state is remembered", "It processes every day since Monday in sequence", "It fails immediately because Monday's data no longer exists"], "answer": 0, "explain": "The script derives its target from the clock, not from the run's intent. Taking the logical date as an argument makes backfills and re-runs process the right day, which is also what orchestrators pass in."}, {"q": "A loader inserts rows with plain INSERT statements. A network error causes the orchestrator to retry the task. What is the result and the fix?", "options": ["Duplicate rows for whatever was committed before the failure; use an upsert keyed on the natural key or overwrite the partition so re-runs are idempotent", "No effect, because databases automatically reject repeated inserts", "The retry is blocked until an operator deletes the partial data", "The rows are inserted in the wrong order but not duplicated"], "answer": 0, "explain": "Plain inserts are not idempotent; anything committed before the crash is inserted again. Upserts or partition overwrites make the second run produce the same state as one successful run."}, {"q": "A CSV export has one row with an empty `customer_id`, and pandas loads the whole column as float64. Which practice prevents this class of problem?", "options": ["Declare dtypes explicitly at load time and validate records at the boundary so unexpected values fail or are quarantined", "Convert the column to string after loading and compare as text", "Remove the empty row by hand before every load", "Increase pandas' type inference sample size"], "answer": 0, "explain": "Explicit dtypes stop silent coercion, and boundary validation turns the bad row into a reported error rather than a type change across the column. Manual fixes and inference tweaks do not scale or guarantee anything."}, {"q": "An API returns 429 with a Retry-After header during a nightly pull. What should the client do?", "options": ["Wait as instructed (or back off exponentially), retry a bounded number of times, and resume from the persisted cursor", "Treat it as a permanent error and fail the run immediately", "Retry immediately in a tight loop until the request succeeds", "Restart the entire pull from the first page"], "answer": 0, "explain": "429 is a transient, retryable signal that requests backoff. Bounded retries with backoff respect the limit; a persisted cursor means the pull continues where it left off rather than repeating work."}, {"q": "Why is Parquet preferred over CSV for data written by pipelines and read by later steps?", "options": ["It stores types and a schema, is columnar and compressed, and carries statistics that let readers skip irrelevant data", "It is human-readable in any text editor, which simplifies debugging", "It is the only format that pandas can read lazily", "It stores each row as a separate file, which makes partial reads easy"], "answer": 0, "explain": "Parquet solves CSV's core problems: untyped, uncompressed, row-oriented text. Columnar storage with embedded schema and statistics is why warehouses and query engines read it efficiently. It is binary, not human-readable."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="de-modeling.html"><span>← Previous</span><strong>Data modelling</strong></a>
+    <a class="pager-up" href="../education.html#data">All Data modules</a>
+    <a class="pager-link pager-next" href="de-storage.html"><span>Next →</span><strong>Storage formats &amp; the lakehouse</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=de-python-data&amp;page=/education/de-python-data.html&amp;title=Python%20for%20data%20work">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=de-python-data&amp;page=/education/de-python-data.html&amp;title=Python%20for%20data%20work">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

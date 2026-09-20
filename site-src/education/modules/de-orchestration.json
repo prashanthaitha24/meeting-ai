@@ -1,0 +1,188 @@
+{
+  "id": "de-orchestration",
+  "minutes": 35,
+  "intro": "A cron entry runs a script at 02:00. It does not know that the script depends on a file that arrives at 02:15, that yesterday's run failed and today's should wait, that three other scripts need this one's output, or that someone needs to rerun last week. An orchestrator knows all of that. It models work as a directed acyclic graph of tasks, schedules it by logical date, retries what fails, records every run, and gives you one place to see what is late and why. This module uses Apache Airflow's vocabulary — the most widely deployed orchestrator — but the ideas apply to Dagster, Prefect and the managed equivalents: DAGs, tasks, dependencies, scheduling semantics, retries, sensors, backfills and the discipline of keeping DAGs boring.",
+  "objectives": [
+    "Model a pipeline as a DAG with clear task boundaries and explicit dependencies",
+    "Explain scheduling semantics: logical date, data intervals, catch-up and backfill",
+    "Configure retries, timeouts, SLAs and alerts so failures are handled without a human at 3 a.m.",
+    "Use sensors and datasets to wait for inputs without polling loops in code",
+    "Keep DAG code thin, testable and idempotent, with heavy work delegated to the right engine"
+  ],
+  "sections": [
+    {
+      "heading": "DAGs and tasks",
+      "blocks": [
+        {"type": "p", "text": "A **DAG** (directed acyclic graph) is a set of **tasks** and the dependencies between them: extract must finish before transform, transform before publish, and publish fans out to three downstream notifications. Acyclic means no loops, so the orchestrator can always determine an order. Each task is one unit of work with a clear input and output that can be retried on its own. Good task boundaries follow the pipeline stages from the previous module: extract, stage, transform, validate, publish. A single task that does everything cannot be retried partially or observed meaningfully."},
+        {"type": "code", "lang": "python", "caption": "An Airflow DAG for the daily orders pipeline. Each task is small, parameterised by the run's data interval, and delegates real work to a function or an external engine.", "code": "from datetime import datetime, timedelta\n\nfrom airflow.decorators import dag, task\nfrom airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator\n\n\n@dag(\n    dag_id=\"orders_daily\",\n    schedule=\"0 3 * * *\",                 # 03:00 UTC, after the source's nightly close\n    start_date=datetime(2026, 1, 1),\n    catchup=False,\n    max_active_runs=1,\n    default_args={\"retries\": 3, \"retry_delay\": timedelta(minutes=5), \"retry_exponential_backoff\": True,\n                  \"execution_timeout\": timedelta(minutes=30), \"owner\": \"data-platform\"},\n    tags=[\"orders\", \"daily\"],\n)\ndef orders_daily():\n    @task\n    def extract(data_interval_start=None, data_interval_end=None) -> str:\n        from pipelines.orders import extract_to_raw\n        return extract_to_raw(start=data_interval_start, end=data_interval_end)   # returns the raw path\n\n    @task\n    def validate_raw(path: str) -> str:\n        from pipelines.orders import check_raw\n        check_raw(path)                     # raises on empty file or schema drift\n        return path\n\n    transform = SQLExecuteQueryOperator(\n        task_id=\"transform\",\n        conn_id=\"warehouse\",\n        sql=\"sql/orders_transform.sql\",   # uses {{ data_interval_start }} for the partition\n    )\n\n    @task\n    def publish_metrics(**context):\n        from pipelines.orders import emit_run_metrics\n        emit_run_metrics(run_id=context[\"run_id\"])\n\n    validate_raw(extract()) >> transform >> publish_metrics()\n\n\norders_daily()"},
+        {"type": "p", "text": "Notice what the DAG does not do: it does not contain the transformation logic, it does not compute dates from the clock, and it does not hold data in memory between tasks. Tasks pass small references (a path, a partition key), never DataFrames. The heavy lifting runs in the warehouse, in a Spark job, in a container — anywhere but the orchestrator's own workers, which exist to coordinate."}
+      ]
+    },
+    {
+      "heading": "Scheduling semantics: the logical date",
+      "blocks": [
+        {"type": "p", "text": "The most misunderstood part of any orchestrator is **when a run happens versus which data it covers**. A daily DAG scheduled at 03:00 with a data interval of one day runs at 03:00 on March 2nd to process the interval March 1st 00:00 to March 2nd 00:00. The run's **logical date** (`data_interval_start`) is March 1st, even though the clock says March 2nd. Every task should derive its target partition from the interval it is given, never from `datetime.now()`. This is what makes reruns and backfills correct: rerunning the March 1st run in April still processes March 1st."},
+        {"type": "table", "headers": ["Setting", "Meaning", "Typical choice"], "rows": [
+          ["`schedule`", "Cron or interval that defines data intervals", "`0 3 * * *` for daily after source close"],
+          ["`start_date`", "First data interval to consider", "A fixed date in the past, never `now()`"],
+          ["`catchup`", "Whether to run every missed interval since start_date on deploy", "`False` unless you want history built automatically"],
+          ["`max_active_runs`", "How many intervals may run concurrently", "1 for pipelines whose runs depend on order"],
+          ["`depends_on_past`", "Wait for the previous interval's task to succeed", "True for incremental loads that assume continuity"]
+        ]},
+        {"type": "callout", "kind": "warning", "text": "Setting `start_date` to a dynamic value or leaving `catchup=True` on a DAG with an old start date are the two classic first-day surprises: the first never schedules stably, the second launches hundreds of runs the moment the DAG is enabled."}
+      ]
+    },
+    {
+      "heading": "Failure handling without a human",
+      "blocks": [
+        {"type": "p", "text": "Tasks fail for transient reasons (a network blip, a warehouse queue) and for real ones (bad data, a bug). **Retries** with backoff absorb the first kind; a task that is idempotent can be retried safely, which is why idempotency kept coming up. **Timeouts** stop a hung task from blocking the day. When retries are exhausted, the failure should reach a human with context: which DAG, which interval, which task, the log, and a runbook link — through an on-failure callback to the alerting system, not through someone checking the UI. **SLAs** (or freshness checks on the output tables) catch the failure mode retries do not: the run that succeeds late, or never starts."},
+        {"type": "code", "lang": "python", "caption": "Failure and lateness reaching people with context: an on-failure callback and a per-task SLA.", "code": "from datetime import timedelta\n\n\ndef page_on_failure(context):\n    from pipelines.alerts import send_alert\n    ti = context[\"task_instance\"]\n    send_alert(\n        severity=\"high\",\n        title=f\"{ti.dag_id}.{ti.task_id} failed for {context['data_interval_start']:%Y-%m-%d}\",\n        body=f\"attempt {ti.try_number} of {ti.max_tries + 1}; log: {ti.log_url}\",\n        runbook=\"https://runbooks.internal/data/orders_daily\",\n    )\n\n\ndefault_args = {\n    \"retries\": 3,\n    \"retry_delay\": timedelta(minutes=5),\n    \"retry_exponential_backoff\": True,\n    \"execution_timeout\": timedelta(minutes=30),\n    \"on_failure_callback\": page_on_failure,\n    \"sla\": timedelta(hours=2),              # task should finish within 2 h of the interval's end\n}"},
+        {"type": "p", "text": "Decide per task whether downstream should run when it fails. The default (skip downstream) is right for a hard dependency; for optional enrichment a **trigger rule** such as `all_done` lets the pipeline continue and flag the gap. And separate \"the data is bad\" from \"the task crashed\": a validation task that fails on bad data should not be retried three times; it should stop the run and alert with the validation report."}
+      ]
+    },
+    {
+      "heading": "Waiting for inputs: sensors and datasets",
+      "blocks": [
+        {"type": "p", "text": "Pipelines wait: for a file to land, for an upstream DAG to finish, for a partition to appear in the warehouse. A **sensor** is a task that polls for a condition and succeeds when it holds, with a timeout so it does not wait forever. Use **deferrable** (or reschedule mode) sensors so a waiting task does not occupy a worker slot. Better than polling, where the platform supports it, is **data-aware scheduling**: a DAG declares that it produces a dataset, downstream DAGs declare they consume it, and the scheduler starts the consumer when the producer updates the dataset — no cron guessing about when upstream will be done."},
+        {"type": "code", "lang": "python", "caption": "A deferrable file sensor with a timeout, and dataset-driven scheduling so the downstream DAG runs exactly when its input is ready.", "code": "from datetime import datetime, timedelta\n\nfrom airflow.datasets import Dataset\nfrom airflow.decorators import dag, task\nfrom airflow.providers.amazon.aws.sensors.s3 import S3KeySensor\n\nORDERS_SILVER = Dataset(\"s3://acme-lake/silver/orders/\")\n\n\n@dag(dag_id=\"partner_file_ingest\", schedule=\"0 4 * * *\", start_date=datetime(2026, 1, 1), catchup=False)\ndef partner_file_ingest():\n    wait_for_file = S3KeySensor(\n        task_id=\"wait_for_partner_file\",\n        bucket_name=\"acme-inbound\",\n        bucket_key=\"partner/orders_{{ data_interval_start | ds_nodash }}.csv\",\n        deferrable=True,                       # frees the worker while waiting\n        timeout=6 * 60 * 60,                   # give up after 6 hours and alert\n        poke_interval=300,\n    )\n\n    @task(outlets=[ORDERS_SILVER])\n    def load_to_silver():\n        from pipelines.partner import load\n        load()\n\n    wait_for_file >> load_to_silver()\n\n\n@dag(dag_id=\"orders_reporting\", schedule=[ORDERS_SILVER], start_date=datetime(2026, 1, 1), catchup=False)\ndef orders_reporting():\n    @task\n    def build_reports():\n        from pipelines.reports import build\n        build()\n\n    build_reports()\n\n\npartner_file_ingest()\norders_reporting()"},
+        {"type": "callout", "kind": "note", "text": "Newer Airflow versions call datasets \"assets\" and Dagster is built around the asset idea from the start: you declare the tables you produce and their dependencies, and the schedule follows. The concept is the same — schedule on data readiness, not on the clock."}
+      ]
+    },
+    {
+      "heading": "Backfills and keeping DAGs boring",
+      "blocks": [
+        {"type": "p", "text": "A **backfill** asks the orchestrator to run a DAG for a range of past intervals. Because each run gets its own logical date and every task is idempotent, the backfill is just many correct runs. Limit its concurrency so it does not starve the daily schedule or overwhelm the warehouse; clear only the tasks that need rerunning rather than the whole DAG; and watch the first few runs before letting the rest go. Backfills that need special handling (a different code path, skipped notifications) should get an explicit parameter, not a guess based on how old the interval is."},
+        {"type": "code", "lang": "bash", "caption": "Operating a DAG from the CLI: a backfill with bounded concurrency, clearing a failed task, and testing one task locally before deploying.", "code": "# rebuild a range with at most 2 intervals in flight, without triggering downstream datasets\nairflow dags backfill orders_daily --start-date 2026-02-01 --end-date 2026-02-28 --max-active-runs 2\n\n# rerun just the transform (and what depends on it) for one interval\nairflow tasks clear orders_daily --task-regex '^transform$' --downstream \\\n  --start-date 2026-03-01 --end-date 2026-03-01 --yes\n\n# run one task for one interval locally, no scheduler needed\nairflow tasks test orders_daily extract 2026-03-01"},
+        {"type": "list", "items": [
+          "**Thin DAG files**: imports inside tasks, logic in a package with unit tests; the DAG file is parsed constantly and must be fast and side-effect free.",
+          "**No top-level work**: no database calls or API requests at import time; they run every parse.",
+          "**Small payloads between tasks**: paths and keys, not data; the metadata database is not a data store.",
+          "**One DAG per pipeline, one owner, tagged**: hundreds of tasks in one DAG is hard to operate; hundreds of copy-paste DAGs is worse. Generate similar DAGs from configuration.",
+          "**Version the DAGs with the pipeline code** and deploy through CI like any other code."
+        ]},
+        {"type": "p", "text": "The orchestrator's job is to make the pipeline's behaviour predictable and visible. When the DAG is thin, the tasks idempotent and the schedule data-aware, the interesting logic lives where it is tested, and the orchestrator becomes what it should be: the boring, reliable clock and ledger of the platform."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Orchestrate the pipeline from the previous module",
+    "steps": [
+      "Install Airflow locally in standalone mode (`airflow standalone`) or with the official Docker Compose file. Confirm the web UI loads and the example DAGs are disabled.",
+      "Wrap the idempotent orders pipeline from the batch module as a DAG with four tasks: extract, validate, transform, publish. Pass only the raw path between tasks. Use `data_interval_start` for the partition.",
+      "Set `catchup=False`, enable the DAG, trigger one run manually, and read each task's log. Then run `airflow tasks test` for the extract task with a past date and confirm it processed that date.",
+      "Make the validate task fail on an empty file, wire an on-failure callback that prints a formatted alert, and confirm retries are not attempted for validation failures (set `retries=0` on that task).",
+      "Add an S3 (or local filesystem) sensor with a 10-minute timeout in front of extract, in deferrable or reschedule mode, and watch it wait and then succeed when you create the file.",
+      "Split reporting into a second DAG scheduled on a Dataset produced by the first, and confirm it runs automatically after the first completes.",
+      "Backfill one week with `--max-active-runs 2`, then clear and rerun a single task for one day. Check the warehouse partitions are correct after each."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "A DAG is tasks with explicit dependencies; each task is a retryable unit with a clear input and output",
+      "Logical date = the data interval the run covers, not when it runs; derive partitions from it, never from now()",
+      "Fixed start_date, catchup=False unless history is wanted, max_active_runs=1 for ordered pipelines",
+      "Retries with backoff for transient failures; timeouts; on-failure callbacks with context; SLAs or freshness checks for lateness",
+      "Deferrable sensors with timeouts to wait; datasets/assets to schedule on data readiness",
+      "Thin DAG files, no top-level work, small payloads, logic in a tested package, backfills with bounded concurrency"
+    ],
+    "groups": [
+      {"title": "DAG definition", "items": [
+        {"syntax": "@dag(dag_id, schedule, start_date, catchup, max_active_runs, default_args, tags)", "desc": "The header that sets behaviour"},
+        {"syntax": "@task def f(data_interval_start=None): ...", "desc": "Python task receiving the interval"},
+        {"syntax": "a >> b >> [c, d]", "desc": "Dependencies; fan-out with lists"},
+        {"syntax": "SQLExecuteQueryOperator(conn_id, sql='file.sql')", "desc": "Run SQL in the warehouse; template dates"},
+        {"syntax": "{{ data_interval_start | ds }}", "desc": "Jinja: the logical date as YYYY-MM-DD"},
+        {"syntax": "import inside the task function", "desc": "Fast, side-effect-free parsing"}
+      ]},
+      {"title": "Scheduling", "items": [
+        {"syntax": "schedule='0 3 * * *'", "desc": "Cron; run at 03:00 for the previous day's interval"},
+        {"syntax": "schedule=timedelta(hours=1)", "desc": "Interval schedule"},
+        {"syntax": "schedule=[Dataset(uri)]", "desc": "Run when the dataset is updated"},
+        {"syntax": "catchup=False", "desc": "Do not run missed intervals on enable"},
+        {"syntax": "depends_on_past=True", "desc": "Serial runs for continuity-dependent loads"},
+        {"syntax": "data_interval_start / data_interval_end", "desc": "The window this run owns"}
+      ]},
+      {"title": "Failure handling", "items": [
+        {"syntax": "retries=3, retry_delay, retry_exponential_backoff=True", "desc": "Absorb transient failures"},
+        {"syntax": "execution_timeout=timedelta(minutes=30)", "desc": "No hung tasks"},
+        {"syntax": "on_failure_callback=fn(context)", "desc": "Alert with DAG, task, interval, log URL, runbook"},
+        {"syntax": "sla=timedelta(hours=2) / output freshness check", "desc": "Catch late or missing runs"},
+        {"syntax": "trigger_rule='all_done'", "desc": "Continue past optional failures"},
+        {"syntax": "retries=0 on validation tasks", "desc": "Bad data is not transient"}
+      ]},
+      {"title": "Waiting and operating", "items": [
+        {"syntax": "S3KeySensor(..., deferrable=True, timeout=..., poke_interval=...)", "desc": "Wait without holding a worker"},
+        {"syntax": "@task(outlets=[Dataset(uri)])", "desc": "Declare what a task produces"},
+        {"syntax": "airflow dags backfill DAG --start-date --end-date --max-active-runs N", "desc": "Bounded reprocessing"},
+        {"syntax": "airflow tasks clear DAG --task-regex R --downstream --start-date --end-date", "desc": "Rerun part of a run"},
+        {"syntax": "airflow tasks test DAG TASK DATE", "desc": "Run one task locally"},
+        {"syntax": "XCom: paths and keys only", "desc": "Never pass data between tasks"}
+      ]}
+    ],
+    "pitfalls": [
+      "Computing the date to process from the clock inside a task; backfills process the wrong day.",
+      "Dynamic start_date or catchup left True on an old start date; hundreds of surprise runs.",
+      "Heavy work on the orchestrator's workers and DataFrames in XCom; the scheduler becomes the bottleneck.",
+      "Database or API calls at DAG file top level; they run on every parse.",
+      "Retrying validation failures as if bad data were a network blip.",
+      "Sensors in poke mode with no timeout, silently occupying every worker slot."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A daily DAG scheduled at `0 3 * * *` runs on March 2nd at 03:00. What is `data_interval_start` for that run, and which partition should its tasks build?",
+      "options": [
+        "March 1st; the run covers the interval that just closed, so tasks build the March 1st partition",
+        "March 2nd; the run builds today's partition as of 03:00",
+        "March 3rd; Airflow schedules one interval ahead",
+        "Whatever `datetime.now()` returns in the task"
+      ],
+      "answer": 0,
+      "explain": "A run executes after its data interval ends. The logical date names the interval, not the wall-clock moment, which is what makes reruns and backfills process the right data."
+    },
+    {
+      "q": "A validation task fails because the raw file has a new column with a changed type. It is configured with three retries and backoff. What is wrong with that configuration?",
+      "options": [
+        "Bad data is not transient; retries waste time and delay the alert. Validation failures should stop the run immediately with the report",
+        "Nothing; every task should retry to be safe",
+        "Retries should be increased to ten so the file has time to be corrected upstream",
+        "The task should use `trigger_rule='all_done'` so downstream continues"
+      ],
+      "answer": 0,
+      "explain": "Retries exist for failures that may succeed on a second attempt. A schema change will fail identically three times; set retries to zero on validation and alert with context. Continuing downstream with bad data is worse."
+    },
+    {
+      "q": "A reporting DAG is scheduled at 05:00 because the upstream orders DAG \"usually finishes by 04:30\". Twice a month it runs on stale data. What is the robust fix?",
+      "options": [
+        "Schedule the reporting DAG on the dataset the orders DAG produces, so it runs when the data is actually ready",
+        "Move the reporting schedule to 06:00 to add margin",
+        "Add a sleep at the start of the reporting DAG",
+        "Merge both DAGs into one large DAG with all tasks"
+      ],
+      "answer": 0,
+      "explain": "Data-aware scheduling removes the guess entirely. Adding margin or sleeps trades staleness for lateness and still fails on slow days; one giant DAG is harder to own and operate."
+    },
+    {
+      "q": "A DAG file opens a database connection at module level to build its task list from a table. What problem does this cause?",
+      "options": [
+        "The scheduler parses DAG files continuously, so the connection is opened on every parse, slowing scheduling and hammering the database",
+        "Airflow forbids database access anywhere in DAG code",
+        "The task list will be empty because parsing happens before the database starts",
+        "The connection will be shared between tasks and cause deadlocks"
+      ],
+      "answer": 0,
+      "explain": "Top-level code runs at parse time, repeatedly. Keep DAG files declarative, generate from static configuration, or use dynamic task mapping that reads inputs inside a task at run time."
+    },
+    {
+      "q": "A team needs to rebuild six weeks of a fact table after a bug fix without disrupting the daily run or overloading the warehouse. What is the appropriate approach?",
+      "options": [
+        "Run a backfill for the date range with bounded concurrency, relying on idempotent, date-parameterised tasks, and validate the first runs before continuing",
+        "Trigger the DAG manually 42 times as fast as possible",
+        "Temporarily change the DAG's start_date to six weeks ago with catchup=True",
+        "Write a one-off script that bypasses the orchestrator"
+      ],
+      "answer": 0,
+      "explain": "Backfill is the orchestrator's mechanism for exactly this, and concurrency limits protect the daily schedule. Manual triggers lose interval semantics, editing start_date with catchup is a blunt instrument, and one-off scripts skip the idempotent tested path."
+    }
+  ]
+}

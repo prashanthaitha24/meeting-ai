@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Batch pipeline design — Data | ThavionAI Education</title>
+  <meta name="description" content="ETL vs ELT, idempotency, backfills, late data, and designing a pipeline you can re-run safely." />
+  <meta property="og:title" content="Batch pipeline design — ThavionAI Education" />
+  <meta property="og:description" content="ETL vs ELT, idempotency, backfills, late data, and designing a pipeline you can re-run safely." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/de-etl.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-data" data-module="de-etl">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../index.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=de-etl&amp;page=/education/de-etl.html&amp;title=Batch%20pipeline%20design">Feedback</a>
+    <a href="../education.html#data" class="nav-cta">All Data modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#data">Data</a> › Stage 2: Pipelines</div>
+    <h1>Batch pipeline design</h1>
+    <p class="lede">ETL vs ELT, idempotency, backfills, late data, and designing a pipeline you can re-run safely.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 5 of 16</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">A batch pipeline is a promise: run me for a date and I will produce that date's data, correctly, every time, including the second time. Most pipeline pain — duplicated rows after a retry, a backfill that overwrote good data with stale data, late records that never arrived, a run that silently produced half a table — comes from pipelines that were written to run once and hoped for the best. This module is about designing batch pipelines that keep the promise: the ETL versus ELT choice, extraction patterns that scale, idempotent loads, late-arriving and changing data, backfills you can trust, and the operational shape that makes all of it routine.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Choose between ETL and ELT and explain the trade-offs for a given stack</li><li>Extract data incrementally with watermarks, and know when a full extract is safer</li><li>Design idempotent loads with partition overwrite, upsert and atomic swaps</li><li>Handle late-arriving and updated records without double counting</li><li>Run backfills and reprocessing safely, and keep pipelines observable</li></ul>
+    </div>
+    <section id="etl-elt-and-where-transformation-lives"><h2>ETL, ELT and where transformation lives</h2>
+    <p><strong>ETL</strong> transforms data in flight, between source and destination, in a processing engine (Spark, a Python job, a dedicated tool), and loads the finished shape. <strong>ELT</strong> loads raw data into the warehouse or lakehouse first and transforms it there, in SQL, using the destination's compute. Cheap, elastic warehouse compute and tools like dbt made ELT the default for analytics: raw data is preserved, transformations are versioned SQL, and the warehouse's optimiser does the heavy lifting. ETL remains right when the transformation needs code the warehouse cannot run (complex parsing, machine learning features, external enrichment), when data must be reduced before it lands (cost, privacy), or when the destination is not a query engine.</p>
+    <div class="table-wrap"><table><thead><tr><th>Question</th><th>Favours ETL</th><th>Favours ELT</th></tr></thead><tbody><tr><td>Where is compute cheap and elastic?</td><td>Dedicated cluster</td><td>The warehouse</td></tr><tr><td>Must raw data be preserved for replay?</td><td>Store it anyway</td><td>Yes, by design</td></tr><tr><td>Is the logic expressible in SQL?</td><td>No: code, ML, parsing</td><td>Yes</td></tr><tr><td>Must sensitive fields be removed before landing?</td><td>Yes</td><td>Land to a restricted zone, then mask</td></tr><tr><td>Who maintains transformations?</td><td>Engineers in code</td><td>Analysts and engineers in versioned SQL</td></tr></tbody></table></div>
+    <p>In practice most platforms are both: a thin extract-and-load layer that lands raw data faithfully, a SQL transformation layer for modelling, and code-based jobs for the few things SQL cannot do. The principle that matters more than the acronym is <strong>load raw, transform explicitly</strong>: keep the source's shape at the first hop, so every later step is reproducible.</p></section>
+  <section id="extraction-incremental-with-watermarks"><h2>Extraction: incremental, with watermarks</h2>
+    <p>Pulling an entire table every night works until the table is large. <strong>Incremental extraction</strong> pulls only what changed since the last run, tracked by a <strong>watermark</strong>: the maximum <code>updated_at</code> (or id, or log position) seen in the previous successful run. Each run selects rows past the watermark, loads them, and advances the watermark only after the load commits. Three rules keep it honest: overlap the window slightly to catch rows with equal timestamps or clock skew (and deduplicate on load), store the watermark with the run's state rather than in someone's head, and choose a watermark column the source actually maintains — an <code>updated_at</code> that some code paths forget to set will lose rows silently.</p>
+    <div class="code"><div class="code-cap">Incremental extract with a persisted watermark and a small overlap. The watermark advances only after the load succeeds.</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>from datetime import datetime, timedelta, timezone
+
+OVERLAP = timedelta(minutes=5)
+
+
+def extract_incremental(conn, state, table: str, ts_col: str = "updated_at"):
+    since = state.get_watermark(table) - OVERLAP          # re-read a little to be safe
+    now = datetime.now(timezone.utc)
+    rows = conn.execute(
+        f"SELECT * FROM {table} WHERE {ts_col} &gt; %s AND {ts_col} &lt;= %s ORDER BY {ts_col}",
+        (since, now),
+    ).fetchall()
+    return rows, now
+
+
+def run(conn, state, loader):
+    rows, new_watermark = extract_incremental(conn, state, "orders")
+    loader.upsert("orders", rows, key="order_id")       # overlap rows collapse on the key
+    state.set_watermark("orders", new_watermark)         # only after the upsert committed</code></pre></div>
+    <p>Some sources cannot be extracted incrementally: no reliable timestamp, hard deletes that leave no trace, or small reference tables where a full pull is trivial. For those, full extracts with a snapshot comparison are simpler and safer. For high-volume transactional sources the better answer is <strong>change data capture</strong> from the database log, which a later module covers; the watermark pattern is the workhorse for APIs and for tables that maintain their timestamps.</p>
+    <div class="callout callout-warning"><strong>Watch out</strong><p>Deletes are invisible to timestamp-based extraction. If the source hard-deletes rows, you need soft deletes upstream, a periodic full reconciliation, or log-based CDC. Assuming deletes do not matter is how a warehouse ends up reporting orders that no longer exist.</p></div></section>
+  <section id="loading-idempotently"><h2>Loading idempotently</h2>
+    <p>The load is where re-runs go wrong. Three patterns make a load <strong>idempotent</strong> — safe to repeat with the same result. <strong>Partition overwrite</strong>: the run computes one logical partition (a day, an hour) and replaces it atomically; a retry replaces it again with the same content. <strong>Upsert</strong> (merge) keyed on a natural key: rows that exist are updated, new ones inserted, and the overlap from the extract collapses. <strong>Atomic swap</strong>: build the new table under a temporary name, validate it, then swap names in one transaction so readers never see a partial state. Choose by grain: partition overwrite for event-like data with a time partition, upsert for entity-like data that changes, swap for full rebuilds of small-to-medium tables.</p>
+    <div class="code"><div class="code-cap">Two idempotent loads: partition overwrite for events, and build-validate-swap for a full rebuild.</div><div class="code-head"><span>sql</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>-- 1. partition overwrite: the whole day is replaced in one transaction
+BEGIN;
+DELETE FROM fact_events WHERE event_date = DATE '2026-03-01';
+INSERT INTO fact_events
+SELECT * FROM stage_events WHERE event_date = DATE '2026-03-01';
+COMMIT;
+-- (warehouses: INSERT OVERWRITE PARTITION, or MERGE on a table format)
+
+-- 2. build, validate, swap: readers see the old table until the instant of the swap
+CREATE TABLE dim_product_new AS SELECT ... FROM stage_products;
+-- validation queries run here: row count within 10% of current, no NULL keys, keys unique
+BEGIN;
+ALTER TABLE dim_product     RENAME TO dim_product_old;
+ALTER TABLE dim_product_new RENAME TO dim_product;
+COMMIT;
+DROP TABLE dim_product_old;</code></pre></div>
+    <p>Append-only loads are idempotent only if every row carries a unique id and the destination deduplicates, or if the pipeline records which batches were loaded and skips repeats. Plain <code>INSERT</code> of a batch with no key is the single most common source of duplicated data in warehouses; treat it as a bug in the design, not an operational risk to manage.</p></section>
+  <section id="late-changed-and-out-of-order-data"><h2>Late, changed and out-of-order data</h2>
+    <p>Events arrive late: a mobile device syncs a day later, a partner sends yesterday's file this afternoon, a record is corrected a week after it was created. A pipeline that processes "yesterday" once and moves on will miss them. Two design choices handle this. Partition by <strong>event time</strong>, not arrival time, so a late event lands in the partition where it belongs; and <strong>reprocess a trailing window</strong> — recompute the last N days on every run, where N covers most lateness — so late arrivals are picked up automatically. Beyond the window, a manual backfill handles the rare very late record.</p>
+    <div class="code"><div class="code-cap">Trailing-window reprocessing: each daily run rebuilds the last three event-date partitions, which absorbs late data and corrections.</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>from datetime import date, timedelta
+
+LOOKBACK_DAYS = 3
+
+
+def partitions_to_rebuild(run_date: date) -&gt; list[date]:
+    return [run_date - timedelta(days=i) for i in range(LOOKBACK_DAYS)]
+
+
+def daily(run_date: date, build_partition):
+    for day in partitions_to_rebuild(run_date):
+        build_partition(day)          # idempotent overwrite of that day's partition
+
+
+# run on 2026-03-04: rebuilds 03-04, 03-03, 03-02 from the raw layer
+daily(date(2026, 3, 4), build_partition=lambda d: print("rebuilding", d))</code></pre></div>
+    <p>Updates to existing records are the same problem with a different face: an order's status changes from <code>placed</code> to <code>paid</code>. For entity tables, upsert on the key. For fact tables that must not lose history, load status changes as new events and derive the current state with a window function, or maintain an accumulating snapshot as the modelling module described. Whichever you choose, write down how each table treats late and changed data; it is the first question anyone debugging a discrepancy will ask.</p></section>
+  <section id="backfills-reprocessing-and-operations"><h2>Backfills, reprocessing and operations</h2>
+    <p>A <strong>backfill</strong> runs the pipeline for a range of past dates: after a bug fix, after a new column is added, when a new consumer needs history. Backfills are safe only if every step is idempotent and parameterised by logical date, which is why those properties were non-negotiable. Run backfills as a distinct operation with its own concurrency limit (they compete with the daily run for warehouse compute and source rate limits), from the raw layer rather than from the source system when possible, and validate a sample of rebuilt partitions against the previous version before dropping it.</p>
+    <ul><li><strong>Logging and metrics per run</strong>: rows extracted, loaded, rejected; duration; watermark before and after. A run that loads zero rows on a Tuesday should alert.</li><li><strong>Freshness checks</strong>: the newest event time in each table versus now; the SLA is a number.</li><li><strong>Reconciliation</strong>: periodic counts or sums compared with the source for a window; the only way to catch silent loss.</li><li><strong>Small, single-purpose steps</strong>: extract, stage, transform, publish — each restartable, each with a clear input and output.</li><li><strong>Schema change handling</strong>: new columns added automatically to raw; type or rename changes fail loudly with a message that names the column.</li></ul>
+    <div class="callout callout-tip"><strong>Tip</strong><p>The pipeline you can trust is the one you can rerun in front of a stakeholder: <code>pipeline --day 2026-03-01</code> finishes, the numbers match yesterday's, and the run's log says exactly what happened. Build every pipeline so that demonstration is boring.</p></div></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>A pipeline that survives retries, late data and a backfill</h2>
+    <ol><li>Create a source table <code>orders</code> in Postgres or DuckDB with <code>updated_at</code>, and a destination <code>fact_orders</code> partitioned (logically) by <code>order_date</code>. Seed a few hundred rows across five days.</li><li>Implement incremental extraction with a persisted watermark (a one-row state table) and a five-minute overlap. Run it twice in a row; the second run should extract only the overlap and load nothing new.</li><li>Implement the load as partition overwrite by <code>order_date</code>. Kill the process halfway through a run (raise an exception after the delete) and confirm that re-running produces the correct final state.</li><li>Insert a late order dated three days ago and update an existing order's status. Run the pipeline with a three-day lookback and confirm both are reflected without duplicates.</li><li>Introduce a deliberate bug in the transformation (wrong sign on refunds), run for a week of dates, fix it, and backfill the week. Compare row counts and sums before and after.</li><li>Add freshness and row-count checks that fail the run when the newest <code>order_date</code> is older than two days or a partition loads zero rows. Trigger each once.</li><li>Write the table's contract in a comment: partition key, how late data is handled, how updates are handled, how to backfill.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Batch pipeline design — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Load raw, transform explicitly; ELT for SQL-expressible analytics, ETL for code, reduction and non-query destinations</li><li>Incremental extraction with a persisted watermark, a small overlap and dedup on load; watermark advances after commit</li><li>Timestamp extraction cannot see hard deletes; reconcile or use CDC</li><li>Idempotent loads: partition overwrite, keyed upsert, or build-validate-swap; never bare appends</li><li>Partition by event time; reprocess a trailing window to absorb late and corrected data</li><li>Backfills are only safe for idempotent, date-parameterised steps; validate before dropping old data</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Extraction</h3><table><tbody><tr><td><code>WHERE updated_at &gt; :wm - overlap AND updated_at &lt;= :now</code></td><td>Incremental window with overlap</td></tr><tr><td><code>state.set_watermark(table, now) after load commits</code></td><td>Never advance before success</td></tr><tr><td><code>full extract + snapshot compare</code></td><td>Small tables or no reliable timestamp</td></tr><tr><td><code>soft deletes / periodic reconciliation / CDC</code></td><td>The only ways to see deletes</td></tr><tr><td><code>ORDER BY watermark column</code></td><td>Deterministic, resumable extraction</td></tr></tbody></table></div><div class="cheat-group"><h3>Idempotent loads</h3><table><tbody><tr><td><code>DELETE partition; INSERT partition; in one transaction</code></td><td>Partition overwrite</td></tr><tr><td><code>INSERT OVERWRITE PARTITION / MERGE INTO</code></td><td>Warehouse and table-format equivalents</td></tr><tr><td><code>INSERT ... ON CONFLICT (key) DO UPDATE</code></td><td>Keyed upsert for entity tables</td></tr><tr><td><code>CREATE t_new AS ...; validate; RENAME swap; DROP old</code></td><td>Atomic full rebuild</td></tr><tr><td><code>batch id + loaded_batches table</code></td><td>Make appends skip repeats</td></tr></tbody></table></div><div class="cheat-group"><h3>Late and changed data</h3><table><tbody><tr><td><code>partition by event_date, not load_date</code></td><td>Late rows land where they belong</td></tr><tr><td><code>rebuild last N partitions every run</code></td><td>Trailing-window reprocessing</td></tr><tr><td><code>status changes as events + ROW_NUMBER() latest</code></td><td>Keep history, derive current</td></tr><tr><td><code>accumulating snapshot for milestones</code></td><td>Updates in place by design</td></tr><tr><td><code>document lateness and update policy per table</code></td><td>First question in any discrepancy</td></tr></tbody></table></div><div class="cheat-group"><h3>Operations</h3><table><tbody><tr><td><code>pipeline --day D / --start S --end E</code></td><td>Logical dates for runs and backfills</td></tr><tr><td><code>rows in / out / rejected, duration, watermarks</code></td><td>Per-run metrics; zero rows alerts</td></tr><tr><td><code>freshness = now - max(event_time)</code></td><td>SLA as a number</td></tr><tr><td><code>reconcile counts/sums vs source weekly</code></td><td>Catch silent loss</td></tr><tr><td><code>backfill from raw, limited concurrency, validate sample</code></td><td>Safe reprocessing</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Advancing the watermark before the load commits, then losing a batch when the load fails.</li><li>Bare INSERT loads; every retry doubles the data.</li><li>Partitioning by load date, so a late event for Monday lands in Thursday's partition and Monday's numbers are wrong forever.</li><li>Assuming the source never deletes rows.</li><li>Backfilling with a job that reads 'today' from the clock.</li><li>No reconciliation, so silent row loss is discovered by a customer.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "A nightly job extracts rows where `updated_at > last_watermark`, loads them with INSERT, and then saves the new watermark. The load fails halfway one night and the job is retried. What state results?", "options": ["Rows committed before the failure are inserted again on retry, producing duplicates; the load must be an upsert or partition overwrite", "The retry is skipped because the watermark was already advanced", "The destination is unchanged because the whole load rolled back", "The rows after the failure point are lost permanently"], "answer": 0, "explain": "Bare inserts are not idempotent, so whatever was committed is loaded twice. Keyed upserts or replacing the partition make the retry converge to the correct state. The watermark should only advance after a successful load, which is a second bug in the described design."}, {"q": "A source system hard-deletes cancelled orders. The pipeline extracts incrementally by `updated_at`. What happens to cancelled orders in the warehouse?", "options": ["They remain forever, because a deleted row produces no `updated_at` change to extract; deletes need soft-delete flags, reconciliation or log-based CDC", "They are removed on the next run because the extractor notices the missing ids", "They are marked as cancelled automatically by the upsert", "They are removed when the trailing-window reprocessing runs"], "answer": 0, "explain": "Timestamp extraction only sees rows that exist. Nothing in the described pipeline observes a deletion; a mechanism that does (soft deletes, full reconciliation, CDC from the database log) is required."}, {"q": "Mobile events often arrive one to two days after they occur. A daily pipeline processes only the previous day. How should it be changed?", "options": ["Partition by event time and rebuild a trailing window of the last few days on every run so late events land in their correct partition", "Process events by arrival date so nothing is ever missed", "Delay the daily pipeline by two days so all events have arrived", "Drop events older than one day since they are unreliable"], "answer": 0, "explain": "Event-time partitions with trailing-window reprocessing absorb lateness automatically and keep partitions correct. Arrival-date partitioning misplaces events; delaying the pipeline harms freshness and still misses stragglers; dropping data is wrong."}, {"q": "Which load pattern lets readers of a dimension table never see a partial or inconsistent state during a full nightly rebuild?", "options": ["Build the new table under a temporary name, validate it, then swap names in a single transaction", "Truncate the table, then insert the new rows in batches", "Delete rows in place as new ones arrive from the source", "Write the new rows to a CSV and have readers pick it up when it is complete"], "answer": 0, "explain": "The build-validate-swap pattern exposes the new version atomically; truncate-then-insert leaves the table empty or partial while it runs, and in-place deletes interleave states."}, {"q": "After fixing a transformation bug, a team needs to reprocess six months of a fact table. Which properties of the pipeline make that safe?", "options": ["Every step is idempotent and parameterised by logical date, and the rebuild reads from the retained raw layer with validation before old partitions are dropped", "The pipeline runs on a fast machine so six months completes in one night", "The source system still has the six months of data available for re-extraction", "The team has database backups from before the bug was introduced"], "answer": 0, "explain": "A backfill is a series of correct single-date runs; that requires idempotency and date parameters, a raw layer to rebuild from, and validation. Speed and backups do not make reprocessing correct, and re-extracting from the source is slower and often impossible."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="de-storage.html"><span>← Previous</span><strong>Storage formats &amp; the lakehouse</strong></a>
+    <a class="pager-up" href="../education.html#data">All Data modules</a>
+    <a class="pager-link pager-next" href="de-orchestration.html"><span>Next →</span><strong>Orchestration with DAGs</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=de-etl&amp;page=/education/de-etl.html&amp;title=Batch%20pipeline%20design">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=de-etl&amp;page=/education/de-etl.html&amp;title=Batch%20pipeline%20design">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

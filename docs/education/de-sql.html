@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SQL for engineers — Data | ThavionAI Education</title>
+  <meta name="description" content="Joins, aggregation, window functions, CTEs and reading a query plan — the language everything else speaks." />
+  <meta property="og:title" content="SQL for engineers — ThavionAI Education" />
+  <meta property="og:description" content="Joins, aggregation, window functions, CTEs and reading a query plan — the language everything else speaks." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/de-sql.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-data" data-module="de-sql">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../index.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=de-sql&amp;page=/education/de-sql.html&amp;title=SQL%20for%20engineers">Feedback</a>
+    <a href="../education.html#data" class="nav-cta">All Data modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#data">Data</a> › Stage 1: Foundations</div>
+    <h1>SQL for engineers</h1>
+    <p class="lede">Joins, aggregation, window functions, CTEs and reading a query plan — the language everything else speaks.</p>
+    <div class="meta">
+      <span class="chip">Beginner</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 1 of 16</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">Every data tool eventually turns into SQL: the warehouse runs it, the transformation framework generates it, the orchestrator schedules it, and the dashboard hides it behind a chart. Engineers who can read and write SQL fluently debug pipelines in minutes that take others a day, because they can see what the system is actually doing to the data. This module goes past the basics you probably know into the parts that matter for data work: joins that do not silently multiply rows, aggregation with grouping sets, window functions, common table expressions, and reading an execution plan to understand why a query is slow. Examples use PostgreSQL syntax, which most warehouses follow closely.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Write joins deliberately and detect fan-out when a join multiplies rows</li><li>Use aggregation, HAVING, DISTINCT and conditional aggregates correctly</li><li>Apply window functions for rankings, running totals, deduplication and gaps</li><li>Structure complex queries with CTEs and know when a CTE hurts performance</li><li>Read an EXPLAIN plan and fix the most common causes of slow queries</li></ul>
+    </div>
+    <section id="joins-and-the-row-multiplication-trap"><h2>Joins, and the row-multiplication trap</h2>
+    <p>A join combines rows from two tables where a condition holds. <strong>INNER</strong> keeps only matching pairs; <strong>LEFT</strong> keeps every row from the left table and fills the right side with NULLs when nothing matches; <strong>FULL</strong> keeps everything from both. The mistake that produces wrong numbers in more reports than any other is <strong>fan-out</strong>: joining a one-row-per-customer table to a many-rows-per-customer table, then summing a column from the one side. Each customer's amount is counted once per matching row on the many side.</p>
+    <div class="code"><div class="code-cap">Fan-out and its fix. The first query overstates revenue for any customer with more than one address; the second aggregates first, then joins.</div><div class="code-head"><span>sql</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>-- WRONG: orders x addresses multiplies each order by the customer's address count
+SELECT c.id, SUM(o.amount) AS revenue
+FROM customers c
+JOIN orders o    ON o.customer_id = c.id
+JOIN addresses a ON a.customer_id = c.id
+GROUP BY c.id;
+
+-- RIGHT: reduce the many side to one row per key before joining
+WITH primary_address AS (
+  SELECT DISTINCT ON (customer_id) customer_id, city
+  FROM addresses
+  ORDER BY customer_id, is_primary DESC, created_at
+)
+SELECT c.id, pa.city, SUM(o.amount) AS revenue
+FROM customers c
+JOIN orders o ON o.customer_id = c.id
+LEFT JOIN primary_address pa ON pa.customer_id = c.id
+GROUP BY c.id, pa.city;</code></pre></div>
+    <p>Two habits prevent fan-out. Know the <strong>grain</strong> of every table you join (one row per what?), and check row counts before and after a join: if <code>COUNT(*)</code> grows when you add a table that should be one-to-one, you have found it. Also be careful with filters on the right side of a LEFT JOIN: putting <code>a.status = 'active'</code> in the WHERE clause turns the LEFT JOIN into an INNER JOIN because NULL rows fail the filter; put the condition in the ON clause to keep unmatched rows.</p>
+    <div class="callout callout-tip"><strong>Tip</strong><p>Anti-joins answer "which A have no B": <code>LEFT JOIN b ... WHERE b.id IS NULL</code>, or <code>WHERE NOT EXISTS (SELECT 1 FROM b WHERE b.a_id = a.id)</code>. Prefer NOT EXISTS over NOT IN when the subquery can return NULLs; NOT IN with a NULL matches nothing.</p></div></section>
+  <section id="aggregation-done-precisely"><h2>Aggregation done precisely</h2>
+    <p><code>GROUP BY</code> collapses rows sharing the grouping columns; every column in the SELECT must be either grouped or aggregated. <code>HAVING</code> filters groups after aggregation, <code>WHERE</code> filters rows before it, and the difference is both correctness and performance. <code>COUNT(*)</code> counts rows, <code>COUNT(col)</code> counts non-NULL values, <code>COUNT(DISTINCT col)</code> counts distinct non-NULL values; mixing them up is a classic off-by-NULL error. Conditional aggregates (<code>SUM(CASE WHEN ...)</code> or PostgreSQL's <code>FILTER</code>) replace many self-joins.</p>
+    <div class="code"><div class="code-cap">One pass over orders producing several conditional metrics per month, then keeping only busy months.</div><div class="code-head"><span>sql</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>SELECT
+  date_trunc('month', ordered_at)                     AS month,
+  COUNT(*)                                            AS orders,
+  COUNT(DISTINCT customer_id)                         AS customers,
+  SUM(amount) FILTER (WHERE status = 'paid')          AS paid_revenue,
+  SUM(amount) FILTER (WHERE status = 'refunded')      AS refunds,
+  AVG(amount)                                         AS avg_order,
+  ROUND(100.0 * COUNT(*) FILTER (WHERE status = 'refunded') / COUNT(*), 2) AS refund_pct
+FROM orders
+WHERE ordered_at &gt;= date '2026-01-01'
+GROUP BY 1
+HAVING COUNT(*) &gt;= 100
+ORDER BY 1;</code></pre></div>
+    <p>Integer division bites here: <code>COUNT(a) / COUNT(*)</code> is integer division in most databases and returns 0; multiply by <code>100.0</code> or cast first. And <code>AVG</code> ignores NULLs, so an average over a column with missing values is an average of the present values, which may or may not be what the business meant. State the treatment of NULLs explicitly in the query and in the column's documentation.</p>
+    <div class="callout callout-note"><strong>Note</strong><p><code>GROUP BY ROLLUP (region, country)</code> or <code>GROUPING SETS</code> produce subtotals and grand totals in one query; they are the honest way to build the totals row rather than a second query that may disagree.</p></div></section>
+  <section id="window-functions-aggregate-without-collapsing"><h2>Window functions: aggregate without collapsing</h2>
+    <p>A <strong>window function</strong> computes a value over a set of related rows (the window) while keeping every row. <code>OVER (PARTITION BY ... ORDER BY ...)</code> defines the window: partition restarts the calculation per group, order defines sequence for ranking and running calculations. They replace correlated subqueries and self-joins for rankings, running totals, moving averages, previous-row comparisons and deduplication, and they are usually faster.</p>
+    <div class="code"><div class="code-cap">The four window patterns you will use weekly: ranking, deduplication, running totals and comparing with the previous row.</div><div class="code-head"><span>sql</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>-- top 3 orders per customer
+SELECT * FROM (
+  SELECT o.*, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY amount DESC) AS rn
+  FROM orders o
+) t WHERE rn &lt;= 3;
+
+-- keep the latest row per key (dedup after a re-load)
+SELECT * FROM (
+  SELECT e.*, ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY loaded_at DESC) AS rn
+  FROM events_raw e
+) t WHERE rn = 1;
+
+-- running revenue per customer, and the gap since their previous order
+SELECT
+  customer_id, ordered_at, amount,
+  SUM(amount)  OVER (PARTITION BY customer_id ORDER BY ordered_at
+                     ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total,
+  ordered_at - LAG(ordered_at) OVER (PARTITION BY customer_id ORDER BY ordered_at) AS since_previous
+FROM orders;</code></pre></div>
+    <p><code>ROW_NUMBER</code> gives a unique sequence, <code>RANK</code> leaves gaps after ties, <code>DENSE_RANK</code> does not. The frame clause (<code>ROWS BETWEEN ...</code>) matters for running calculations: the default frame with ORDER BY is <code>RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW</code>, which treats tied order values as one group and can surprise you; say <code>ROWS</code> when you mean rows. Window functions run after WHERE and GROUP BY, so you cannot filter on them directly; wrap the query, as the examples do.</p></section>
+  <section id="ctes-and-query-structure"><h2>CTEs and query structure</h2>
+    <p>A <strong>common table expression</strong> (<code>WITH name AS (...)</code>) names a subquery so a complex query reads top to bottom as a sequence of steps: clean, filter, aggregate, join, present. It is the unit of readability in analytics SQL and the unit that transformation frameworks like dbt turn into models. Two cautions. In PostgreSQL before version 12, CTEs were always materialised (an optimisation fence); modern versions inline them unless referenced more than once or marked <code>MATERIALIZED</code>. And a CTE referenced twice may be computed twice in some engines; check the plan.</p>
+    <div class="code"><div class="code-cap">A query written as steps. Each CTE has one job and a name that says what it holds.</div><div class="code-head"><span>sql</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>WITH paid_orders AS (
+  SELECT customer_id, ordered_at::date AS order_date, amount
+  FROM orders
+  WHERE status = 'paid' AND ordered_at &gt;= date '2026-01-01'
+),
+daily_customer AS (
+  SELECT customer_id, order_date, SUM(amount) AS day_amount
+  FROM paid_orders
+  GROUP BY customer_id, order_date
+),
+with_streaks AS (
+  SELECT *,
+         order_date - (ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date))::int AS streak_key
+  FROM daily_customer
+)
+SELECT customer_id, MIN(order_date) AS streak_start, COUNT(*) AS consecutive_days, SUM(day_amount) AS streak_amount
+FROM with_streaks
+GROUP BY customer_id, streak_key
+HAVING COUNT(*) &gt;= 3
+ORDER BY consecutive_days DESC;</code></pre></div>
+    <p>The <code>streak_key</code> trick (date minus row number is constant within a run of consecutive days) is the standard gaps-and-islands technique; it is worth recognising because interview questions and real pipelines both use it. Recursive CTEs handle hierarchies (org charts, bill of materials) and sequences; they are the one place SQL loops.</p></section>
+  <section id="reading-the-plan"><h2>Reading the plan</h2>
+    <p><code>EXPLAIN</code> shows how the planner intends to run a query; <code>EXPLAIN (ANALYZE, BUFFERS)</code> runs it and reports actual rows, time and I/O per step. Read plans from the innermost node outward and look for four things: <strong>sequential scans</strong> on large tables where an index would help, <strong>row estimate errors</strong> (estimated 100, actual 2 million, which means stale statistics and a wrong join strategy), <strong>nested loop joins</strong> over large inputs (usually a missing index on the inner side), and <strong>sorts or hashes spilling to disk</strong> (work memory too small for the operation).</p>
+    <div class="code"><div class="code-cap">A plan with the tell-tale signs: an estimate off by four orders of magnitude and a sequential scan under a nested loop.</div><div class="code-head"><span>sql</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>EXPLAIN (ANALYZE, BUFFERS)
+SELECT c.email, o.amount
+FROM orders o JOIN customers c ON c.id = o.customer_id
+WHERE o.ordered_at &gt;= now() - interval '1 day';
+
+-- Nested Loop  (cost=0.43..8.47 rows=1 width=40) (actual time=0.05..2411.9 rows=18230 loops=1)
+--   -&gt;  Seq Scan on orders o  (cost=0..145213 rows=1 width=16) (actual time=0.02..2380.1 rows=18230 loops=1)
+--         Filter: (ordered_at &gt;= (now() - '1 day'::interval))
+--         Rows Removed by Filter: 9981770
+--   -&gt;  Index Scan using customers_pkey on customers c (actual time=0.001..0.001 rows=1 loops=18230)
+-- Planning Time: 0.3 ms   Execution Time: 2418.7 ms
+
+-- fixes: an index on orders(ordered_at), and fresh statistics
+CREATE INDEX CONCURRENTLY orders_ordered_at_idx ON orders (ordered_at);
+ANALYZE orders;</code></pre></div>
+    <p>In columnar warehouses the vocabulary changes (partitions pruned, bytes scanned, shuffle) but the questions are the same: how much data is read, is the filter applied early, does a join move a large table across the network. The warehouse module goes deeper; the habit to build now is to look at the plan before guessing.</p>
+    <div class="callout callout-warning"><strong>Watch out</strong><p>Wrapping an indexed column in a function (<code>WHERE date(ordered_at) = ...</code>, <code>WHERE lower(email) = ...</code>) prevents the index from being used. Rewrite as a range (<code>ordered_at &gt;= d AND ordered_at &lt; d + 1</code>) or create an expression index.</p></div></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Diagnose a wrong number and a slow query</h2>
+    <ol><li>Install DuckDB or PostgreSQL locally and create <code>customers</code>, <code>addresses</code> and <code>orders</code> tables with a few hundred generated rows; give some customers two addresses.</li><li>Write the fan-out query from the lesson and compare its revenue total with <code>SELECT SUM(amount) FROM orders</code>. Then write the fixed version and confirm the totals match.</li><li>Write the monthly metrics query with FILTER (or CASE WHEN in DuckDB) and verify <code>refund_pct</code> is not always 0; if it is, find the integer division.</li><li>Produce the top-3-orders-per-customer and latest-row-per-key queries with ROW_NUMBER. Change ROW_NUMBER to RANK and observe what happens with tied amounts.</li><li>Implement the consecutive-days streak query and hand-check one customer's result.</li><li>In PostgreSQL, load a million-row orders table, run the last-day query with EXPLAIN (ANALYZE, BUFFERS), note the time, add the index, ANALYZE, and run again. Record both plans.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>SQL for engineers — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Know the grain of every table; check COUNT(*) before and after each join to catch fan-out</li><li>Filter the right side of a LEFT JOIN in ON, not WHERE, or it becomes an INNER JOIN</li><li>COUNT(*) vs COUNT(col) vs COUNT(DISTINCT col); multiply by 100.0 to avoid integer division</li><li>Window functions keep rows: ROW_NUMBER for dedup and top-N, SUM OVER for running totals, LAG for previous row</li><li>CTEs are steps with names; check the plan if one is referenced twice</li><li>EXPLAIN ANALYZE: look for seq scans on big tables, bad row estimates, nested loops on large inputs, disk spills</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Joins</h3><table><tbody><tr><td><code>INNER / LEFT / FULL JOIN ... ON</code></td><td>Matches only / all left rows / all rows both sides</td></tr><tr><td><code>LEFT JOIN b ON b.a_id = a.id AND b.active</code></td><td>Right-side filter in ON keeps unmatched rows</td></tr><tr><td><code>WHERE NOT EXISTS (SELECT 1 FROM b WHERE b.a_id = a.id)</code></td><td>Anti-join; safe with NULLs</td></tr><tr><td><code>SELECT DISTINCT ON (key) ... ORDER BY key, priority</code></td><td>One row per key before joining (PostgreSQL)</td></tr><tr><td><code>COUNT(*) before vs after join</code></td><td>Fan-out detector</td></tr></tbody></table></div><div class="cheat-group"><h3>Aggregation</h3><table><tbody><tr><td><code>GROUP BY ... HAVING</code></td><td>HAVING filters groups; WHERE filters rows</td></tr><tr><td><code>SUM(x) FILTER (WHERE cond)</code></td><td>Conditional aggregate (or SUM(CASE WHEN cond THEN x END))</td></tr><tr><td><code>COUNT(DISTINCT col)</code></td><td>Distinct non-NULL values</td></tr><tr><td><code>100.0 * a / b</code></td><td>Force decimal division</td></tr><tr><td><code>GROUP BY ROLLUP (a, b) / GROUPING SETS</code></td><td>Subtotals and totals in one query</td></tr><tr><td><code>date_trunc('month', ts)</code></td><td>Bucket timestamps</td></tr></tbody></table></div><div class="cheat-group"><h3>Window functions</h3><table><tbody><tr><td><code>ROW_NUMBER() OVER (PARTITION BY k ORDER BY t DESC)</code></td><td>Dedup (rn = 1) or top-N (rn &lt;= N)</td></tr><tr><td><code>RANK / DENSE_RANK</code></td><td>Ties leave gaps / no gaps</td></tr><tr><td><code>SUM(x) OVER (PARTITION BY k ORDER BY t ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)</code></td><td>Running total; say ROWS explicitly</td></tr><tr><td><code>LAG(x) / LEAD(x) OVER (...)</code></td><td>Previous / next row's value</td></tr><tr><td><code>AVG(x) OVER (ORDER BY t ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)</code></td><td>7-row moving average</td></tr><tr><td><code>wrap in a subquery to filter on a window result</code></td><td>Windows run after WHERE</td></tr></tbody></table></div><div class="cheat-group"><h3>CTEs and plans</h3><table><tbody><tr><td><code>WITH a AS (...), b AS (...) SELECT ...</code></td><td>Named steps; one job each</td></tr><tr><td><code>WITH RECURSIVE t AS (base UNION ALL step) SELECT ...</code></td><td>Hierarchies and sequences</td></tr><tr><td><code>date - ROW_NUMBER() = constant</code></td><td>Gaps-and-islands streak key</td></tr><tr><td><code>EXPLAIN (ANALYZE, BUFFERS) query</code></td><td>Actual rows, time, I/O per node</td></tr><tr><td><code>CREATE INDEX CONCURRENTLY ... ; ANALYZE t</code></td><td>Fix scans and estimates without locking</td></tr><tr><td><code>avoid f(col) = v; use ranges or expression indexes</code></td><td>Keep indexes usable</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Summing a measure after joining a one-to-many table; the total silently multiplies.</li><li>Filtering a LEFT JOIN's right table in WHERE and losing the unmatched rows you wanted.</li><li>Integer division in percentages, returning 0 for everything.</li><li>Using RANGE frames by accident with ORDER BY on a column that has ties.</li><li>NOT IN with a subquery that can return NULL; it matches nothing.</li><li>Guessing at performance instead of reading the plan.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "A revenue report joins `orders` to `order_items` and then to `customers`, and sums `orders.amount`. Totals are three times higher than the finance system. What is the most likely cause?", "options": ["Fan-out: each order's amount is counted once per item row after the one-to-many join", "The customers table has duplicate emails, doubling the join output", "The SUM function includes NULL amounts as zero, inflating the total", "The report is missing a HAVING clause to remove small orders"], "answer": 0, "explain": "Joining the one side (orders) to the many side (items) repeats each order row per item, so summing an order-level measure multiplies it. Aggregate items to the order grain first, or sum item-level amounts instead."}, {"q": "You want every customer, with their active subscription if they have one. Which query is correct?", "options": ["`SELECT ... FROM customers c LEFT JOIN subscriptions s ON s.customer_id = c.id AND s.status = 'active'`", "`SELECT ... FROM customers c LEFT JOIN subscriptions s ON s.customer_id = c.id WHERE s.status = 'active'`", "`SELECT ... FROM customers c JOIN subscriptions s ON s.customer_id = c.id WHERE s.status = 'active'`", "`SELECT ... FROM customers c FULL JOIN subscriptions s ON s.customer_id = c.id WHERE s.status = 'active'`"], "answer": 0, "explain": "Only the condition in the ON clause keeps customers without an active subscription (their subscription columns are NULL). A WHERE filter on the right table removes those NULL rows and turns the LEFT JOIN into an inner join."}, {"q": "After re-loading an events table, some events appear twice with different `loaded_at` values. Which query keeps only the latest copy of each event?", "options": ["Wrap `ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY loaded_at DESC)` in a subquery and keep rows where it equals 1", "`SELECT DISTINCT * FROM events_raw`", "`SELECT event_id, MAX(loaded_at) FROM events_raw GROUP BY event_id` and use it as the deduplicated table", "`SELECT * FROM events_raw ORDER BY loaded_at DESC LIMIT 1`"], "answer": 0, "explain": "The window ranks copies within each event and the outer filter keeps the newest full row. DISTINCT does not remove rows that differ in `loaded_at`; the GROUP BY drops every other column; LIMIT 1 keeps a single row overall."}, {"q": "An `EXPLAIN ANALYZE` shows a Seq Scan on a ten-million-row table with `rows=1` estimated and `rows=18230` actual, under a Nested Loop. What are the likely fix and the reason?", "options": ["Add an index on the filtered column and run ANALYZE; the stale estimate chose a nested loop that would be wrong for 18,000 rows", "Increase the LIMIT so the planner uses fewer rows", "Replace the JOIN with a CTE so the planner materialises the table", "Rewrite the query as a subquery, since nested loops only appear with JOIN syntax"], "answer": 0, "explain": "A large estimate error means statistics are stale, which leads to a poor join strategy; the sequential scan under a filter on a large table calls for an index. LIMIT, CTEs and subquery syntax do not address either problem."}, {"q": "Why does `WHERE date(ordered_at) = '2026-03-01'` run slowly even though `ordered_at` is indexed?", "options": ["Applying a function to the column prevents the index from being used; rewrite as a range on `ordered_at` or add an expression index", "Date comparisons are always slower than timestamp comparisons in SQL", "The index only works with `BETWEEN`, not with equality", "The `date()` function locks the table while it runs"], "answer": 0, "explain": "The index is on `ordered_at`, not on `date(ordered_at)`, so the planner cannot use it for the transformed value. `ordered_at >= '2026-03-01' AND ordered_at < '2026-03-02'` uses the index directly."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <span class="pager-link pager-prev is-empty"></span>
+    <a class="pager-up" href="../education.html#data">All Data modules</a>
+    <a class="pager-link pager-next" href="de-modeling.html"><span>Next →</span><strong>Data modelling</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=de-sql&amp;page=/education/de-sql.html&amp;title=SQL%20for%20engineers">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=de-sql&amp;page=/education/de-sql.html&amp;title=SQL%20for%20engineers">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

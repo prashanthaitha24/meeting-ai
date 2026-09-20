@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Warehouses at scale — Data | ThavionAI Education</title>
+  <meta name="description" content="Partitioning, clustering, materialised views, query cost, and the mistakes that make bills explode." />
+  <meta property="og:title" content="Warehouses at scale — ThavionAI Education" />
+  <meta property="og:description" content="Partitioning, clustering, materialised views, query cost, and the mistakes that make bills explode." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/de-warehouse.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-data" data-module="de-warehouse">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../index.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=de-warehouse&amp;page=/education/de-warehouse.html&amp;title=Warehouses%20at%20scale">Feedback</a>
+    <a href="../education.html#data" class="nav-cta">All Data modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#data">Data</a> › Stage 3: Scale &amp; streaming</div>
+    <h1>Warehouses at scale</h1>
+    <p class="lede">Partitioning, clustering, materialised views, query cost, and the mistakes that make bills explode.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 9 of 16</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">A cloud warehouse makes a billion-row query trivial and a billion-row mistake expensive. The same properties that make it fast — columnar storage, massive parallelism, separated storage and compute — mean that a query written without thought can scan terabytes, and a dashboard that refreshes every minute can cost more than the team that built it. This module explains how modern warehouses execute queries, and the four levers that decide performance and cost: how tables are partitioned and clustered, how much data each query scans, how compute is sized and shared, and what is precomputed. The terminology comes from BigQuery, Snowflake and Redshift, which differ in vocabulary more than in principle.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Describe how a columnar, distributed warehouse executes a query and why bytes scanned drives cost</li><li>Partition and cluster tables so that typical queries prune most of the data</li><li>Read a warehouse query profile and fix the common causes of slow or expensive queries</li><li>Choose materialisations (views, materialised views, aggregate tables) and caching for the workload</li><li>Control cost with compute sizing, workload isolation, quotas and monitoring</li></ul>
+    </div>
+    <section id="how-the-warehouse-runs-a-query"><h2>How the warehouse runs a query</h2>
+    <p>Modern warehouses separate <strong>storage</strong> (columnar files in object storage, with metadata about each block: min/max per column, row counts) from <strong>compute</strong> (clusters of workers that scan, filter, join and aggregate in parallel). A query is planned into stages; each stage runs across many workers on slices of the data; between stages, data is <strong>shuffled</strong> (redistributed by key) so that rows that must meet — the two sides of a join, the members of a group — end up on the same worker. Cost and time follow from three quantities: bytes scanned from storage, bytes shuffled between workers, and the size of the largest single-worker operation.</p>
+    <p>Because storage is columnar and block metadata exists, the planner can skip whole blocks whose min/max exclude the filter (<strong>pruning</strong>) and read only the referenced columns (<strong>projection</strong>). This is why <code>SELECT *</code> over a wide table and a filter on an unpartitioned column are the two most expensive habits: the first reads every column, the second reads every block. Everything in this module is about making the planner able to skip.</p>
+    <div class="callout callout-note"><strong>Note</strong><p>Pricing models differ: BigQuery on-demand charges per byte scanned; Snowflake and Redshift charge for compute time on a sized cluster. In both, the fix for cost is the same — scan less and keep compute busy only when needed — but the metric to watch differs.</p></div></section>
+  <section id="partitioning-and-clustering"><h2>Partitioning and clustering</h2>
+    <p><strong>Partitioning</strong> splits a table into physical segments by a column, almost always a date or timestamp truncated to day. A query filtering on that column reads only the matching partitions; everything else is not touched or billed. <strong>Clustering</strong> (sort keys in Redshift, clustering keys in Snowflake and BigQuery) orders data within partitions by one or more columns so block min/max ranges are tight and pruning works on those columns too. Partition on the column every query filters by time; cluster on the two or three columns most often used in filters and joins, highest selectivity first.</p>
+    <div class="code"><div class="code-cap">The same table defined for BigQuery and Snowflake: partitioned by day, clustered by the columns queries filter on.</div><div class="code-head"><span>sql</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>-- BigQuery: partition by day, cluster by up to four columns; require the partition filter
+CREATE TABLE analytics.fct_events
+(
+  event_id STRING, user_id INT64, event_name STRING, event_at TIMESTAMP, country STRING, properties JSON
+)
+PARTITION BY DATE(event_at)
+CLUSTER BY event_name, user_id
+OPTIONS (require_partition_filter = TRUE, partition_expiration_days = 730);
+
+-- Snowflake: micro-partitions are automatic; declare a clustering key for large tables
+CREATE TABLE analytics.fct_events (
+  event_id STRING, user_id NUMBER, event_name STRING, event_at TIMESTAMP_NTZ, country STRING, properties VARIANT
+)
+CLUSTER BY (TO_DATE(event_at), event_name);</code></pre></div>
+    <p>Pruning only works when the query's filter is on the partition or cluster column in a form the planner recognises: <code>WHERE event_at &gt;= '2026-03-01'</code>, not <code>WHERE DATE(event_at) = ...</code> wrapped in a function the engine cannot push down (BigQuery handles <code>DATE(event_at)</code> on a day-partitioned table; many engines do not handle arbitrary functions). Check the query's estimated bytes or the profile's "partitions scanned" before and after; pruning is measurable. Setting <code>require_partition_filter</code> turns the unbounded scan into an error, which is the right default for large event tables.</p></section>
+  <section id="reading-a-query-profile"><h2>Reading a query profile</h2>
+    <p>Every warehouse shows a profile: stages, rows in and out, bytes scanned, shuffle volume, time per stage and skew between workers. The recurring findings: a <strong>full scan</strong> where a partition filter was expected; a <strong>join explosion</strong> where output rows far exceed both inputs (a fan-out, from the SQL module); <strong>skew</strong>, where one worker gets most rows for a hot key (a NULL customer id, a default value) and everyone waits for it; <strong>spilling</strong>, where a sort or aggregation exceeds memory and writes to disk; and <strong>late filtering</strong>, where a WHERE that could have run on the scan runs after a join instead.</p>
+    <div class="code"><div class="code-cap">A query with three problems and its rewrite: the filter moves to the scan, the join key is deduplicated, and the hot NULL key is handled.</div><div class="code-head"><span>sql</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>-- BEFORE: full scan of events, fan-out on a non-unique dimension, skew on NULL user_id
+SELECT e.event_name, u.plan, COUNT(*)
+FROM analytics.fct_events e
+LEFT JOIN analytics.user_plans u ON u.user_id = e.user_id      -- user_plans has one row per plan change
+WHERE u.plan = 'pro' AND DATE(e.event_at) BETWEEN '2026-03-01' AND '2026-03-07'
+GROUP BY 1, 2;
+
+-- AFTER
+WITH current_plan AS (
+  SELECT user_id, plan
+  FROM analytics.user_plans
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY changed_at DESC) = 1   -- one row per user
+),
+events AS (
+  SELECT user_id, event_name
+  FROM analytics.fct_events
+  WHERE event_at &gt;= TIMESTAMP '2026-03-01' AND event_at &lt; TIMESTAMP '2026-03-08'   -- prunes partitions
+    AND user_id IS NOT NULL                                                        -- drop the hot key early
+)
+SELECT e.event_name, p.plan, COUNT(*)
+FROM events e
+JOIN current_plan p USING (user_id)
+WHERE p.plan = 'pro'
+GROUP BY 1, 2;</code></pre></div>
+    <p>Read profiles in the same order every time: bytes scanned per table (pruning), rows out of each join versus rows in (fan-out), max versus average time per worker (skew), and spill indicators. Most slow queries are fixed by moving a filter earlier, deduplicating a join side, or adding the partition column to the WHERE clause.</p></section>
+  <section id="precompute-what-is-asked-repeatedly"><h2>Precompute what is asked repeatedly</h2>
+    <p>A dashboard that runs the same aggregation over a year of events every time someone opens it should read a small table instead. <strong>Views</strong> save no work; they are query text. <strong>Materialised views</strong> store the result and refresh incrementally or on schedule, and some engines rewrite queries to use them automatically. <strong>Aggregate tables</strong> built by the transformation layer (daily revenue by region, weekly active users) are the explicit version, with the advantage that the definition is one dbt model that everyone uses. The <strong>result cache</strong> returns identical queries for free within a window; BI tools that add a timestamp to every query defeat it.</p>
+    <div class="table-wrap"><table><thead><tr><th>Mechanism</th><th>Freshness</th><th>Best for</th></tr></thead><tbody><tr><td>View</td><td>Live</td><td>Reusable logic, small data</td></tr><tr><td>Materialised view</td><td>Minutes (auto or scheduled refresh)</td><td>Expensive aggregates the engine can maintain</td></tr><tr><td>Aggregate table (dbt model)</td><td>Per pipeline run</td><td>Published metrics with one definition</td></tr><tr><td>Result cache</td><td>Until underlying data changes</td><td>Repeated identical queries</td></tr></tbody></table></div>
+    <div class="callout callout-tip"><strong>Tip</strong><p>Point dashboards at the smallest table that answers their question. A daily aggregate of a few thousand rows is faster, cheaper and more consistent than any amount of tuning on the raw event table.</p></div></section>
+  <section id="compute-isolation-and-the-bill"><h2>Compute, isolation and the bill</h2>
+    <p>Compute is where the money goes. Size clusters to the workload rather than the peak: a warehouse that scales from zero and suspends after a minute idle costs a fraction of one left running. Isolate workloads — a cluster for scheduled transformations, another for dashboards, another for ad hoc analysis — so a heavy analyst query cannot slow the executive dashboard, and so each bill has an owner. Set <strong>quotas and limits</strong>: per-query byte caps, per-user daily budgets, statement timeouts. Then monitor: the most expensive queries by user and by dashboard, bytes scanned per day per table, and clusters that never suspend.</p>
+    <div class="code"><div class="code-cap">The query that finds the money: top consumers over the last week from the warehouse's own usage tables (Snowflake shown; BigQuery's INFORMATION_SCHEMA.JOBS is analogous).</div><div class="code-head"><span>sql</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>SELECT
+  user_name,
+  warehouse_name,
+  COUNT(*)                                       AS queries,
+  ROUND(SUM(total_elapsed_time) / 1000 / 3600, 1) AS hours,
+  ROUND(SUM(bytes_scanned) / POWER(1024, 4), 2)   AS tb_scanned,
+  ROUND(SUM(credits_used_cloud_services), 2)      AS cloud_credits
+FROM snowflake.account_usage.query_history
+WHERE start_time &gt;= DATEADD(day, -7, CURRENT_TIMESTAMP())
+GROUP BY 1, 2
+ORDER BY tb_scanned DESC
+LIMIT 20;</code></pre></div>
+    <ul><li>Auto-suspend at 60 seconds and auto-resume; a cluster running overnight for nothing is the most common waste.</li><li>Right-size before scaling out; a larger cluster finishes a single big query faster, more clusters handle more concurrent small ones.</li><li>Byte caps on ad hoc access (<code>maximum_bytes_billed</code> or statement timeouts) so a missing filter cannot cost a month's budget.</li><li>Tag queries and clusters with team and purpose; attribute cost weekly.</li><li>Expire old partitions and archive cold data to cheaper storage; retention is a cost control as well as a privacy one.</li></ul>
+    <p>Warehouse cost incidents look like security incidents: a small mistake, amplified by scale, discovered late. The controls are the same shape — limits, isolation, monitoring, alerts on anomalies — and the FinOps module in the DevOps track applies directly.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Make a slow query cheap</h2>
+    <ol><li>In a free-tier warehouse (BigQuery sandbox works) or a local engine with statistics (DuckDB with a large Parquet dataset), create an events table with 50 million generated rows across a year, partitioned by day and clustered by event name.</li><li>Run a week-long aggregation with <code>DATE(event_at) BETWEEN ...</code> and then with a timestamp range. Compare bytes processed or blocks read.</li><li>Create a <code>user_plans</code> table with multiple rows per user and reproduce the fan-out join. Record output rows versus input rows in the profile, then fix it with a QUALIFY deduplication.</li><li>Set 10% of <code>user_id</code> values to NULL, run a join on it, and look for skew in the profile (max versus average worker time). Filter the NULLs early and compare.</li><li>Build a daily aggregate table for the dashboard's question and time the dashboard query against it versus the raw table.</li><li>Run the usage query for your account (or DuckDB's query log if local) and list the three most expensive queries of the exercise. Write one sentence on how each would be cheaper.</li><li>If your warehouse supports it, set a per-query byte limit and confirm an unfiltered scan is refused.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Warehouses at scale — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Cost and time follow bytes scanned, bytes shuffled and the largest single-worker step</li><li>Partition by the time column every query filters on; cluster by the next two or three filter/join columns</li><li>Filters must be in a form the planner can prune on; measure partitions scanned before and after</li><li>Profile in order: scanned bytes per table, join rows out vs in, worker skew, spills</li><li>Precompute repeated questions: aggregate tables with one definition, materialised views, result cache</li><li>Compute: auto-suspend, isolate workloads, byte caps and timeouts, attribute cost weekly</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Table design</h3><table><tbody><tr><td><code>PARTITION BY DATE(event_at)</code></td><td>Time partitioning (BigQuery); Snowflake clusters by TO_DATE</td></tr><tr><td><code>CLUSTER BY col1, col2</code></td><td>Sort within partitions for pruning on those columns</td></tr><tr><td><code>require_partition_filter = TRUE</code></td><td>Refuse unbounded scans on big tables</td></tr><tr><td><code>partition_expiration_days</code></td><td>Retention as a cost control</td></tr><tr><td><code>SORTKEY / DISTKEY (Redshift)</code></td><td>Sort for pruning; distribute on the join key</td></tr></tbody></table></div><div class="cheat-group"><h3>Query patterns</h3><table><tbody><tr><td><code>WHERE ts &gt;= TIMESTAMP 'a' AND ts &lt; TIMESTAMP 'b'</code></td><td>Prunable range filter</td></tr><tr><td><code>SELECT only needed columns</code></td><td>Columnar: SELECT * reads everything</td></tr><tr><td><code>QUALIFY ROW_NUMBER() OVER (...) = 1</code></td><td>Deduplicate a join side inline</td></tr><tr><td><code>filter NULL / default hot keys early</code></td><td>Avoid skew on one worker</td></tr><tr><td><code>aggregate before join when possible</code></td><td>Shuffle less data</td></tr><tr><td><code>avoid ORDER BY on huge results without LIMIT</code></td><td>Global sorts are expensive</td></tr></tbody></table></div><div class="cheat-group"><h3>Profile signals</h3><table><tbody><tr><td><code>bytes / partitions scanned per table</code></td><td>Is pruning working?</td></tr><tr><td><code>join output rows &gt;&gt; input rows</code></td><td>Fan-out; deduplicate or fix the key</td></tr><tr><td><code>max worker time &gt;&gt; avg</code></td><td>Skew on a hot key</td></tr><tr><td><code>spilled bytes &gt; 0</code></td><td>Memory-bound sort/agg; reduce data or size up</td></tr><tr><td><code>filter applied after join</code></td><td>Push it into the scan</td></tr></tbody></table></div><div class="cheat-group"><h3>Cost controls</h3><table><tbody><tr><td><code>AUTO_SUSPEND = 60, AUTO_RESUME = TRUE</code></td><td>No idle compute</td></tr><tr><td><code>separate warehouses/reservations per workload</code></td><td>Isolation and attribution</td></tr><tr><td><code>maximum_bytes_billed / STATEMENT_TIMEOUT_IN_SECONDS</code></td><td>Cap the damage of a bad query</td></tr><tr><td><code>account_usage.query_history / INFORMATION_SCHEMA.JOBS</code></td><td>Find the expensive queries and users</td></tr><tr><td><code>materialised views / daily aggregate tables</code></td><td>Precompute repeated dashboards</td></tr><tr><td><code>query tags: team, dashboard</code></td><td>Attribute spend</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>SELECT * on wide tables; every column is read even if one is used.</li><li>Filtering with a function the planner cannot prune on, scanning the whole table.</li><li>Joining to a dimension with multiple rows per key and doubling the numbers.</li><li>Dashboards querying the raw event table on every refresh instead of an aggregate.</li><li>Clusters that never suspend; the bill for nothing.</li><li>No byte caps on ad hoc access, so one missing WHERE costs the monthly budget.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "A query on a day-partitioned events table filters with `WHERE FORMAT_TIMESTAMP('%Y-%m', event_at) = '2026-03'` and scans the entire table. Why, and what is the fix?", "options": ["The function hides the partition column from the planner; filter with a timestamp range on `event_at` so partitions are pruned", "Partition pruning only works with equality on a date literal", "The table needs a clustering key on `event_at` in addition to the partition", "Monthly filters are not supported on daily partitions"], "answer": 0, "explain": "Pruning requires a predicate the planner can map onto partition boundaries. A range on the raw column does that; an arbitrary formatting function does not."}, {"q": "A join produces 40 million output rows from 5 million events and 200 thousand user-plan rows, and totals are inflated. What is the likely cause and fix?", "options": ["The user-plan table has several rows per user (fan-out); reduce it to one row per user with a window function before joining", "The warehouse cluster is too small and dropped rows, so it needs scaling up", "The events table should be clustered by user_id", "The join should be a LEFT JOIN instead of an INNER JOIN"], "answer": 0, "explain": "Output far exceeding both inputs is the signature of a many-to-many or one-to-many join on a non-unique key. Deduplicating the dimension side fixes both the row count and the totals. Cluster keys and join type do not change the multiplicity."}, {"q": "A query profile shows one worker taking ten times longer than the others during a join on `customer_id`, and 15% of events have a NULL `customer_id`. What is happening?", "options": ["Skew: all rows with the NULL key are routed to one worker; filter or separate the NULL rows before the join", "The NULL rows are being duplicated by the join", "The events table lacks a partition filter", "The warehouse needs more storage capacity"], "answer": 0, "explain": "Shuffling by key sends every row with the same key to the same worker; a hot key such as NULL or a default value concentrates work. Handling those rows separately removes the bottleneck."}, {"q": "An executive dashboard runs a year-long aggregation over the raw event table on every refresh, costing more than any other workload. What is the best fix?", "options": ["Build a small daily aggregate table in the transformation layer with the metric's single definition and point the dashboard at it", "Increase the cluster size so the query finishes faster", "Add more clustering keys to the raw table", "Reduce the dashboard's refresh frequency to once a day"], "answer": 0, "explain": "Precomputing turns a terabyte scan into a kilobyte read and keeps the metric definition in one place. Bigger clusters and clustering keys still scan the raw data; a slower refresh reduces but does not remove the waste."}, {"q": "Which set of controls best prevents a single ad hoc query from consuming a month's warehouse budget?", "options": ["Per-query byte caps or statement timeouts, workload isolation for ad hoc use, and monitoring of top queries by cost", "Requiring all analysts to use SELECT * so queries are consistent", "Disabling partition pruning to make costs predictable", "Running all queries on the largest cluster so they finish quickly"], "answer": 0, "explain": "Limits bound the damage, isolation keeps it from affecting others, and monitoring catches patterns. The other options increase cost or remove the mechanisms that reduce it."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="de-quality.html"><span>← Previous</span><strong>Data quality, tests &amp; contracts</strong></a>
+    <a class="pager-up" href="../education.html#data">All Data modules</a>
+    <a class="pager-link pager-next" href="de-spark.html"><span>Next →</span><strong>Distributed processing with Spark</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=de-warehouse&amp;page=/education/de-warehouse.html&amp;title=Warehouses%20at%20scale">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=de-warehouse&amp;page=/education/de-warehouse.html&amp;title=Warehouses%20at%20scale">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

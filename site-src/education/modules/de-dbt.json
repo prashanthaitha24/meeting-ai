@@ -1,0 +1,182 @@
+{
+  "id": "de-dbt",
+  "minutes": 35,
+  "intro": "Once raw data is in the warehouse, someone has to turn it into the tables people trust: cleaned, joined, conformed, documented. For years that was a folder of SQL scripts run in an order only one person understood. dbt made transformation a software discipline: models are SELECT statements, dependencies are inferred from references, tests run against every build, documentation is generated from the code, and the whole thing lives in git and runs in CI. This module covers the dbt project structure that scales, incremental models that do not reprocess the world, tests and sources, and the habits that keep a warehouse explainable as it grows past a few hundred models.",
+  "objectives": [
+    "Structure a dbt project into staging, intermediate and mart layers with consistent naming",
+    "Write models with ref and source so the dependency graph builds itself",
+    "Use incremental materialisation correctly, including late data and full refreshes",
+    "Add tests, sources with freshness checks, and documentation that generates a lineage graph",
+    "Run dbt in CI against a slim build and deploy it on a schedule"
+  ],
+  "sections": [
+    {
+      "heading": "Models, refs and the graph",
+      "blocks": [
+        {"type": "p", "text": "A **model** is a SQL file containing one SELECT. dbt wraps it in the DDL for the chosen **materialisation** (view, table, incremental, ephemeral) and runs it in the warehouse. The important part is `ref()`: instead of hard-coding `analytics.stg_orders`, a model writes `{{ ref('stg_orders') }}`, and dbt resolves the name for the target environment and records the dependency. Run the project and dbt executes models in graph order; select a model with `+` and dbt runs everything it depends on. `source()` does the same for raw tables that other systems load, which is where lineage begins."},
+        {"type": "code", "lang": "sql", "caption": "A staging model: one source, renamed and typed, nothing else. Every raw table gets exactly one of these.", "code": "-- models/staging/shop/stg_shop__orders.sql\nwith source as (\n    select * from {{ source('shop', 'orders') }}\n),\nrenamed as (\n    select\n        id                                   as order_id,\n        customer_id,\n        cast(ordered_at as timestamp)        as ordered_at,\n        lower(status)                        as status,\n        cast(amount_cents as numeric) / 100  as amount,\n        _loaded_at                           as loaded_at\n    from source\n)\nselect * from renamed"},
+        {"type": "code", "lang": "sql", "caption": "A mart model built from staging models by ref. dbt infers that both staging models must run first.", "code": "-- models/marts/finance/fct_orders.sql\n{{ config(materialized='table') }}\n\nselect\n    o.order_id,\n    o.customer_id,\n    c.country,\n    o.ordered_at,\n    cast(o.ordered_at as date) as order_date,\n    o.status,\n    o.amount\nfrom {{ ref('stg_shop__orders') }} o\nleft join {{ ref('stg_shop__customers') }} c using (customer_id)\nwhere o.status != 'cancelled'"},
+        {"type": "callout", "kind": "note", "text": "dbt does not move data or run Python for you in the classic sense; it generates and runs SQL in your warehouse. The transformation logic is SQL, tested and versioned, and the warehouse does the work."}
+      ]
+    },
+    {
+      "heading": "Project structure that survives growth",
+      "blocks": [
+        {"type": "p", "text": "The convention most teams converge on has three layers. **Staging** (`stg_<source>__<entity>`): one model per raw table, light cleaning only — rename, cast, standardise; materialised as views. **Intermediate** (`int_<purpose>`): joins and reshaping that several marts share, not exposed to end users. **Marts** (`fct_` facts and `dim_` dimensions, grouped by business area): the tables dashboards and analysts query, materialised as tables or incremental. The rule is that data flows one way — sources to staging to intermediate to marts — and each layer references only the layer below or itself."},
+        {"type": "code", "lang": "text", "caption": "A project layout and naming that tells a reader what each model is before opening it.", "code": "models/\n  staging/\n    shop/\n      _shop__sources.yml         source definitions, freshness, column docs\n      _shop__models.yml          tests and docs for the staging models\n      stg_shop__orders.sql\n      stg_shop__customers.sql\n    payments/\n      ...\n  intermediate/\n    finance/\n      int_orders_with_refunds.sql\n  marts/\n    finance/\n      _finance__models.yml\n      fct_orders.sql\n      fct_refunds.sql\n      dim_customers.sql\n    marketing/\n      ...\nmacros/\ntests/                            singular tests (SQL that must return zero rows)\nsnapshots/                        SCD2 captures\ndbt_project.yml                   materialisation defaults per folder"},
+        {"type": "p", "text": "Set materialisation defaults per folder in `dbt_project.yml` (staging as views, marts as tables) so individual models rarely need config. Keep metrics logic in the marts, not in dashboards, and define each metric once — the modelling module's rule, now enforced by having one `fct_orders` that everybody refs."}
+      ]
+    },
+    {
+      "heading": "Incremental models",
+      "blocks": [
+        {"type": "p", "text": "Rebuilding a billion-row fact table every night is slow and expensive. An **incremental** model processes only new or changed rows on each run and merges them into the existing table. The model's SQL is filtered with an `is_incremental()` block on the first run (or a full refresh) it builds everything; afterwards it selects rows newer than what the table already holds. A `unique_key` tells dbt how to merge, so late or updated rows replace their earlier versions rather than duplicate them. Combine with a lookback window to absorb late data, exactly as the batch module described."},
+        {"type": "code", "lang": "sql", "caption": "An incremental fact with a unique key and a three-day lookback. A full refresh rebuilds from scratch when logic changes.", "code": "-- models/marts/events/fct_events.sql\n{{ config(\n    materialized='incremental',\n    unique_key='event_id',\n    incremental_strategy='merge',\n    on_schema_change='append_new_columns'\n) }}\n\nselect\n    event_id,\n    user_id,\n    event_name,\n    event_at,\n    cast(event_at as date) as event_date,\n    properties\nfrom {{ ref('stg_app__events') }}\n\n{% if is_incremental() %}\n  -- reprocess a trailing window so late-arriving events are picked up and merged by event_id\n  where event_at >= (select max(event_at) from {{ this }}) - interval '3 days'\n{% endif %}"},
+        {"type": "p", "text": "Three cautions. The `max()` subquery over a huge table can itself be slow; partition-aware warehouses handle it, others benefit from a watermark stored elsewhere. Changing the model's logic does not rewrite old rows; run `dbt run --full-refresh --select fct_events` after a logic change and treat that as a backfill with the same care. And `on_schema_change` decides what happens when a column appears; the default (`ignore`) silently drops it, so choose deliberately."},
+        {"type": "callout", "kind": "tip", "text": "Start every model as a table. Make it incremental only when the rebuild is measurably too slow or expensive; incremental logic is where most subtle bugs in a dbt project live."}
+      ]
+    },
+    {
+      "heading": "Tests, sources and documentation",
+      "blocks": [
+        {"type": "p", "text": "dbt **tests** are assertions that run as SQL and fail if any rows come back. Generic tests are declared in YAML on columns: `unique`, `not_null`, `accepted_values`, `relationships` (every `customer_id` in orders exists in customers). Singular tests are SQL files for business rules (\"no order has a negative amount after refunds\"). Run them after every build; a failing test on a mart should block downstream consumers, which `dbt build` does by running tests in graph order and stopping dependents on failure."},
+        {"type": "code", "lang": "yaml", "caption": "Source definition with freshness, and model tests and documentation, in one YAML file next to the models.", "code": "version: 2\n\nsources:\n  - name: shop\n    schema: raw_shop\n    loaded_at_field: _loaded_at\n    freshness:\n      warn_after: {count: 6, period: hour}\n      error_after: {count: 24, period: hour}\n    tables:\n      - name: orders\n      - name: customers\n\nmodels:\n  - name: fct_orders\n    description: One row per non-cancelled order. Revenue is SUM(amount) where status in ('paid', 'shipped').\n    columns:\n      - name: order_id\n        description: Natural key from the shop database.\n        tests: [unique, not_null]\n      - name: customer_id\n        tests:\n          - not_null\n          - relationships: {to: ref('dim_customers'), field: customer_id}\n      - name: status\n        tests:\n          - accepted_values: {values: ['placed', 'paid', 'shipped', 'refunded']}\n      - name: amount\n        tests:\n          - dbt_utils.accepted_range: {min_value: 0, inclusive: true}"},
+        {"type": "p", "text": "`dbt source freshness` checks that raw tables are being loaded, turning \"the pipeline is silently stuck\" into a failing check. `dbt docs generate` produces a site with every model's description, columns, tests and a lineage graph from sources to marts; it is the documentation people actually consult because it is generated from the code and cannot drift. Descriptions on marts should state the grain and the metric definitions, so the docs answer the questions the modelling module said to write down."}
+      ]
+    },
+    {
+      "heading": "Running it: environments, CI and schedule",
+      "blocks": [
+        {"type": "p", "text": "dbt reads a **target** (development, CI, production) that maps to a schema and credentials, so the same code builds into a developer's own schema locally and into the production schema on the scheduler. In CI, a pull request builds only the models it changed and their descendants, comparing against the production manifest — the **slim CI** pattern — and runs their tests, so a broken model never merges. Production runs are an orchestrator task (`dbt build` on a schedule, or after the raw loads land) with the manifest and run results stored for the next slim CI and for observability."},
+        {"type": "code", "lang": "bash", "caption": "The three commands that matter: a slim CI build of what changed, the production build, and the freshness check that gates it.", "code": "# CI: build changed models and their descendants against the last production manifest, test them\ndbt build --select state:modified+ --state ./prod-manifest --target ci --fail-fast\n\n# production: fail early if sources are stale, then build everything with tests in graph order\ndbt source freshness --target prod\ndbt build --target prod\n\n# a logic change on an incremental model: rebuild it from scratch once\ndbt run --full-refresh --select fct_events --target prod"},
+        {"type": "list", "items": [
+          "Pin the dbt version and adapter in the project; upgrade deliberately.",
+          "Version packages (`dbt_utils` and friends) in `packages.yml` and commit the lock file.",
+          "Use the `+` and `@` selectors and tags to run subsets; never run a 400-model project to test one change.",
+          "Store run artifacts (manifest, run results) after each production run; they feed slim CI, lineage tooling and the observability module's freshness dashboards.",
+          "Treat a test failure in production like a failing deploy: alert, block dependents, fix, rerun."
+        ]}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "A tested, documented dbt project on local data",
+    "steps": [
+      "Install dbt with the DuckDB adapter (`pip install dbt-duckdb`) and initialise a project. Load the orders and customers CSVs from earlier modules into a DuckDB file as raw tables.",
+      "Define the two raw tables as a source with a `loaded_at_field` and freshness thresholds. Write `stg_shop__orders` and `stg_shop__customers` with renaming and casting only.",
+      "Build `dim_customers` and `fct_orders` as marts with `ref`. Run `dbt run` and confirm the graph order in the output.",
+      "Add unique, not_null, accepted_values and relationships tests. Introduce a duplicate order in the raw data and confirm `dbt build` fails and skips the mart's dependents.",
+      "Convert `fct_orders` to an incremental model with `unique_key` and a lookback. Run it twice, add a late order to the raw table, run again and confirm it appears once.",
+      "Generate docs and open the lineage graph. Add a description to `fct_orders` that states its grain and the revenue definition.",
+      "Commit the project, store the manifest as `prod-manifest`, change one staging model, and run the slim CI command to confirm only the changed model and its descendants build."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Models are SELECTs; ref() and source() build the dependency graph and environment-aware names",
+      "Layers: staging (rename and cast, views) → intermediate (shared joins) → marts (fct_ and dim_, tables); data flows one way",
+      "Incremental only when needed: unique_key, merge, lookback window, deliberate on_schema_change, full refresh after logic changes",
+      "Tests in YAML on columns plus singular SQL tests; dbt build runs them in graph order and blocks dependents",
+      "Source freshness turns a stuck loader into a failing check; generated docs carry grain and metric definitions",
+      "Targets per environment; slim CI builds only what changed; production runs on a schedule with artifacts stored"
+    ],
+    "groups": [
+      {"title": "Core syntax", "items": [
+        {"syntax": "{{ ref('model_name') }}", "desc": "Reference another model; records the dependency"},
+        {"syntax": "{{ source('src', 'table') }}", "desc": "Reference a raw table defined in sources YAML"},
+        {"syntax": "{{ config(materialized='table'|'view'|'incremental'|'ephemeral') }}", "desc": "How the model is built"},
+        {"syntax": "{{ this }}", "desc": "The model's own table (used in incremental filters)"},
+        {"syntax": "{% if is_incremental() %} where ... {% endif %}", "desc": "Only on incremental runs"},
+        {"syntax": "{{ var('name', default) }}", "desc": "Runtime variables"}
+      ]},
+      {"title": "Structure and naming", "items": [
+        {"syntax": "stg_<source>__<entity>", "desc": "Staging: one per raw table, light cleaning"},
+        {"syntax": "int_<purpose>", "desc": "Intermediate: shared joins, not user-facing"},
+        {"syntax": "fct_<event> / dim_<entity>", "desc": "Marts by business area"},
+        {"syntax": "dbt_project.yml: models: +materialized per folder", "desc": "Defaults per layer"},
+        {"syntax": "_<area>__models.yml / _<src>__sources.yml", "desc": "Tests and docs beside the models"}
+      ]},
+      {"title": "Incremental", "items": [
+        {"syntax": "unique_key='id', incremental_strategy='merge'", "desc": "Late and updated rows replace, not duplicate"},
+        {"syntax": "where ts >= (select max(ts) from {{ this }}) - interval '3 days'", "desc": "Trailing-window reprocessing"},
+        {"syntax": "on_schema_change='append_new_columns'", "desc": "Default ignore silently drops new columns"},
+        {"syntax": "dbt run --full-refresh --select model", "desc": "Rebuild after a logic change"},
+        {"syntax": "snapshots/ with strategy='timestamp'|'check'", "desc": "SCD2 capture of a source"}
+      ]},
+      {"title": "Tests, docs, running", "items": [
+        {"syntax": "tests: [unique, not_null, accepted_values, relationships]", "desc": "Generic column tests"},
+        {"syntax": "tests/*.sql returning zero rows", "desc": "Singular business-rule tests"},
+        {"syntax": "dbt build", "desc": "Run + test in graph order; skips dependents of failures"},
+        {"syntax": "dbt source freshness", "desc": "Are raw tables being loaded?"},
+        {"syntax": "dbt docs generate && dbt docs serve", "desc": "Lineage and column docs from code"},
+        {"syntax": "dbt build --select state:modified+ --state ./prod-manifest", "desc": "Slim CI: changed models and descendants"},
+        {"syntax": "--select model+ / +model / tag:daily", "desc": "Descendants / ancestors / tagged subset"}
+      ]}
+    ],
+    "pitfalls": [
+      "Hard-coding schema.table instead of ref(); the graph and environment switching break.",
+      "Business logic in staging models, so every mart inherits assumptions nobody documented.",
+      "Incremental models with no unique_key, duplicating late rows; or default on_schema_change dropping new columns.",
+      "Changing incremental logic without a full refresh; old rows keep the old logic.",
+      "Running the whole project in CI for every pull request; slow, expensive and eventually skipped.",
+      "Tests that exist but never block anything, because the schedule runs dbt run instead of dbt build."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A mart model selects from `analytics_prod.stg_orders` directly instead of `{{ ref('stg_orders') }}`. What breaks?",
+      "options": [
+        "dbt cannot infer the dependency or resolve the name per environment: the model may run before staging is built, and CI or dev targets read production data",
+        "The query fails because dbt forbids schema-qualified names",
+        "Nothing, as long as the schema name is correct in production",
+        "The model becomes a view instead of a table"
+      ],
+      "answer": 0,
+      "explain": "ref() is what builds the graph and maps names to each target's schema. Hard-coded names silently lose ordering and environment isolation."
+    },
+    {
+      "q": "An incremental events model filters `where event_at > (select max(event_at) from {{ this }})` with no unique_key. Events sometimes arrive a day late and some are re-sent with corrections. What goes wrong?",
+      "options": [
+        "Late events are missed because they are older than the max, and re-sent events duplicate because nothing merges on a key; add a lookback window and a unique_key with merge",
+        "Nothing; incremental models handle late and duplicate data automatically",
+        "The model fails because `{{ this }}` cannot be used in a subquery",
+        "Only the first run works; later runs return no rows"
+      ],
+      "answer": 0,
+      "explain": "A strict greater-than filter excludes anything older than what is already loaded, and append semantics without a key cannot replace corrected rows. The lookback plus merge pattern handles both."
+    },
+    {
+      "q": "The production schedule runs `dbt run` followed by a separate `dbt test`. A staging model starts producing duplicate keys. What happens downstream?",
+      "options": [
+        "All marts are built on the bad data before tests run and report the failure; `dbt build` would have stopped dependents after the failing test",
+        "dbt run detects the duplicates and halts",
+        "Tests run first automatically, so the marts are not built",
+        "The duplicates are removed by the unique test"
+      ],
+      "answer": 0,
+      "explain": "`dbt run` does not test, and a later `dbt test` only reports. `dbt build` interleaves tests in graph order and skips downstream models when an upstream test fails, which is the behaviour a schedule should rely on."
+    },
+    {
+      "q": "A raw loader has been silently failing for two days. Which dbt feature would have surfaced this as a failing check?",
+      "options": [
+        "Source freshness with `loaded_at_field` and `error_after` thresholds",
+        "The `unique` test on the staging model's key",
+        "The `relationships` test between orders and customers",
+        "Generating documentation with `dbt docs generate`"
+      ],
+      "answer": 0,
+      "explain": "Freshness compares the newest loaded timestamp against thresholds and fails when data stops arriving. Uniqueness and relationships tests pass on stale data; docs describe, they do not check."
+    },
+    {
+      "q": "A pull request changes one staging model in a 400-model project. What should CI run?",
+      "options": [
+        "`dbt build --select state:modified+ --state <prod manifest>` to build and test only the changed model and its descendants",
+        "`dbt build` for the whole project, to be safe",
+        "`dbt run` for the changed model only, without tests",
+        "Nothing; dbt projects are validated in production"
+      ],
+      "answer": 0,
+      "explain": "Slim CI compares against the production manifest and builds exactly what the change affects, with tests, in minutes. Full builds are slow and get skipped; running without tests defeats the purpose."
+    }
+  ]
+}

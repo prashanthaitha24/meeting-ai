@@ -1,0 +1,185 @@
+{
+  "id": "de-warehouse",
+  "minutes": 35,
+  "intro": "A cloud warehouse makes a billion-row query trivial and a billion-row mistake expensive. The same properties that make it fast — columnar storage, massive parallelism, separated storage and compute — mean that a query written without thought can scan terabytes, and a dashboard that refreshes every minute can cost more than the team that built it. This module explains how modern warehouses execute queries, and the four levers that decide performance and cost: how tables are partitioned and clustered, how much data each query scans, how compute is sized and shared, and what is precomputed. The terminology comes from BigQuery, Snowflake and Redshift, which differ in vocabulary more than in principle.",
+  "objectives": [
+    "Describe how a columnar, distributed warehouse executes a query and why bytes scanned drives cost",
+    "Partition and cluster tables so that typical queries prune most of the data",
+    "Read a warehouse query profile and fix the common causes of slow or expensive queries",
+    "Choose materialisations (views, materialised views, aggregate tables) and caching for the workload",
+    "Control cost with compute sizing, workload isolation, quotas and monitoring"
+  ],
+  "sections": [
+    {
+      "heading": "How the warehouse runs a query",
+      "blocks": [
+        {"type": "p", "text": "Modern warehouses separate **storage** (columnar files in object storage, with metadata about each block: min/max per column, row counts) from **compute** (clusters of workers that scan, filter, join and aggregate in parallel). A query is planned into stages; each stage runs across many workers on slices of the data; between stages, data is **shuffled** (redistributed by key) so that rows that must meet — the two sides of a join, the members of a group — end up on the same worker. Cost and time follow from three quantities: bytes scanned from storage, bytes shuffled between workers, and the size of the largest single-worker operation."},
+        {"type": "p", "text": "Because storage is columnar and block metadata exists, the planner can skip whole blocks whose min/max exclude the filter (**pruning**) and read only the referenced columns (**projection**). This is why `SELECT *` over a wide table and a filter on an unpartitioned column are the two most expensive habits: the first reads every column, the second reads every block. Everything in this module is about making the planner able to skip."},
+        {"type": "callout", "kind": "note", "text": "Pricing models differ: BigQuery on-demand charges per byte scanned; Snowflake and Redshift charge for compute time on a sized cluster. In both, the fix for cost is the same — scan less and keep compute busy only when needed — but the metric to watch differs."}
+      ]
+    },
+    {
+      "heading": "Partitioning and clustering",
+      "blocks": [
+        {"type": "p", "text": "**Partitioning** splits a table into physical segments by a column, almost always a date or timestamp truncated to day. A query filtering on that column reads only the matching partitions; everything else is not touched or billed. **Clustering** (sort keys in Redshift, clustering keys in Snowflake and BigQuery) orders data within partitions by one or more columns so block min/max ranges are tight and pruning works on those columns too. Partition on the column every query filters by time; cluster on the two or three columns most often used in filters and joins, highest selectivity first."},
+        {"type": "code", "lang": "sql", "caption": "The same table defined for BigQuery and Snowflake: partitioned by day, clustered by the columns queries filter on.", "code": "-- BigQuery: partition by day, cluster by up to four columns; require the partition filter\nCREATE TABLE analytics.fct_events\n(\n  event_id STRING, user_id INT64, event_name STRING, event_at TIMESTAMP, country STRING, properties JSON\n)\nPARTITION BY DATE(event_at)\nCLUSTER BY event_name, user_id\nOPTIONS (require_partition_filter = TRUE, partition_expiration_days = 730);\n\n-- Snowflake: micro-partitions are automatic; declare a clustering key for large tables\nCREATE TABLE analytics.fct_events (\n  event_id STRING, user_id NUMBER, event_name STRING, event_at TIMESTAMP_NTZ, country STRING, properties VARIANT\n)\nCLUSTER BY (TO_DATE(event_at), event_name);"},
+        {"type": "p", "text": "Pruning only works when the query's filter is on the partition or cluster column in a form the planner recognises: `WHERE event_at >= '2026-03-01'`, not `WHERE DATE(event_at) = ...` wrapped in a function the engine cannot push down (BigQuery handles `DATE(event_at)` on a day-partitioned table; many engines do not handle arbitrary functions). Check the query's estimated bytes or the profile's \"partitions scanned\" before and after; pruning is measurable. Setting `require_partition_filter` turns the unbounded scan into an error, which is the right default for large event tables."}
+      ]
+    },
+    {
+      "heading": "Reading a query profile",
+      "blocks": [
+        {"type": "p", "text": "Every warehouse shows a profile: stages, rows in and out, bytes scanned, shuffle volume, time per stage and skew between workers. The recurring findings: a **full scan** where a partition filter was expected; a **join explosion** where output rows far exceed both inputs (a fan-out, from the SQL module); **skew**, where one worker gets most rows for a hot key (a NULL customer id, a default value) and everyone waits for it; **spilling**, where a sort or aggregation exceeds memory and writes to disk; and **late filtering**, where a WHERE that could have run on the scan runs after a join instead."},
+        {"type": "code", "lang": "sql", "caption": "A query with three problems and its rewrite: the filter moves to the scan, the join key is deduplicated, and the hot NULL key is handled.", "code": "-- BEFORE: full scan of events, fan-out on a non-unique dimension, skew on NULL user_id\nSELECT e.event_name, u.plan, COUNT(*)\nFROM analytics.fct_events e\nLEFT JOIN analytics.user_plans u ON u.user_id = e.user_id      -- user_plans has one row per plan change\nWHERE u.plan = 'pro' AND DATE(e.event_at) BETWEEN '2026-03-01' AND '2026-03-07'\nGROUP BY 1, 2;\n\n-- AFTER\nWITH current_plan AS (\n  SELECT user_id, plan\n  FROM analytics.user_plans\n  QUALIFY ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY changed_at DESC) = 1   -- one row per user\n),\nevents AS (\n  SELECT user_id, event_name\n  FROM analytics.fct_events\n  WHERE event_at >= TIMESTAMP '2026-03-01' AND event_at < TIMESTAMP '2026-03-08'   -- prunes partitions\n    AND user_id IS NOT NULL                                                        -- drop the hot key early\n)\nSELECT e.event_name, p.plan, COUNT(*)\nFROM events e\nJOIN current_plan p USING (user_id)\nWHERE p.plan = 'pro'\nGROUP BY 1, 2;"},
+        {"type": "p", "text": "Read profiles in the same order every time: bytes scanned per table (pruning), rows out of each join versus rows in (fan-out), max versus average time per worker (skew), and spill indicators. Most slow queries are fixed by moving a filter earlier, deduplicating a join side, or adding the partition column to the WHERE clause."}
+      ]
+    },
+    {
+      "heading": "Precompute what is asked repeatedly",
+      "blocks": [
+        {"type": "p", "text": "A dashboard that runs the same aggregation over a year of events every time someone opens it should read a small table instead. **Views** save no work; they are query text. **Materialised views** store the result and refresh incrementally or on schedule, and some engines rewrite queries to use them automatically. **Aggregate tables** built by the transformation layer (daily revenue by region, weekly active users) are the explicit version, with the advantage that the definition is one dbt model that everyone uses. The **result cache** returns identical queries for free within a window; BI tools that add a timestamp to every query defeat it."},
+        {"type": "table", "headers": ["Mechanism", "Freshness", "Best for"], "rows": [
+          ["View", "Live", "Reusable logic, small data"],
+          ["Materialised view", "Minutes (auto or scheduled refresh)", "Expensive aggregates the engine can maintain"],
+          ["Aggregate table (dbt model)", "Per pipeline run", "Published metrics with one definition"],
+          ["Result cache", "Until underlying data changes", "Repeated identical queries"]
+        ]},
+        {"type": "callout", "kind": "tip", "text": "Point dashboards at the smallest table that answers their question. A daily aggregate of a few thousand rows is faster, cheaper and more consistent than any amount of tuning on the raw event table."}
+      ]
+    },
+    {
+      "heading": "Compute, isolation and the bill",
+      "blocks": [
+        {"type": "p", "text": "Compute is where the money goes. Size clusters to the workload rather than the peak: a warehouse that scales from zero and suspends after a minute idle costs a fraction of one left running. Isolate workloads — a cluster for scheduled transformations, another for dashboards, another for ad hoc analysis — so a heavy analyst query cannot slow the executive dashboard, and so each bill has an owner. Set **quotas and limits**: per-query byte caps, per-user daily budgets, statement timeouts. Then monitor: the most expensive queries by user and by dashboard, bytes scanned per day per table, and clusters that never suspend."},
+        {"type": "code", "lang": "sql", "caption": "The query that finds the money: top consumers over the last week from the warehouse's own usage tables (Snowflake shown; BigQuery's INFORMATION_SCHEMA.JOBS is analogous).", "code": "SELECT\n  user_name,\n  warehouse_name,\n  COUNT(*)                                       AS queries,\n  ROUND(SUM(total_elapsed_time) / 1000 / 3600, 1) AS hours,\n  ROUND(SUM(bytes_scanned) / POWER(1024, 4), 2)   AS tb_scanned,\n  ROUND(SUM(credits_used_cloud_services), 2)      AS cloud_credits\nFROM snowflake.account_usage.query_history\nWHERE start_time >= DATEADD(day, -7, CURRENT_TIMESTAMP())\nGROUP BY 1, 2\nORDER BY tb_scanned DESC\nLIMIT 20;"},
+        {"type": "list", "items": [
+          "Auto-suspend at 60 seconds and auto-resume; a cluster running overnight for nothing is the most common waste.",
+          "Right-size before scaling out; a larger cluster finishes a single big query faster, more clusters handle more concurrent small ones.",
+          "Byte caps on ad hoc access (`maximum_bytes_billed` or statement timeouts) so a missing filter cannot cost a month's budget.",
+          "Tag queries and clusters with team and purpose; attribute cost weekly.",
+          "Expire old partitions and archive cold data to cheaper storage; retention is a cost control as well as a privacy one."
+        ]},
+        {"type": "p", "text": "Warehouse cost incidents look like security incidents: a small mistake, amplified by scale, discovered late. The controls are the same shape — limits, isolation, monitoring, alerts on anomalies — and the FinOps module in the DevOps track applies directly."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Make a slow query cheap",
+    "steps": [
+      "In a free-tier warehouse (BigQuery sandbox works) or a local engine with statistics (DuckDB with a large Parquet dataset), create an events table with 50 million generated rows across a year, partitioned by day and clustered by event name.",
+      "Run a week-long aggregation with `DATE(event_at) BETWEEN ...` and then with a timestamp range. Compare bytes processed or blocks read.",
+      "Create a `user_plans` table with multiple rows per user and reproduce the fan-out join. Record output rows versus input rows in the profile, then fix it with a QUALIFY deduplication.",
+      "Set 10% of `user_id` values to NULL, run a join on it, and look for skew in the profile (max versus average worker time). Filter the NULLs early and compare.",
+      "Build a daily aggregate table for the dashboard's question and time the dashboard query against it versus the raw table.",
+      "Run the usage query for your account (or DuckDB's query log if local) and list the three most expensive queries of the exercise. Write one sentence on how each would be cheaper.",
+      "If your warehouse supports it, set a per-query byte limit and confirm an unfiltered scan is refused."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Cost and time follow bytes scanned, bytes shuffled and the largest single-worker step",
+      "Partition by the time column every query filters on; cluster by the next two or three filter/join columns",
+      "Filters must be in a form the planner can prune on; measure partitions scanned before and after",
+      "Profile in order: scanned bytes per table, join rows out vs in, worker skew, spills",
+      "Precompute repeated questions: aggregate tables with one definition, materialised views, result cache",
+      "Compute: auto-suspend, isolate workloads, byte caps and timeouts, attribute cost weekly"
+    ],
+    "groups": [
+      {"title": "Table design", "items": [
+        {"syntax": "PARTITION BY DATE(event_at)", "desc": "Time partitioning (BigQuery); Snowflake clusters by TO_DATE"},
+        {"syntax": "CLUSTER BY col1, col2", "desc": "Sort within partitions for pruning on those columns"},
+        {"syntax": "require_partition_filter = TRUE", "desc": "Refuse unbounded scans on big tables"},
+        {"syntax": "partition_expiration_days", "desc": "Retention as a cost control"},
+        {"syntax": "SORTKEY / DISTKEY (Redshift)", "desc": "Sort for pruning; distribute on the join key"}
+      ]},
+      {"title": "Query patterns", "items": [
+        {"syntax": "WHERE ts >= TIMESTAMP 'a' AND ts < TIMESTAMP 'b'", "desc": "Prunable range filter"},
+        {"syntax": "SELECT only needed columns", "desc": "Columnar: SELECT * reads everything"},
+        {"syntax": "QUALIFY ROW_NUMBER() OVER (...) = 1", "desc": "Deduplicate a join side inline"},
+        {"syntax": "filter NULL / default hot keys early", "desc": "Avoid skew on one worker"},
+        {"syntax": "aggregate before join when possible", "desc": "Shuffle less data"},
+        {"syntax": "avoid ORDER BY on huge results without LIMIT", "desc": "Global sorts are expensive"}
+      ]},
+      {"title": "Profile signals", "items": [
+        {"syntax": "bytes / partitions scanned per table", "desc": "Is pruning working?"},
+        {"syntax": "join output rows >> input rows", "desc": "Fan-out; deduplicate or fix the key"},
+        {"syntax": "max worker time >> avg", "desc": "Skew on a hot key"},
+        {"syntax": "spilled bytes > 0", "desc": "Memory-bound sort/agg; reduce data or size up"},
+        {"syntax": "filter applied after join", "desc": "Push it into the scan"}
+      ]},
+      {"title": "Cost controls", "items": [
+        {"syntax": "AUTO_SUSPEND = 60, AUTO_RESUME = TRUE", "desc": "No idle compute"},
+        {"syntax": "separate warehouses/reservations per workload", "desc": "Isolation and attribution"},
+        {"syntax": "maximum_bytes_billed / STATEMENT_TIMEOUT_IN_SECONDS", "desc": "Cap the damage of a bad query"},
+        {"syntax": "account_usage.query_history / INFORMATION_SCHEMA.JOBS", "desc": "Find the expensive queries and users"},
+        {"syntax": "materialised views / daily aggregate tables", "desc": "Precompute repeated dashboards"},
+        {"syntax": "query tags: team, dashboard", "desc": "Attribute spend"}
+      ]}
+    ],
+    "pitfalls": [
+      "SELECT * on wide tables; every column is read even if one is used.",
+      "Filtering with a function the planner cannot prune on, scanning the whole table.",
+      "Joining to a dimension with multiple rows per key and doubling the numbers.",
+      "Dashboards querying the raw event table on every refresh instead of an aggregate.",
+      "Clusters that never suspend; the bill for nothing.",
+      "No byte caps on ad hoc access, so one missing WHERE costs the monthly budget."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A query on a day-partitioned events table filters with `WHERE FORMAT_TIMESTAMP('%Y-%m', event_at) = '2026-03'` and scans the entire table. Why, and what is the fix?",
+      "options": [
+        "The function hides the partition column from the planner; filter with a timestamp range on `event_at` so partitions are pruned",
+        "Partition pruning only works with equality on a date literal",
+        "The table needs a clustering key on `event_at` in addition to the partition",
+        "Monthly filters are not supported on daily partitions"
+      ],
+      "answer": 0,
+      "explain": "Pruning requires a predicate the planner can map onto partition boundaries. A range on the raw column does that; an arbitrary formatting function does not."
+    },
+    {
+      "q": "A join produces 40 million output rows from 5 million events and 200 thousand user-plan rows, and totals are inflated. What is the likely cause and fix?",
+      "options": [
+        "The user-plan table has several rows per user (fan-out); reduce it to one row per user with a window function before joining",
+        "The warehouse cluster is too small and dropped rows, so it needs scaling up",
+        "The events table should be clustered by user_id",
+        "The join should be a LEFT JOIN instead of an INNER JOIN"
+      ],
+      "answer": 0,
+      "explain": "Output far exceeding both inputs is the signature of a many-to-many or one-to-many join on a non-unique key. Deduplicating the dimension side fixes both the row count and the totals. Cluster keys and join type do not change the multiplicity."
+    },
+    {
+      "q": "A query profile shows one worker taking ten times longer than the others during a join on `customer_id`, and 15% of events have a NULL `customer_id`. What is happening?",
+      "options": [
+        "Skew: all rows with the NULL key are routed to one worker; filter or separate the NULL rows before the join",
+        "The NULL rows are being duplicated by the join",
+        "The events table lacks a partition filter",
+        "The warehouse needs more storage capacity"
+      ],
+      "answer": 0,
+      "explain": "Shuffling by key sends every row with the same key to the same worker; a hot key such as NULL or a default value concentrates work. Handling those rows separately removes the bottleneck."
+    },
+    {
+      "q": "An executive dashboard runs a year-long aggregation over the raw event table on every refresh, costing more than any other workload. What is the best fix?",
+      "options": [
+        "Build a small daily aggregate table in the transformation layer with the metric's single definition and point the dashboard at it",
+        "Increase the cluster size so the query finishes faster",
+        "Add more clustering keys to the raw table",
+        "Reduce the dashboard's refresh frequency to once a day"
+      ],
+      "answer": 0,
+      "explain": "Precomputing turns a terabyte scan into a kilobyte read and keeps the metric definition in one place. Bigger clusters and clustering keys still scan the raw data; a slower refresh reduces but does not remove the waste."
+    },
+    {
+      "q": "Which set of controls best prevents a single ad hoc query from consuming a month's warehouse budget?",
+      "options": [
+        "Per-query byte caps or statement timeouts, workload isolation for ad hoc use, and monitoring of top queries by cost",
+        "Requiring all analysts to use SELECT * so queries are consistent",
+        "Disabling partition pruning to make costs predictable",
+        "Running all queries on the largest cluster so they finish quickly"
+      ],
+      "answer": 0,
+      "explain": "Limits bound the damage, isolation keeps it from affecting others, and monitoring catches patterns. The other options increase cost or remove the mechanisms that reduce it."
+    }
+  ]
+}

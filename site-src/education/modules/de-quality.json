@@ -1,0 +1,184 @@
+{
+  "id": "de-quality",
+  "minutes": 30,
+  "intro": "A pipeline that runs green and loads wrong numbers is worse than one that fails, because nobody looks at it. Data quality is the practice of making wrongness visible: checks that assert what must be true of a table, run every time it changes, that stop bad data at the door instead of letting it reach a dashboard or a model. It also means agreeing with producers what the data will look like, so that a renamed column upstream is a contract violation caught in their CI, not a silent NULL in your report a week later. This module covers the dimensions of quality worth checking, where to put checks, how to write them so they are useful rather than noisy, data contracts, and what to do when a check fails.",
+  "objectives": [
+    "Name the quality dimensions (freshness, volume, schema, uniqueness, completeness, distribution, referential integrity) and choose checks for each",
+    "Place checks at ingestion, after transformation and before publication, with the right severity",
+    "Write checks that are specific and stable, and quarantine rather than drop bad rows",
+    "Define and enforce a data contract between a producer and a consumer",
+    "Handle failures: block, alert with context, root-cause, and turn incidents into new checks"
+  ],
+  "sections": [
+    {
+      "heading": "What can be wrong with a table",
+      "blocks": [
+        {"type": "p", "text": "Data problems cluster into a handful of dimensions, and each has a cheap check. **Freshness**: the newest row is older than expected. **Volume**: far fewer or more rows than usual for the period. **Schema**: a column missing, renamed or of a new type. **Uniqueness**: duplicate keys. **Completeness**: NULLs where values are required. **Distribution**: values outside a plausible range, a category that never appeared before, a mean that jumped. **Referential integrity**: keys pointing at rows that do not exist. Most incidents are one of these; a table with a check for each rarely surprises anyone."},
+        {"type": "table", "headers": ["Dimension", "Example check", "Typical cause when it fails"], "rows": [
+          ["Freshness", "max(loaded_at) within 6 hours", "Stuck loader, upstream outage"],
+          ["Volume", "row count within 30% of same weekday last week", "Partial load, duplicate load, source change"],
+          ["Schema", "columns and types match the contract", "Upstream migration"],
+          ["Uniqueness", "order_id unique", "Retry without idempotency, join fan-out"],
+          ["Completeness", "customer_id not null", "New code path forgetting a field"],
+          ["Distribution", "amount between 0 and 50,000; status in the known set", "Currency change, new enum value, unit error"],
+          ["Referential", "every customer_id exists in dim_customers", "Dimension load lagging the fact"]
+        ]},
+        {"type": "callout", "kind": "note", "text": "The dimensions map onto the modelling and pipeline rules from earlier modules: grain (uniqueness), SCD invariants (one current row per key), idempotency (volume does not double), event-time partitioning (freshness by event, not by load)."}
+      ]
+    },
+    {
+      "heading": "Where checks live",
+      "blocks": [
+        {"type": "p", "text": "Checks belong at three points. **At ingestion**, on raw or bronze data: schema and basic validity, to catch upstream changes before they spread; bad rows are quarantined with a reason, not dropped. **After transformation**, on every model: the dbt tests from the previous module — uniqueness, nullability, accepted values, relationships, and business rules as singular tests. **Before publication**, on the marts that dashboards and downstream systems consume: freshness, volume and distribution checks that gate the publish step. The severity differs: an ingestion schema change and a mart uniqueness failure should block; a distribution drift might warn and open a ticket."},
+        {"type": "code", "lang": "python", "caption": "Ingestion-time checks with a quarantine: rows that fail go to a side table with the failing rule, and the run fails only if the reject rate is unreasonable.", "code": "import polars as pl\n\nMAX_REJECT_RATE = 0.01\n\n\ndef check_and_split(df: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:\n    rules = {\n        \"order_id_null\":   pl.col(\"order_id\").is_null(),\n        \"amount_negative\": pl.col(\"amount\") < 0,\n        \"amount_huge\":     pl.col(\"amount\") > 50_000,\n        \"status_unknown\":  ~pl.col(\"status\").is_in([\"placed\", \"paid\", \"shipped\", \"refunded\"]),\n        \"future_date\":     pl.col(\"ordered_at\") > pl.lit(pl.datetime(2100, 1, 1)),\n    }\n    tagged = df.with_columns(\n        pl.concat_list([pl.when(expr).then(pl.lit(name)).otherwise(None) for name, expr in rules.items()])\n          .list.drop_nulls().alias(\"failed_rules\")\n    )\n    good = tagged.filter(pl.col(\"failed_rules\").list.len() == 0).drop(\"failed_rules\")\n    bad = tagged.filter(pl.col(\"failed_rules\").list.len() > 0)\n    rate = bad.height / max(df.height, 1)\n    if rate > MAX_REJECT_RATE:\n        raise RuntimeError(f\"reject rate {rate:.2%} exceeds {MAX_REJECT_RATE:.0%}; not loading\")\n    return good, bad     # caller writes `bad` to orders_quarantine with run id and timestamp"},
+        {"type": "p", "text": "Quarantine matters because dropping rows hides the problem and failing the whole load on one bad row makes the pipeline brittle. A reject-rate threshold separates \"a few malformed rows, load and report\" from \"something upstream broke, stop\". The quarantine table gets its own freshness and volume checks; a quarantine that grows quietly is a problem in disguise."}
+      ]
+    },
+    {
+      "heading": "Writing checks that stay useful",
+      "blocks": [
+        {"type": "p", "text": "A check that fires every Monday because Monday volume is always lower gets muted, and then it never catches anything. Specific, stable checks compare like with like: volume against the same weekday over recent weeks, not against yesterday; freshness against the source's actual delivery schedule; distributions with tolerances derived from history rather than guessed. Anomaly-based checks (learned baselines) help for high-cardinality metrics, but a handful of explicit assertions written by someone who understands the data catch more, with fewer false alarms."},
+        {"type": "code", "lang": "sql", "caption": "A volume check that respects weekly seasonality, written as a singular dbt test (it must return zero rows).", "code": "-- tests/assert_fct_orders_volume_plausible.sql\nwith daily as (\n    select order_date, count(*) as n\n    from {{ ref('fct_orders') }}\n    where order_date >= current_date - 35\n    group by 1\n),\nbaseline as (\n    select\n        order_date,\n        n,\n        avg(n) over (partition by extract(dow from order_date)\n                     order by order_date rows between 4 preceding and 1 preceding) as same_weekday_avg\n    from daily\n)\nselect *\nfrom baseline\nwhere order_date = current_date - 1\n  and same_weekday_avg is not null\n  and (n < 0.7 * same_weekday_avg or n > 1.5 * same_weekday_avg)"},
+        {"type": "list", "items": [
+          "Every check has an owner and a runbook line: what it means, first thing to look at.",
+          "Severity is explicit: `error` blocks the build and pages; `warn` records and notifies asynchronously.",
+          "Checks are versioned with the models they protect and reviewed in the same pull request.",
+          "Thresholds are numbers in config with a comment explaining where they came from.",
+          "A check that never fails in six months and could not plausibly fail is a candidate for removal; one that fails weekly is either catching real issues or needs tuning — decide which."
+        ]}
+      ]
+    },
+    {
+      "heading": "Data contracts",
+      "blocks": [
+        {"type": "p", "text": "Most quality incidents originate upstream: an application team renames a field, changes a type, or stops populating a column, and the first sign is a broken report days later. A **data contract** makes the interface explicit: the producer publishes a schema (names, types, nullability, semantics, allowed values), a delivery expectation (frequency, freshness), and a versioning policy; the consumer builds against it; and both sides enforce it in CI — the producer's tests fail if their output no longer matches the contract, and the consumer's ingestion checks fail if the received data does not. Contracts turn a surprise into a pull request conversation."},
+        {"type": "code", "lang": "yaml", "caption": "A contract for the orders feed. Schema, semantics, delivery and change policy, in a file both teams version.", "code": "dataset: shop.orders\nowner: shop-backend@acme.example\nversion: 2\nschema:\n  - name: order_id\n    type: integer\n    nullable: false\n    unique: true\n    description: Natural key from the shop database.\n  - name: customer_id\n    type: integer\n    nullable: false\n  - name: ordered_at\n    type: timestamp\n    nullable: false\n    description: Order creation time, UTC.\n  - name: status\n    type: string\n    nullable: false\n    enum: [placed, paid, shipped, refunded, cancelled]\n  - name: amount_cents\n    type: integer\n    nullable: false\n    description: Order total in minor units; never negative.\ndelivery:\n  frequency: every 15 minutes\n  freshness_sla: 1 hour\n  partition: ordered_at (date)\nchanges:\n  additive: allowed without version bump (new nullable columns)\n  breaking: requires version bump and 30 days notice (rename, type change, removal, new enum value)"},
+        {"type": "p", "text": "Enforce the contract mechanically. The producer generates the schema from their code and diffs it against the contract in CI. The consumer's ingestion step validates incoming data against the same file (the pydantic models from the Python module are one way; a schema registry is another for streaming). When a breaking change is needed, the producer publishes version 2 alongside version 1 for the notice period, exactly like an API."}
+      ]
+    },
+    {
+      "heading": "When a check fails",
+      "blocks": [
+        {"type": "p", "text": "A failing check is an incident with a small blast radius, and the response follows the SRE track's shape. **Block** the affected data from reaching consumers: `dbt build` skips dependents; a publish gate holds the mart; a dashboard shows its last good version with a banner. **Alert** with context: table, check, observed versus expected value, the run, a link to the data. **Root-cause** from the top of the lineage down: was the source late, did a load duplicate, did a schema change. **Fix and rerun** with the idempotent backfill. **Record** it, and add the check that would have caught it earlier if one did not exist. A short log of quality incidents, with time to detect and time to fix, is the quality program's own dashboard."},
+        {"type": "callout", "kind": "tip", "text": "Show the freshness and the last check status on the dashboard itself. Consumers who can see \"data as of 06:12, all checks passed\" trust the numbers; consumers who cannot will build their own spreadsheet."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Guard a pipeline end to end",
+    "steps": [
+      "Add the ingestion `check_and_split` step to the batch pipeline from earlier modules, writing rejects to an `orders_quarantine` table with the run id. Feed it a file with three bad rows and confirm they land in quarantine while the rest loads.",
+      "Raise the bad-row count above 1% and confirm the run fails with a clear message before loading anything.",
+      "In the dbt project, add the seasonal volume singular test and the standard column tests. Load a duplicated day of orders and watch `dbt build` fail the mart and skip its dependents.",
+      "Write the orders data contract as YAML. Write a ten-line Python script that validates a Parquet file's schema against it (names, types, nullability) and run it in the ingestion step.",
+      "Simulate a breaking change (rename `amount_cents` to `total_cents` in the source) and confirm the contract check fails at ingestion with the column named in the error.",
+      "Add freshness and volume checks on the quarantine table itself.",
+      "Write a one-page runbook entry for the volume check: meaning, first three things to look at, how to rerun."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Seven dimensions: freshness, volume, schema, uniqueness, completeness, distribution, referential integrity",
+      "Checks at ingestion (quarantine, reject-rate threshold), after transformation (dbt tests), before publication (gates)",
+      "Compare like with like: same weekday baselines, source delivery schedules, historical tolerances",
+      "Every check: owner, severity, runbook line, versioned with the model",
+      "Data contracts: schema, semantics, delivery, change policy; enforced in both producer and consumer CI",
+      "On failure: block, alert with context, root-cause down the lineage, fix and backfill, add the missing check"
+    ],
+    "groups": [
+      {"title": "Standard checks", "items": [
+        {"syntax": "max(loaded_at) > now() - interval '6 hours'", "desc": "Freshness"},
+        {"syntax": "count(*) vs avg of same weekday, last 4 weeks, ±30%", "desc": "Volume with seasonality"},
+        {"syntax": "columns/types == contract", "desc": "Schema"},
+        {"syntax": "unique, not_null, accepted_values, relationships", "desc": "dbt generic tests"},
+        {"syntax": "singular test returning zero rows", "desc": "Business rules"},
+        {"syntax": "dbt_utils.accepted_range / expression_is_true", "desc": "Distribution bounds"}
+      ]},
+      {"title": "Ingestion and quarantine", "items": [
+        {"syntax": "rules = {name: expr}; failed_rules list per row", "desc": "Tag rows with every failing rule"},
+        {"syntax": "quarantine table: row, failed_rules, run_id, ts", "desc": "Never drop silently"},
+        {"syntax": "fail run if reject_rate > threshold", "desc": "Few bad rows load; a broken source stops"},
+        {"syntax": "checks on the quarantine table too", "desc": "A growing quarantine is an incident"}
+      ]},
+      {"title": "Contracts", "items": [
+        {"syntax": "schema: name, type, nullable, unique, enum, description", "desc": "The interface"},
+        {"syntax": "delivery: frequency, freshness_sla, partition", "desc": "The service level"},
+        {"syntax": "changes: additive allowed; breaking = version bump + notice", "desc": "Evolution policy"},
+        {"syntax": "producer CI diffs output schema vs contract", "desc": "Catch it before it ships"},
+        {"syntax": "consumer validates on ingest (pydantic / schema registry)", "desc": "Catch it before it spreads"}
+      ]},
+      {"title": "Failure handling", "items": [
+        {"syntax": "dbt build skips dependents on test failure", "desc": "Block by default"},
+        {"syntax": "alert: table, check, observed vs expected, run, link", "desc": "Context, not just red"},
+        {"syntax": "root-cause top-down through lineage", "desc": "Source late? Load duplicated? Schema changed?"},
+        {"syntax": "fix, backfill idempotently, add the missing check", "desc": "Close the loop"},
+        {"syntax": "freshness + check status on the dashboard", "desc": "Visible trust"}
+      ]}
+    ],
+    "pitfalls": [
+      "Volume checks against yesterday, firing every Monday until someone mutes them.",
+      "Dropping bad rows silently instead of quarantining them with a reason.",
+      "Failing the whole load on one malformed row, making the pipeline too brittle to keep.",
+      "Checks with no owner or runbook, so a failure is a mystery to whoever is on call.",
+      "Discovering upstream schema changes from a broken dashboard instead of a contract check in the producer's CI.",
+      "Publishing marts with a separate test step that runs after consumers have already read them."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A nightly load's row-count check compares today's count to yesterday's and fails every Monday. What is the right fix?",
+      "options": [
+        "Compare against the average of the same weekday over recent weeks, with a tolerance derived from history",
+        "Mute the check on Mondays",
+        "Widen the tolerance to ±90% so it never fails",
+        "Remove the volume check, since freshness checks cover the same risk"
+      ],
+      "answer": 0,
+      "explain": "The check is comparing unlike periods. A seasonal baseline keeps the check meaningful; muting or widening it destroys its value, and freshness does not detect a partial or duplicated load."
+    },
+    {
+      "q": "An ingestion step drops rows with a negative amount. Three months later, finance asks why refunds are missing. What should the step have done?",
+      "options": [
+        "Quarantined the rows with the failing rule recorded, so the pattern was visible and the data recoverable",
+        "Loaded the rows anyway and let the dashboard handle negatives",
+        "Failed the entire load on the first negative amount",
+        "Converted negative amounts to zero to keep the data clean"
+      ],
+      "answer": 0,
+      "explain": "Silent drops hide problems; quarantine keeps the data and makes the reject rate observable. Failing on one row is brittle, and altering values is data corruption."
+    },
+    {
+      "q": "Which practice turns an upstream column rename into a failed pull request in the producer's repository rather than a broken report?",
+      "options": [
+        "A data contract whose schema the producer's CI diffs against their generated output",
+        "A freshness check on the consumer's staging table",
+        "A weekly manual review of the source schema by the data team",
+        "Storing raw data so it can be reprocessed later"
+      ],
+      "answer": 0,
+      "explain": "Enforcing the contract where the change is made stops it before delivery. Freshness does not see renames; manual reviews are late; raw storage helps recovery, not prevention."
+    },
+    {
+      "q": "A uniqueness test on `fct_orders` fails in the production build. What should happen next?",
+      "options": [
+        "Dependent models are skipped, an alert with the table, test and observed duplicates reaches the owner, and root-causing starts from the source down the lineage",
+        "The build continues so dashboards stay fresh, and the duplicates are investigated later",
+        "The test is set to warn so it does not block again",
+        "The duplicates are removed by an automatic DISTINCT in the model"
+      ],
+      "answer": 0,
+      "explain": "Bad data should not propagate. Blocking dependents, alerting with context and working down the lineage is the response; continuing, downgrading or auto-deduplicating hides the cause."
+    },
+    {
+      "q": "What distinguishes a useful data quality check from a noisy one?",
+      "options": [
+        "It compares like with like, has an explicit severity, owner and runbook line, and fails only when something genuinely changed",
+        "It runs as often as possible on as many columns as possible",
+        "It uses machine-learned baselines rather than explicit thresholds",
+        "It never fails, proving the data is clean"
+      ],
+      "answer": 0,
+      "explain": "Specificity, ownership and clear meaning are what keep checks acted upon. Volume of checks and learned baselines do not guarantee relevance, and a check that cannot fail catches nothing."
+    }
+  ]
+}

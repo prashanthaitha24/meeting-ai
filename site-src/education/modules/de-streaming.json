@@ -1,0 +1,183 @@
+{
+  "id": "de-streaming",
+  "minutes": 40,
+  "intro": "Batch answers questions about yesterday. Some questions cannot wait: is this payment fraudulent, is this sensor failing, which product just sold out, what is the user doing right now. Streaming processes events as they happen, and Apache Kafka is the log at the centre of most streaming architectures — a durable, ordered, replayable record of events that producers append to and any number of consumers read at their own pace. This module explains the log model and why it matters, Kafka's topics, partitions and consumer groups, the delivery guarantees you can actually get, schemas, and the stream processing patterns — windows, joins, state — that turn events into answers. Batch will not go away; the goal is knowing when streaming is worth its complexity.",
+  "objectives": [
+    "Explain the log abstraction: append-only, ordered per partition, retained, replayable",
+    "Design topics, keys and partitions for ordering and parallelism",
+    "Choose and implement delivery guarantees: at-most-once, at-least-once, exactly-once semantics",
+    "Enforce schemas with a registry and evolve them compatibly",
+    "Build stream processing with windows, event time and watermarks, and know when batch is the better answer"
+  ],
+  "sections": [
+    {
+      "heading": "The log",
+      "blocks": [
+        {"type": "p", "text": "Kafka is not a queue that deletes messages once read. It is a **log**: an append-only sequence of records, each with an offset, retained for a configured time or size regardless of who has read it. Producers append; consumers read from any offset and track their own position. Several consumers can read the same data independently, a new consumer can start from the beginning and replay history, and a crashed consumer resumes from where it left off. This decoupling — producers do not know or wait for consumers — is why a log works as the backbone between systems that evolve separately."},
+        {"type": "p", "text": "A **topic** is a named log, split into **partitions** for parallelism and scale. Within a partition, records are strictly ordered; across partitions there is no ordering guarantee. Records have an optional **key**; records with the same key always go to the same partition, so all events for one customer, one order, one device arrive in order to whoever reads that partition. Choosing the key is choosing what must be ordered together, and it decides how evenly load spreads: a key with a few hot values (country) skews partitions; a key with many values (customer id) balances them."},
+        {"type": "code", "lang": "bash", "caption": "Creating a topic with enough partitions to grow into, seven days of retention, and a quick produce and consume to see offsets.", "code": "kafka-topics.sh --bootstrap-server broker:9092 --create --topic orders \\\n  --partitions 12 --replication-factor 3 \\\n  --config retention.ms=604800000 --config min.insync.replicas=2\n\n# produce keyed records (key:value with a separator)\nprintf 'cust-1042:{\"order_id\":9001,\"amount\":42.5}\\ncust-77:{\"order_id\":9002,\"amount\":9.99}\\n' \\\n  | kafka-console-producer.sh --bootstrap-server broker:9092 --topic orders \\\n      --property parse.key=true --property key.separator=:\n\n# consume from the beginning, showing partition and offset\nkafka-console-consumer.sh --bootstrap-server broker:9092 --topic orders --from-beginning \\\n  --property print.partition=true --property print.offset=true --property print.key=true --max-messages 2"},
+        {"type": "callout", "kind": "note", "text": "Partition count is hard to change well later (keys remap), so choose for growth: more partitions than current consumers, bounded by broker limits and the cost of many small partitions. Twelve to fifty is common for a busy topic; thousands is a mistake."}
+      ]
+    },
+    {
+      "heading": "Consumers, groups and offsets",
+      "blocks": [
+        {"type": "p", "text": "A **consumer group** is a set of consumers sharing a group id; Kafka assigns each partition of the subscribed topics to exactly one consumer in the group, so the group processes the topic in parallel with each partition read once. Add a consumer and partitions rebalance; a consumer dies and its partitions move to survivors. Each group tracks its **committed offset** per partition: the position it will resume from after a restart. Independent groups (the fraud service and the analytics loader) each maintain their own offsets over the same topic, reading at their own speed."},
+        {"type": "code", "lang": "python", "caption": "A consumer that commits offsets only after processing succeeds, giving at-least-once delivery. The handler must therefore be idempotent.", "code": "from confluent_kafka import Consumer, KafkaException\n\nconsumer = Consumer({\n    \"bootstrap.servers\": \"broker:9092\",\n    \"group.id\": \"orders-loader\",\n    \"enable.auto.commit\": False,          # we commit explicitly, after work is done\n    \"auto.offset.reset\": \"earliest\",      # a brand-new group starts from the beginning\n    \"max.poll.interval.ms\": 300000,\n})\nconsumer.subscribe([\"orders\"])\n\ntry:\n    while True:\n        msg = consumer.poll(1.0)\n        if msg is None:\n            continue\n        if msg.error():\n            raise KafkaException(msg.error())\n        process(msg.key(), msg.value())        # idempotent: upsert by order_id\n        consumer.commit(message=msg, asynchronous=False)   # commit this offset + 1\nfinally:\n    consumer.close()"},
+        {"type": "p", "text": "**Consumer lag** — committed offset versus the latest offset per partition — is the health metric of streaming: growing lag means consumers cannot keep up, are stuck, or have died. Monitor it per group and alert on it. Slow processing inside `poll` loops causes the broker to consider the consumer dead and rebalance, which makes lag worse; keep per-record work fast, batch the slow parts, and raise `max.poll.interval.ms` only with a reason."}
+      ]
+    },
+    {
+      "heading": "Delivery guarantees, honestly",
+      "blocks": [
+        {"type": "p", "text": "There are three achievable semantics. **At-most-once**: commit before processing; a crash loses the in-flight record; acceptable for metrics where a gap is tolerable. **At-least-once**: commit after processing; a crash reprocesses the record; the default for anything that matters, and it requires idempotent processing (upsert by key, deduplicate by event id) so replays are harmless. **Exactly-once semantics** (EOS): Kafka's idempotent producer prevents duplicate appends from producer retries, and transactions let a consume-transform-produce loop commit its output records and its input offsets atomically, so a Kafka-to-Kafka pipeline neither loses nor duplicates. EOS stops at Kafka's edge: writing to an external database exactly once still needs idempotent writes or a transactional sink."},
+        {"type": "table", "headers": ["Semantics", "Mechanism", "Cost and limits"], "rows": [
+          ["At-most-once", "Commit offset before processing", "Cheap; loses records on crash"],
+          ["At-least-once", "Commit after processing; idempotent handler", "Duplicates on crash, absorbed by idempotency"],
+          ["Exactly-once (Kafka to Kafka)", "Idempotent producer + transactions (`isolation.level=read_committed`)", "Higher latency; only within Kafka"],
+          ["Exactly-once to external sinks", "Idempotent writes keyed on event id, or two-phase commit sinks", "Design work in the sink"]
+        ]},
+        {"type": "code", "lang": "python", "caption": "Producer settings for durability and no duplicate appends: acks from all in-sync replicas, idempotence on, and a delivery callback so failures are not silent.", "code": "from confluent_kafka import Producer\n\nproducer = Producer({\n    \"bootstrap.servers\": \"broker:9092\",\n    \"acks\": \"all\",                 # leader + in-sync replicas must persist it\n    \"enable.idempotence\": True,    # retries cannot create duplicates\n    \"linger.ms\": 20,               # small batching for throughput\n    \"compression.type\": \"zstd\",\n})\n\n\ndef on_delivery(err, msg):\n    if err is not None:\n        log_failed_event(msg.key(), err)   # dead-letter or alert; never ignore\n\n\nproducer.produce(\"orders\", key=\"cust-1042\", value=payload_bytes, on_delivery=on_delivery)\nproducer.flush(timeout=10)"},
+        {"type": "callout", "kind": "warning", "text": "The phrase \"exactly-once\" on a product page rarely means what people hope. Ask where the guarantee ends. Nearly every real pipeline is at-least-once plus idempotent sinks, and that is fine when designed on purpose."}
+      ]
+    },
+    {
+      "heading": "Schemas and evolution",
+      "blocks": [
+        {"type": "p", "text": "Bytes on a topic have no schema unless you give them one, and a producer that changes its JSON shape breaks every consumer at once. A **schema registry** stores versioned schemas (Avro, Protobuf or JSON Schema) per topic; producers serialise with a registered schema id embedded in the record, consumers fetch the schema by id and deserialise correctly even across versions. The registry enforces a **compatibility mode**: backward compatibility (new schema can read old data: add optional fields, remove fields with defaults) is the usual choice so consumers can upgrade after producers. This is the data contract from the quality module, enforced at the moment of writing."},
+        {"type": "code", "lang": "json", "caption": "An Avro schema for order events. Adding `channel` with a default is a backward-compatible change; renaming `amount` is not.", "code": "{\n  \"type\": \"record\",\n  \"name\": \"OrderPlaced\",\n  \"namespace\": \"acme.shop\",\n  \"fields\": [\n    {\"name\": \"order_id\", \"type\": \"long\"},\n    {\"name\": \"customer_id\", \"type\": \"long\"},\n    {\"name\": \"ordered_at\", \"type\": {\"type\": \"long\", \"logicalType\": \"timestamp-millis\"}},\n    {\"name\": \"amount\", \"type\": {\"type\": \"bytes\", \"logicalType\": \"decimal\", \"precision\": 12, \"scale\": 2}},\n    {\"name\": \"status\", \"type\": {\"type\": \"enum\", \"name\": \"Status\", \"symbols\": [\"PLACED\", \"PAID\", \"SHIPPED\", \"REFUNDED\"]}},\n    {\"name\": \"channel\", \"type\": [\"null\", \"string\"], \"default\": null}\n  ]\n}"},
+        {"type": "p", "text": "Design events as facts about what happened (`OrderPlaced`, `PaymentCaptured`), carrying the identifiers and values a consumer needs, with a unique event id and the event time as a field. Include a version or rely on the registry's; never put a secret or a full card number in an event, because a log retains it for the retention period across every replica and every consumer's copy."}
+      ]
+    },
+    {
+      "heading": "Stream processing: windows, time and state",
+      "blocks": [
+        {"type": "p", "text": "Reading one record at a time is easy; most useful computations involve many: revenue per minute, distinct users per hour, joining a click stream with a purchase stream, detecting three failed logins in five minutes. Stream processors (Kafka Streams, Apache Flink, Spark Structured Streaming) manage the **state** these need and the hard problem behind them: **time**. Events carry an **event time** (when it happened) and arrive at a **processing time** (when you saw it), and they arrive late and out of order. Windows must be computed on event time, which means deciding how long to wait for stragglers: a **watermark** declares \"I assume no events older than T will still arrive\", closes windows before T, and routes anything later to a side output or a correction."},
+        {"type": "code", "lang": "python", "caption": "A tumbling window on event time with a watermark, in Spark Structured Streaming: revenue per minute per country, tolerating ten minutes of lateness, written with checkpoints so it restarts exactly where it stopped.", "code": "from pyspark.sql import SparkSession, functions as F\nfrom pyspark.sql.types import StructType, StructField, LongType, StringType, DoubleType, TimestampType\n\nspark = SparkSession.builder.appName(\"revenue_per_minute\").getOrCreate()\n\nschema = StructType([\n    StructField(\"order_id\", LongType()), StructField(\"country\", StringType()),\n    StructField(\"amount\", DoubleType()), StructField(\"ordered_at\", TimestampType()),\n])\n\norders = (\n    spark.readStream.format(\"kafka\")\n    .option(\"kafka.bootstrap.servers\", \"broker:9092\")\n    .option(\"subscribe\", \"orders\")\n    .option(\"startingOffsets\", \"latest\")\n    .load()\n    .select(F.from_json(F.col(\"value\").cast(\"string\"), schema).alias(\"o\")).select(\"o.*\")\n)\n\nper_minute = (\n    orders\n    .withWatermark(\"ordered_at\", \"10 minutes\")                       # tolerate 10 min of lateness\n    .groupBy(F.window(\"ordered_at\", \"1 minute\"), \"country\")\n    .agg(F.sum(\"amount\").alias(\"revenue\"), F.count(\"*\").alias(\"orders\"))\n)\n\nquery = (\n    per_minute.writeStream\n    .outputMode(\"append\")                                           # emit a window once it is final\n    .format(\"parquet\")\n    .option(\"path\", \"s3://acme-lake/gold/revenue_per_minute/\")\n    .option(\"checkpointLocation\", \"s3://acme-lake/checkpoints/revenue_per_minute/\")\n    .trigger(processingTime=\"30 seconds\")\n    .start()\n)\nquery.awaitTermination()"},
+        {"type": "p", "text": "Window types: **tumbling** (fixed, non-overlapping: per minute), **sliding** (overlapping: last five minutes, every minute) and **session** (gap-based: a user's visit). Stream-stream joins need state bounded by time (join clicks to purchases within an hour); stream-table joins enrich events with a slowly changing reference. All of it needs **checkpointing** so state and offsets survive restarts, and it needs the same idempotent sinks as batch, because a restart replays from the last checkpoint."},
+        {"type": "callout", "kind": "tip", "text": "Reach for streaming when the value of an answer decays in minutes and the consumer can act on it. If the dashboard is looked at once a day, a fifteen-minute micro-batch from the same topic is simpler to operate and gives the same business result."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "A keyed topic, a lagging consumer and a windowed aggregate",
+    "steps": [
+      "Start a single-broker Kafka locally (the official Docker image in KRaft mode is enough). Create the `orders` topic with six partitions.",
+      "Write a producer with `acks=all` and idempotence that sends 10,000 keyed order events with a timestamp field, with 30% of them arriving up to five minutes late (set `ordered_at` earlier than send time).",
+      "Write the at-least-once consumer from the lesson that upserts into a local SQLite or Postgres table by `order_id`. Kill it halfway, restart, and confirm the table has exactly 10,000 rows.",
+      "Start a second consumer in the same group and watch partitions rebalance in the logs; then start a consumer with a different group id and confirm it reads from the beginning independently.",
+      "Slow the consumer with a `sleep` and watch lag grow with `kafka-consumer-groups.sh --describe --group orders-loader`. Remove the sleep and watch it recover.",
+      "Register the Avro schema in a local schema registry (or validate with a JSON Schema in code) and confirm a producer sending a record with a renamed field is rejected.",
+      "Run the Structured Streaming per-minute aggregation against the topic with a 10-minute watermark. Compare the windows it emits with a batch `GROUP BY minute` over the same data and explain any differences from late events."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Kafka is a retained, replayable log; consumers track their own offsets; ordering only within a partition",
+      "The key decides ordering and load balance; partitions decide parallelism and are hard to change",
+      "At-least-once plus idempotent sinks is the honest default; exactly-once holds only inside Kafka with transactions",
+      "Commit after processing; monitor consumer lag per group; keep poll loops fast",
+      "Schemas in a registry with backward compatibility are the streaming form of data contracts",
+      "Windows on event time with watermarks; state and offsets in checkpoints; idempotent outputs"
+    ],
+    "groups": [
+      {"title": "Topics and CLI", "items": [
+        {"syntax": "kafka-topics.sh --create --partitions N --replication-factor 3", "desc": "Create with room to grow"},
+        {"syntax": "retention.ms / retention.bytes", "desc": "How long the log keeps records"},
+        {"syntax": "min.insync.replicas=2 + acks=all", "desc": "Durable writes"},
+        {"syntax": "kafka-consumer-groups.sh --describe --group G", "desc": "Lag per partition"},
+        {"syntax": "--from-beginning / auto.offset.reset=earliest", "desc": "Replay from the start"},
+        {"syntax": "cleanup.policy=compact", "desc": "Keep latest value per key (changelog topics)"}
+      ]},
+      {"title": "Producer and consumer", "items": [
+        {"syntax": "enable.idempotence=true, acks=all", "desc": "No duplicate appends from retries"},
+        {"syntax": "linger.ms, batch.size, compression.type=zstd", "desc": "Throughput levers"},
+        {"syntax": "on_delivery callback", "desc": "Never ignore failed sends"},
+        {"syntax": "enable.auto.commit=false; commit after process", "desc": "At-least-once"},
+        {"syntax": "group.id", "desc": "One partition per consumer within a group"},
+        {"syntax": "max.poll.interval.ms", "desc": "Slow handlers trigger rebalances"}
+      ]},
+      {"title": "Guarantees and schemas", "items": [
+        {"syntax": "commit before = at-most-once; after = at-least-once", "desc": "Choose deliberately"},
+        {"syntax": "transactional.id + isolation.level=read_committed", "desc": "Exactly-once within Kafka"},
+        {"syntax": "idempotent sink keyed on event id", "desc": "Exactly-once effect at external systems"},
+        {"syntax": "schema registry: Avro / Protobuf / JSON Schema", "desc": "Schema id in each record"},
+        {"syntax": "BACKWARD compatibility: add optional, remove with default", "desc": "Consumers upgrade after producers"},
+        {"syntax": "event = fact + ids + event_time + event_id", "desc": "Design of a good event"}
+      ]},
+      {"title": "Stream processing", "items": [
+        {"syntax": "withWatermark(ts, '10 minutes')", "desc": "How long to wait for late events"},
+        {"syntax": "window(ts, '1 minute') / ('5 minutes', '1 minute') / session_window", "desc": "Tumbling / sliding / session"},
+        {"syntax": "outputMode append | update | complete", "desc": "Emit final / changed / all windows"},
+        {"syntax": "checkpointLocation", "desc": "State + offsets for restart"},
+        {"syntax": "trigger(processingTime='30 seconds')", "desc": "Micro-batch cadence"},
+        {"syntax": "stream-stream join with time bounds", "desc": "State must be bounded"}
+      ]}
+    ],
+    "pitfalls": [
+      "Keying by a low-cardinality field (country) and skewing all traffic onto two partitions.",
+      "Auto-committing offsets before processing and losing records on every crash.",
+      "Believing 'exactly-once' extends to the database the consumer writes to.",
+      "Producing JSON with no schema, then breaking every consumer with a renamed field.",
+      "Windowing on processing time, so late events land in the wrong window or vanish.",
+      "Streaming for a report someone reads once a day."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A consumer must process every order event for a customer in the order they occurred. What guarantees that?",
+      "options": [
+        "Keying events by customer id, so all of a customer's events go to one partition, where order is preserved",
+        "Using a single consumer for the whole topic",
+        "Setting acks=all on the producer",
+        "Enabling exactly-once semantics on the consumer"
+      ],
+      "answer": 0,
+      "explain": "Ordering is guaranteed only within a partition, and the key determines the partition. A single consumer does not fix cross-partition ordering; acks and EOS concern durability and duplication, not order."
+    },
+    {
+      "q": "A consumer auto-commits offsets every five seconds and crashes just after committing but before writing the last batch to the database. What is the outcome?",
+      "options": [
+        "Those records are lost: this is at-most-once behaviour; commit after processing to get at-least-once",
+        "The records are processed twice after restart",
+        "Kafka replays the uncommitted records automatically",
+        "Nothing is lost because the broker retains the records"
+      ],
+      "answer": 0,
+      "explain": "Committing before the work completes means the resumed consumer starts after the unprocessed records. The broker still has them, but the group's offset has moved past them. Commit after success and make the handler idempotent."
+    },
+    {
+      "q": "A team enables Kafka transactions and read_committed isolation for a pipeline that consumes from one topic and writes to Postgres. They expect no duplicates in Postgres. What is wrong with that expectation?",
+      "options": [
+        "Kafka's exactly-once covers Kafka-to-Kafka; writes to an external database still need idempotent upserts or a transactional sink",
+        "Transactions only work with Avro-serialised records",
+        "read_committed prevents the consumer from seeing any records",
+        "Postgres does not support transactions"
+      ],
+      "answer": 0,
+      "explain": "The transactional guarantee spans the consumed offsets and produced records inside Kafka. An external write that succeeds just before a crash will be repeated on replay unless the sink is idempotent."
+    },
+    {
+      "q": "A producer team wants to rename the `amount` field to `total` in their Avro schema. The registry is in backward compatibility mode. What happens, and what is the compatible approach?",
+      "options": [
+        "The registration is rejected; add `total` as a new optional field with a default, migrate consumers, then remove `amount` in a later version",
+        "The rename is accepted and consumers adapt automatically",
+        "Consumers must be stopped while the rename is applied",
+        "The topic must be deleted and recreated with the new schema"
+      ],
+      "answer": 0,
+      "explain": "Renaming breaks readers of old data. Backward-compatible evolution adds fields with defaults and removes fields only when every reader can cope, in separate versions with a migration period."
+    },
+    {
+      "q": "A per-minute revenue window computed on processing time shows lower totals than the batch report for the same minutes. What is the most likely cause and fix?",
+      "options": [
+        "Late events were counted in the minute they arrived rather than the minute they occurred; window on event time with a watermark that tolerates the observed lateness",
+        "The batch report double counts refunds",
+        "The stream job's checkpoint directory is on slow storage",
+        "The topic has too few partitions for accurate aggregation"
+      ],
+      "answer": 0,
+      "explain": "Processing-time windows attribute events to when they were seen. Event-time windows with an appropriate watermark reproduce the batch semantics up to the lateness the watermark allows."
+    }
+  ]
+}

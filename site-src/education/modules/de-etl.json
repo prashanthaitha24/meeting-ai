@@ -1,0 +1,184 @@
+{
+  "id": "de-etl",
+  "minutes": 35,
+  "intro": "A batch pipeline is a promise: run me for a date and I will produce that date's data, correctly, every time, including the second time. Most pipeline pain — duplicated rows after a retry, a backfill that overwrote good data with stale data, late records that never arrived, a run that silently produced half a table — comes from pipelines that were written to run once and hoped for the best. This module is about designing batch pipelines that keep the promise: the ETL versus ELT choice, extraction patterns that scale, idempotent loads, late-arriving and changing data, backfills you can trust, and the operational shape that makes all of it routine.",
+  "objectives": [
+    "Choose between ETL and ELT and explain the trade-offs for a given stack",
+    "Extract data incrementally with watermarks, and know when a full extract is safer",
+    "Design idempotent loads with partition overwrite, upsert and atomic swaps",
+    "Handle late-arriving and updated records without double counting",
+    "Run backfills and reprocessing safely, and keep pipelines observable"
+  ],
+  "sections": [
+    {
+      "heading": "ETL, ELT and where transformation lives",
+      "blocks": [
+        {"type": "p", "text": "**ETL** transforms data in flight, between source and destination, in a processing engine (Spark, a Python job, a dedicated tool), and loads the finished shape. **ELT** loads raw data into the warehouse or lakehouse first and transforms it there, in SQL, using the destination's compute. Cheap, elastic warehouse compute and tools like dbt made ELT the default for analytics: raw data is preserved, transformations are versioned SQL, and the warehouse's optimiser does the heavy lifting. ETL remains right when the transformation needs code the warehouse cannot run (complex parsing, machine learning features, external enrichment), when data must be reduced before it lands (cost, privacy), or when the destination is not a query engine."},
+        {"type": "table", "headers": ["Question", "Favours ETL", "Favours ELT"], "rows": [
+          ["Where is compute cheap and elastic?", "Dedicated cluster", "The warehouse"],
+          ["Must raw data be preserved for replay?", "Store it anyway", "Yes, by design"],
+          ["Is the logic expressible in SQL?", "No: code, ML, parsing", "Yes"],
+          ["Must sensitive fields be removed before landing?", "Yes", "Land to a restricted zone, then mask"],
+          ["Who maintains transformations?", "Engineers in code", "Analysts and engineers in versioned SQL"]
+        ]},
+        {"type": "p", "text": "In practice most platforms are both: a thin extract-and-load layer that lands raw data faithfully, a SQL transformation layer for modelling, and code-based jobs for the few things SQL cannot do. The principle that matters more than the acronym is **load raw, transform explicitly**: keep the source's shape at the first hop, so every later step is reproducible."}
+      ]
+    },
+    {
+      "heading": "Extraction: incremental, with watermarks",
+      "blocks": [
+        {"type": "p", "text": "Pulling an entire table every night works until the table is large. **Incremental extraction** pulls only what changed since the last run, tracked by a **watermark**: the maximum `updated_at` (or id, or log position) seen in the previous successful run. Each run selects rows past the watermark, loads them, and advances the watermark only after the load commits. Three rules keep it honest: overlap the window slightly to catch rows with equal timestamps or clock skew (and deduplicate on load), store the watermark with the run's state rather than in someone's head, and choose a watermark column the source actually maintains — an `updated_at` that some code paths forget to set will lose rows silently."},
+        {"type": "code", "lang": "python", "caption": "Incremental extract with a persisted watermark and a small overlap. The watermark advances only after the load succeeds.", "code": "from datetime import datetime, timedelta, timezone\n\nOVERLAP = timedelta(minutes=5)\n\n\ndef extract_incremental(conn, state, table: str, ts_col: str = \"updated_at\"):\n    since = state.get_watermark(table) - OVERLAP          # re-read a little to be safe\n    now = datetime.now(timezone.utc)\n    rows = conn.execute(\n        f\"SELECT * FROM {table} WHERE {ts_col} > %s AND {ts_col} <= %s ORDER BY {ts_col}\",\n        (since, now),\n    ).fetchall()\n    return rows, now\n\n\ndef run(conn, state, loader):\n    rows, new_watermark = extract_incremental(conn, state, \"orders\")\n    loader.upsert(\"orders\", rows, key=\"order_id\")       # overlap rows collapse on the key\n    state.set_watermark(\"orders\", new_watermark)         # only after the upsert committed"},
+        {"type": "p", "text": "Some sources cannot be extracted incrementally: no reliable timestamp, hard deletes that leave no trace, or small reference tables where a full pull is trivial. For those, full extracts with a snapshot comparison are simpler and safer. For high-volume transactional sources the better answer is **change data capture** from the database log, which a later module covers; the watermark pattern is the workhorse for APIs and for tables that maintain their timestamps."},
+        {"type": "callout", "kind": "warning", "text": "Deletes are invisible to timestamp-based extraction. If the source hard-deletes rows, you need soft deletes upstream, a periodic full reconciliation, or log-based CDC. Assuming deletes do not matter is how a warehouse ends up reporting orders that no longer exist."}
+      ]
+    },
+    {
+      "heading": "Loading idempotently",
+      "blocks": [
+        {"type": "p", "text": "The load is where re-runs go wrong. Three patterns make a load **idempotent** — safe to repeat with the same result. **Partition overwrite**: the run computes one logical partition (a day, an hour) and replaces it atomically; a retry replaces it again with the same content. **Upsert** (merge) keyed on a natural key: rows that exist are updated, new ones inserted, and the overlap from the extract collapses. **Atomic swap**: build the new table under a temporary name, validate it, then swap names in one transaction so readers never see a partial state. Choose by grain: partition overwrite for event-like data with a time partition, upsert for entity-like data that changes, swap for full rebuilds of small-to-medium tables."},
+        {"type": "code", "lang": "sql", "caption": "Two idempotent loads: partition overwrite for events, and build-validate-swap for a full rebuild.", "code": "-- 1. partition overwrite: the whole day is replaced in one transaction\nBEGIN;\nDELETE FROM fact_events WHERE event_date = DATE '2026-03-01';\nINSERT INTO fact_events\nSELECT * FROM stage_events WHERE event_date = DATE '2026-03-01';\nCOMMIT;\n-- (warehouses: INSERT OVERWRITE PARTITION, or MERGE on a table format)\n\n-- 2. build, validate, swap: readers see the old table until the instant of the swap\nCREATE TABLE dim_product_new AS SELECT ... FROM stage_products;\n-- validation queries run here: row count within 10% of current, no NULL keys, keys unique\nBEGIN;\nALTER TABLE dim_product     RENAME TO dim_product_old;\nALTER TABLE dim_product_new RENAME TO dim_product;\nCOMMIT;\nDROP TABLE dim_product_old;"},
+        {"type": "p", "text": "Append-only loads are idempotent only if every row carries a unique id and the destination deduplicates, or if the pipeline records which batches were loaded and skips repeats. Plain `INSERT` of a batch with no key is the single most common source of duplicated data in warehouses; treat it as a bug in the design, not an operational risk to manage."}
+      ]
+    },
+    {
+      "heading": "Late, changed and out-of-order data",
+      "blocks": [
+        {"type": "p", "text": "Events arrive late: a mobile device syncs a day later, a partner sends yesterday's file this afternoon, a record is corrected a week after it was created. A pipeline that processes \"yesterday\" once and moves on will miss them. Two design choices handle this. Partition by **event time**, not arrival time, so a late event lands in the partition where it belongs; and **reprocess a trailing window** — recompute the last N days on every run, where N covers most lateness — so late arrivals are picked up automatically. Beyond the window, a manual backfill handles the rare very late record."},
+        {"type": "code", "lang": "python", "caption": "Trailing-window reprocessing: each daily run rebuilds the last three event-date partitions, which absorbs late data and corrections.", "code": "from datetime import date, timedelta\n\nLOOKBACK_DAYS = 3\n\n\ndef partitions_to_rebuild(run_date: date) -> list[date]:\n    return [run_date - timedelta(days=i) for i in range(LOOKBACK_DAYS)]\n\n\ndef daily(run_date: date, build_partition):\n    for day in partitions_to_rebuild(run_date):\n        build_partition(day)          # idempotent overwrite of that day's partition\n\n\n# run on 2026-03-04: rebuilds 03-04, 03-03, 03-02 from the raw layer\ndaily(date(2026, 3, 4), build_partition=lambda d: print(\"rebuilding\", d))"},
+        {"type": "p", "text": "Updates to existing records are the same problem with a different face: an order's status changes from `placed` to `paid`. For entity tables, upsert on the key. For fact tables that must not lose history, load status changes as new events and derive the current state with a window function, or maintain an accumulating snapshot as the modelling module described. Whichever you choose, write down how each table treats late and changed data; it is the first question anyone debugging a discrepancy will ask."}
+      ]
+    },
+    {
+      "heading": "Backfills, reprocessing and operations",
+      "blocks": [
+        {"type": "p", "text": "A **backfill** runs the pipeline for a range of past dates: after a bug fix, after a new column is added, when a new consumer needs history. Backfills are safe only if every step is idempotent and parameterised by logical date, which is why those properties were non-negotiable. Run backfills as a distinct operation with its own concurrency limit (they compete with the daily run for warehouse compute and source rate limits), from the raw layer rather than from the source system when possible, and validate a sample of rebuilt partitions against the previous version before dropping it."},
+        {"type": "list", "items": [
+          "**Logging and metrics per run**: rows extracted, loaded, rejected; duration; watermark before and after. A run that loads zero rows on a Tuesday should alert.",
+          "**Freshness checks**: the newest event time in each table versus now; the SLA is a number.",
+          "**Reconciliation**: periodic counts or sums compared with the source for a window; the only way to catch silent loss.",
+          "**Small, single-purpose steps**: extract, stage, transform, publish — each restartable, each with a clear input and output.",
+          "**Schema change handling**: new columns added automatically to raw; type or rename changes fail loudly with a message that names the column."
+        ]},
+        {"type": "callout", "kind": "tip", "text": "The pipeline you can trust is the one you can rerun in front of a stakeholder: `pipeline --day 2026-03-01` finishes, the numbers match yesterday's, and the run's log says exactly what happened. Build every pipeline so that demonstration is boring."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "A pipeline that survives retries, late data and a backfill",
+    "steps": [
+      "Create a source table `orders` in Postgres or DuckDB with `updated_at`, and a destination `fact_orders` partitioned (logically) by `order_date`. Seed a few hundred rows across five days.",
+      "Implement incremental extraction with a persisted watermark (a one-row state table) and a five-minute overlap. Run it twice in a row; the second run should extract only the overlap and load nothing new.",
+      "Implement the load as partition overwrite by `order_date`. Kill the process halfway through a run (raise an exception after the delete) and confirm that re-running produces the correct final state.",
+      "Insert a late order dated three days ago and update an existing order's status. Run the pipeline with a three-day lookback and confirm both are reflected without duplicates.",
+      "Introduce a deliberate bug in the transformation (wrong sign on refunds), run for a week of dates, fix it, and backfill the week. Compare row counts and sums before and after.",
+      "Add freshness and row-count checks that fail the run when the newest `order_date` is older than two days or a partition loads zero rows. Trigger each once.",
+      "Write the table's contract in a comment: partition key, how late data is handled, how updates are handled, how to backfill."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Load raw, transform explicitly; ELT for SQL-expressible analytics, ETL for code, reduction and non-query destinations",
+      "Incremental extraction with a persisted watermark, a small overlap and dedup on load; watermark advances after commit",
+      "Timestamp extraction cannot see hard deletes; reconcile or use CDC",
+      "Idempotent loads: partition overwrite, keyed upsert, or build-validate-swap; never bare appends",
+      "Partition by event time; reprocess a trailing window to absorb late and corrected data",
+      "Backfills are only safe for idempotent, date-parameterised steps; validate before dropping old data"
+    ],
+    "groups": [
+      {"title": "Extraction", "items": [
+        {"syntax": "WHERE updated_at > :wm - overlap AND updated_at <= :now", "desc": "Incremental window with overlap"},
+        {"syntax": "state.set_watermark(table, now) after load commits", "desc": "Never advance before success"},
+        {"syntax": "full extract + snapshot compare", "desc": "Small tables or no reliable timestamp"},
+        {"syntax": "soft deletes / periodic reconciliation / CDC", "desc": "The only ways to see deletes"},
+        {"syntax": "ORDER BY watermark column", "desc": "Deterministic, resumable extraction"}
+      ]},
+      {"title": "Idempotent loads", "items": [
+        {"syntax": "DELETE partition; INSERT partition; in one transaction", "desc": "Partition overwrite"},
+        {"syntax": "INSERT OVERWRITE PARTITION / MERGE INTO", "desc": "Warehouse and table-format equivalents"},
+        {"syntax": "INSERT ... ON CONFLICT (key) DO UPDATE", "desc": "Keyed upsert for entity tables"},
+        {"syntax": "CREATE t_new AS ...; validate; RENAME swap; DROP old", "desc": "Atomic full rebuild"},
+        {"syntax": "batch id + loaded_batches table", "desc": "Make appends skip repeats"}
+      ]},
+      {"title": "Late and changed data", "items": [
+        {"syntax": "partition by event_date, not load_date", "desc": "Late rows land where they belong"},
+        {"syntax": "rebuild last N partitions every run", "desc": "Trailing-window reprocessing"},
+        {"syntax": "status changes as events + ROW_NUMBER() latest", "desc": "Keep history, derive current"},
+        {"syntax": "accumulating snapshot for milestones", "desc": "Updates in place by design"},
+        {"syntax": "document lateness and update policy per table", "desc": "First question in any discrepancy"}
+      ]},
+      {"title": "Operations", "items": [
+        {"syntax": "pipeline --day D / --start S --end E", "desc": "Logical dates for runs and backfills"},
+        {"syntax": "rows in / out / rejected, duration, watermarks", "desc": "Per-run metrics; zero rows alerts"},
+        {"syntax": "freshness = now - max(event_time)", "desc": "SLA as a number"},
+        {"syntax": "reconcile counts/sums vs source weekly", "desc": "Catch silent loss"},
+        {"syntax": "backfill from raw, limited concurrency, validate sample", "desc": "Safe reprocessing"}
+      ]}
+    ],
+    "pitfalls": [
+      "Advancing the watermark before the load commits, then losing a batch when the load fails.",
+      "Bare INSERT loads; every retry doubles the data.",
+      "Partitioning by load date, so a late event for Monday lands in Thursday's partition and Monday's numbers are wrong forever.",
+      "Assuming the source never deletes rows.",
+      "Backfilling with a job that reads 'today' from the clock.",
+      "No reconciliation, so silent row loss is discovered by a customer."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A nightly job extracts rows where `updated_at > last_watermark`, loads them with INSERT, and then saves the new watermark. The load fails halfway one night and the job is retried. What state results?",
+      "options": [
+        "Rows committed before the failure are inserted again on retry, producing duplicates; the load must be an upsert or partition overwrite",
+        "The retry is skipped because the watermark was already advanced",
+        "The destination is unchanged because the whole load rolled back",
+        "The rows after the failure point are lost permanently"
+      ],
+      "answer": 0,
+      "explain": "Bare inserts are not idempotent, so whatever was committed is loaded twice. Keyed upserts or replacing the partition make the retry converge to the correct state. The watermark should only advance after a successful load, which is a second bug in the described design."
+    },
+    {
+      "q": "A source system hard-deletes cancelled orders. The pipeline extracts incrementally by `updated_at`. What happens to cancelled orders in the warehouse?",
+      "options": [
+        "They remain forever, because a deleted row produces no `updated_at` change to extract; deletes need soft-delete flags, reconciliation or log-based CDC",
+        "They are removed on the next run because the extractor notices the missing ids",
+        "They are marked as cancelled automatically by the upsert",
+        "They are removed when the trailing-window reprocessing runs"
+      ],
+      "answer": 0,
+      "explain": "Timestamp extraction only sees rows that exist. Nothing in the described pipeline observes a deletion; a mechanism that does (soft deletes, full reconciliation, CDC from the database log) is required."
+    },
+    {
+      "q": "Mobile events often arrive one to two days after they occur. A daily pipeline processes only the previous day. How should it be changed?",
+      "options": [
+        "Partition by event time and rebuild a trailing window of the last few days on every run so late events land in their correct partition",
+        "Process events by arrival date so nothing is ever missed",
+        "Delay the daily pipeline by two days so all events have arrived",
+        "Drop events older than one day since they are unreliable"
+      ],
+      "answer": 0,
+      "explain": "Event-time partitions with trailing-window reprocessing absorb lateness automatically and keep partitions correct. Arrival-date partitioning misplaces events; delaying the pipeline harms freshness and still misses stragglers; dropping data is wrong."
+    },
+    {
+      "q": "Which load pattern lets readers of a dimension table never see a partial or inconsistent state during a full nightly rebuild?",
+      "options": [
+        "Build the new table under a temporary name, validate it, then swap names in a single transaction",
+        "Truncate the table, then insert the new rows in batches",
+        "Delete rows in place as new ones arrive from the source",
+        "Write the new rows to a CSV and have readers pick it up when it is complete"
+      ],
+      "answer": 0,
+      "explain": "The build-validate-swap pattern exposes the new version atomically; truncate-then-insert leaves the table empty or partial while it runs, and in-place deletes interleave states."
+    },
+    {
+      "q": "After fixing a transformation bug, a team needs to reprocess six months of a fact table. Which properties of the pipeline make that safe?",
+      "options": [
+        "Every step is idempotent and parameterised by logical date, and the rebuild reads from the retained raw layer with validation before old partitions are dropped",
+        "The pipeline runs on a fast machine so six months completes in one night",
+        "The source system still has the six months of data available for re-extraction",
+        "The team has database backups from before the bug was introduced"
+      ],
+      "answer": 0,
+      "explain": "A backfill is a series of correct single-date runs; that requires idempotency and date parameters, a raw layer to rebuild from, and validation. Speed and backups do not make reprocessing correct, and re-extracting from the source is slower and often impossible."
+    }
+  ]
+}

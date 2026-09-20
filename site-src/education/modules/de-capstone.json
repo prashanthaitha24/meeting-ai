@@ -1,0 +1,197 @@
+{
+  "id": "de-capstone",
+  "minutes": 40,
+  "intro": "Fifteen modules have given you the pieces: SQL and modelling, Python and storage, batch and orchestration, dbt and quality, warehouses, Spark, streaming and CDC, observability, governance and platform infrastructure. The capstone assembles them into one lakehouse pipeline you build from scratch and can put in front of an interviewer or a stakeholder: raw events landing in object storage, an idempotent batch pipeline, a table-format silver layer, dbt marts with tests and documentation, an orchestrated schedule with freshness SLAs, governance tags with masking, and a dashboard reading the result — all provisioned by Terraform and deployed by CI. Nothing new is introduced; what is built is the judgement to make the pieces fit, and the evidence that they do.",
+  "objectives": [
+    "Design a lakehouse pipeline end to end from a written set of business questions",
+    "Implement ingestion, an idempotent batch layer, a table-format silver layer and dbt marts with tests",
+    "Orchestrate it with data-aware scheduling, freshness SLAs and alerting",
+    "Apply governance: ownership, PII tags, masking, retention, and a record of processing",
+    "Deliver a dashboard with a trust panel and a written design document with evidence"
+  ],
+  "sections": [
+    {
+      "heading": "The brief and the deliverables",
+      "blocks": [
+        {"type": "p", "text": "Pick a domain with events and entities: an online shop (orders, customers, products, page views), a ride service (trips, drivers, riders), a SaaS product (accounts, subscriptions, usage events). Write ten business questions first, in plain words, at least three of which need history (\"revenue by customer country as it was at order time\") and at least one of which needs recent data (\"orders in the last hour\"). The questions drive the model, the model drives the pipeline, and the pipeline drives the platform — never the other way around. Generate realistic synthetic data with a script you commit: a few million events over a year, late arrivals, corrections, deletes, and a slowly changing customer table."},
+        {"type": "table", "headers": ["Deliverable", "Where", "Modules it draws on"], "rows": [
+          ["`DESIGN.md`: questions, grain decisions, star schema, layer diagram, SLAs", "repo root", "Modelling, storage, observability"],
+          ["Terraform: bucket with lifecycle, catalog, warehouse or DuckDB setup, identities, budget", "`infra/`", "Platform infrastructure, cloud security"],
+          ["Ingestion + bronze: idempotent, watermarked, quarantining loader", "`pipelines/`", "Python, batch design, quality"],
+          ["Silver: Iceberg (or Delta) tables with MERGE, deletes, compaction", "`pipelines/`", "Storage, CDC patterns"],
+          ["dbt project: staging, marts, SCD2 snapshot, tests, docs, exposures", "`dbt/`", "dbt, modelling, quality"],
+          ["Orchestration: DAGs with datasets, retries, SLAs, backfill tested", "`dags/`", "Orchestration"],
+          ["Observability: run telemetry, freshness alerts, lineage, trust panel", "`ops/`", "Observability"],
+          ["Governance: owners, PII tags, masking policies, retention job, erasure job", "`dbt/` + `governance/`", "Governance"],
+          ["CI/CD: lint, tests, slim build, DAG parse, deploy", "`.github/workflows/`", "Platform infrastructure"],
+          ["Dashboard answering the ten questions, with a trust panel", "BI tool or a notebook", "Warehouse"]
+        ]},
+        {"type": "callout", "kind": "note", "text": "Budget three to four focused days. Everything runs locally with DuckDB, MinIO or a local folder as object storage, a local Airflow and dbt-duckdb; a cloud account makes it more realistic but is optional. The design document is not optional."}
+      ]
+    },
+    {
+      "heading": "Phase 1: model before you move anything",
+      "blocks": [
+        {"type": "p", "text": "From the questions, declare the facts and their grains (one row per order line; one row per page view), the dimensions and which attributes are Type 2 (customer country, plan), the conformed date dimension, and the one definition of each headline metric. Draw the layer diagram: raw (immutable files by arrival date), bronze (typed Parquet by event date), silver (table-format entities and events, deduplicated, with deletes applied), gold (dbt marts), and where each of the ten questions is answered. Write all of it into `DESIGN.md` before writing a line of pipeline code; the document is what you will check the implementation against."},
+        {"type": "code", "lang": "text", "caption": "The core of a design document, one screen long. Every later decision refers back to it.", "code": "QUESTIONS (10)                       ANSWERED BY\n  Q1 daily revenue by country        fct_orders x dim_customer (SCD2, country as of order)\n  Q2 orders in the last hour         silver.orders (freshness SLA 15 min) via a direct query\n  Q3 repeat-purchase rate by cohort  fct_orders + dim_customer.signup_month\n  ...\n\nFACTS                                GRAIN                      MEASURES\n  fct_orders                         one row per order line     quantity, unit_price, line_amount\n  fct_page_views                     one row per page view      duration_ms\n\nDIMENSIONS                           SCD                        NOTES\n  dim_customer                       type 2: country, segment   surrogate customer_key\n  dim_product                        type 1                     category, brand\n  dim_date                           n/a                        generated 2020-2030\n\nMETRICS (one definition each)\n  revenue = SUM(line_amount) FROM fct_orders WHERE status IN ('paid','shipped')\n\nLAYERS\n  raw/     jsonl.gz by arrival date, immutable, 730-day retention\n  bronze/  parquet by event_date, typed, quarantine table for rejects\n  silver/  iceberg: orders, order_items, customers (deletes applied, last_lsn guard)\n  gold/    dbt marts, tested, documented, tier-1 SLA 06:00 UTC\n\nLATENESS: events up to 3 days late -> 3-day trailing reprocess; later -> manual backfill\nPII: customer.email (direct, hash), customer.dob (indirect, year only), addresses (direct, restricted)"}
+      ]
+    },
+    {
+      "heading": "Phase 2: raw to silver, idempotently",
+      "blocks": [
+        {"type": "p", "text": "Build the loader as the Python and batch modules described: a `--day` parameter, an incremental extract with a persisted watermark and overlap, pydantic validation with a quarantine table and a reject-rate threshold, Parquet output to bronze partitioned by event date, and a MERGE into silver Iceberg tables keyed on the natural key with a version guard, including deletes. Run it twice for the same day and prove the row counts do not change. Then simulate three kinds of trouble — a crash mid-load, a late batch for a day already processed, and a corrected record — and prove each is handled by the trailing-window reprocess and the merge."},
+        {"type": "code", "lang": "python", "caption": "The test that proves idempotency, which the rest of the capstone depends on. It runs in CI against a small fixture.", "code": "from datetime import date\n\nimport duckdb\n\nfrom pipelines.orders import run\n\n\ndef test_rerun_is_idempotent(tmp_path, fixture_events):\n    lake = tmp_path / \"lake\"\n    run(day=date(2026, 3, 1), lake=lake, source=fixture_events)\n    first = duckdb.sql(f\"SELECT COUNT(*), SUM(amount) FROM read_parquet('{lake}/bronze/orders/**/*.parquet')\").fetchone()\n\n    run(day=date(2026, 3, 1), lake=lake, source=fixture_events)   # same day again\n    second = duckdb.sql(f\"SELECT COUNT(*), SUM(amount) FROM read_parquet('{lake}/bronze/orders/**/*.parquet')\").fetchone()\n\n    assert first == second, f\"rerun changed the data: {first} -> {second}\"\n\n\ndef test_late_event_lands_in_its_own_partition(tmp_path, fixture_events_with_late):\n    lake = tmp_path / \"lake\"\n    run(day=date(2026, 3, 4), lake=lake, source=fixture_events_with_late, lookback_days=3)\n    rows = duckdb.sql(\n        f\"SELECT event_date, COUNT(*) FROM read_parquet('{lake}/bronze/orders/**/*.parquet') GROUP BY 1 ORDER BY 1\"\n    ).fetchall()\n    assert (date(2026, 3, 2), 1) in rows          # the late March 2nd event is in the March 2nd partition"},
+        {"type": "p", "text": "Add compaction and snapshot expiry as a weekly maintenance task, and a reconciliation query that compares silver row counts and a checksum against the synthetic source for a window. Record every run in the telemetry table with rows in, out and rejected."}
+      ]
+    },
+    {
+      "heading": "Phase 3: marts, tests and schedule",
+      "blocks": [
+        {"type": "p", "text": "Build the dbt project over silver: staging models per silver table, an SCD2 snapshot of customers (or use the CDC-driven history), the dimensions and facts from the design, and the metric models. Add the standard column tests, the SCD2 invariants (one current row per key, no overlapping validity), a seasonal volume test and a relationships test between facts and dimensions. Document grain and metric definitions on the marts and declare the dashboard as an exposure. Then orchestrate: the loader DAG produces a dataset; the dbt DAG is scheduled on it; both have retries, timeouts, an on-failure callback and a freshness SLA. Backfill one week through the orchestrator and verify the marts."},
+        {"type": "code", "lang": "yaml", "caption": "The dbt YAML that carries tests, SLA and governance for the main fact in one place, as the earlier modules designed it.", "code": "models:\n  - name: fct_orders\n    description: One row per order line, non-cancelled. revenue = SUM(line_amount) WHERE status IN ('paid','shipped').\n    meta:\n      owner: data-platform@acme.example\n      product_tier: 1\n      classification: internal\n      sla: {freshness: \"by 06:00 UTC daily\", completeness: \"±30% same-weekday baseline\"}\n    columns:\n      - name: order_id\n        tests: [not_null]\n      - name: line_no\n        tests: [not_null]\n      - name: customer_key\n        tests:\n          - not_null\n          - relationships: {to: ref('dim_customer'), field: customer_key}\n      - name: line_amount\n        tests:\n          - dbt_utils.accepted_range: {min_value: 0, inclusive: true}\n    tests:\n      - dbt_utils.unique_combination_of_columns: {combination_of_columns: [order_id, line_no]}\n      - dbt_utils.recency: {datepart: hour, field: loaded_at, interval: 8}\n\nexposures:\n  - name: revenue_dashboard\n    type: dashboard\n    owner: {name: Finance analytics, email: finance-analytics@acme.example}\n    depends_on: [ref('fct_orders'), ref('dim_customer'), ref('dim_date')]"}
+      ]
+    },
+    {
+      "heading": "Phase 4: governance and the recent-data question",
+      "blocks": [
+        {"type": "p", "text": "Tag every PII column, generate the masking policies (or masked views in DuckDB), implement row-level access for one attribute, and write the record of processing. Implement the retention job for raw files and the erasure job for one synthetic customer across silver, gold and snapshots, and prove with a query that the person is gone. Add the governance CI check: no model without an owner, no PII without a mask."},
+        {"type": "p", "text": "Then answer the question that needs recent data. Choose deliberately between a fifteen-minute micro-batch of the loader (simplest, usually enough) and a small streaming path — events to a topic, a windowed aggregation, a freshness SLA in minutes. Justify the choice in the design document in terms of the consumer's need and the operational cost. If you build the stream, make its output idempotent and its watermark explicit, and show a comparison against the batch result for the same window."},
+        {"type": "callout", "kind": "warning", "text": "The most common capstone failure is over-building: a Kafka cluster, a Spark job and a streaming aggregation for a question a 15-minute batch answers. Choosing the simpler tool, and writing down why, is a stronger demonstration of engineering than the more complex one."}
+      ]
+    },
+    {
+      "heading": "Phase 5: platform, evidence and the write-up",
+      "blocks": [
+        {"type": "p", "text": "Put the infrastructure in Terraform with a policy check in the plan, the repository under the CI workflow from the platform module, and production behind an approval. Build the dashboard that answers the ten questions from the marts, with a trust panel showing last update, SLA status and test results. Finally write the evidence section of `DESIGN.md`: for each claim (idempotent, handles late data, tested, governed, observable, deployed by CI) point at the test, the run record, the policy or the workflow that proves it, and include the reconciliation results and the backfill log. Add a residual-risks section: what is not handled, what you would do next with more time."},
+        {"type": "list", "items": [
+          "A reader with no context can run `make demo` (or the documented commands) and reproduce the pipeline on the synthetic data in under thirty minutes.",
+          "Every business question is answered by a named mart with a documented grain and metric definition.",
+          "Rerun, crash, late data, correction and delete scenarios each have a test or a recorded drill.",
+          "Freshness alerts fire when the schedule is skipped; the dashboard trust panel reflects it.",
+          "The erasure drill removes a customer from every layer including snapshots, with a log entry.",
+          "CI blocks: lint failures, failing tests, DAG parse errors, a public bucket, an untagged PII column."
+        ]},
+        {"type": "p", "text": "When it is done you will have built and documented the full loop that the track kept returning to: model from questions, land raw immutably, transform idempotently, test what must be true, orchestrate on data readiness, watch freshness and lineage, govern the personal data, and keep all of it as reviewed, deployable code. That loop is the job, and the repository is the proof."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Complete the capstone",
+    "steps": [
+      "Phase 1 (half a day): write the ten questions and `DESIGN.md` with grains, SCD choices, metric definitions, layers, lateness and PII decisions. Commit a data generator that produces a year of events with late, corrected and deleted records.",
+      "Phase 2 (one day): implement the watermarked, quarantining loader to bronze and the MERGE to silver Iceberg tables with deletes; write the idempotency and late-event tests; add compaction, snapshot expiry and reconciliation.",
+      "Phase 3 (one day): build the dbt project with staging, SCD2, dimensions, facts, tests, docs and an exposure; orchestrate loader and dbt DAGs with datasets, retries, SLAs and alerts; backfill one week and verify.",
+      "Phase 4 (half a day): tag PII, generate masking and row policies, write the record of processing, implement retention and erasure jobs and prove erasure; decide and build the recent-data path with a written justification.",
+      "Phase 5 (half a day): Terraform with policy checks, the CI/CD workflow with a production approval, the dashboard with a trust panel, and the evidence and residual-risk sections of `DESIGN.md`.",
+      "Have someone else run the demo from the README and try to break one guarantee (rerun, late data, PII exposure). Fix what they find and record it.",
+      "Present it in fifteen minutes: the questions, the model, the guarantees and their evidence, and what you would do next."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Questions drive the model, the model drives the pipeline, the pipeline drives the platform",
+      "Raw immutable; bronze typed by event date with quarantine; silver table-format with merges and deletes; gold as tested dbt marts",
+      "Every guarantee (idempotent, late data, tested, governed, observable, deployed) points at a test, a run record or a policy",
+      "Data-aware scheduling, retries, SLAs and alerts; backfills rehearsed",
+      "Governance from tags: masking, row policies, retention, erasure including snapshots",
+      "Choose the simpler tool for recent data and write down why; over-building is the common failure"
+    ],
+    "groups": [
+      {"title": "Repository layout", "items": [
+        {"syntax": "DESIGN.md: questions, grains, metrics, layers, lateness, PII, evidence, residual risks", "desc": "The document everything checks against"},
+        {"syntax": "generate/: synthetic data with late, corrected, deleted records", "desc": "Reproducible input"},
+        {"syntax": "pipelines/: loader (--day, watermark, quarantine), merge to silver, maintenance", "desc": "Raw to silver"},
+        {"syntax": "dbt/: staging, snapshots, marts, tests, docs, exposures", "desc": "Silver to gold"},
+        {"syntax": "dags/: loader DAG -> dataset -> dbt DAG", "desc": "Orchestration"},
+        {"syntax": "infra/, .github/workflows/, governance/, ops/", "desc": "Platform, CI/CD, policies, telemetry"}
+      ]},
+      {"title": "Guarantees and their evidence", "items": [
+        {"syntax": "test_rerun_is_idempotent", "desc": "Same counts and sums after a second run"},
+        {"syntax": "test_late_event_lands_in_its_own_partition", "desc": "Trailing-window reprocessing works"},
+        {"syntax": "dbt build in CI + prod; SCD2 invariant tests", "desc": "What must be true is checked"},
+        {"syntax": "ops.pipeline_runs + freshness alert fired in a drill", "desc": "Observable"},
+        {"syntax": "erasure_log + time-travel query returning nothing", "desc": "Governed"},
+        {"syntax": "CI blocks on lint/tests/DAG parse/public bucket/untagged PII", "desc": "Deployed safely"}
+      ]},
+      {"title": "Decisions to justify", "items": [
+        {"syntax": "batch every 15 min vs stream", "desc": "Consumer need and operational cost"},
+        {"syntax": "warehouse vs lakehouse engine for gold", "desc": "Team, tools, scale"},
+        {"syntax": "SCD2 attributes", "desc": "What the business analyses over time"},
+        {"syntax": "lookback window length", "desc": "Observed lateness distribution"},
+        {"syntax": "product tiers and SLAs", "desc": "Where guarantees are worth the cost"}
+      ]},
+      {"title": "Demo checklist", "items": [
+        {"syntax": "make demo reproduces the pipeline in < 30 min", "desc": "Reproducibility"},
+        {"syntax": "10 questions -> named marts with grain and definitions", "desc": "Model completeness"},
+        {"syntax": "rerun / crash / late / correction / delete drills", "desc": "Pipeline robustness"},
+        {"syntax": "trust panel on the dashboard", "desc": "Consumer-visible health"},
+        {"syntax": "residual risks stated", "desc": "Judgement"}
+      ]}
+    ],
+    "pitfalls": [
+      "Starting with tools instead of questions, then modelling around what the tools produced.",
+      "A loader that works once and duplicates on the second run; everything downstream inherits it.",
+      "Marts without tests, so the demo works until the data generator is changed.",
+      "Streaming, Kafka and Spark for a question a small batch answers.",
+      "Governance skipped 'because it is synthetic data'; the point is to prove the mechanism.",
+      "A design document written after the fact that describes what was built instead of what was decided."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "Why does the capstone insist on writing the ten business questions and the design document before any pipeline code?",
+      "options": [
+        "Because the questions determine grains, dimensions and metric definitions, and the implementation is checked against that document rather than the other way round",
+        "Because reviewers grade documents more heavily than code",
+        "Because pipelines cannot be started until a Terraform plan exists",
+        "Because synthetic data cannot be generated without a document"
+      ],
+      "answer": 0,
+      "explain": "Modelling from questions is the discipline the whole track builds on; a document written after the fact only describes what happened to be built."
+    },
+    {
+      "q": "Which single test most protects everything downstream in the capstone pipeline?",
+      "options": [
+        "The idempotency test: running the loader twice for the same day leaves counts and sums unchanged",
+        "A test that the dashboard loads in under two seconds",
+        "A test that the Terraform plan has no changes",
+        "A test that the data generator produces exactly one million rows"
+      ],
+      "answer": 0,
+      "explain": "Retries, backfills and orchestration all assume idempotent steps; without it, duplicates propagate into every mart and metric."
+    },
+    {
+      "q": "The brief includes one question needing data from the last hour. A candidate builds Kafka, a streaming aggregation and a Spark cluster for it. What would a stronger answer look like?",
+      "options": [
+        "Evaluate whether a 15-minute micro-batch of the existing loader meets the consumer's need, choose the simpler option if so, and justify the choice in the design document",
+        "Add a second streaming framework for redundancy",
+        "Answer the question from the raw files directly in the dashboard",
+        "Remove the question from the brief as out of scope"
+      ],
+      "answer": 0,
+      "explain": "Matching the tool to the need, and writing down the trade-off, demonstrates judgement. Over-building adds operational cost without business value; raw-file dashboards bypass the model and its guarantees."
+    },
+    {
+      "q": "An erasure drill deletes a synthetic customer from silver and gold, but a time-travel query on the silver table still returns the rows. What is incomplete?",
+      "options": [
+        "Snapshot expiry: the table format retains old snapshots until they are expired, which must be part of the erasure window",
+        "The dbt tests were not rerun after the delete",
+        "The customer must also be deleted from the data generator's source file",
+        "The dashboard cache must be cleared"
+      ],
+      "answer": 0,
+      "explain": "Time travel reads retained snapshots. Erasure is complete only when snapshots holding the rows are expired and, where applicable, files compacted."
+    },
+    {
+      "q": "What makes the capstone's evidence section credible to an interviewer or an auditor?",
+      "options": [
+        "Each guarantee points at a specific test, run record, policy or workflow that proves it, and residual risks are stated honestly",
+        "It lists every technology used with version numbers",
+        "It states that the pipeline has never failed",
+        "It includes screenshots of the dashboard"
+      ],
+      "answer": 0,
+      "explain": "Claims tied to verifiable artefacts, plus an honest account of what is not covered, are what experienced readers look for. Technology lists and screenshots describe; they do not prove."
+    }
+  ]
+}
