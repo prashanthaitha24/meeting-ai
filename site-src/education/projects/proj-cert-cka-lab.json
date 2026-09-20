@@ -1,0 +1,290 @@
+{
+  "id": "proj-cert-cka-lab",
+  "track": "certs",
+  "title": "CKA practice cluster",
+  "summary": "Build a real two-node kubeadm cluster you own, then use it the way the CKA exam will use you: timed tasks across every domain, deliberate breakage you must diagnose, a kubeadm upgrade and an etcd restore performed until they are boring. Everything runs in local virtual machines with Multipass; no cloud account needed.",
+  "outcome": "A repeatable script that builds a kubeadm cluster (one control plane, one worker) in about ten minutes, a `tasks/` folder of forty timed exam-style tasks with solutions and verification commands, a `breaks/` folder of scripts that sabotage the cluster in exam-realistic ways, and a log of your times per task and per fix. By the end, the upgrade and the etcd backup-and-restore each take you under ten minutes without looking anything up.",
+  "hours": 6,
+  "level": "Associate",
+  "prereqs": [
+    "The DevOps track's Kubernetes module and the Certifications track's CKA guide (this is its practice half)",
+    "A laptop with 8 GB RAM free for two VMs (4 GB and 2 GB) and about 20 GB disk",
+    "Comfortable in a terminal and with vim or nano"
+  ],
+  "tools": [
+    {
+      "name": "Multipass",
+      "why": "Ubuntu VMs on macOS, Windows or Linux with one command",
+      "url": "https://multipass.run/"
+    },
+    {
+      "name": "kubeadm, kubelet, kubectl",
+      "why": "the exam is built on kubeadm clusters; these are the tools it expects",
+      "url": "https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/"
+    },
+    {
+      "name": "containerd",
+      "why": "the container runtime kubeadm clusters use",
+      "url": "https://containerd.io/"
+    },
+    {
+      "name": "Calico (or Cilium)",
+      "why": "a CNI that supports NetworkPolicy, which the exam tests",
+      "url": "https://docs.tigera.io/calico/latest/getting-started/kubernetes/quickstart"
+    },
+    {
+      "name": "etcdctl",
+      "why": "backup and restore tasks",
+      "url": "https://etcd.io/docs/"
+    }
+  ],
+  "layout": "cka-lab/\n├── cluster/\n│   ├── up.sh              # create VMs, install runtime + kubeadm, init, join, CNI\n│   ├── node-setup.sh      # runs inside each VM: containerd, kubeadm packages, sysctl\n│   └── down.sh            # delete the VMs\n├── tasks/\n│   ├── 01-pods-deployments.md\n│   ├── 02-services-ingress.md\n│   ├── 03-storage.md\n│   ├── 04-scheduling.md\n│   ├── 05-rbac.md\n│   ├── 06-networkpolicy.md\n│   ├── 07-upgrade.md\n│   ├── 08-etcd.md\n│   └── solutions/\n├── breaks/\n│   ├── break-kubelet.sh\n│   ├── break-apiserver.sh\n│   ├── break-cni.sh\n│   ├── break-service.sh\n│   └── break-scheduler.sh\n└── LOG.md                 # task, date, time taken, notes",
+  "phases": [
+    {
+      "title": "Build the cluster",
+      "goal": "A kubeadm cluster with one control plane and one worker on a recent Kubernetes minor version, built by a script you can rerun in ten minutes.",
+      "steps": [
+        {
+          "text": "Install Multipass and create the two VMs. The control plane gets 2 CPUs and 4 GB; the worker 2 CPUs and 2 GB. Use the same Ubuntu LTS the exam environment uses (currently 24.04).",
+          "code": {
+            "lang": "bash",
+            "code": "brew install --cask multipass      # macOS; Windows: winget install Canonical.Multipass; Linux: snap install multipass\nmultipass launch 24.04 --name cp --cpus 2 --memory 4G --disk 12G\nmultipass launch 24.04 --name w1 --cpus 2 --memory 2G --disk 12G\nmultipass list"
+          },
+          "check": "Both VMs show `Running` with an IPv4 address."
+        },
+        {
+          "text": "Write the per-node setup script: kernel modules and sysctl for networking, containerd with the systemd cgroup driver, and the Kubernetes apt repository pinned to the exam's minor version (adjust `1.35` to the version on the CKA FAQ when you do this).",
+          "code": {
+            "lang": "bash",
+            "code": "#!/bin/bash\n# cluster/node-setup.sh  (run as root inside each VM)\nset -euxo pipefail\nK8S_MINOR=\"1.35\"\n\ncat <<'EOF' >/etc/modules-load.d/k8s.conf\noverlay\nbr_netfilter\nEOF\nmodprobe overlay && modprobe br_netfilter\ncat <<'EOF' >/etc/sysctl.d/k8s.conf\nnet.bridge.bridge-nf-call-iptables  = 1\nnet.bridge.bridge-nf-call-ip6tables = 1\nnet.ipv4.ip_forward                 = 1\nEOF\nsysctl --system >/dev/null\nswapoff -a && sed -i '/ swap / s/^/#/' /etc/fstab\n\napt-get update && apt-get install -y containerd apt-transport-https ca-certificates curl gpg\nmkdir -p /etc/containerd\ncontainerd config default >/etc/containerd/config.toml\nsed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml\nsystemctl restart containerd && systemctl enable containerd\n\ncurl -fsSL \"https://pkgs.k8s.io/core:/stable:/v${K8S_MINOR}/deb/Release.key\" | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg\necho \"deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v${K8S_MINOR}/deb/ /\" >/etc/apt/sources.list.d/kubernetes.list\napt-get update && apt-get install -y kubelet kubeadm kubectl\napt-mark hold kubelet kubeadm kubectl\nsystemctl enable kubelet"
+          },
+          "note": "The version pin matters twice: it matches the exam, and it leaves room for the upgrade task (you will deliberately install the previous patch release first in Phase 4)."
+        },
+        {
+          "text": "Write the orchestration script that copies the setup into both VMs, initialises the control plane, installs Calico, joins the worker and pulls the kubeconfig to your laptop.",
+          "code": {
+            "lang": "bash",
+            "code": "#!/bin/bash\n# cluster/up.sh\nset -euo pipefail\nfor n in cp w1; do\n  multipass transfer cluster/node-setup.sh \"$n:/tmp/node-setup.sh\"\n  multipass exec \"$n\" -- sudo bash /tmp/node-setup.sh\ndone\n\nCP_IP=$(multipass info cp --format json | python3 -c \"import sys,json; print(json.load(sys.stdin)['info']['cp']['ipv4'][0])\")\nmultipass exec cp -- sudo kubeadm init --apiserver-advertise-address \"$CP_IP\" --pod-network-cidr 192.168.0.0/16\nmultipass exec cp -- bash -c 'mkdir -p ~/.kube && sudo cp /etc/kubernetes/admin.conf ~/.kube/config && sudo chown $(id -u):$(id -g) ~/.kube/config'\n\n# CNI with NetworkPolicy support\nmultipass exec cp -- kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.29.1/manifests/calico.yaml\n\nJOIN=$(multipass exec cp -- sudo kubeadm token create --print-join-command)\nmultipass exec w1 -- sudo bash -c \"$JOIN\"\n\nmkdir -p ~/.kube\nmultipass exec cp -- cat ~/.kube/config | sed \"s/127.0.0.1/$CP_IP/\" > ~/.kube/cka-lab.config\necho \"export KUBECONFIG=~/.kube/cka-lab.config\""
+          },
+          "note": "The kubeconfig rewrite lets `kubectl` on your laptop reach the API server through the VM's IP. Practise on the control plane VM itself too (`multipass shell cp`), because the exam terminal is a Linux host, not your laptop."
+        },
+        {
+          "text": "Run it, then wait for both nodes to be Ready.",
+          "code": {
+            "lang": "bash",
+            "code": "chmod +x cluster/*.sh && ./cluster/up.sh\nexport KUBECONFIG=~/.kube/cka-lab.config\nkubectl get nodes -o wide\nkubectl get pods -n kube-system"
+          },
+          "check": "`cp` and `w1` are `Ready`; all `kube-system` pods (including calico) are Running within a couple of minutes."
+        },
+        {
+          "text": "The exam switches clusters with `kubectl config use-context`. Create a second named context on the same cluster so you build the habit of running the context line before every task.",
+          "code": {
+            "lang": "bash",
+            "code": "export KUBECONFIG=~/.kube/cka-lab.config\nkubectl config get-contexts\nkubectl config set-context lab-apps --cluster=kubernetes --user=kubernetes-admin --namespace=apps\nkubectl config use-context lab-apps && kubectl config current-context"
+          },
+          "check": "`current-context` prints `lab-apps`; `kubectl get pods` without `-n` now targets the `apps` namespace."
+        },
+        {
+          "text": "Write `down.sh` (`multipass delete cp w1 && multipass purge`) and prove the round trip: tear down and rebuild. Time it; that number is your safety net for every drill that goes wrong.",
+          "check": "A full rebuild takes about ten minutes. Commit the `cluster/` scripts to a new repository."
+        }
+      ]
+    },
+    {
+      "title": "Exam habits and the core tasks",
+      "goal": "The aliases and speed techniques become reflexes, and you have timed results for the workloads, services, storage and scheduling domains.",
+      "steps": [
+        {
+          "text": "Every session starts on the control plane VM with the exam setup, typed from memory in under thirty seconds.",
+          "code": {
+            "lang": "bash",
+            "code": "multipass shell cp\nalias k=kubectl\nexport do=\"--dry-run=client -o yaml\"\nexport now=\"--force --grace-period=0\"\nsource <(kubectl completion bash) && complete -o default -F __start_kubectl k\nprintf 'set et ts=2 sw=2\\n' > ~/.vimrc"
+          }
+        },
+        {
+          "text": "Create the task files. Each task states a namespace, a goal, a time budget and a verification command, exactly like the exam. Write the first ten workload tasks; the solution file holds the imperative command sequence.",
+          "code": {
+            "lang": "text",
+            "code": "# tasks/01-pods-deployments.md\n\nT1 (4 min)  In namespace `apps` (create it), create a Deployment `web` with 3 replicas of `nginx:1.27`,\n            container port 80, and label `tier=frontend` on the pods.\n            verify: k -n apps get deploy web -o jsonpath='{.status.readyReplicas}' -> 3\n\nT2 (3 min)  Scale `web` to 5, then roll its image to `nginx:1.27.3`, then roll back to the previous revision.\n            verify: k -n apps rollout history deploy web shows 3 revisions; image is nginx:1.27\n\nT3 (5 min)  Create a ConfigMap `web-config` with key `INDEX=hello` and a Secret `web-secret` with key\n            `TOKEN=s3cr3t`. Mount the ConfigMap at /etc/config and expose the Secret as env var TOKEN in `web`.\n            verify: k -n apps exec deploy/web -- sh -c 'cat /etc/config/INDEX; echo $TOKEN'\n\nT4 (4 min)  Add a readiness probe (HTTP GET / on 80, every 5 s) and resource requests (100m CPU, 64Mi) with\n            limits (200m, 128Mi) to `web`.\n            verify: k -n apps get deploy web -o yaml | grep -A4 readinessProbe\n\nT5 (3 min)  Create a CronJob `report` in `apps` running `busybox:1.36` with command `date` every 5 minutes;\n            keep 2 successful job histories.\n            verify: k -n apps get cronjob report -o jsonpath='{.spec.successfulJobsHistoryLimit}' -> 2\n\nT6 (4 min)  Create a DaemonSet `node-agent` in `kube-system` running `busybox:1.36` with `sleep 3600`,\n            tolerating the control-plane taint so it runs on both nodes.\n            verify: k -n kube-system get ds node-agent -> DESIRED 2, READY 2\n\nT7 (4 min)  A pod `crash` in `apps` must run `busybox:1.36` with command `sh -c 'exit 1'` and restart policy\n            Never. Create it, then find the exit code from its status.\n            verify: k -n apps get pod crash -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}' -> 1\n\nT8 (5 min)  Create a HorizontalPodAutoscaler for `web`: min 2, max 6, target 60% CPU. Install metrics-server\n            first if `k top nodes` fails (see solutions).\n            verify: k -n apps get hpa web\n\nT9 (3 min)  Export the `web` Deployment to /root/web.yaml, delete it, recreate it from the file.\n            verify: k -n apps get deploy web\n\nT10 (3 min) Find which node each `web` pod runs on and write the pod name and node, one per line, to /root/pods.txt.\n            verify: cat /root/pods.txt shows 5 lines"
+          },
+          "note": "Solutions live in `tasks/solutions/01.md`; write them yourself the first time you solve each task, using generators (`k create deploy ... $do > f.yaml`) rather than hand-written YAML."
+        },
+        {
+          "text": "Do T1–T10 with a timer and record each time in `LOG.md`. Anything over budget goes on a redo list.",
+          "code": {
+            "lang": "text",
+            "code": "# LOG.md\n| date       | task | budget | took  | notes                                   |\n|------------|------|--------|-------|-----------------------------------------|\n| 2026-09-22 | T1   | 4:00   | 2:10  |                                         |\n| 2026-09-22 | T3   | 5:00   | 7:40  | forgot envFrom vs env valueFrom syntax  |"
+          },
+          "check": "Ten timed entries; a redo list of the tasks that ran over."
+        },
+        {
+          "text": "Install the metrics server (the HPA task and `kubectl top` need it). On a kubeadm lab the kubelet serves a self-signed certificate, so the insecure-TLS flag is required.",
+          "code": {
+            "lang": "bash",
+            "code": "kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.2/components.yaml\nkubectl -n kube-system patch deploy metrics-server --type=json \\\n  -p='[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"--kubelet-insecure-tls\"}]'\nsleep 30 && kubectl top nodes"
+          },
+          "check": "`kubectl top nodes` prints CPU and memory for both nodes."
+        },
+        {
+          "text": "Services and Ingress tasks. Install the ingress-nginx controller once (it is what most exam environments provide) and write tasks for ClusterIP, NodePort, endpoints debugging and an Ingress with two paths.",
+          "code": {
+            "lang": "bash",
+            "code": "kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.12.0/deploy/static/provider/baremetal/deploy.yaml\nkubectl -n ingress-nginx get pods -w   # until the controller is Running"
+          },
+          "note": "Tasks for `02-services-ingress.md`: expose `web` as ClusterIP on 80→80 and curl it from a temporary pod; expose as NodePort and curl the worker's IP; create a Service whose selector is deliberately wrong and fix it by reading `k get ep`; create an Ingress `shop` routing `/` to `web` and `/api` to a second Deployment `api` (`hashicorp/http-echo`), and verify with `curl -H 'Host: shop.example' http://W1_IP:NODEPORT/api`."
+        },
+        {
+          "text": "Storage and scheduling tasks: a hostPath PersistentVolume and matching claim, a StorageClass with `volumeBindingMode: WaitForFirstConsumer`, and scheduling with nodeSelector, node affinity, taints and tolerations, plus a pod that stays Pending until you fix the reason.",
+          "code": {
+            "lang": "yaml",
+            "code": "# tasks/solutions/03-pv.yaml (the shape to be able to write from memory)\napiVersion: v1\nkind: PersistentVolume\nmetadata:\n  name: pv-data\nspec:\n  capacity:\n    storage: 1Gi\n  accessModes: [ReadWriteOnce]\n  persistentVolumeReclaimPolicy: Retain\n  storageClassName: manual\n  hostPath:\n    path: /mnt/data\n---\napiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: pvc-data\n  namespace: apps\nspec:\n  accessModes: [ReadWriteOnce]\n  storageClassName: manual\n  resources:\n    requests:\n      storage: 500Mi"
+          },
+          "note": "Tasks for `03-storage.md` and `04-scheduling.md`: bind the claim and mount it in a pod that writes a file; delete the pod and confirm the file persists on the node; taint `w1` with `env=prod:NoSchedule` and make `web` tolerate it; add a nodeSelector nobody matches and diagnose the Pending event; use `requiredDuringSchedulingIgnoredDuringExecution` affinity for a label you add to `cp`."
+        },
+        {
+          "text": "Add a Gateway API task, since the current curriculum lists it alongside Ingress: install a Gateway API implementation (the NGINX Gateway Fabric or Envoy Gateway quickstart), create a `Gateway` and an `HTTPRoute` sending `shop.example/api` to the `api` Service, and verify with curl exactly as for the Ingress task.",
+          "note": "Keep the task even if it takes longer the first time; HTTPRoute manifests are copied from the docs in the exam, and knowing which page to open is the skill."
+        }
+      ]
+    },
+    {
+      "title": "RBAC and NetworkPolicy",
+      "goal": "You can create least-privilege access for a user and a service account and write a NetworkPolicy from memory, verifying both.",
+      "steps": [
+        {
+          "text": "RBAC tasks: create a ServiceAccount `deployer` in `apps` that may only get, list and update Deployments in `apps`; verify with `auth can-i`; then create a ClusterRole for reading nodes bound to a user `ops`.",
+          "code": {
+            "lang": "bash",
+            "code": "k -n apps create sa deployer\nk -n apps create role deploy-editor --verb=get,list,update --resource=deployments\nk -n apps create rolebinding deployer-binding --role=deploy-editor --serviceaccount=apps:deployer\nk auth can-i update deployments -n apps --as=system:serviceaccount:apps:deployer     # yes\nk auth can-i delete deployments -n apps --as=system:serviceaccount:apps:deployer     # no\nk create clusterrole node-reader --verb=get,list,watch --resource=nodes\nk create clusterrolebinding ops-nodes --clusterrole=node-reader --user=ops\nk auth can-i list nodes --as=ops                                                     # yes"
+          },
+          "check": "The three `auth can-i` answers are yes, no, yes. Add a task to `05-rbac.md` that requires a ClusterRole bound with a RoleBinding (namespace-scoped use of a cluster-wide role) and explain the difference in your solution notes."
+        },
+        {
+          "text": "NetworkPolicy tasks: default deny in `apps`, then allow `web` to be reached only from pods labelled `role=lb`, and allow `web` egress only to DNS and to `api` on 8080. Verify each rule with a temporary pod before and after.",
+          "code": {
+            "lang": "yaml",
+            "code": "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: default-deny\n  namespace: apps\nspec:\n  podSelector: {}\n  policyTypes: [Ingress, Egress]\n---\napiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: web-policy\n  namespace: apps\nspec:\n  podSelector:\n    matchLabels: {tier: frontend}\n  policyTypes: [Ingress, Egress]\n  ingress:\n    - from:\n        - podSelector:\n            matchLabels: {role: lb}\n      ports: [{protocol: TCP, port: 80}]\n  egress:\n    - to:\n        - namespaceSelector:\n            matchLabels: {kubernetes.io/metadata.name: kube-system}\n          podSelector:\n            matchLabels: {k8s-app: kube-dns}\n      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]\n    - to:\n        - podSelector:\n            matchLabels: {app: api}\n      ports: [{protocol: TCP, port: 8080}]"
+          },
+          "check": "`k -n apps run t --rm -it --image=busybox:1.36 --restart=Never -- wget -qO- --timeout=2 web` fails; the same with `--labels role=lb` succeeds; from `web`, `nslookup api` works and `wget api:8080` works while `wget example.com` times out."
+        },
+        {
+          "text": "Write five more NetworkPolicy tasks with different selectors (namespace-only, ipBlock with except, port ranges) and solve them from the docs page for NetworkPolicy — the one page you are allowed to open in the exam. Time how long it takes to find and adapt the example.",
+          "check": "Under three minutes per policy by the fifth one."
+        }
+      ]
+    },
+    {
+      "title": "The long tasks: upgrade and etcd",
+      "goal": "A control-plane and worker upgrade and an etcd backup-and-restore, each performed three times until they take under ten minutes without notes.",
+      "steps": [
+        {
+          "text": "Set up the upgrade drill: rebuild the cluster with the previous patch release so there is something to upgrade to. In `node-setup.sh` change the install line to pin a specific older patch (for example `kubelet=1.35.0-1.1 kubeadm=1.35.0-1.1 kubectl=1.35.0-1.1`), rebuild, and confirm the version.",
+          "code": {
+            "lang": "bash",
+            "code": "./cluster/down.sh && ./cluster/up.sh\nkubectl get nodes    # VERSION column shows v1.35.0 (or whatever you pinned)\nmultipass exec cp -- apt-cache madison kubeadm | head -5   # the available newer patch versions"
+          },
+          "note": "Upgrading across a minor version (1.34 → 1.35) is the more realistic exam task and follows the same steps; do a patch upgrade first, then rebuild on the previous minor and do the minor upgrade."
+        },
+        {
+          "text": "Perform the control-plane upgrade with a stopwatch running. This is the exact sequence; do not deviate from the order.",
+          "code": {
+            "lang": "bash",
+            "code": "# on your laptop or the cp node with KUBECONFIG set\nkubectl drain cp --ignore-daemonsets --delete-emptydir-data\n\n# on cp\nmultipass shell cp\nsudo apt-mark unhold kubeadm && sudo apt-get update && sudo apt-get install -y kubeadm=1.35.1-1.1 && sudo apt-mark hold kubeadm\nsudo kubeadm upgrade plan\nsudo kubeadm upgrade apply v1.35.1 -y\nsudo apt-mark unhold kubelet kubectl && sudo apt-get install -y kubelet=1.35.1-1.1 kubectl=1.35.1-1.1 && sudo apt-mark hold kubelet kubectl\nsudo systemctl daemon-reload && sudo systemctl restart kubelet\nexit\n\nkubectl uncordon cp\nkubectl get nodes"
+          },
+          "check": "`cp` shows the new version and is Ready. Record the time in `LOG.md`."
+        },
+        {
+          "text": "Upgrade the worker the same way with `kubeadm upgrade node` instead of `upgrade apply`.",
+          "code": {
+            "lang": "bash",
+            "code": "kubectl drain w1 --ignore-daemonsets --delete-emptydir-data\nmultipass exec w1 -- sudo bash -c 'apt-mark unhold kubeadm && apt-get update && apt-get install -y kubeadm=1.35.1-1.1 && apt-mark hold kubeadm && kubeadm upgrade node && apt-mark unhold kubelet kubectl && apt-get install -y kubelet=1.35.1-1.1 kubectl=1.35.1-1.1 && apt-mark hold kubelet kubectl && systemctl daemon-reload && systemctl restart kubelet'\nkubectl uncordon w1\nkubectl get nodes"
+          },
+          "check": "Both nodes on the new version, both Ready, all `apps` pods back to Running."
+        },
+        {
+          "text": "etcd backup: take a snapshot using the certificate paths from the etcd static pod manifest, then verify it. Read the paths from the manifest instead of memorising them.",
+          "code": {
+            "lang": "bash",
+            "code": "multipass shell cp\nsudo grep -E 'cert-file|key-file|trusted-ca-file|listen-client' /etc/kubernetes/manifests/etcd.yaml\nsudo apt-get install -y etcd-client 2>/dev/null || true   # or use the etcdctl binary from the etcd release\nsudo ETCDCTL_API=3 etcdctl snapshot save /opt/etcd-backup.db \\\n  --endpoints=https://127.0.0.1:2379 \\\n  --cacert=/etc/kubernetes/pki/etcd/ca.crt \\\n  --cert=/etc/kubernetes/pki/etcd/server.crt \\\n  --key=/etc/kubernetes/pki/etcd/server.key\nsudo ETCDCTL_API=3 etcdctl snapshot status /opt/etcd-backup.db --write-out=table"
+          },
+          "check": "The status table shows a hash, a revision and a total key count."
+        },
+        {
+          "text": "Prove the restore matters: create a Deployment `after-backup` in `apps`, then restore the snapshot into a new data directory and repoint the etcd static pod at it. The Deployment created after the backup must disappear.",
+          "code": {
+            "lang": "bash",
+            "code": "kubectl -n apps create deploy after-backup --image=nginx:1.27\n\nmultipass shell cp\nsudo ETCDCTL_API=3 etcdctl snapshot restore /opt/etcd-backup.db --data-dir /var/lib/etcd-restored\nsudo sed -i 's#path: /var/lib/etcd$#path: /var/lib/etcd-restored#' /etc/kubernetes/manifests/etcd.yaml\n# kubelet notices the manifest change and recreates the etcd pod; watch it come back\nsudo crictl ps | grep etcd\nexit\n\nkubectl -n apps get deploy      # after-backup is gone; web is back"
+          },
+          "check": "`after-backup` no longer exists; the cluster is healthy. Time the whole backup-and-restore sequence and log it. Repeat the upgrade and restore drills twice more on fresh clusters."
+        }
+      ]
+    },
+    {
+      "title": "Break it, fix it",
+      "goal": "Five realistic sabotage scripts and the procedure that finds each cause from symptoms, timed.",
+      "steps": [
+        {
+          "text": "Write the break scripts. Each one changes a single thing an exam scenario might; you run one without reading it, then diagnose from the symptoms.",
+          "code": {
+            "lang": "bash",
+            "code": "# breaks/break-kubelet.sh (run on w1 as root): wrong kubelet config path\nsed -i 's#/var/lib/kubelet/config.yaml#/var/lib/kubelet/config.yml#' /var/lib/kubelet/kubeadm-flags.env 2>/dev/null || \\\n  sed -i 's#config.yaml#config.yml#' /usr/lib/systemd/system/kubelet.service.d/10-kubeadm.conf\nsystemctl daemon-reload && systemctl restart kubelet\n\n# breaks/break-apiserver.sh (run on cp as root): a typo in a flag\nsed -i 's/--etcd-servers=/--etcd-server=/' /etc/kubernetes/manifests/kube-apiserver.yaml\n\n# breaks/break-scheduler.sh (run on cp as root): scheduler cannot start\nsed -i 's/kube-scheduler/kube-schedulerr/' /etc/kubernetes/manifests/kube-scheduler.yaml\n\n# breaks/break-service.sh (run anywhere with kubectl): selector mismatch\nkubectl -n apps patch svc web -p '{\"spec\":{\"selector\":{\"tier\":\"frontendd\"}}}'\n\n# breaks/break-cni.sh (run on w1 as root): CNI config removed\nmv /etc/cni/net.d /etc/cni/net.d.bak && systemctl restart kubelet"
+          },
+          "note": "Keep the scripts in the repo but do not memorise them; the value is in diagnosing from `k get nodes`, `k describe`, `journalctl -u kubelet`, `crictl ps -a` and `crictl logs` as the CKA guide's procedure describes."
+        },
+        {
+          "text": "Run each break, diagnose, fix, and log the time. The expected symptoms and the tools that reveal the cause:",
+          "code": {
+            "lang": "text",
+            "code": "break-kubelet    symptom: w1 NotReady            find: journalctl -u kubelet on w1 -> 'config.yml: no such file'\n                 fix: correct the path, daemon-reload, restart kubelet\nbreak-apiserver  symptom: kubectl times out       find: on cp: crictl ps -a (apiserver exited), crictl logs CID -> unknown flag\n                 fix: correct the manifest; kubelet restarts the static pod\nbreak-scheduler  symptom: new pods stay Pending    find: k -n kube-system get pods (no scheduler), crictl ps -a on cp\n                 with no events               fix: correct the image name in the manifest\nbreak-service    symptom: curl to web fails       find: k -n apps get ep web -> <none>; compare selector with pod labels\n                 fix: patch the selector back\nbreak-cni        symptom: new pods on w1 stuck    find: k describe pod -> 'network plugin not ready'; ls /etc/cni/net.d on w1\n                 ContainerCreating        fix: restore the directory, restart kubelet"
+          },
+          "check": "All five fixed; each under ten minutes; the times in `LOG.md`."
+        },
+        {
+          "text": "Write five more breaks of your own (a wrong `--advertise-address`, a missing kube-proxy DaemonSet, a full disk on a node via a large file, an expired-looking certificate path, a bad `imagePullPolicy` with a private image) and have a study partner run them for you — the diagnosis is only real when you do not know what changed.",
+          "check": "Ten breaks total, each diagnosed with the procedure rather than by guessing."
+        },
+        {
+          "text": "Run a full mock: rebuild the cluster on the previous minor version, then in one two-hour sitting do fifteen tasks drawn from every file plus one break, one upgrade and one etcd restore, with a timer and the docs as the only reference. Score yourself on end state.",
+          "check": "Above 66 % of tasks fully correct in the time. If not, the `LOG.md` redo list tells you exactly what to drill before the real exam, and the killer.sh sessions that come with registration are the final check."
+        }
+      ]
+    }
+  ],
+  "troubleshooting": [
+    {
+      "symptom": "`kubeadm init` fails with a preflight error about swap or bridge-nf-call-iptables",
+      "fix": "The node-setup script disables swap and sets the sysctls; if you rebuilt the VM without rerunning it, run it again. `kubeadm init --ignore-preflight-errors=...` hides the problem rather than fixing it."
+    },
+    {
+      "symptom": "Nodes stay NotReady after init",
+      "fix": "The CNI is not installed or not running yet. `kubectl -n kube-system get pods` should show calico pods; `kubectl describe node cp` shows `network plugin not ready` until they are Running."
+    },
+    {
+      "symptom": "The worker cannot join: token or connection refused",
+      "fix": "Tokens expire after 24 hours; generate a new join command with `kubeadm token create --print-join-command` on cp. Confirm the worker can reach the cp IP on 6443 (`nc -zv CP_IP 6443`)."
+    },
+    {
+      "symptom": "`kubectl` from the laptop reports a certificate error for the VM IP",
+      "fix": "The API server certificate includes the advertise address given at init; if the VM's IP changed after a restart, either re-init or set `--apiserver-cert-extra-sans`. Practising from inside the cp VM avoids this entirely."
+    },
+    {
+      "symptom": "`etcdctl` not found",
+      "fix": "Install `etcd-client` from apt, or download the matching etcd release tarball and use its `etcdctl`; the exam environment provides the binary."
+    },
+    {
+      "symptom": "After the etcd restore, the API server stays down",
+      "fix": "Check that the `hostPath` in `etcd.yaml` points at the restored directory and that the directory is owned correctly; `crictl logs` on the etcd container shows the reason. If the manifest was edited with a typo, kubelet will not start the pod at all — `journalctl -u kubelet` says why."
+    },
+    {
+      "symptom": "Multipass VMs are slow or fail to start on macOS",
+      "fix": "Reduce the memory allocations, close other VMs, and check `multipass get local.driver`; on Apple Silicon the default driver is fine, on Intel Macs HyperKit or QEMU may need selecting."
+    }
+  ],
+  "next": [
+    "Register for the CKA and use the two included killer.sh sessions as the final mocks; they mirror the real difficulty.",
+    "Add a third node and practise the tasks that need it: pod anti-affinity across nodes, draining with a PodDisruptionBudget, and a control-plane node with a taint you must tolerate.",
+    "Install a Gateway API implementation and redo the routing tasks with HTTPRoute, which the current curriculum includes.",
+    "Continue to the CKS (security specialist) with the Cybersecurity track's container module: the same cluster serves for RBAC hardening, Pod Security Standards, admission and runtime security drills.",
+    "Turn the cluster into the target for the DevOps track's **GitOps on Kubernetes** project."
+  ]
+}

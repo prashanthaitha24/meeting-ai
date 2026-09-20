@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Secure a web service end to end — Security project | ThavionAI Education</title>
+  <meta name="description" content="Take the zero-to-production API and its AWS host and make them defensible: a threat model that chooses the controls, a hardened host and container, secrets fetched at runtime instead of stored, scanning gates in the pipeline, image signing, centralised logs with three working detections, and a drill that proves the detections fire. Each control gets a test so it cannot quietly regress." />
+  <meta property="og:title" content="Secure a web service end to end — ThavionAI project" />
+  <meta property="og:description" content="Take the zero-to-production API and its AWS host and make them defensible: a threat model that chooses the controls, a hardened host and container, secrets fetched at runtime instead of stored, scanning gates in the pipeline, image signing, centralised logs with three working detections, and a drill that proves the detections fire. Each control gets a test so it cannot quietly regress." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/projects/proj-sec-secure-service.html" />
+  <link rel="icon" href="../../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="../lesson.css" />
+  <link rel="stylesheet" href="project.css" />
+</head>
+<body class="track-security" data-project="proj-sec-secure-service">
+
+<nav>
+  <a href="../../index.html" class="nav-logo"><img class="nav-logo-icon" src="../../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../../education.html">Tracks</a>
+    <a href="../../index.html#projects" class="active">Projects</a>
+    <a href="../../education.html#certs">Certifications</a>
+    <a href="../../index.html#apps">Apps</a>
+    <a href="../../feedback.html?page=/education/projects/proj-sec-secure-service.html&amp;title=Secure%20a%20web%20service%20end%20to%20end">Feedback</a>
+    <a href="../../education.html#security" class="nav-cta">Security track</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../../education.html">Education</a> › <a href="../../education.html#security">Cybersecurity</a> › Guided project</div>
+    <h1>Secure a web service end to end</h1>
+    <p class="lede">Take the zero-to-production API and its AWS host and make them defensible: a threat model that chooses the controls, a hardened host and container, secrets fetched at runtime instead of stored, scanning gates in the pipeline, image signing, centralised logs with three working detections, and a drill that proves the detections fire. Each control gets a test so it cannot quietly regress.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">about 8 hours</span>
+      <span class="chip">5 phases · 26 steps</span>
+      <span class="chip chip-quiz" id="progressChip">0 / 26 done</span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav">
+  <div class="wrap">
+    <a href="#overview">Overview</a>
+    <a href="#phase-1">1. Threat-model the deployed service</a>
+    <a href="#phase-2">2. Harden the host and the instance</a>
+    <a href="#phase-3">3. Harden the image and the pipeline</a>
+    <a href="#phase-4">4. Detections</a>
+    <a href="#phase-5">5. The drill and the evidence</a>
+    <a href="#troubleshooting">Troubleshooting</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <section class="pj-intro" id="overview">
+    <div class="objectives">
+      <div class="box-label">What you will have at the end</div>
+      <p class="pj-outcome">A <code>security/</code> directory in the repository with the threat model and register, a hardened Terraform and Docker configuration with tests that fail if a control is removed, a pipeline that blocks secrets, vulnerable dependencies, misconfigured infrastructure and unsigned images, CloudWatch log groups receiving host auth, audit and application security events with three metric-filter alarms, and a recorded drill in which a planted SSH key and a leaked-key simulation each produced an alert within minutes.</p>
+    </div>
+    <div class="pj-grid">
+      <div class="pj-box">
+        <div class="box-label">Before you start</div>
+        <ul><li>The DevOps track's zero-to-production project deployed (or the same shape: a container on an AWS EC2 host provisioned by Terraform, with GitHub Actions and OIDC to AWS)</li><li>The Cybersecurity track's modules on threat modelling, hardening, secrets, containers, supply chain, DevSecOps and logging — this project is their combined lab</li><li>AWS CLI configured for a test account, Docker Desktop, Terraform 1.10+, Git and the GitHub CLI</li></ul>
+      </div>
+      <div class="pj-box">
+        <div class="box-label">Tools you will install</div>
+        <ul class="pj-tools"><li><strong>gitleaks, Semgrep, pip-audit, Checkov, Trivy</strong> — the scanning gates: secrets, code, dependencies, infrastructure, images <a href="https://github.com/gitleaks/gitleaks" target="_blank" rel="noopener">↗</a></li><li><strong>cosign (Sigstore)</strong> — keyless image signing and verification <a href="https://docs.sigstore.dev/" target="_blank" rel="noopener">↗</a></li><li><strong>AWS Secrets Manager</strong> — runtime secret delivery by instance role, no secrets in images or env files <a href="https://docs.aws.amazon.com/secretsmanager/" target="_blank" rel="noopener">↗</a></li><li><strong>CloudWatch Logs agent + metric filters + alarms</strong> — centralised logs and simple detections without running a SIEM <a href="https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/" target="_blank" rel="noopener">↗</a></li><li><strong>auditd, nftables, unattended-upgrades</strong> — host hardening and audit trail on the EC2 instance <a href="https://linux-audit.com/" target="_blank" rel="noopener">↗</a></li></ul>
+      </div>
+    </div>
+    <div class="pj-box pj-layout"><div class="box-label">Repository layout at the end</div><pre><code>zero-to-prod/
+├── security/
+│   ├── THREAT_MODEL.md          # DFD, assets, entry points, STRIDE register with controls and tests
+│   ├── controls/                # one record per control with evidence
+│   ├── detections/              # metric filters as code + runbooks
+│   └── incidents/2026-xx-xx-drill.md
+├── tests/security/
+│   ├── test_image.py            # non-root, no secrets, no critical CVEs with fixes
+│   ├── test_infra_policy.py     # terraform plan assertions
+│   └── test_api_authz.py        # wrong-user returns 404
+├── infra/
+│   ├── main.tf                  # hardened instance: IMDSv2, no SSH, secret access, log agent
+│   ├── logging.tf               # log groups, metric filters, alarms
+│   └── user_data.sh             # hardening on boot
+├── Dockerfile                   # distroless, non-root, pinned by digest
+└── .github/workflows/
+    ├── security.yml             # gate + report jobs on PRs
+    └── release.yml              # + trivy, sbom, cosign sign</code></pre></div>
+    <p class="pj-hint">Tick each step as you finish it — your progress is saved in this browser. Every code block has a copy button. If something goes wrong, the <a href="#troubleshooting">troubleshooting</a> section at the end covers the usual suspects.</p>
+  </section>
+
+  <section id="phase-1" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 1</span><h2>Threat-model the deployed service</h2></div>
+    <p class="pj-goal">A one-page model of the service as it actually runs, and a ranked register of eight threats whose controls become the work plan.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-1-1"><label class="pj-step-tick"><input type="checkbox" data-step="1-1" aria-label="Done: step 1.1" /><span class="pj-step-num">1.1</span></label><div class="pj-step-body"><div class="pj-step-text">Create the branch and the security directory. Draw the data flow diagram from the deployed reality: internet → EC2 (port 80, Docker) → app container; GitHub Actions → GHCR → the host pulls; you → SSM Run Command; app → Secrets Manager (soon). Mark the trust boundaries: internet edge, host to container, pipeline to host.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>git switch -c feat/security
+mkdir -p security/controls security/detections security/incidents tests/security</code></pre></div></div></li><li class="pj-step" id="step-1-2"><label class="pj-step-tick"><input type="checkbox" data-step="1-2" aria-label="Done: step 1.2" /><span class="pj-step-num">1.2</span></label><div class="pj-step-body"><div class="pj-step-text">List the assets in rank order and the entry points with their authentication. Be honest: today the API has no authentication and the host is reachable on port 80 from anywhere.</div><div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># security/THREAT_MODEL.md (part 1)
+
+ASSETS (ranked)
+  1. ability to run code on the host (leads to the AWS role and everything below)
+  2. the instance's IAM role credentials (Secrets Manager read, SSM)
+  3. Grafana admin password; the GHCR package; the repo's deploy role trust
+  4. availability of the API
+
+ENTRY POINTS
+  E1  HTTP :80 -&gt; app         internet -&gt; host -&gt; container        (auth: none)
+  E2  :3000 Grafana, :9090    my_ip only                           (auth: Grafana password)
+  E3  SSM Run Command         AWS IAM (github role, my user)       (auth: OIDC / MFA)
+  E4  image pull from GHCR    host -&gt; internet                     (auth: none, public package)
+  E5  GitHub Actions          repo push, PRs                       (auth: GitHub; OIDC to AWS)
+  E6  instance metadata       any process on the host              (auth: IMDSv2 token if required)
+
+BOUNDARIES
+  internet | security group | host (Amazon Linux, Docker) | containers
+  GitHub | GHCR | host      and      GitHub OIDC | AWS role</code></pre></div></div></li><li class="pj-step" id="step-1-3"><label class="pj-step-tick"><input type="checkbox" data-step="1-3" aria-label="Done: step 1.3" /><span class="pj-step-num">1.3</span></label><div class="pj-step-body"><div class="pj-step-text">Walk STRIDE over each entry point and rate the results. Keep the top eight; these are the controls you will build in the next phases. Each has a response, a specific control, and the name of the test that proves it.</div><div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># security/THREAT_MODEL.md (part 2: register)
+
+T-01 E1 Tampering/Elevation: SSRF or RCE in the app reaches the metadata service and steals role creds
+     HIGH x HIGH -&gt; MITIGATE: IMDSv2 required (hop limit 1); container has no host network
+     test: test_infra_policy::test_imdsv2_required
+T-02 E1 Elevation: container escape to host (root in container, docker socket, privileged)
+     MED x HIGH  -&gt; MITIGATE: non-root distroless image, no socket mounts, read-only rootfs
+     test: test_image::test_runs_as_non_root, test_image::test_no_capabilities_needed
+T-03 E4 Tampering: a tampered or unsigned image is pulled and run
+     MED x HIGH  -&gt; MITIGATE: cosign keyless signing in release; host verifies before pull
+     test: test_release_workflow::test_signature_verified_before_deploy
+T-04 E5 Info disclosure: a secret committed to the repo or printed in CI
+     HIGH x HIGH -&gt; MITIGATE: gitleaks gate; no secrets in env files; Secrets Manager at runtime
+     test: test_image::test_no_secret_shaped_env, CI gate job
+T-05 E1 Info disclosure: vulnerable dependency or base image exploited
+     MED x MED   -&gt; MITIGATE: pip-audit + trivy gates; weekly rebuild
+     test: test_image::test_no_fixable_critical_cves
+T-06 E3 Elevation: the GitHub deploy role is over-privileged (EC2FullAccess, SSMFullAccess)
+     MED x HIGH  -&gt; MITIGATE: least-privilege policy scoped to the instance and the state bucket
+     test: test_infra_policy::test_deploy_role_no_wildcards
+T-07 host Repudiation: no record of commands run on the host or of logins
+     MED x MED   -&gt; MITIGATE: auditd + auth log shipped to CloudWatch; alarms
+     test: detection drill D-01, D-02
+T-08 E1 DoS: unbounded requests exhaust the single host
+     MED x MED   -&gt; ACCEPT for this project (single host by design); note: WAF + ALB in the ECS project</code></pre></div><div class="pj-check"><strong>Check:</strong> Every threat has an entry point, a rating, a response, a control and a test name. Commit the file.</div></div></li></ol>
+  </section>
+
+  <section id="phase-2" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 2</span><h2>Harden the host and the instance</h2></div>
+    <p class="pj-goal">The EC2 instance requires IMDSv2, has no SSH path, runs a host firewall and auditd, patches itself, and ships its logs — all from Terraform and the boot script.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-2-1"><label class="pj-step-tick"><input type="checkbox" data-step="2-1" aria-label="Done: step 2.1" /><span class="pj-step-num">2.1</span></label><div class="pj-step-body"><div class="pj-step-text">Require IMDSv2 on the instance and give the role permission to read one secret and to write logs. Replace the instance block's relevant parts in <code>infra/main.tf</code>.</div><div class="code"><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>resource "aws_instance" "app" {
+  # ... existing arguments ...
+
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"   # IMDSv2 only: a plain GET from an SSRF gets nothing
+    http_put_response_hop_limit = 1            # tokens cannot be fetched from inside a container
+  }
+
+  root_block_device {
+    volume_size = 16
+    encrypted   = true
+  }
+}
+
+resource "aws_iam_role_policy" "instance_least_privilege" {
+  name = "${var.name}-instance"
+  role = aws_iam_role.instance.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "ReadOwnSecret"
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue"]
+        Resource = aws_secretsmanager_secret.app.arn
+      },
+      {
+        Sid      = "ShipLogs"
+        Effect   = "Allow"
+        Action   = ["logs:CreateLogStream", "logs:PutLogEvents", "logs:DescribeLogStreams"]
+        Resource = "${aws_cloudwatch_log_group.host.arn}:*"
+      }
+    ]
+  })
+}</code></pre></div><div class="pj-note">The <code>AmazonSSMManagedInstanceCore</code> attachment from the original project stays; it is what lets you run commands without SSH.</div></div></li><li class="pj-step" id="step-2-2"><label class="pj-step-tick"><input type="checkbox" data-step="2-2" aria-label="Done: step 2.2" /><span class="pj-step-num">2.2</span></label><div class="pj-step-body"><div class="pj-step-text">Create the secret that the app will read at runtime (the Grafana admin password moves here too), and the log group.</div><div class="code"><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>resource "aws_secretsmanager_secret" "app" {
+  name                    = "${var.name}/app"
+  recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret_version" "app" {
+  secret_id     = aws_secretsmanager_secret.app.id
+  secret_string = jsonencode({
+    grafana_password = var.grafana_password   # written once from your tfvars; rotate in the console later
+    api_signing_key  = random_password.api_signing_key.result
+  })
+}
+
+resource "random_password" "api_signing_key" {
+  length  = 48
+  special = false
+}
+
+resource "aws_cloudwatch_log_group" "host" {
+  name              = "/${var.name}/host"
+  retention_in_days = 365
+}</code></pre></div><div class="pj-note">Add <code>random = { source = "hashicorp/random", version = "~&gt; 3.6" }</code> to <code>required_providers</code>. The secret's value ends up in Terraform state, which is why the state bucket is encrypted and private; for a production system, write the value out of band and only reference the secret here.</div></div></li><li class="pj-step" id="step-2-3"><label class="pj-step-tick"><input type="checkbox" data-step="2-3" aria-label="Done: step 2.3" /><span class="pj-step-num">2.3</span></label><div class="pj-step-body"><div class="pj-step-text">Extend the boot script with hardening: nftables default-deny with only 80 (and 3000/9090 from your IP via the security group, which stays), auditd with the rules from the hardening module, unattended security updates, and the CloudWatch agent shipping the auth log, the audit log and the app's security log.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># infra/user_data.sh (append after Docker is installed, before the compose up)
+dnf install -y nftables audit amazon-cloudwatch-agent dnf-automatic
+
+cat &gt; /etc/nftables.conf &lt;&lt;'NFT'
+flush ruleset
+table inet filter {
+  chain input {
+    type filter hook input priority 0; policy drop;
+    iif lo accept
+    ct state established,related accept
+    tcp dport { 80, 3000, 9090 } accept
+    icmp type echo-request limit rate 5/second accept
+  }
+  chain forward { type filter hook forward priority 0; policy accept; }
+  chain output  { type filter hook output priority 0; policy accept; }
+}
+NFT
+systemctl enable --now nftables
+
+cat &gt; /etc/audit/rules.d/hardening.rules &lt;&lt;'AUD'
+-w /etc/passwd -p wa -k identity
+-w /etc/shadow -p wa -k identity
+-w /etc/sudoers -p wa -k privilege
+-w /etc/sudoers.d/ -p wa -k privilege
+-w /home/ -p wa -k home_changes
+-w /root/.ssh/ -p wa -k ssh_keys
+-a always,exit -F arch=b64 -S execve -F euid=0 -F auid&gt;=1000 -F auid!=unset -k root_commands
+-e 2
+AUD
+augenrules --load &amp;&amp; systemctl enable --now auditd
+
+sed -i 's/^apply_updates = .*/apply_updates = yes/; s/^upgrade_type = .*/upgrade_type = security/' /etc/dnf/automatic.conf
+systemctl enable --now dnf-automatic.timer
+
+cat &gt; /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json &lt;&lt;'CW'
+{
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {"file_path": "/var/log/secure",      "log_group_name": "/${name}/host", "log_stream_name": "{instance_id}/auth"},
+          {"file_path": "/var/log/audit/audit.log", "log_group_name": "/${name}/host", "log_stream_name": "{instance_id}/audit"},
+          {"file_path": "/opt/app/logs/security.log", "log_group_name": "/${name}/host", "log_stream_name": "{instance_id}/app-security"}
+        ]
+      }
+    }
+  }
+}
+CW
+systemctl enable --now amazon-cloudwatch-agent</code></pre></div><div class="pj-note"><code>${name}</code> is filled by Terraform's <code>templatefile</code>; add <code>name = var.name</code> to the template variables in <code>main.tf</code>. Docker manages the <code>forward</code> chain, so it stays at accept; the security group still limits 3000/9090 to your IP.</div></div></li><li class="pj-step" id="step-2-4"><label class="pj-step-tick"><input type="checkbox" data-step="2-4" aria-label="Done: step 2.4" /><span class="pj-step-num">2.4</span></label><div class="pj-step-body"><div class="pj-step-text">Make the app write its security events to a file the agent ships. Add the <code>security_event</code> helper from the logging module to <code>app/main.py</code>, log <code>authz.denied</code> and <code>auth.signature.invalid</code>, and mount <code>/opt/app/logs</code> into the container in <code>deploy/compose.yml</code>.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># deploy/compose.yml (app service additions)
+    volumes:
+      - /opt/app/logs:/logs
+    environment:
+      SECURITY_LOG: /logs/security.log
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]</code></pre></div><div class="pj-note"><code>read_only</code> plus a tmpfs for <code>/tmp</code> gives the container an immutable filesystem; <code>no-new-privileges</code> and <code>cap_drop: ALL</code> are the Compose equivalents of the Kubernetes restricted profile.</div></div></li><li class="pj-step" id="step-2-5"><label class="pj-step-tick"><input type="checkbox" data-step="2-5" aria-label="Done: step 2.5" /><span class="pj-step-num">2.5</span></label><div class="pj-step-body"><div class="pj-step-text">Write the infrastructure policy tests: they run <code>terraform plan -json</code> and assert the settings exist, so a future edit that drops IMDSv2 or widens the role fails CI.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># tests/security/test_infra_policy.py
+import json
+import subprocess
+
+import pytest
+
+
+@pytest.fixture(scope="module")
+def plan():
+    subprocess.run(["terraform", "-chdir=infra", "init", "-input=false", "-backend=false"], check=True, capture_output=True)
+    subprocess.run(["terraform", "-chdir=infra", "plan", "-input=false", "-out=tfplan",
+                    "-var=image=ghcr.io/example/x:latest", "-var=grafana_password=test", "-var=my_ip=203.0.113.9/32"],
+                   check=True, capture_output=True)
+    out = subprocess.run(["terraform", "-chdir=infra", "show", "-json", "tfplan"], check=True, capture_output=True, text=True).stdout
+    return json.loads(out)
+
+
+def resources(plan, rtype):
+    return [r for r in plan["planned_values"]["root_module"]["resources"] if r["type"] == rtype]
+
+
+def test_imdsv2_required(plan):
+    inst = resources(plan, "aws_instance")[0]["values"]
+    assert inst["metadata_options"][0]["http_tokens"] == "required"
+    assert inst["metadata_options"][0]["http_put_response_hop_limit"] == 1
+
+
+def test_root_volume_encrypted(plan):
+    inst = resources(plan, "aws_instance")[0]["values"]
+    assert inst["root_block_device"][0]["encrypted"] is True
+
+
+def test_no_ssh_from_internet(plan):
+    for sg in resources(plan, "aws_security_group"):
+        for rule in sg["values"].get("ingress", []):
+            if rule["from_port"] &lt;= 22 &lt;= rule["to_port"]:
+                assert "0.0.0.0/0" not in rule["cidr_blocks"]
+
+
+def test_instance_policy_has_no_wildcard_actions(plan):
+    for pol in resources(plan, "aws_iam_role_policy"):
+        doc = json.loads(pol["values"]["policy"])
+        for st in doc["Statement"]:
+            actions = st["Action"] if isinstance(st["Action"], list) else [st["Action"]]
+            assert "*" not in actions and not any(a.endswith(":*") for a in actions)</code></pre></div><div class="pj-note"><code>-backend=false</code> lets the plan run in CI without touching the real state bucket; the plan is for assertions only.</div></div></li><li class="pj-step" id="step-2-6"><label class="pj-step-tick"><input type="checkbox" data-step="2-6" aria-label="Done: step 2.6" /><span class="pj-step-num">2.6</span></label><div class="pj-step-body"><div class="pj-step-text">Apply the infrastructure changes from your laptop (the pipeline will own applies again after this phase), wait for the instance to replace itself (user data changed), and confirm the hardening took effect through Run Command.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>cd infra &amp;&amp; terraform init &amp;&amp; terraform apply &amp;&amp; cd ..
+INSTANCE=$(aws ec2 describe-instances --filters Name=tag:Name,Values=zero-to-prod Name=instance-state-name,Values=running --query 'Reservations[].Instances[].InstanceId' --output text)
+aws ssm send-command --instance-ids "$INSTANCE" --document-name AWS-RunShellScript \
+  --parameters 'commands=["nft list ruleset | head -20","auditctl -s","systemctl is-active amazon-cloudwatch-agent dnf-automatic.timer","curl -s -m 2 http://169.254.169.254/latest/meta-data/ || echo IMDSv1-blocked"]' \
+  --query Command.CommandId --output text</code></pre></div><div class="pj-check"><strong>Check:</strong> The command output (Systems Manager → Run Command → the command → the instance) shows the drop policy, <code>enabled 2</code> for auditd, both services active, and <code>IMDSv1-blocked</code>. In CloudWatch Logs, the <code>/zero-to-prod/host</code> group has <code>auth</code> and <code>audit</code> streams receiving lines.</div></div></li></ol>
+  </section>
+
+  <section id="phase-3" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 3</span><h2>Harden the image and the pipeline</h2></div>
+    <p class="pj-goal">A distroless non-root image pinned by digest, secrets fetched at runtime, and gates that block secrets, vulnerable dependencies, bad infrastructure and unsigned images.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-3-1"><label class="pj-step-tick"><input type="checkbox" data-step="3-1" aria-label="Done: step 3.1" /><span class="pj-step-num">3.1</span></label><div class="pj-step-body"><div class="pj-step-text">Rewrite the Dockerfile to a distroless, non-root final stage pinned by digest. Get the current digests with <code>docker buildx imagetools inspect python:3.12-slim</code> and <code>... gcr.io/distroless/python3-debian12:nonroot</code>.</div><div class="code"><div class="code-head"><span>dockerfile</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># syntax=docker/dockerfile:1
+FROM python:3.12-slim@sha256:REPLACE_WITH_CURRENT_DIGEST AS build
+WORKDIR /src
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+FROM gcr.io/distroless/python3-debian12:nonroot@sha256:REPLACE_WITH_CURRENT_DIGEST
+COPY --from=build /install /usr/local
+COPY app /app/app
+WORKDIR /app
+ENV PYTHONPATH=/usr/local/lib/python3.12/site-packages PYTHONUNBUFFERED=1
+USER nonroot:nonroot
+EXPOSE 8000
+ENTRYPOINT ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]</code></pre></div><div class="pj-note">Distroless has no shell, so the previous <code>HEALTHCHECK</code> with <code>python -c</code> still works but a <code>curl</code>-based one would not. Confirm the site-packages path by running <code>docker run --rm --entrypoint python IMAGE -c 'import sys; print(sys.path)'</code>.</div></div></li><li class="pj-step" id="step-3-2"><label class="pj-step-tick"><input type="checkbox" data-step="3-2" aria-label="Done: step 3.2" /><span class="pj-step-num">3.2</span></label><div class="pj-step-body"><div class="pj-step-text">Fetch the secret at runtime with the instance role instead of the <code>.env</code> file. The Grafana password stays in Compose for now (it is not the app's secret); the app reads its own signing key from Secrets Manager on startup and uses it to verify a request signature on a new protected endpoint — giving the API its first real authentication.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># app/secrets.py
+import json
+import os
+from functools import lru_cache
+
+import boto3
+
+
+@lru_cache(maxsize=1)
+def app_secrets() -&gt; dict:
+    name = os.environ.get("APP_SECRET_NAME", "zero-to-prod/app")
+    client = boto3.client("secretsmanager", region_name=os.environ.get("AWS_REGION", "eu-west-1"))
+    return json.loads(client.get_secret_value(SecretId=name)["SecretString"])
+
+
+# app/main.py additions
+import hmac
+import hashlib
+
+from fastapi import Header, HTTPException, Request
+
+from app.secrets import app_secrets
+
+
+@app.post("/admin/reindex")
+async def reindex(request: Request, x_signature: str = Header(default="")):
+    body = await request.body()
+    expected = hmac.new(app_secrets()["api_signing_key"].encode(), body, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, x_signature):
+        security_event("auth.signature.invalid", actor=request.client.host, target="/admin/reindex", outcome="denied", request_id=request.headers.get("x-request-id", "-"))
+        raise HTTPException(status_code=404)
+    return {"status": "queued"}</code></pre></div><div class="pj-note">Add <code>boto3</code> to <code>requirements.txt</code>. The container reaches Secrets Manager through the instance role via IMDSv2 — which works from inside the container only because the hop limit is 1 and Docker's default bridge is one hop; if you later move to a different network mode, use the container credential provider instead.</div></div></li><li class="pj-step" id="step-3-3"><label class="pj-step-tick"><input type="checkbox" data-step="3-3" aria-label="Done: step 3.3" /><span class="pj-step-num">3.3</span></label><div class="pj-step-body"><div class="pj-step-text">Add the image tests. The CVE test uses Trivy with <code>--ignore-unfixed</code> so unfixable base-image findings do not block, while fixable criticals do.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># tests/security/test_image.py
+import json
+import os
+import subprocess
+
+IMAGE = os.environ.get("IMAGE_UNDER_TEST", "zero-to-prod:test")
+
+
+def inspect():
+    out = subprocess.run(["docker", "image", "inspect", IMAGE], capture_output=True, text=True, check=True).stdout
+    return json.loads(out)[0]["Config"]
+
+
+def test_runs_as_non_root():
+    assert inspect().get("User", "") not in ("", "0", "root")
+
+
+def test_no_secret_shaped_env():
+    env = inspect().get("Env") or []
+    assert not [e for e in env if any(k in e.upper() for k in ("PASSWORD", "SECRET", "TOKEN", "AKIA"))]
+
+
+def test_no_fixable_critical_cves():
+    r = subprocess.run(["trivy", "image", "--quiet", "--severity", "CRITICAL", "--ignore-unfixed", "--exit-code", "1", IMAGE],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout
+
+
+def test_no_secrets_in_layers():
+    r = subprocess.run(["trivy", "image", "--quiet", "--scanners", "secret", "--exit-code", "1", IMAGE], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout</code></pre></div></div></li><li class="pj-step" id="step-3-4"><label class="pj-step-tick"><input type="checkbox" data-step="3-4" aria-label="Done: step 3.4" /><span class="pj-step-num">3.4</span></label><div class="pj-step-body"><div class="pj-step-text">Add the two-tier security workflow from the DevSecOps module as <code>.github/workflows/security.yml</code>: a <code>gate</code> job (gitleaks, Semgrep OWASP rules at ERROR, pip-audit strict, Checkov on <code>infra/</code>, then build the image and run <code>tests/security/test_image.py</code>) and a <code>report</code> job (full Semgrep to SARIF, never blocking). Install Trivy in the job with <code>aquasecurity/setup-trivy@v0.2.3</code> and Terraform with <code>hashicorp/setup-terraform@v3</code> for the policy tests.</div><div class="pj-note">The exact YAML is in the DevSecOps lesson; the additions here are the image build (<code>docker build -t zero-to-prod:test .</code>) and <code>pytest tests/security -q</code> after the scanners.</div></div></li><li class="pj-step" id="step-3-5"><label class="pj-step-tick"><input type="checkbox" data-step="3-5" aria-label="Done: step 3.5" /><span class="pj-step-num">3.5</span></label><div class="pj-step-body"><div class="pj-step-text">Sign the image in <code>release.yml</code> right after the push, and make the host verify the signature before it deploys. Add to the <code>build</code> job (after <code>docker/build-push-action</code>):</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>      - uses: sigstore/cosign-installer@v3
+      - name: Sign the image by digest (keyless, this workflow's identity)
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+        env:
+          IMAGE: ${{ env.IMAGE }}
+          DIGEST: ${{ steps.build.outputs.digest }}</code></pre></div><div class="pj-note"><code>docker/build-push-action</code> exposes the digest as <code>steps.&lt;id&gt;.outputs.digest</code>; give the build step <code>id: build</code>. The job already has <code>id-token: write</code>.</div></div></li><li class="pj-step" id="step-3-6"><label class="pj-step-tick"><input type="checkbox" data-step="3-6" aria-label="Done: step 3.6" /><span class="pj-step-num">3.6</span></label><div class="pj-step-body"><div class="pj-step-text">Change the deploy job so the host verifies before pulling: install cosign on the host in <code>user_data.sh</code> (download the release binary and <code>chmod +x</code>), and change the Run Command to verify the exact digest against your workflow identity, aborting if verification fails.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># the commands sent through SSM by the deploy job (one line each in the JSON parameters)
+cd /opt/app
+cosign verify --certificate-identity-regexp '^https://github.com/YOUR_GITHUB_USER/zero-to-prod/.github/workflows/release.yml@refs/heads/main$' --certificate-oidc-issuer https://token.actions.githubusercontent.com ghcr.io/YOUR_GITHUB_USER/zero-to-prod@DIGEST || exit 1
+sed -i 's#^APP_IMAGE=.*#APP_IMAGE=ghcr.io/YOUR_GITHUB_USER/zero-to-prod@DIGEST#' .env
+docker compose pull app &amp;&amp; docker compose up -d app</code></pre></div><div class="pj-note">Deploy by digest, not tag: the workflow passes <code>${{ steps.build.outputs.digest }}</code> into the command. A signature check by tag would be meaningless because tags move.</div></div></li><li class="pj-step" id="step-3-7"><label class="pj-step-tick"><input type="checkbox" data-step="3-7" aria-label="Done: step 3.7" /><span class="pj-step-num">3.7</span></label><div class="pj-step-body"><div class="pj-step-text">Open a pull request, watch the gates run, merge, and watch the release sign the image and the host verify it. Then prove the gate with a negative test: push a branch with a fake <code>AKIA...</code> key in a file and confirm the pull request is blocked.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>git add . &amp;&amp; git commit -m "feat: hardened image, runtime secrets, scanning gates, signed deploys"
+git push -u origin feat/security
+gh pr create --fill &amp;&amp; gh pr checks --watch
+gh pr merge --squash --delete-branch &amp;&amp; git switch main &amp;&amp; git pull &amp;&amp; gh run watch</code></pre></div><div class="pj-check"><strong>Check:</strong> The deploy job's Run Command output includes <code>Verified OK</code> from cosign before the pull. A test branch containing a secret shows a red <code>Secrets (blocks)</code> step.</div></div></li></ol>
+  </section>
+
+  <section id="phase-4" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 4</span><h2>Detections</h2></div>
+    <p class="pj-goal">Three detections on the shipped logs that alarm within minutes, each with a runbook line, implemented as code in Terraform.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-4-1"><label class="pj-step-tick"><input type="checkbox" data-step="4-1" aria-label="Done: step 4.1" /><span class="pj-step-num">4.1</span></label><div class="pj-step-body"><div class="pj-step-text">Define the three detections as CloudWatch metric filters and alarms in <code>infra/logging.tf</code>: an SSH authorized_keys change (persistence), a burst of root commands outside the deploy window (privilege use), and repeated invalid signatures on the admin endpoint (credential guessing).</div><div class="code"><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>locals {
+  detections = {
+    ssh_key_change = {
+      pattern   = "[..., key=ssh_keys]"              # auditd lines carrying the ssh_keys rule key
+      threshold = 1
+      summary   = "authorized_keys modified on the host"
+    }
+    root_command_burst = {
+      pattern   = "[..., key=root_commands]"
+      threshold = 20                                 # a deploy runs a handful; a human shell runs many
+      summary   = "unusual volume of root commands"
+    }
+    admin_signature_failures = {
+      pattern   = "{ $.event = \"auth.signature.invalid\" }"
+      threshold = 10
+      summary   = "repeated invalid signatures on /admin"
+    }
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "det" {
+  for_each       = local.detections
+  name           = "${var.name}-${each.key}"
+  log_group_name = aws_cloudwatch_log_group.host.name
+  pattern        = each.value.pattern
+  metric_transformation {
+    name      = each.key
+    namespace = "${var.name}/security"
+    value     = "1"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "det" {
+  for_each            = local.detections
+  alarm_name          = "${var.name}-${each.key}"
+  alarm_description   = "${each.value.summary} — runbook: security/detections/${each.key}.md"
+  namespace           = "${var.name}/security"
+  metric_name         = each.key
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = each.value.threshold
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.security.arn]
+}
+
+resource "aws_sns_topic" "security" {
+  name = "${var.name}-security-alerts"
+}
+
+resource "aws_sns_topic_subscription" "email" {
+  topic_arn = aws_sns_topic.security.arn
+  protocol  = "email"
+  endpoint  = var.security_email
+}</code></pre></div><div class="pj-note">Add <code>variable "security_email"</code> and set it in tfvars; confirm the subscription from the email AWS sends. The audit log lines are space-delimited, hence the <code>[...]</code> pattern syntax; the app log is JSON, hence the <code>{ $.event = ... }</code> form.</div></div></li><li class="pj-step" id="step-4-2"><label class="pj-step-tick"><input type="checkbox" data-step="4-2" aria-label="Done: step 4.2" /><span class="pj-step-num">4.2</span></label><div class="pj-step-body"><div class="pj-step-text">Write a runbook per detection in <code>security/detections/&lt;name&gt;.md</code>: what it means, how to confirm (the CloudWatch Logs Insights query), and the containment step (isolate the instance by swapping its security group for one with no rules, snapshot, then investigate via Run Command).</div><div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># security/detections/ssh_key_change.md
+
+**Meaning:** a file under /root/.ssh or /home/*/.ssh changed. Nobody should be adding SSH keys; SSH is not
+an access path on this host. Treat as persistence until proven otherwise.
+
+**Confirm (Logs Insights on /zero-to-prod/host):**
+  fields @timestamp, @message | filter @message like /key=ssh_keys/ | sort @timestamp desc | limit 50
+Look at the auid (which login) and the exe (which process) in the audit line.
+
+**Contain:** if not you and not a deploy:
+  aws ec2 modify-instance-attribute --instance-id I --groups SG_QUARANTINE   # no rules: isolated
+  aws ec2 create-snapshot --volume-id V --description "evidence $(date -u +%FT%TZ)"
+Then Run Command: cat the changed authorized_keys, last -F, ps -eo pid,user,lstart,cmd.
+
+**Recover:** rebuild the instance from Terraform (user_data recreates a clean host); rotate the
+instance role's secrets; add the finding to security/incidents/.</code></pre></div><div class="pj-note">Create the quarantine security group (<code>aws_security_group.quarantine</code> with no ingress and no egress) in Terraform so it exists before you need it.</div></div></li><li class="pj-step" id="step-4-3"><label class="pj-step-tick"><input type="checkbox" data-step="4-3" aria-label="Done: step 4.3" /><span class="pj-step-num">4.3</span></label><div class="pj-step-body"><div class="pj-step-text">Apply, then confirm the metric filters parse real lines by running a Logs Insights query for each pattern against the last hour.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>cd infra &amp;&amp; terraform apply &amp;&amp; cd ..
+aws logs start-query --log-group-name /zero-to-prod/host --start-time $(($(date +%s)-3600)) --end-time $(date +%s) \
+  --query-string 'fields @timestamp, @message | filter @message like /key=root_commands/ | sort @timestamp desc | limit 5' \
+  --query queryId --output text</code></pre></div><div class="pj-check"><strong>Check:</strong> <code>aws logs get-query-results --query-id ID</code> returns audit lines from the deploy's <code>docker compose</code> commands, proving the pipeline from auditd to CloudWatch works. The three alarms show <code>OK</code> (or <code>INSUFFICIENT_DATA</code> until the first datapoint) in the CloudWatch console.</div></div></li></ol>
+  </section>
+
+  <section id="phase-5" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 5</span><h2>The drill and the evidence</h2></div>
+    <p class="pj-goal">Each detection proven by triggering its behaviour, one control removed and caught by a test, and a write-up that links every claim to evidence.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-5-1"><label class="pj-step-tick"><input type="checkbox" data-step="5-1" aria-label="Done: step 5.1" /><span class="pj-step-num">5.1</span></label><div class="pj-step-body"><div class="pj-step-text">Drill D-01: plant an SSH key through Run Command (the only way in, which is itself worth noting), then time the alarm.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>date -u
+aws ssm send-command --targets Key=tag:Name,Values=zero-to-prod --document-name AWS-RunShellScript \
+  --parameters 'commands=["mkdir -p /root/.ssh","echo ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDRILLKEYDRILLKEYDRILLKEYDRILLKEYDRILLKEY drill &gt;&gt; /root/.ssh/authorized_keys"]' \
+  --query Command.CommandId --output text</code></pre></div><div class="pj-check"><strong>Check:</strong> Within about five minutes (one alarm period) the <code>zero-to-prod-ssh_key_change</code> alarm goes to ALARM and the email arrives with the runbook path. Record injection time and alarm time.</div></div></li><li class="pj-step" id="step-5-2"><label class="pj-step-tick"><input type="checkbox" data-step="5-2" aria-label="Done: step 5.2" /><span class="pj-step-num">5.2</span></label><div class="pj-step-body"><div class="pj-step-text">Follow the runbook: run the Logs Insights query, identify the audit line (it shows the SSM agent's session as the actor), and remove the key. Then rebuild the host from Terraform as the runbook says, because a real incident would not trust the cleaned host.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>aws ssm send-command --targets Key=tag:Name,Values=zero-to-prod --document-name AWS-RunShellScript \
+  --parameters 'commands=["sed -i /drill/d /root/.ssh/authorized_keys"]' --query Command.CommandId --output text
+cd infra &amp;&amp; terraform apply -replace=aws_instance.app &amp;&amp; cd ..</code></pre></div><div class="pj-check"><strong>Check:</strong> The alarm returns to OK after the next clean period; a fresh instance comes up with the hardening applied automatically.</div></div></li><li class="pj-step" id="step-5-3"><label class="pj-step-tick"><input type="checkbox" data-step="5-3" aria-label="Done: step 5.3" /><span class="pj-step-num">5.3</span></label><div class="pj-step-body"><div class="pj-step-text">Drill D-03: hammer the admin endpoint with bad signatures from your laptop and confirm the application-log detection fires.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>IP=$(cd infra &amp;&amp; terraform output -raw public_ip)
+for i in $(seq 1 15); do curl -s -o /dev/null -X POST "http://$IP/admin/reindex" -H 'X-Signature: nope' -d '{}'; done</code></pre></div><div class="pj-check"><strong>Check:</strong> The <code>admin_signature_failures</code> alarm fires within a period; the app-security stream shows fifteen <code>auth.signature.invalid</code> events with your IP as the actor.</div></div></li><li class="pj-step" id="step-5-4"><label class="pj-step-tick"><input type="checkbox" data-step="5-4" aria-label="Done: step 5.4" /><span class="pj-step-num">5.4</span></label><div class="pj-step-body"><div class="pj-step-text">Drill D-04 (the leaked-key simulation): create a test IAM user with a key, use it once from your laptop, then "discover the leak" and run the secrets module's response in order — revoke, audit with CloudTrail lookup by access key id, contain, write up. Delete the user afterwards.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>aws iam create-user --user-name drill-leak &amp;&amp; aws iam create-access-key --user-name drill-leak &gt; /tmp/drillkey.json
+KEY=$(jq -r .AccessKey.AccessKeyId /tmp/drillkey.json)
+AWS_ACCESS_KEY_ID=$KEY AWS_SECRET_ACCESS_KEY=$(jq -r .AccessKey.SecretAccessKey /tmp/drillkey.json) aws sts get-caller-identity
+# response:
+aws iam update-access-key --user-name drill-leak --access-key-id "$KEY" --status Inactive      # 1. revoke
+aws cloudtrail lookup-events --lookup-attributes AttributeKey=AccessKeyId,AttributeValue="$KEY" --max-results 20   # 2. audit
+aws iam delete-access-key --user-name drill-leak --access-key-id "$KEY" &amp;&amp; aws iam delete-user --user-name drill-leak
+rm /tmp/drillkey.json</code></pre></div><div class="pj-check"><strong>Check:</strong> CloudTrail shows the <code>GetCallerIdentity</code> call from your IP under that key; the timeline in the write-up records revoke-before-audit.</div></div></li><li class="pj-step" id="step-5-5"><label class="pj-step-tick"><input type="checkbox" data-step="5-5" aria-label="Done: step 5.5" /><span class="pj-step-num">5.5</span></label><div class="pj-step-body"><div class="pj-step-text">Prove the tests hold the line: in a branch, set <code>http_tokens = "optional"</code> and change the Dockerfile's <code>USER</code> to root, open a pull request, and confirm both <code>test_imdsv2_required</code> and <code>test_runs_as_non_root</code> fail. Close the pull request.</div><div class="pj-check"><strong>Check:</strong> Two red tests naming the exact controls; the merge is blocked.</div></div></li><li class="pj-step" id="step-5-6"><label class="pj-step-tick"><input type="checkbox" data-step="5-6" aria-label="Done: step 5.6" /><span class="pj-step-num">5.6</span></label><div class="pj-step-body"><div class="pj-step-text">Write the control records and the incident write-up, and finish the README section.</div><div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># security/controls/C-01-imdsv2.md
+Control:   instance metadata requires IMDSv2 with hop limit 1
+Threat:    T-01 (SSRF/RCE to role credentials)
+Evidence:  infra/main.tf metadata_options; tests/security/test_infra_policy.py::test_imdsv2_required (CI, every PR)
+Verified:  2026-09-21 by Run Command: plain GET to 169.254.169.254 returns nothing
+Owner:     you
+
+# security/incidents/2026-09-21-drill.md
+D-01 ssh key planted 10:02Z -&gt; alarm 10:06Z -&gt; contained 10:14Z -&gt; host rebuilt 10:31Z   (detect 4 min, contain 12 min)
+D-03 15 bad signatures 10:40Z -&gt; alarm 10:45Z
+D-04 leaked key used 10:50Z -&gt; revoked 10:52Z -&gt; audited 10:55Z
+Improvement shipped: added /home/*/.ssh to the audit watch list (was /root only) after D-01 review.</code></pre></div><div class="pj-note">One record per threat in the register; the write-up lists detect and contain times and at least one improvement you actually made.</div></div></li><li class="pj-step" id="step-5-7"><label class="pj-step-tick"><input type="checkbox" data-step="5-7" aria-label="Done: step 5.7" /><span class="pj-step-num">5.7</span></label><div class="pj-step-body"><div class="pj-step-text">Commit and merge through a pull request. The service now has a threat model, eight controls with tests, gates in the pipeline, signed deploys, shipped logs, three tested detections and a recorded response — the full loop from the Cybersecurity capstone, on a real host.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>git add security tests infra app deploy .github Dockerfile
+git commit -m "security: detections, drills, control records and evidence"
+git push -u origin HEAD &amp;&amp; gh pr create --fill &amp;&amp; gh pr merge --squash --delete-branch
+git switch main &amp;&amp; git pull</code></pre></div><div class="pj-note">When you are done experimenting, <code>terraform destroy</code> as in the original project; the SNS subscription and log group cost cents while they exist, and the secret has a 7-day recovery window before it is fully removed.</div></div></li></ol>
+  </section>
+
+  <section id="troubleshooting" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Help</span><h2>Troubleshooting</h2></div>
+    <dl class="pj-trouble"><dt>The container cannot reach Secrets Manager (credentials error)</dt><dd>With IMDSv2 hop limit 1, the container gets credentials through the bridge network's single hop. If you set <code>network_mode: host</code> or a custom network with extra hops, raise the hop limit to 2 or use the ECS/EC2 container credential provider. Check <code>curl -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60'</code> from inside the container via Run Command.</dd><dt>The distroless image fails with <code>ModuleNotFoundError</code></dt><dd>The <code>--prefix=/install</code> layout puts packages under <code>/install/lib/python3.12/site-packages</code>; after <code>COPY --from=build /install /usr/local</code>, set <code>PYTHONPATH=/usr/local/lib/python3.12/site-packages</code>. Verify with <code>docker run --rm --entrypoint python IMAGE -c 'import fastapi'</code>.</dd><dt><code>cosign verify</code> on the host fails with a certificate identity mismatch</dt><dd>The identity regexp must match the workflow file path and ref exactly: <code>.github/workflows/release.yml@refs/heads/main</code>. Print the signature's certificate with <code>cosign verify ... --output text</code> to see the actual identity.</dd><dt>The audit metric filter never matches</dt><dd>Audit lines look like <code>type=SYSCALL ... key="ssh_keys"</code> with quotes; the space-delimited pattern <code>[..., key=ssh_keys]</code> may need to be <code>[..., key="ssh_keys"]</code> depending on the agent's formatting. Test patterns in the console's filter tester against real lines from the stream.</dd><dt>The <code>root_command_burst</code> alarm fires on every deploy</dt><dd>Deploys run <code>docker compose</code> as root through SSM. Raise the threshold above a deploy's command count, or exclude the SSM agent's session by adding <code>-F exe!=/usr/bin/ssm-session-worker</code> to the audit rule — but note that exclusion also hides an attacker using SSM.</dd><dt>Terraform wants to recreate the instance every apply</dt><dd><code>user_data_replace_on_change = true</code> plus a template that includes a changing value (a timestamp, a random) causes this. Keep the template deterministic; only real changes should replace the host.</dd><dt><code>test_infra_policy</code> fails in CI with a provider download error</dt><dd>The policy tests run <code>terraform init -backend=false</code>, which still downloads the AWS provider; ensure the CI job has network access and <code>hashicorp/setup-terraform</code> installed a 1.10+ binary.</dd></dl>
+  </section>
+
+  <section id="next" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Next</span><h2>Where to go from here</h2></div>
+    <ul class="pj-next"><li>Put the service behind an ALB with WAF in the <strong>Terraform an AWS environment</strong> project, which retires threat T-08 (DoS on a single host) that this project accepted.</li><li>Replace metric filters with a proper detection pipeline: ship the same logs to an OpenSearch or Loki stack and write the Sigma rules from the detection module.</li><li>Run the <strong>Signed and attested builds</strong> project to add SBOM attestations and SLSA provenance on top of the signature you added here.</li><li>Add the SRE track's SLO alerts to the same host, and notice that the security alarms and the reliability alerts want the same routing and runbook discipline.</li><li>Do the <strong>Build a detection lab</strong> project to practise the response side with a full SIEM and adversary emulation.</li></ul>
+  </section>
+
+  <p class="feedback-row">Did a step fail or feel unclear? <a href="../../feedback.html?page=/education/projects/proj-sec-secure-service.html&amp;title=Secure%20a%20web%20service%20end%20to%20end">Tell me which one →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../../education.html">Education</a>
+      <a href="../../privacy.html">Privacy</a>
+      <a href="../../terms.html">Terms</a>
+      <a href="../../feedback.html?page=/education/projects/proj-sec-secure-service.html&amp;title=Secure%20a%20web%20service%20end%20to%20end">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="project.js"></script>
+</body>
+</html>

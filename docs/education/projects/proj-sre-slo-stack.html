@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SLOs from scratch — Site Reliability project | ThavionAI Education</title>
+  <meta name="description" content="Take a running HTTP service and give it the reliability machinery a real SRE team would: measured SLIs for availability and latency, a written SLO with an error budget, Prometheus recording rules that compute the budget burn, multi-window burn-rate alerts that page only when it matters, Alertmanager routing, a Grafana SLO dashboard, an error budget policy, and a runbook — then break the service on purpose and watch the whole chain fire." />
+  <meta property="og:title" content="SLOs from scratch — ThavionAI project" />
+  <meta property="og:description" content="Take a running HTTP service and give it the reliability machinery a real SRE team would: measured SLIs for availability and latency, a written SLO with an error budget, Prometheus recording rules that compute the budget burn, multi-window burn-rate alerts that page only when it matters, Alertmanager routing, a Grafana SLO dashboard, an error budget policy, and a runbook — then break the service on purpose and watch the whole chain fire." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/projects/proj-sre-slo-stack.html" />
+  <link rel="icon" href="../../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="../lesson.css" />
+  <link rel="stylesheet" href="project.css" />
+</head>
+<body class="track-sre" data-project="proj-sre-slo-stack">
+
+<nav>
+  <a href="../../index.html" class="nav-logo"><img class="nav-logo-icon" src="../../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../../education.html">Tracks</a>
+    <a href="../../index.html#projects" class="active">Projects</a>
+    <a href="../../education.html#certs">Certifications</a>
+    <a href="../../index.html#apps">Apps</a>
+    <a href="../../feedback.html?page=/education/projects/proj-sre-slo-stack.html&amp;title=SLOs%20from%20scratch">Feedback</a>
+    <a href="../../education.html#sre" class="nav-cta">Site Reliability track</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../../education.html">Education</a> › <a href="../../education.html#sre">Site Reliability Engineering</a> › Guided project</div>
+    <h1>SLOs from scratch</h1>
+    <p class="lede">Take a running HTTP service and give it the reliability machinery a real SRE team would: measured SLIs for availability and latency, a written SLO with an error budget, Prometheus recording rules that compute the budget burn, multi-window burn-rate alerts that page only when it matters, Alertmanager routing, a Grafana SLO dashboard, an error budget policy, and a runbook — then break the service on purpose and watch the whole chain fire.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">about 6 hours</span>
+      <span class="chip">5 phases · 25 steps</span>
+      <span class="chip chip-quiz" id="progressChip">0 / 25 done</span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav">
+  <div class="wrap">
+    <a href="#overview">Overview</a>
+    <a href="#phase-1">1. Get the stack up and generate traffic</a>
+    <a href="#phase-2">2. Define the SLIs and write the SLO</a>
+    <a href="#phase-3">3. Recording rules and burn-rate alerts</a>
+    <a href="#phase-4">4. Route the alerts and build the dashboard</a>
+    <a href="#phase-5">5. The drill: break it, get paged, fix it</a>
+    <a href="#troubleshooting">Troubleshooting</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <section class="pj-intro" id="overview">
+    <div class="objectives">
+      <div class="box-label">What you will have at the end</div>
+      <p class="pj-outcome">A repository containing a <code>deploy/</code> stack (service, Prometheus, Alertmanager, Grafana) you can start with one command, an <code>slo/</code> folder with the SLO document, recording and alerting rules, the dashboard and the runbook, and a recorded drill showing a fast-burn page firing within minutes of an injected failure and resolving after the fix. The same rules and dashboard drop onto any service that exposes standard HTTP metrics.</p>
+    </div>
+    <div class="pj-grid">
+      <div class="pj-box">
+        <div class="box-label">Before you start</div>
+        <ul><li>The DevOps track's zero-to-production project (or any HTTP service exposing Prometheus metrics with request counts by status and a latency histogram); this guide uses that project's FastAPI service and <code>deploy/</code> Compose stack</li><li>Docker Desktop and Git installed; comfortable editing YAML</li><li>The SRE track modules on SLOs, Prometheus and alerting on symptoms — this project is their hands-on half</li></ul>
+      </div>
+      <div class="pj-box">
+        <div class="box-label">Tools you will install</div>
+        <ul class="pj-tools"><li><strong>Prometheus</strong> — scrapes the service, evaluates recording and alerting rules <a href="https://prometheus.io/docs/" target="_blank" rel="noopener">↗</a></li><li><strong>Alertmanager</strong> — routes, groups and silences alerts; sends pages and tickets <a href="https://prometheus.io/docs/alerting/latest/alertmanager/" target="_blank" rel="noopener">↗</a></li><li><strong>Grafana</strong> — the SLO dashboard, provisioned from JSON in the repo <a href="https://grafana.com/docs/grafana/latest/" target="_blank" rel="noopener">↗</a></li><li><strong>hey (HTTP load generator)</strong> — steady traffic so the SLIs have data; a shell loop works too <a href="https://github.com/rakyll/hey" target="_blank" rel="noopener">↗</a></li><li><strong>promtool</strong> — checks rule files and unit-tests alert expressions before they run <a href="https://prometheus.io/docs/prometheus/latest/configuration/unit_testing_rules/" target="_blank" rel="noopener">↗</a></li></ul>
+      </div>
+    </div>
+    <div class="pj-box pj-layout"><div class="box-label">Repository layout at the end</div><pre><code>zero-to-prod/
+├── app/main.py                 # + /orders/{id} endpoint with an injectable failure rate
+├── deploy/
+│   ├── compose.yml             # app, prometheus, alertmanager, grafana, node-exporter
+│   ├── prometheus.yml          # scrape config + rule_files
+│   ├── alertmanager.yml        # routes and receivers
+│   ├── rules/
+│   │   ├── slo_recording.yml   # SLIs and burn rates as recorded series
+│   │   └── slo_alerts.yml      # multi-window burn-rate alerts
+│   ├── tests/
+│   │   └── slo_alerts_test.yml # promtool unit tests for the alerts
+│   └── grafana/
+│       ├── provisioning/       # datasource + dashboard loader
+│       └── dashboards/slo.json
+└── slo/
+    ├── SLO.md                  # the objective, the SLIs, the budget policy
+    └── RUNBOOK-orders-api.md   # what to do when it pages</code></pre></div>
+    <p class="pj-hint">Tick each step as you finish it — your progress is saved in this browser. Every code block has a copy button. If something goes wrong, the <a href="#troubleshooting">troubleshooting</a> section at the end covers the usual suspects.</p>
+  </section>
+
+  <section id="phase-1" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 1</span><h2>Get the stack up and generate traffic</h2></div>
+    <p class="pj-goal">The service, Prometheus, Alertmanager and Grafana running locally with steady traffic flowing, so every later rule has data to evaluate.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-1-1"><label class="pj-step-tick"><input type="checkbox" data-step="1-1" aria-label="Done: step 1.1" /><span class="pj-step-num">1.1</span></label><div class="pj-step-body"><div class="pj-step-text">Clone the zero-to-production repository (or your own service) and create a branch for the SLO work.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>gh repo clone YOUR_GITHUB_USER/zero-to-prod &amp;&amp; cd zero-to-prod
+git switch -c feat/slos</code></pre></div></div></li><li class="pj-step" id="step-1-2"><label class="pj-step-tick"><input type="checkbox" data-step="1-2" aria-label="Done: step 1.2" /><span class="pj-step-num">1.2</span></label><div class="pj-step-body"><div class="pj-step-text">Add an endpoint that does real-looking work and can be made to fail on demand. The failure rate comes from an environment variable so you can inject errors without redeploying code.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># app/main.py (add to the existing FastAPI app)
+import os
+import random
+import time
+
+from fastapi import HTTPException
+
+
+@app.get("/orders/{order_id}")
+def get_order(order_id: int):
+    time.sleep(random.uniform(0.02, 0.12))            # simulated work: 20-120 ms
+    if random.random() &lt; float(os.environ.get("CHAOS_ERROR_RATE", "0")):
+        raise HTTPException(status_code=503, detail="upstream unavailable")
+    if random.random() &lt; float(os.environ.get("CHAOS_SLOW_RATE", "0")):
+        time.sleep(0.6)                                # occasional slow response
+    return {"order_id": order_id, "status": "paid"}</code></pre></div><div class="pj-note">Keep the existing <code>/</code>, <code>/health</code> and <code>/metrics</code> endpoints. The instrumentator already records <code>http_requests_total{handler,method,status}</code> and the <code>http_request_duration_seconds</code> histogram for every route.</div></div></li><li class="pj-step" id="step-1-3"><label class="pj-step-tick"><input type="checkbox" data-step="1-3" aria-label="Done: step 1.3" /><span class="pj-step-num">1.3</span></label><div class="pj-step-body"><div class="pj-step-text">Add Alertmanager to the Compose stack and pass the chaos variables through to the app, defaulting to zero.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># deploy/compose.yml (additions)
+services:
+  app:
+    environment:
+      GREETING: ${GREETING:-hello from compose}
+      CHAOS_ERROR_RATE: ${CHAOS_ERROR_RATE:-0}
+      CHAOS_SLOW_RATE: ${CHAOS_SLOW_RATE:-0}
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.0
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports: ["9093:9093"]
+    restart: unless-stopped
+
+  prometheus:
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./rules:/etc/prometheus/rules:ro
+      - prom-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d</code></pre></div><div class="pj-note">Merge these into the existing service definitions rather than duplicating them; the <code>prometheus</code> volumes list replaces the old one that mounted <code>alerts.yml</code> directly.</div></div></li><li class="pj-step" id="step-1-4"><label class="pj-step-tick"><input type="checkbox" data-step="1-4" aria-label="Done: step 1.4" /><span class="pj-step-num">1.4</span></label><div class="pj-step-body"><div class="pj-step-text">Point Prometheus at the rules directory and at Alertmanager, and lower the scrape interval so short drills produce enough samples.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># deploy/prometheus.yml
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: app
+    static_configs:
+      - targets: ["app:8000"]
+  - job_name: node
+    static_configs:
+      - targets: ["node-exporter:9100"]
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]</code></pre></div></div></li><li class="pj-step" id="step-1-5"><label class="pj-step-tick"><input type="checkbox" data-step="1-5" aria-label="Done: step 1.5" /><span class="pj-step-num">1.5</span></label><div class="pj-step-body"><div class="pj-step-text">Give Alertmanager a minimal configuration for now: everything goes to a webhook receiver that logs to a tiny sink container, so you can see alerts arrive without needing Slack or a pager yet.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># deploy/alertmanager.yml
+route:
+  receiver: default
+  group_by: [alertname, service]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: default
+    webhook_configs:
+      - url: http://alert-sink:8080/
+        send_resolved: true</code></pre></div><div class="pj-note">Stop here and add the sink service in the next step; the URL above points at it by service name.</div></div></li><li class="pj-step" id="step-1-6"><label class="pj-step-tick"><input type="checkbox" data-step="1-6" aria-label="Done: step 1.6" /><span class="pj-step-num">1.6</span></label><div class="pj-step-body"><div class="pj-step-text">Add the alert sink container to the Compose stack. It is an HTTP echo server that prints every request it receives, so alert deliveries show up in its logs.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># deploy/compose.yml (addition)
+services:
+  alert-sink:
+    image: mendhak/http-https-echo:35
+    environment:
+      HTTP_PORT: "8080"
+    restart: unless-stopped</code></pre></div><div class="pj-check"><strong>Check:</strong> <code>docker compose -f deploy/compose.yml config</code> prints the merged file without errors and lists <code>alert-sink</code> among the services.</div></div></li><li class="pj-step" id="step-1-7"><label class="pj-step-tick"><input type="checkbox" data-step="1-7" aria-label="Done: step 1.7" /><span class="pj-step-num">1.7</span></label><div class="pj-step-body"><div class="pj-step-text">Rebuild and start the stack, then generate steady traffic against the new endpoint. Install <code>hey</code> (<code>brew install hey</code> on macOS; a binary release on Linux) or use the shell loop.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>docker compose -f deploy/compose.yml build app
+docker compose -f deploy/compose.yml up -d
+
+# 20 requests/second for 10 minutes, in the background
+hey -z 10m -q 20 -c 2 http://localhost/orders/42 &gt; /dev/null 2&gt;&amp;1 &amp;
+# without hey:
+# while true; do curl -s -o /dev/null http://localhost/orders/42; sleep 0.05; done &amp;</code></pre></div><div class="pj-check"><strong>Check:</strong> http://localhost:9090/targets shows <code>app</code>, <code>node</code> and <code>prometheus</code> as UP. In the Prometheus graph, <code>sum(rate(http_requests_total{handler="/orders/{order_id}"}[1m]))</code> is about 20.</div></div></li></ol>
+  </section>
+
+  <section id="phase-2" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 2</span><h2>Define the SLIs and write the SLO</h2></div>
+    <p class="pj-goal">Two SLIs expressed as Prometheus expressions, one SLO document that a product manager could sign, and the error budget that follows from it.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-2-1"><label class="pj-step-tick"><input type="checkbox" data-step="2-1" aria-label="Done: step 2.1" /><span class="pj-step-num">2.1</span></label><div class="pj-step-body"><div class="pj-step-text">Decide the SLIs as ratios of good events to valid events, using only the metrics the service already exports. Availability: requests that did not return a 5xx. Latency: requests served under 250 ms (the instrumentator's histogram has a 0.25 bucket). Health checks and metrics scrapes are excluded because they are not user traffic.</div><div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>availability SLI = 1 - ( 5xx responses / all responses )      handler != /health, /metrics
+latency SLI      = responses faster than 250 ms / all responses  same handlers
+
+valid events: every HTTP response to a user-facing handler
+good events:  status !~ 5.. (availability);  duration &lt;= 0.25 s (latency)</code></pre></div></div></li><li class="pj-step" id="step-2-2"><label class="pj-step-tick"><input type="checkbox" data-step="2-2" aria-label="Done: step 2.2" /><span class="pj-step-num">2.2</span></label><div class="pj-step-body"><div class="pj-step-text">Check both SLIs in the Prometheus UI as raw expressions before writing any rules. They should sit near 1.0 with no chaos injected.</div><div class="code"><div class="code-head"><span>promql</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># availability over the last 5 minutes
+1 - (
+  sum(rate(http_requests_total{job="app", handler!~"/health|/metrics", status=~"5.."}[5m]))
+  /
+  sum(rate(http_requests_total{job="app", handler!~"/health|/metrics"}[5m]))
+)
+
+# latency: fraction of requests under 250 ms over the last 5 minutes
+sum(rate(http_request_duration_seconds_bucket{job="app", handler!~"/health|/metrics", le="0.25"}[5m]))
+/
+sum(rate(http_request_duration_seconds_count{job="app", handler!~"/health|/metrics"}[5m])</code></pre></div><div class="pj-check"><strong>Check:</strong> Both expressions return a value close to 1 (for example 0.998 and 0.97). If the latency one is lower than you expect, the simulated work is doing its job; that is fine.</div></div></li><li class="pj-step" id="step-2-3"><label class="pj-step-tick"><input type="checkbox" data-step="2-3" aria-label="Done: step 2.3" /><span class="pj-step-num">2.3</span></label><div class="pj-step-body"><div class="pj-step-text">Write the SLO document. Pick targets the service can currently meet with a little headroom; you can tighten later. State the window, the SLIs, the budget, and who owns it.</div><div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># slo/SLO.md
+
+## orders-api service level objectives
+
+Owner: platform team (@you)          Window: rolling 30 days          Reviewed: quarterly
+
+| SLO          | SLI                                                   | Target  | Error budget / 30 d |
+|--------------|-------------------------------------------------------|---------|---------------------|
+| Availability | non-5xx responses / all responses (user handlers)     | 99.9 %  | 0.1 % of requests   |
+| Latency      | responses &lt;= 250 ms / all responses (user handlers)   | 95.0 %  | 5 % of requests     |
+
+At 20 requests/s the 30-day availability budget is about 51,800 failed requests,
+or 43 minutes of total outage.
+
+### Error budget policy
+- Budget remaining &gt; 50 %: ship normally.
+- Budget remaining 10-50 %: releases need an SRE reviewer; no risky migrations.
+- Budget exhausted: feature releases freeze until the budget recovers; only reliability
+  work and fixes ship. The freeze is lifted when the 30-day SLI is back above target.
+- A fast-burn page (see alerts) triggers an incident regardless of remaining budget.
+
+### Exclusions
+/health and /metrics are not user traffic and are excluded from both SLIs.</code></pre></div><div class="pj-note">The arithmetic: 20 req/s × 86,400 s × 30 d ≈ 51.8 million requests; 0.1 % of that is about 51,800; at full outage (20 failures/s) that budget lasts 2,590 s ≈ 43 minutes.</div></div></li></ol>
+  </section>
+
+  <section id="phase-3" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 3</span><h2>Recording rules and burn-rate alerts</h2></div>
+    <p class="pj-goal">The SLIs, error ratios and burn rates as recorded series, and multi-window multi-burn-rate alerts that page for fast burns and ticket for slow ones.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-3-1"><label class="pj-step-tick"><input type="checkbox" data-step="3-1" aria-label="Done: step 3.1" /><span class="pj-step-num">3.1</span></label><div class="pj-step-body"><div class="pj-step-text">Create the recording rules. Each SLI's error ratio is recorded over several windows, because burn-rate alerts compare a short and a long window. Naming follows the <code>level:metric:operations</code> convention.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># deploy/rules/slo_recording.yml
+groups:
+  - name: slo_recording
+    interval: 10s
+    rules:
+      # --- availability error ratio (bad / total) over several windows ---
+      - record: sli:availability_error_ratio:rate5m
+        expr: |
+          sum(rate(http_requests_total{job="app", handler!~"/health|/metrics", status=~"5.."}[5m]))
+          / sum(rate(http_requests_total{job="app", handler!~"/health|/metrics"}[5m]))
+      - record: sli:availability_error_ratio:rate30m
+        expr: |
+          sum(rate(http_requests_total{job="app", handler!~"/health|/metrics", status=~"5.."}[30m]))
+          / sum(rate(http_requests_total{job="app", handler!~"/health|/metrics"}[30m]))
+      - record: sli:availability_error_ratio:rate1h
+        expr: |
+          sum(rate(http_requests_total{job="app", handler!~"/health|/metrics", status=~"5.."}[1h]))
+          / sum(rate(http_requests_total{job="app", handler!~"/health|/metrics"}[1h]))
+      - record: sli:availability_error_ratio:rate6h
+        expr: |
+          sum(rate(http_requests_total{job="app", handler!~"/health|/metrics", status=~"5.."}[6h]))
+          / sum(rate(http_requests_total{job="app", handler!~"/health|/metrics"}[6h]))
+      - record: sli:availability_error_ratio:rate3d
+        expr: |
+          sum(rate(http_requests_total{job="app", handler!~"/health|/metrics", status=~"5.."}[3d]))
+          / sum(rate(http_requests_total{job="app", handler!~"/health|/metrics"}[3d]))
+
+      # --- latency error ratio (slow / total) ---
+      - record: sli:latency_error_ratio:rate5m
+        expr: |
+          1 - (
+            sum(rate(http_request_duration_seconds_bucket{job="app", handler!~"/health|/metrics", le="0.25"}[5m]))
+            / sum(rate(http_request_duration_seconds_count{job="app", handler!~"/health|/metrics"}[5m]))
+          )
+      - record: sli:latency_error_ratio:rate1h
+        expr: |
+          1 - (
+            sum(rate(http_request_duration_seconds_bucket{job="app", handler!~"/health|/metrics", le="0.25"}[1h]))
+            / sum(rate(http_request_duration_seconds_count{job="app", handler!~"/health|/metrics"}[1h]))
+          )
+      - record: sli:latency_error_ratio:rate6h
+        expr: |
+          1 - (
+            sum(rate(http_request_duration_seconds_bucket{job="app", handler!~"/health|/metrics", le="0.25"}[6h]))
+            / sum(rate(http_request_duration_seconds_count{job="app", handler!~"/health|/metrics"}[6h]))
+          )
+
+      # --- 30-day SLI and remaining budget, for the dashboard ---
+      - record: slo:availability_sli:ratio_rate30d
+        expr: |
+          1 - (
+            sum(rate(http_requests_total{job="app", handler!~"/health|/metrics", status=~"5.."}[30d]))
+            / sum(rate(http_requests_total{job="app", handler!~"/health|/metrics"}[30d]))
+          )
+      - record: slo:availability_error_budget_remaining:ratio
+        expr: |
+          1 - ((1 - slo:availability_sli:ratio_rate30d) / (1 - 0.999))</code></pre></div><div class="pj-note">A 15-day retention (set in Compose) means the 30-day series will be based on partial data until the stack has run that long; that is fine for the drill.</div></div></li><li class="pj-step" id="step-3-2"><label class="pj-step-tick"><input type="checkbox" data-step="3-2" aria-label="Done: step 3.2" /><span class="pj-step-num">3.2</span></label><div class="pj-step-body"><div class="pj-step-text">Write the alerts. A burn rate of 1 consumes exactly the budget over the window; 14.4 consumes the 30-day budget in two days. The pairs of windows (long and short) stop an alert from lingering after the problem is fixed. These thresholds are the standard multi-window, multi-burn-rate recommendation for a 30-day SLO.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># deploy/rules/slo_alerts.yml
+groups:
+  - name: slo_alerts
+    rules:
+      # 99.9 % availability -&gt; error budget 0.001
+      - alert: OrdersApiAvailabilityFastBurn
+        expr: |
+          sli:availability_error_ratio:rate1h &gt; (14.4 * 0.001)
+          and sli:availability_error_ratio:rate5m &gt; (14.4 * 0.001)
+        for: 2m
+        labels: {severity: page, service: orders-api, slo: availability}
+        annotations:
+          summary: "orders-api is burning its 30-day availability budget in ~2 days"
+          runbook: "https://github.com/YOUR_GITHUB_USER/zero-to-prod/blob/main/slo/RUNBOOK-orders-api.md"
+
+      - alert: OrdersApiAvailabilitySlowBurn
+        expr: |
+          sli:availability_error_ratio:rate6h &gt; (6 * 0.001)
+          and sli:availability_error_ratio:rate30m &gt; (6 * 0.001)
+        for: 15m
+        labels: {severity: page, service: orders-api, slo: availability}
+        annotations:
+          summary: "orders-api is burning its availability budget in ~5 days"
+
+      - alert: OrdersApiAvailabilityBudgetTrend
+        expr: |
+          sli:availability_error_ratio:rate3d &gt; (1 * 0.001)
+          and sli:availability_error_ratio:rate6h &gt; (1 * 0.001)
+        for: 1h
+        labels: {severity: ticket, service: orders-api, slo: availability}
+        annotations:
+          summary: "orders-api availability is on track to exhaust its budget this month"
+
+      # 95 % latency -&gt; error budget 0.05
+      - alert: OrdersApiLatencyFastBurn
+        expr: |
+          sli:latency_error_ratio:rate1h &gt; (14.4 * 0.05)
+          and sli:latency_error_ratio:rate5m &gt; (14.4 * 0.05)
+        for: 2m
+        labels: {severity: page, service: orders-api, slo: latency}
+        annotations:
+          summary: "orders-api latency SLO burning fast: &gt;72% of requests slower than 250 ms"
+
+      - alert: OrdersApiLatencySlowBurn
+        expr: |
+          sli:latency_error_ratio:rate6h &gt; (6 * 0.05)
+          and sli:latency_error_ratio:rate1h &gt; (6 * 0.05)
+        for: 15m
+        labels: {severity: ticket, service: orders-api, slo: latency}
+        annotations:
+          summary: "orders-api latency SLO burning: &gt;30% of requests slower than 250 ms for 6 h"</code></pre></div><div class="pj-note">14.4 × 0.05 = 0.72, so the latency fast-burn only fires when most requests are slow — appropriate for a 95 % target. For a tighter latency SLO the thresholds scale down automatically.</div></div></li><li class="pj-step" id="step-3-3"><label class="pj-step-tick"><input type="checkbox" data-step="3-3" aria-label="Done: step 3.3" /><span class="pj-step-num">3.3</span></label><div class="pj-step-body"><div class="pj-step-text">Validate the rule files with promtool before reloading Prometheus.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>docker run --rm -v "$PWD/deploy/rules:/rules:ro" --entrypoint promtool prom/prometheus:v3.1.0 check rules /rules/slo_recording.yml /rules/slo_alerts.yml</code></pre></div><div class="pj-check"><strong>Check:</strong> Both files report <code>SUCCESS</code> with the number of rules found.</div></div></li><li class="pj-step" id="step-3-4"><label class="pj-step-tick"><input type="checkbox" data-step="3-4" aria-label="Done: step 3.4" /><span class="pj-step-num">3.4</span></label><div class="pj-step-body"><div class="pj-step-text">Unit-test the fast-burn alert with synthetic series, so the arithmetic is proven before any traffic exists. The test feeds a 2 % error ratio for both windows and expects the page after the <code>for</code> duration.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># deploy/tests/slo_alerts_test.yml
+rule_files:
+  - ../rules/slo_alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'sli:availability_error_ratio:rate1h'
+        values: '0.02x10'
+      - series: 'sli:availability_error_ratio:rate5m'
+        values: '0.02x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: OrdersApiAvailabilityFastBurn
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              service: orders-api
+              slo: availability
+            exp_annotations:
+              summary: "orders-api is burning its 30-day availability budget in ~2 days"
+              runbook: "https://github.com/YOUR_GITHUB_USER/zero-to-prod/blob/main/slo/RUNBOOK-orders-api.md"
+      - eval_time: 1m
+        alertname: OrdersApiAvailabilityFastBurn
+        exp_alerts: []          # not yet: the 'for: 2m' has not elapsed</code></pre></div></div></li><li class="pj-step" id="step-3-5"><label class="pj-step-tick"><input type="checkbox" data-step="3-5" aria-label="Done: step 3.5" /><span class="pj-step-num">3.5</span></label><div class="pj-step-body"><div class="pj-step-text">Run the unit test, then reload Prometheus so the rules are live.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>docker run --rm -v "$PWD/deploy:/deploy:ro" --entrypoint promtool prom/prometheus:v3.1.0 test rules /deploy/tests/slo_alerts_test.yml
+docker compose -f deploy/compose.yml restart prometheus</code></pre></div><div class="pj-check"><strong>Check:</strong> <code>promtool test rules</code> prints <code>SUCCESS</code>. http://localhost:9090/rules lists both groups with no errors, and http://localhost:9090/alerts shows the five alerts as inactive (green).</div></div></li></ol>
+  </section>
+
+  <section id="phase-4" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 4</span><h2>Route the alerts and build the dashboard</h2></div>
+    <p class="pj-goal">Pages and tickets go to different places, an SLO dashboard shows the budget at a glance, and both are provisioned from the repository.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-4-1"><label class="pj-step-tick"><input type="checkbox" data-step="4-1" aria-label="Done: step 4.1" /><span class="pj-step-num">4.1</span></label><div class="pj-step-body"><div class="pj-step-text">Route by severity in Alertmanager: <code>page</code> goes to the on-call receiver, <code>ticket</code> to a low-urgency receiver. Both are webhooks to the sink for now; the receiver blocks are where a real Slack, PagerDuty or Opsgenie integration goes later.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># deploy/alertmanager.yml
+route:
+  receiver: tickets
+  group_by: [alertname, service]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers: [severity="page"]
+      receiver: oncall
+      group_wait: 10s
+      repeat_interval: 1h
+    - matchers: [severity="ticket"]
+      receiver: tickets
+
+inhibit_rules:
+  # while a fast burn is paging, do not also send the slow-burn or trend alerts for the same SLO
+  - source_matchers: [alertname=~".*FastBurn"]
+    target_matchers: [alertname=~".*(SlowBurn|BudgetTrend)"]
+    equal: [service, slo]
+
+receivers:
+  - name: oncall
+    webhook_configs:
+      - url: http://alert-sink:8080/oncall
+        send_resolved: true
+  - name: tickets
+    webhook_configs:
+      - url: http://alert-sink:8080/tickets
+        send_resolved: true</code></pre></div><div class="pj-note">Validate with <code>docker run --rm -v "$PWD/deploy/alertmanager.yml:/a.yml:ro" --entrypoint amtool prom/alertmanager:v0.28.0 check-config /a.yml</code>, then <code>docker compose -f deploy/compose.yml restart alertmanager</code>.</div></div></li><li class="pj-step" id="step-4-2"><label class="pj-step-tick"><input type="checkbox" data-step="4-2" aria-label="Done: step 4.2" /><span class="pj-step-num">4.2</span></label><div class="pj-step-body"><div class="pj-step-text">Replace the dashboard JSON with an SLO view: the 30-day SLI against its target, budget remaining, the burn rates for each window, and the raw error ratios. Grafana's provisioning from the zero-to-production project already loads any JSON in the dashboards folder.</div><div class="code"><div class="code-head"><span>json</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>{
+  "title": "orders-api SLOs",
+  "uid": "orders-api-slo",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "panels": [
+    {"type": "stat", "title": "Availability SLI (30d) vs 99.9%", "gridPos": {"x": 0, "y": 0, "w": 8, "h": 6},
+     "fieldConfig": {"defaults": {"unit": "percentunit", "decimals": 3,
+       "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 0.999}]}}},
+     "targets": [{"expr": "slo:availability_sli:ratio_rate30d"}]},
+    {"type": "gauge", "title": "Availability error budget remaining", "gridPos": {"x": 8, "y": 0, "w": 8, "h": 6},
+     "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1,
+       "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "orange", "value": 0.1}, {"color": "green", "value": 0.5}]}}},
+     "targets": [{"expr": "clamp_min(slo:availability_error_budget_remaining:ratio, 0)"}]},
+    {"type": "stat", "title": "Latency SLI (1h) vs 95%", "gridPos": {"x": 16, "y": 0, "w": 8, "h": 6},
+     "fieldConfig": {"defaults": {"unit": "percentunit", "decimals": 2,
+       "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 0.95}]}}},
+     "targets": [{"expr": "1 - sli:latency_error_ratio:rate1h"}]},
+    {"type": "timeseries", "title": "Availability burn rate by window (1 = budget consumed exactly over 30d)", "gridPos": {"x": 0, "y": 6, "w": 24, "h": 9},
+     "fieldConfig": {"defaults": {"custom": {"thresholdsStyle": {"mode": "line"}},
+       "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 6}, {"color": "red", "value": 14.4}]}}},
+     "targets": [
+       {"expr": "sli:availability_error_ratio:rate5m / 0.001", "legendFormat": "5m"},
+       {"expr": "sli:availability_error_ratio:rate1h / 0.001", "legendFormat": "1h"},
+       {"expr": "sli:availability_error_ratio:rate6h / 0.001", "legendFormat": "6h"}
+     ]},
+    {"type": "timeseries", "title": "Requests/s by status", "gridPos": {"x": 0, "y": 15, "w": 12, "h": 8},
+     "targets": [{"expr": "sum by (status) (rate(http_requests_total{job=\"app\", handler!~\"/health|/metrics\"}[1m]))", "legendFormat": "{{status}}"}]},
+    {"type": "timeseries", "title": "Latency p50 / p95 / p99", "gridPos": {"x": 12, "y": 15, "w": 12, "h": 8},
+     "fieldConfig": {"defaults": {"unit": "s"}},
+     "targets": [
+       {"expr": "histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket{job=\"app\", handler!~\"/health|/metrics\"}[5m])) by (le))", "legendFormat": "p50"},
+       {"expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"app\", handler!~\"/health|/metrics\"}[5m])) by (le))", "legendFormat": "p95"},
+       {"expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{job=\"app\", handler!~\"/health|/metrics\"}[5m])) by (le))", "legendFormat": "p99"}
+     ]}
+  ]
+}</code></pre></div><div class="pj-note">Save as <code>deploy/grafana/dashboards/slo.json</code> and restart Grafana (<code>docker compose -f deploy/compose.yml restart grafana</code>).</div></div></li><li class="pj-step" id="step-4-3"><label class="pj-step-tick"><input type="checkbox" data-step="4-3" aria-label="Done: step 4.3" /><span class="pj-step-num">4.3</span></label><div class="pj-step-body"><div class="pj-step-text">Open Grafana at http://localhost:3000 and find the <code>orders-api SLOs</code> dashboard. With clean traffic, the availability stat is green, budget remaining is near 100 %, and the burn-rate lines sit near zero.</div><div class="pj-check"><strong>Check:</strong> All three stat panels have values; the burn-rate chart shows the 14.4 and 6 threshold lines.</div></div></li></ol>
+  </section>
+
+  <section id="phase-5" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 5</span><h2>The drill: break it, get paged, fix it</h2></div>
+    <p class="pj-goal">Prove the whole chain — injected failure, SLI degradation, burn-rate alert, Alertmanager routing, dashboard — and record what you saw.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-5-1"><label class="pj-step-tick"><input type="checkbox" data-step="5-1" aria-label="Done: step 5.1" /><span class="pj-step-num">5.1</span></label><div class="pj-step-body"><div class="pj-step-text">Write the runbook first, because the page will link to it. Keep it to what an on-call engineer needs in the first five minutes.</div><div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># slo/RUNBOOK-orders-api.md
+
+## OrdersApiAvailabilityFastBurn / SlowBurn
+
+**Meaning:** more than 1.4 % (fast) or 0.6 % (slow) of user requests are failing with 5xx.
+At this rate the 30-day error budget is gone in ~2 days (fast) or ~5 days (slow).
+
+**Confirm (2 min)**
+1. Dashboard: http://localhost:3000/d/orders-api-slo  - which status codes? since when?
+2. `docker compose -f deploy/compose.yml ps` - is the app container Up?
+3. `docker compose -f deploy/compose.yml logs app --tail 100` - what is the error?
+
+**Common causes**
+- Bad deploy: check the last release time against the start of the burn. Roll back:
+  `docker compose -f deploy/compose.yml up -d app` with the previous APP_IMAGE in .env.
+- Upstream dependency down (503s): check the dependency's status; enable the fallback if one exists.
+- Chaos left on: `grep CHAOS deploy/.env` - CHAOS_ERROR_RATE must be 0 in production.
+
+**Mitigate first, then diagnose.** Rolling back or removing bad config stops the burn; the
+investigation continues afterwards in the incident channel.
+
+**Escalate** to the service owner if the burn continues 15 minutes after mitigation.
+
+## OrdersApiLatencyFastBurn
+Same procedure; look at p95/p99 and the slow-rate chaos variable; check CPU on the host
+(node dashboard) and upstream latency.</code></pre></div></div></li><li class="pj-step" id="step-5-2"><label class="pj-step-tick"><input type="checkbox" data-step="5-2" aria-label="Done: step 5.2" /><span class="pj-step-num">5.2</span></label><div class="pj-step-body"><div class="pj-step-text">Start the drill: keep the load generator running, then inject a 3 % error rate. That is 30 times the availability error budget, well above the fast-burn threshold of 1.44 %. Note the time.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>date -u
+CHAOS_ERROR_RATE=0.03 docker compose -f deploy/compose.yml up -d app</code></pre></div><div class="pj-note">Compose recreates only the app container with the new environment; Prometheus keeps scraping through the restart.</div></div></li><li class="pj-step" id="step-5-3"><label class="pj-step-tick"><input type="checkbox" data-step="5-3" aria-label="Done: step 5.3" /><span class="pj-step-num">5.3</span></label><div class="pj-step-body"><div class="pj-step-text">Watch it propagate. Within about a minute the 5m error ratio rises above 0.0144; the 1h ratio follows more slowly because it averages over an hour of mostly good data — with 20 req/s and a fresh stack it crosses in a few minutes. Once both windows are above threshold for 2 minutes, the alert fires.</div><div class="pj-check"><strong>Check:</strong> http://localhost:9090/alerts shows <code>OrdersApiAvailabilityFastBurn</code> as Pending, then Firing. http://localhost:9093 lists it under the <code>oncall</code> receiver. <code>docker compose -f deploy/compose.yml logs alert-sink</code> shows the webhook payload with the summary and the runbook URL.</div></div></li><li class="pj-step" id="step-5-4"><label class="pj-step-tick"><input type="checkbox" data-step="5-4" aria-label="Done: step 5.4" /><span class="pj-step-num">5.4</span></label><div class="pj-step-body"><div class="pj-step-text">Follow the runbook as if you were on call: open the dashboard, read the status breakdown (503s), check the container logs, find the chaos variable, and mitigate by removing it.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>CHAOS_ERROR_RATE=0 docker compose -f deploy/compose.yml up -d app
+date -u</code></pre></div><div class="pj-check"><strong>Check:</strong> The 5m ratio drops immediately; the alert goes to inactive once the 5m window is clean (the 1h window may stay high longer, which is exactly why both windows are required). Alertmanager sends a resolved notification to the sink.</div></div></li><li class="pj-step" id="step-5-5"><label class="pj-step-tick"><input type="checkbox" data-step="5-5" aria-label="Done: step 5.5" /><span class="pj-step-num">5.5</span></label><div class="pj-step-body"><div class="pj-step-text">Repeat for latency: inject a 90 % slow rate (each slow response is 600 ms, well over the 250 ms threshold) and confirm <code>OrdersApiLatencyFastBurn</code> fires and resolves. Then run a slow-burn scenario: 0.8 % errors for 20 minutes should fire the slow-burn alert but not the fast one.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>CHAOS_SLOW_RATE=0.9 docker compose -f deploy/compose.yml up -d app     # latency fast burn
+# ...observe, then reset...
+CHAOS_SLOW_RATE=0 CHAOS_ERROR_RATE=0.008 docker compose -f deploy/compose.yml up -d app   # slow burn only
+# ...wait ~20 min, observe, then reset...
+CHAOS_ERROR_RATE=0 docker compose -f deploy/compose.yml up -d app</code></pre></div><div class="pj-check"><strong>Check:</strong> The inhibition rule means that while a fast burn pages, the slow-burn alert for the same SLO is suppressed; in the slow-burn-only scenario it reaches the <code>tickets</code> receiver.</div></div></li><li class="pj-step" id="step-5-6"><label class="pj-step-tick"><input type="checkbox" data-step="5-6" aria-label="Done: step 5.6" /><span class="pj-step-num">5.6</span></label><div class="pj-step-body"><div class="pj-step-text">Record the drill in <code>slo/DRILL-YYYY-MM-DD.md</code>: the injection time, when the alert went Pending and Firing, when the webhook arrived, when you mitigated, when it resolved, and the time from injection to page. Then compute what the drill cost in error budget from the dashboard's budget-remaining gauge.</div><div class="pj-check"><strong>Check:</strong> Time from injection to page is a few minutes; the budget gauge dropped by a visible amount and the runbook was sufficient to find the cause without reading this guide.</div></div></li><li class="pj-step" id="step-5-7"><label class="pj-step-tick"><input type="checkbox" data-step="5-7" aria-label="Done: step 5.7" /><span class="pj-step-num">5.7</span></label><div class="pj-step-body"><div class="pj-step-text">Stop the load generator, commit everything and merge through a pull request. Add a CI step that runs <code>promtool check rules</code> and <code>promtool test rules</code> so rule changes are validated before they reach the stack.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>pkill hey || true
+git add app deploy slo
+git commit -m "feat: SLOs, burn-rate alerts, routing, dashboard, runbook and drill"
+git push -u origin feat/slos
+gh pr create --fill &amp;&amp; gh pr merge --squash --delete-branch
+git switch main &amp;&amp; git pull</code></pre></div><div class="pj-note">In <code>ci.yml</code>, add a job that runs the two promtool commands from this guide in a <code>prom/prometheus</code> container; a syntax error in a rule file would otherwise take down rule evaluation silently.</div></div></li></ol>
+  </section>
+
+  <section id="troubleshooting" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Help</span><h2>Troubleshooting</h2></div>
+    <dl class="pj-trouble"><dt>The SLI expressions return no data</dt><dd>Check the <code>handler</code> label values with <code>count by (handler) (http_requests_total)</code>; FastAPI's instrumentator records the route template, e.g. <code>/orders/{order_id}</code>. Adjust the regex if your handlers differ, and make sure traffic is actually flowing (<code>rate(...)</code> over an empty window is empty).</dd><dt><code>promtool check rules</code> fails with a parse error</dt><dd>Multi-line expressions must use the <code>|</code> block scalar and consistent indentation; a stray tab or a missing <code>/</code> at a line start is the usual cause. The error names the line.</dd><dt>The fast-burn alert never fires during the drill</dt><dd>The 1h window needs enough bad samples to cross 1.44 %. With a fresh stack and low traffic it may take longer; raise the injected rate to 0.1 for the drill or increase the load generator's rate. Check both recorded series in the Prometheus graph.</dd><dt>The alert fires but nothing reaches the sink</dt><dd>Check http://localhost:9093/#/status for the loaded config and http://localhost:9090/targets is not the right place — use http://localhost:9090/status for the Alertmanager discovery. Confirm the <code>alert-sink</code> container is Up and the receiver URL matches its port.</dd><dt>Grafana shows the old dashboard or none</dt><dd>Provisioned dashboards load from the folder on start; restart Grafana after adding the JSON, and check its logs for a JSON parse error (a trailing comma is the classic).</dd><dt>The 30-day SLI panel shows a value far from 1 after the drill</dt><dd>Expected: with only hours of data, a 30-day rate is dominated by the drill. It recovers as clean data accumulates. In production the window is real; in the lab, treat the 1h and 6h panels as the meaningful ones.</dd><dt>Latency SLI is below target even with no chaos</dt><dd>The simulated work (20-120 ms) plus container overhead may push some requests past 250 ms on a busy laptop. Either raise the threshold bucket to <code>le="0.5"</code> in the SLI, or lower the load generator's concurrency. Set the SLO to what the service can meet.</dd></dl>
+  </section>
+
+  <section id="next" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Next</span><h2>Where to go from here</h2></div>
+    <ul class="pj-next"><li>Point the <code>oncall</code> receiver at a real pager (PagerDuty, Opsgenie or a Slack channel with escalation) and run the drill again with a colleague on call who does not know what you broke.</li><li>Run the <strong>incident drill</strong> project from this track against the same stack: the page becomes a full incident with roles, a timeline and a blameless postmortem.</li><li>Add the SLOs to a service catalogue entry and review the error budget in a weekly meeting for a month; adjust the targets from data.</li><li>Move the rules and dashboard to Kubernetes with the Prometheus Operator (PrometheusRule and a dashboard ConfigMap) via the GitOps project in the DevOps track.</li><li>Add an SLO for a dependency you call and see how its budget composes with yours.</li></ul>
+  </section>
+
+  <p class="feedback-row">Did a step fail or feel unclear? <a href="../../feedback.html?page=/education/projects/proj-sre-slo-stack.html&amp;title=SLOs%20from%20scratch">Tell me which one →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../../education.html">Education</a>
+      <a href="../../privacy.html">Privacy</a>
+      <a href="../../terms.html">Terms</a>
+      <a href="../../feedback.html?page=/education/projects/proj-sre-slo-stack.html&amp;title=SLOs%20from%20scratch">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="project.js"></script>
+</body>
+</html>
