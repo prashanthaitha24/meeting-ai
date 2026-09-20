@@ -1,0 +1,190 @@
+{
+  "id": "sec-incident",
+  "minutes": 35,
+  "intro": "At some point a detection fires and it is real, or a customer emails a screenshot of your data, or a cloud bill arrives with ten thousand dollars of GPU instances you never launched. What happens in the next few hours decides whether this is a contained incident or a company-defining breach. Security incident response borrows the structure of the SRE incident process — roles, a commander, timelines, blameless review — and adds what is different when there is an adversary: evidence must be preserved, containment must not tip them off before it is complete, and the scope is almost always larger than the first alert suggests. This module gives you the phases, the playbooks, the evidence-handling basics and the communication rules to run one well.",
+  "objectives": [
+    "Describe the incident lifecycle: preparation, detection and analysis, containment, eradication, recovery, lessons learned",
+    "Run the first hour: declare, assign roles, preserve evidence, scope before acting",
+    "Choose containment actions that stop the attacker without destroying evidence or alerting them prematurely",
+    "Eradicate and recover from a known-good state, and verify the attacker is gone",
+    "Write a blameless security postmortem and handle notification obligations"
+  ],
+  "sections": [
+    {
+      "heading": "The lifecycle and why preparation is most of it",
+      "blocks": [
+        {"type": "p", "text": "The standard model (from NIST's incident handling guide) has six phases: **preparation**, **detection and analysis**, **containment**, **eradication**, **recovery**, and **post-incident activity**. Teams that do well in the middle four did the work in the first one: logs are centralised and retained, roles are defined, playbooks exist for the common scenarios, contact details for legal, communications, the cloud provider and law enforcement are written down, and everyone has practised at least once. Improvising all of that at 3 a.m. with an attacker inside is the failure mode."},
+        {"type": "list", "items": [
+          "**Playbooks** for the likely incidents: leaked credential, phished account, malware on an endpoint, web application compromise, ransomware, insider misuse, cloud account takeover. One page each: how to confirm, how to contain, who to call.",
+          "**Roles**: incident commander (decisions and coordination), investigation lead (technical analysis), communications lead (internal and external updates), scribe (timeline). Same people can hold several roles in a small team, but the roles must be named.",
+          "**Access ready**: break-glass credentials for investigators, the ability to isolate hosts and revoke sessions quickly, forensic tooling installed before it is needed.",
+          "**Contacts**: legal counsel, cyber insurance, the cloud provider's abuse or security contact, a forensics firm on retainer, relevant regulators' notification routes.",
+          "**Practice**: a tabletop exercise per quarter, walking through a scenario and finding the gaps in the playbooks."
+        ]}
+      ]
+    },
+    {
+      "heading": "The first hour: declare, preserve, scope",
+      "blocks": [
+        {"type": "p", "text": "When an alert or a report looks real, **declare** the incident early and loudly; it is cheap to stand down a false alarm and expensive to lose an hour. Assign the roles. Start the timeline: a shared document where the scribe records every observation, decision and action with a UTC timestamp. Then, before touching anything, **preserve evidence**: snapshot the affected instances and volumes, export the relevant logs to a separate location, capture running process and connection lists, and note the hashes of anything you collect."},
+        {"type": "code", "lang": "bash", "caption": "Volatile evidence from a suspect Linux host, collected to a separate location before any remediation.", "code": "EVID=/mnt/evidence/$(hostname)-$(date -u +%Y%m%dT%H%M%SZ)\nsudo mkdir -p \"$EVID\" && cd \"$EVID\" || exit 1\n\nsudo ps -eo pid,ppid,user,lstart,etime,cmd --sort=lstart > processes.txt\nsudo ss -tunapee > sockets.txt\nsudo lsof -nP > open_files.txt 2>/dev/null\nlast -F > logins.txt; sudo lastb -F > failed_logins.txt 2>/dev/null\nsudo cat /etc/passwd /etc/group > accounts.txt\nsudo crontab -l -u root > cron_root.txt 2>/dev/null; ls -la /etc/cron* /var/spool/cron > cron_files.txt 2>&1\nsudo systemctl list-units --type=service --all > services.txt\nsudo find / -xdev -mmin -1440 -type f ! -path '/proc/*' -printf '%TY-%Tm-%Td %TH:%TM %u %p\\n' > modified_24h.txt 2>/dev/null\n\nsha256sum ./* > SHA256SUMS\n# and in the cloud console or CLI: snapshot the instance's volumes now, tag them \"evidence\", restrict access"},
+        {"type": "p", "text": "Then **scope** before you act. The alert that fired is one footprint; the attacker has usually been in longer and wider. Pivot from what you know: which credential, which host, which IP, which time window. Search the central logs for every use of that credential, every connection from that IP, every host that talked to the compromised one, every new user, key, role or scheduled task created in the window. Write each new finding in the timeline. Containment that misses part of the footprint tells the attacker you are coming and leaves them a way back in."},
+        {"type": "callout", "kind": "warning", "text": "Do not reboot, reimage, or \"just clean it up\" before evidence is preserved and scope is understood. You destroy the record of what happened and you may stop only one of the attacker's three footholds."}
+      ]
+    },
+    {
+      "heading": "Containment: stop the bleeding, keep the evidence",
+      "blocks": [
+        {"type": "p", "text": "Containment stops the attacker from doing more damage while you finish understanding the incident. Choose actions that are **reversible where possible** and **quiet where it matters**: revoking a credential and rotating it, isolating a host at the network layer (security group with no rules, or a quarantine VLAN) while keeping it running for analysis, blocking an IP or an ASN at the edge, disabling a user's sessions and tokens, taking a compromised service off the load balancer. For an active, capable intruder, coordinate so that all footholds are cut at once; cutting one at a time is a signal."},
+        {"type": "table", "headers": ["Scenario", "Contain first", "Then"], "rows": [
+          ["Leaked cloud key", "Revoke the key; deny the identity in a policy", "Audit its use; find what it created; rotate everything it could read"],
+          ["Phished account", "Revoke all sessions and tokens; reset password and MFA", "Check mail rules, OAuth grants, downloads; look for lateral logins"],
+          ["Compromised host", "Network-isolate; snapshot; keep it running", "Collect evidence; identify the entry; check siblings"],
+          ["Web app compromise", "Block the exploited path at the WAF or edge; rotate app secrets", "Find the vulnerability; check for webshells, new admin users, data access"],
+          ["Ransomware", "Disconnect affected segments; protect backups now", "Identify strain and entry; do not pay reflexively; engage legal"]
+        ]},
+        {"type": "p", "text": "Record every containment action in the timeline with who did it and when. Some actions have side effects for customers (a blocked range, an offline service); the incident commander weighs those with the business, but the default when data is leaving is to stop it now and apologise for the outage later."}
+      ]
+    },
+    {
+      "heading": "Eradication and recovery",
+      "blocks": [
+        {"type": "p", "text": "**Eradication** removes the attacker's presence: the malware, the webshell, the added user, the persistence in cron or a systemd unit, the forwarding rule in the mailbox, the extra IAM role, the SSH key in `authorized_keys`. Because you rarely find everything by hand, prefer rebuilding from known-good sources over cleaning: redeploy the service from the pipeline, re-create the host from the image, restore data from a backup taken before the intrusion (verify the backup is clean and the restore actually works). Close the entry point: patch the vulnerability, fix the misconfiguration, enforce the MFA that was missing."},
+        {"type": "p", "text": "**Recovery** brings services back with heightened monitoring: watch for the indicators you collected (IPs, domains, hashes, user agents, the attacker's habits) and for any repeat of the entry technique. Rotate every credential the attacker could have reached, not just the one they used. Confirm with the detection team that the alerts that should fire on a return actually fire. Only when the timeline shows a clear entry, full scope, complete containment and eradication, and a clean recovery does the incident close."},
+        {"type": "code", "lang": "bash", "caption": "Checking common persistence locations on a Linux host during eradication.", "code": "sudo find / -xdev -name authorized_keys -exec sh -c 'echo \"== $1\"; cat \"$1\"' _ {} \\; 2>/dev/null\nsudo ls -la /etc/cron.d /etc/cron.daily /var/spool/cron/crontabs 2>/dev/null\nsudo systemctl list-unit-files --state=enabled | grep -v '^unit'\nsudo find /etc/systemd/system /lib/systemd/system -newer /etc/hostname -name '*.service' 2>/dev/null\nsudo grep -rl 'curl\\|wget\\|base64 -d' /etc/rc.local /etc/profile.d /home/*/.bashrc /root/.bashrc 2>/dev/null\nsudo find / -xdev -perm -4000 -newer /etc/hostname -type f 2>/dev/null"}
+      ]
+    },
+    {
+      "heading": "Communication, notification and the postmortem",
+      "blocks": [
+        {"type": "p", "text": "Inside the company, the communications lead sends short, regular updates (every hour during the active phase) on a fixed channel: what is known, what is being done, what is needed. Speculation stays out of writing; facts and next steps go in. Outside the company, notification is often a legal obligation with a clock: personal data breaches under GDPR must be reported to the regulator within 72 hours of awareness, and many jurisdictions and contracts have their own rules. Involve legal counsel early, keep the timeline accurate because it becomes the evidence of what you knew when, and tell affected customers what happened, what it means for them and what you have done — plainly, without minimising."},
+        {"type": "p", "text": "After recovery, run a **blameless postmortem** exactly as the SRE track describes: the timeline, the root cause and the contributing causes, what went well, what did not, and actions with owners and dates. Security incidents add specific questions: how long was the attacker present before detection (dwell time), which detection should have fired earlier, which control would have stopped the entry, and what evidence was missing. Then update the playbooks and detections, and schedule the tabletop that rehearses the next one."},
+        {"type": "callout", "kind": "tip", "text": "Measure the program by the numbers that improve outcomes: time from entry to detection, time from detection to containment, and percentage of playbook steps that worked as written. Each incident should move at least one of them."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Run a tabletop and build your playbooks",
+    "steps": [
+      "Write one-page playbooks for three scenarios: leaked cloud key, phished employee account, compromised web server. Each has: how to confirm, evidence to preserve, containment steps in order, who to call, and how to know it is over.",
+      "Run the evidence-collection script from the lesson on a test host and inspect the outputs. Note which files would tell you about a new user, a cron persistence, or an active outbound connection.",
+      "Practise host isolation in a cloud test account: replace an instance's security group with one that has no rules, confirm the instance is unreachable, and confirm you can still snapshot its volumes.",
+      "Pick one of your playbooks and run a 45-minute tabletop with two colleagues: one plays the incident commander, one the investigator, one injects new facts every ten minutes (\"the key was also used from a new region\"). Write down every gap you find.",
+      "Draft the internal update template (known, doing, needed) and the customer notification template (what, impact on you, what we did, what you should do). Have someone outside engineering read them.",
+      "For your last real or simulated incident, compute dwell time and time to containment, and identify the single detection that would have shortened dwell time the most."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Preparation is most of it: playbooks, roles, contacts, evidence tooling, practice",
+      "First hour: declare, assign roles, start the UTC timeline, preserve evidence, scope before acting",
+      "Contain reversibly and quietly; cut all footholds at once; record every action",
+      "Eradicate by rebuilding from known-good, close the entry, rotate everything reachable",
+      "Recover with heightened monitoring for the collected indicators; close only when scope is complete",
+      "Communicate facts on a schedule; know the notification clocks; blameless postmortem with dwell time"
+    ],
+    "groups": [
+      {"title": "Roles and phases", "items": [
+        {"syntax": "commander / investigation lead / comms lead / scribe", "desc": "Named per incident, even in a small team"},
+        {"syntax": "prepare -> detect & analyse -> contain -> eradicate -> recover -> learn", "desc": "NIST lifecycle"},
+        {"syntax": "declare early", "desc": "Standing down is cheap; lost hours are not"},
+        {"syntax": "timeline: UTC, observation / decision / action, who", "desc": "The single source of truth and the legal record"}
+      ]},
+      {"title": "Evidence", "items": [
+        {"syntax": "snapshot volumes, tag evidence, restrict access", "desc": "Before any change to the host"},
+        {"syntax": "ps -eo ... --sort=lstart / ss -tunapee / lsof -nP", "desc": "Processes, sockets, files: volatile, collect first"},
+        {"syntax": "last -F / lastb -F / auth.log", "desc": "Logins and attempts"},
+        {"syntax": "find / -mmin -1440 -type f", "desc": "Files changed in the window"},
+        {"syntax": "sha256sum collected files", "desc": "Integrity of what you collected"},
+        {"syntax": "export central logs for the window to a separate store", "desc": "Do not rely on retention during the incident"}
+      ]},
+      {"title": "Containment moves", "items": [
+        {"syntax": "revoke key / disable identity / explicit deny policy", "desc": "Credential incidents"},
+        {"syntax": "revoke all sessions + tokens; reset password and MFA", "desc": "Account takeover"},
+        {"syntax": "security group with no rules; keep running", "desc": "Host isolation that preserves evidence"},
+        {"syntax": "block path at WAF/edge; remove from load balancer", "desc": "Web application compromise"},
+        {"syntax": "disconnect segments; protect backups first", "desc": "Ransomware"},
+        {"syntax": "all footholds at once", "desc": "Do not tip off a capable intruder"}
+      ]},
+      {"title": "Eradication and recovery", "items": [
+        {"syntax": "rebuild from pipeline/image; restore verified clean backup", "desc": "Cleaning by hand misses things"},
+        {"syntax": "check: authorized_keys, cron, systemd units, rc files, setuid, mail rules, OAuth grants, IAM", "desc": "Persistence locations"},
+        {"syntax": "rotate everything the attacker could reach", "desc": "Not just what they used"},
+        {"syntax": "monitor the collected indicators", "desc": "IPs, domains, hashes, user agents, techniques"},
+        {"syntax": "close when: entry known, scope complete, eradicated, recovered", "desc": "Not before"}
+      ]},
+      {"title": "Communication and learning", "items": [
+        {"syntax": "hourly internal update: known / doing / needed", "desc": "Facts only, fixed channel"},
+        {"syntax": "GDPR: 72 hours to the regulator", "desc": "Know your clocks; involve legal early"},
+        {"syntax": "customer notice: what, impact, what we did, what you should do", "desc": "Plain, not minimised"},
+        {"syntax": "postmortem + dwell time + which detection should have fired", "desc": "Blameless, with owners and dates"},
+        {"syntax": "metrics: entry->detect, detect->contain, playbook accuracy", "desc": "What should improve each time"}
+      ]}
+    ],
+    "pitfalls": [
+      "Rebooting or reimaging the first compromised host before evidence and scope; the record is gone and the other footholds remain.",
+      "Containing one credential and declaring victory while the attacker's second key keeps working.",
+      "Cleaning a host by hand and trusting it; rebuild from known-good instead.",
+      "Rotating only the credential that was used, not everything it could read.",
+      "Speculating in written updates that later become the legal record.",
+      "Closing the incident without a postmortem, so the same entry works again next quarter."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "An alert shows a service account making unusual API calls from a new country. An engineer proposes immediately terminating the instance that uses the account. What is the better first sequence?",
+      "options": [
+        "Declare the incident, revoke the credential, snapshot the instance and export logs, then scope what else the credential touched before further changes",
+        "Terminate the instance so the attacker loses access, then investigate from the logs",
+        "Wait for more alerts to confirm it is not a false positive before doing anything",
+        "Reboot the instance to clear any malware and rotate the credential afterwards"
+      ],
+      "answer": 0,
+      "explain": "Revoking the credential stops the immediate damage without destroying evidence; snapshots and log exports preserve the record; scoping finds the rest of the footprint. Terminating or rebooting first loses evidence and may leave other footholds."
+    },
+    {
+      "q": "Why do experienced responders cut all of an attacker's known footholds at the same time rather than one by one as they are found?",
+      "options": [
+        "Removing one foothold signals the attacker, who may accelerate damage or dig in through the others before they are cut",
+        "Cloud APIs rate-limit sequential revocations, so batching is faster",
+        "Evidence can only be preserved once, so all changes must happen in a single step",
+        "Regulators require containment to be completed in a single documented action"
+      ],
+      "answer": 0,
+      "explain": "A capable intruder watches for defensive action. Coordinated containment after scoping denies them the warning; piecemeal containment invites a race you may lose. The other options are not real constraints."
+    },
+    {
+      "q": "During eradication, a team removes a webshell from a compromised web server and puts it back into service. What is the main risk of this approach?",
+      "options": [
+        "Other persistence mechanisms (added users, cron jobs, keys) may remain, and the entry vulnerability is still open; rebuilding from known-good and patching the entry is safer",
+        "The webshell file is needed as evidence and cannot be deleted",
+        "Removing files from a running server always causes an outage",
+        "The team should have blocked the attacker's IP instead of removing anything"
+      ],
+      "answer": 0,
+      "explain": "Hand-cleaning finds what you looked for. Redeploying from the pipeline or a clean image, closing the vulnerability and rotating secrets removes what you did not find. Evidence should be preserved by snapshot before eradication, not by leaving the shell in place."
+    },
+    {
+      "q": "A breach of customer personal data is confirmed on a Monday at 10:00. Under GDPR, what is the notification obligation?",
+      "options": [
+        "Notify the supervisory authority within 72 hours of becoming aware, unless the breach is unlikely to risk individuals' rights, and inform affected individuals without undue delay when the risk is high",
+        "Notify only if more than 10,000 records were affected",
+        "Notify affected customers within 30 days and the regulator at the next annual filing",
+        "No notification is required if the data was encrypted at rest"
+      ],
+      "answer": 0,
+      "explain": "The 72-hour clock to the regulator starts at awareness; high-risk breaches also require informing individuals. Encryption can affect the risk assessment but is not a blanket exemption, and there is no record-count threshold."
+    },
+    {
+      "q": "Which metric most directly reflects the effectiveness of a detection program, as revealed by an incident?",
+      "options": [
+        "Dwell time: how long the attacker was present before detection",
+        "The number of engineers involved in the response",
+        "The total number of alerts generated during the incident",
+        "The size of the evidence archive collected"
+      ],
+      "answer": 0,
+      "explain": "Dwell time measures how long attackers operate unseen; reducing it is the purpose of detection. The other numbers describe activity, not effectiveness."
+    }
+  ]
+}

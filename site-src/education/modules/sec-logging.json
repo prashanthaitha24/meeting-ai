@@ -1,0 +1,185 @@
+{
+  "id": "sec-logging",
+  "minutes": 35,
+  "intro": "Almost every serious breach was visible in logs that nobody read. Detection is the discipline of collecting the right events, in a place the attacker cannot alter, and writing rules that turn them into a small number of alerts a human will actually investigate. It is not the same as monitoring for reliability: an SRE dashboard shows the service is healthy while an attacker quietly exports the customer table at normal request rates. This module covers what to log for security, how to centralise it in a SIEM or a log platform, how to write detections that catch real attacker behaviour without drowning the on-call, and how to keep the whole system honest.",
+  "objectives": [
+    "Decide which events matter for security and make sure they are emitted with the fields an investigator needs",
+    "Centralise logs in tamper-resistant storage with retention and access control",
+    "Write detections mapped to attacker techniques, with a known false-positive rate",
+    "Tune alerting so that every alert is investigated and the queue never becomes noise",
+    "Test detections continuously with simulated attacks"
+  ],
+  "sections": [
+    {
+      "heading": "What to log, and what a log line needs",
+      "blocks": [
+        {"type": "p", "text": "Security logging answers four questions after the fact: who, did what, to which resource, from where, and when. Logs that lack any of those are much less useful. Prioritise the sources where attacker behaviour shows up first."},
+        {"type": "table", "headers": ["Source", "Events that matter", "Typical fields"], "rows": [
+          ["Identity provider / SSO", "Logins, failures, MFA events, password and factor changes, new devices", "user, result, ip, device, geo, factor"],
+          ["Cloud API audit trail", "Every management call; role assumptions; key creation; policy changes", "identity, action, resource, source ip, user agent"],
+          ["Hosts", "auth log, sudo, auditd execve, service starts, package installs", "user, command, parent, pid, host"],
+          ["Applications", "Authn/authz decisions, admin actions, data exports, input validation failures", "user id, action, object id, result, request id"],
+          ["Network and edge", "Flow logs, DNS queries, WAF blocks, VPN sessions", "src, dst, port, bytes, verdict"],
+          ["Kubernetes", "API server audit: exec, secrets reads, RBAC changes, pod creation", "user, verb, resource, namespace"]
+        ]},
+        {"type": "p", "text": "Emit application security events deliberately, in structured form, with a stable event name: `auth.login.failed`, `authz.denied`, `data.export.requested`, `admin.user.role_changed`. Include the acting identity, the target, the outcome and the request id that ties it to the rest of the trace. Never include secrets, session tokens or full card numbers; redact at the source."},
+        {"type": "code", "lang": "python", "caption": "A structured security event from an application. One line, JSON, stable names, no secrets.", "code": "import json\nimport logging\nfrom datetime import datetime, timezone\n\nsec = logging.getLogger(\"security\")\n\n\ndef security_event(name: str, actor: str, target: str, outcome: str, request_id: str, **extra):\n    sec.info(json.dumps({\n        \"ts\": datetime.now(timezone.utc).isoformat(),\n        \"event\": name,            # e.g. \"authz.denied\", \"data.export.requested\"\n        \"actor\": actor,           # user id or service identity, never a token\n        \"target\": target,         # resource identifier\n        \"outcome\": outcome,       # \"success\" | \"denied\" | \"error\"\n        \"request_id\": request_id,\n        **extra,\n    }))\n\n\nsecurity_event(\"authz.denied\", actor=\"user:1042\", target=\"order:99817\", outcome=\"denied\",\n               request_id=\"7f3c...\", src_ip=\"203.0.113.9\")"},
+        {"type": "callout", "kind": "note", "text": "Clock accuracy is part of logging: correlate events across systems only if every host uses NTP. Log in UTC with timezone-aware timestamps."}
+      ]
+    },
+    {
+      "heading": "Centralise, protect, retain",
+      "blocks": [
+        {"type": "p", "text": "Logs on the host that produced them are evidence in the attacker's custody. Ship them immediately (an agent such as Fluent Bit, Vector or the cloud provider's agent) to central storage that the source systems can write to but not delete from: object storage with write-once policies, or a log platform with immutability and a separate administrative boundary. A **SIEM** (security information and event management system) is a log platform specialised for this: normalised schemas across sources, correlation rules, case management and long retention. Open-source and cloud-native options exist; the key property is that the security team's data cannot be altered by the people or systems it monitors."},
+        {"type": "code", "lang": "yaml", "caption": "A Fluent Bit pipeline: tail the auth log and the application's security log, tag them, and forward to central storage over TLS.", "code": "pipeline:\n  inputs:\n    - name: tail\n      path: /var/log/auth.log\n      tag: host.auth\n      read_from_head: false\n    - name: tail\n      path: /var/log/app/security.log\n      tag: app.security\n      parser: json\n  filters:\n    - name: record_modifier\n      match: '*'\n      record:\n        - host ${HOSTNAME}\n        - env production\n  outputs:\n    - name: forward\n      match: '*'\n      host: logs.internal\n      port: 24224\n      tls: on\n      tls.verify: on"},
+        {"type": "p", "text": "Retention is a policy decision with a floor: keep security-relevant logs for at least a year, because intrusions are often discovered months after they begin, and regulators and insurers increasingly require it. Tier the storage — hot for thirty to ninety days of fast search, cold object storage beyond — and control who can read the archive, since logs contain personal data. Test restoration from cold storage before you need it."}
+      ]
+    },
+    {
+      "heading": "Detections: rules that catch behaviour",
+      "blocks": [
+        {"type": "p", "text": "A **detection** is a rule that turns events into an alert with a known meaning. Good detections describe attacker behaviour, not just anomalies: a login followed by MFA enrolment from a new country, a service account used from an IP it has never used, `curl` or `python -c` executed inside a container that never runs shells, an IAM policy change outside the deploy pipeline, a user reading a hundred times more records than their baseline. Map each detection to the technique it covers (the MITRE ATT&CK catalogue is the shared vocabulary) so that you can see which stages of an attack you would notice and which you would not."},
+        {"type": "code", "lang": "yaml", "caption": "A detection in Sigma, the vendor-neutral rule format that converts to most SIEM query languages.", "code": "title: Interactive shell spawned inside a container\nid: 1c7a2e8f-3b4d-4c5e-9f0a-1b2c3d4e5f60\nstatus: stable\ndescription: A shell started in a production container; application containers never run one.\nreferences:\n  - internal runbook DET-014\ntags:\n  - attack.execution\n  - attack.t1059.004\nlogsource:\n  product: linux\n  service: auditd\ndetection:\n  selection:\n    type: EXECVE\n    a0|endswith:\n      - '/sh'\n      - '/bash'\n      - '/dash'\n    container_id|contains: '*'\n  filter_debug:\n    container_name|startswith: 'debug-'\n  condition: selection and not filter_debug\nfalsepositives:\n  - Engineers using an approved debug container (excluded by name)\nlevel: high"},
+        {"type": "p", "text": "Start with a small set of high-value detections rather than a vendor's thousand-rule pack: authentication anomalies, privilege changes, new persistence (new users, new keys, new cron or systemd units), execution in places it should not happen, unusual data access volumes, and known-bad indicators. Each rule ships with a runbook: what it means, how to confirm, what to do. A detection without a runbook produces an alert nobody can act on."},
+        {"type": "callout", "kind": "tip", "text": "Cloud providers' managed detection services cover a lot of the cloud-layer techniques out of the box. Turn them on first, then write custom rules for your applications and your specific crown jewels."}
+      ]
+    },
+    {
+      "heading": "Alert fatigue is a security vulnerability",
+      "blocks": [
+        {"type": "p", "text": "An alert queue that grows faster than it is worked is equivalent to no detection at all; the real alert is in there, unread. Treat alert volume like an SLO: every alert is investigated within its target time, and if the rate makes that impossible, the fix is tuning or automation, not a bigger queue. Measure per rule: how many alerts, how many true positives, median time to close. Rules with near-zero true positives get tuned, demoted to a dashboard, or deleted."},
+        {"type": "list", "items": [
+          "Severity means something: `critical` pages a human; `high` is worked the same day; `medium` and below aggregate into a daily review.",
+          "Enrich before alerting: attach the user's manager, the asset's owner, whether the IP is a known VPN egress, recent related alerts. Investigation time drops sharply.",
+          "Automate the first step: an alert for a leaked key can revoke it; an alert for a new admin can post to the owner for confirmation. Humans handle the judgement, not the clicking.",
+          "Suppress with expiry: a known false positive is excluded with a rule that names the reason and a date to reconsider.",
+          "Close the loop: every incident retrospective asks which detection fired, which should have, and what to add."
+        ]},
+        {"type": "p", "text": "The SRE track's alerting module makes the same argument for reliability alerts: alert on what matters, make every page actionable, and treat noise as a bug. Security alerting borrows all of it."}
+      ]
+    },
+    {
+      "heading": "Test the detections",
+      "blocks": [
+        {"type": "p", "text": "Detections rot silently: a log source stops shipping, a field is renamed, a parser breaks, a rule's threshold no longer matches the environment. Test them like code. Unit-test rule logic against sample events. Monitor log pipelines for volume drops per source, which is how you notice a broken agent or an attacker disabling logging. Most importantly, **run the attack**: adversary emulation tools (Atomic Red Team, Stratus Red Team for cloud) execute safe versions of real techniques, and a detection that does not fire is a finding for the detection engineering backlog."},
+        {"type": "code", "lang": "bash", "caption": "Testing a cloud detection with Stratus Red Team: create a backdoor IAM user, confirm the alert fires, clean up.", "code": "stratus warmup aws.persistence.iam-create-backdoor-user\nstratus detonate aws.persistence.iam-create-backdoor-user\n# ...check that your \"new IAM user created outside the pipeline\" detection produced an alert...\nstratus cleanup aws.persistence.iam-create-backdoor-user"},
+        {"type": "p", "text": "Keep a coverage map: techniques on one axis, your detections on the other, with a colour for tested-and-fires, exists-but-untested, and absent. It shows leadership what the team can and cannot see, guides what to write next, and is the honest answer to the question every board eventually asks after a breach elsewhere: would we have noticed?"}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Ship, detect, test",
+    "steps": [
+      "Add the `security_event` helper to a small application and emit events for login failure, authorisation denial and an admin action. Confirm each is one JSON line with actor, target, outcome and request id.",
+      "Install Fluent Bit (or Vector) on a test host and forward the auth log plus your application's security log to a local collector (a second container running Fluent Bit with a `stdout` output is enough). Confirm events arrive with the host and env fields added.",
+      "Write a Sigma rule for five failed logins followed by a success from the same IP within ten minutes. Convert it with `sigma convert` to the query language of a log tool you can run locally (Loki or OpenSearch work), and trigger it with a script.",
+      "Write the runbook for that rule: meaning, how to confirm it is an attack, what to do. Attach it to the rule's references.",
+      "Simulate a broken pipeline: stop the agent and confirm your \"log volume dropped for source X\" check notices within fifteen minutes. If you have no such check, build it.",
+      "If you have a cloud test account with managed threat detection enabled, run one Stratus Red Team technique and record whether, and how fast, an alert appeared."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Log who, what, which resource, from where, when; structured, stable event names, no secrets",
+      "Highest-value sources: identity provider, cloud audit trail, host auth and audit, application security events, Kubernetes API audit",
+      "Ship immediately to storage the source cannot alter; retain at least a year; tier hot and cold",
+      "Detections describe attacker behaviour, map to ATT&CK, and ship with a runbook",
+      "Alert volume is an SLO: every alert investigated or the rule gets tuned; automate first steps",
+      "Test detections with emulated attacks and monitor log sources for silence"
+    ],
+    "groups": [
+      {"title": "Event design", "items": [
+        {"syntax": "{ts, event, actor, target, outcome, request_id, src_ip}", "desc": "Minimum fields for a security event"},
+        {"syntax": "auth.login.failed / authz.denied / data.export.requested", "desc": "Stable, hierarchical event names"},
+        {"syntax": "redact at source: tokens, passwords, PAN", "desc": "Logs are read by many people"},
+        {"syntax": "UTC, ISO 8601, NTP everywhere", "desc": "Correlation depends on time"}
+      ]},
+      {"title": "Shipping and storage", "items": [
+        {"syntax": "Fluent Bit / Vector agent -> forward over TLS", "desc": "Off the host within seconds"},
+        {"syntax": "write-once bucket, separate admin boundary", "desc": "Sources cannot delete their own evidence"},
+        {"syntax": "hot 30-90d, cold >= 1 year", "desc": "Fast search recently, affordable archive"},
+        {"syntax": "volume-per-source monitor", "desc": "Silence means a broken agent or a disabled log"},
+        {"syntax": "access control on the archive", "desc": "Logs contain personal data"}
+      ]},
+      {"title": "Detection engineering", "items": [
+        {"syntax": "Sigma rule: logsource + detection + condition + level", "desc": "Vendor-neutral; convert to any SIEM"},
+        {"syntax": "tags: attack.tXXXX", "desc": "Map rules to techniques for a coverage map"},
+        {"syntax": "starter set: auth anomalies, privilege change, new persistence, odd execution, data volume, known-bad", "desc": "High value, low noise"},
+        {"syntax": "runbook per rule: meaning, confirm, act", "desc": "No alert without a next step"},
+        {"syntax": "filter with reason + expiry", "desc": "Known false positives, reconsidered"}
+      ]},
+      {"title": "Alert hygiene and testing", "items": [
+        {"syntax": "per-rule: volume, true-positive rate, time to close", "desc": "Tune or delete the noisy ones"},
+        {"syntax": "critical pages; high same day; medium daily review", "desc": "Severity with meaning"},
+        {"syntax": "enrich: owner, manager, known-egress, related alerts", "desc": "Cut investigation time"},
+        {"syntax": "stratus detonate TECHNIQUE / Atomic Red Team", "desc": "Prove the rule fires"},
+        {"syntax": "coverage map: technique x detection x tested", "desc": "The honest picture"}
+      ]}
+    ],
+    "pitfalls": [
+      "Logging everything at debug level and nothing structured, so investigators grep prose.",
+      "Keeping logs only on the host, or in a store the compromised account can purge.",
+      "Importing a thousand vendor rules on day one and drowning the on-call in false positives.",
+      "Detections without runbooks; the alert fires and nobody knows what it means.",
+      "Never noticing that a log source went quiet three months ago.",
+      "Treating detections as finished; they are code and need tests and maintenance."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "An application logs `\"User logged in\"` as free text with no user id or source address. During an incident, what can the investigators determine from it?",
+      "options": [
+        "Almost nothing useful; without actor, source and a correlation id the events cannot be attributed or linked to other systems",
+        "Everything needed, since the timestamp alone identifies the session",
+        "The user's identity, because the log platform infers it from the request",
+        "The attacker's location, because the log platform records the client address automatically"
+      ],
+      "answer": 0,
+      "explain": "Security events need who, what, target, outcome, from where and a request id. Platforms do not add fields the application did not emit; a timestamp alone identifies nothing."
+    },
+    {
+      "q": "Why should security logs be shipped off the host immediately to storage the host cannot delete from?",
+      "options": [
+        "An attacker with control of the host can alter or erase local logs; central write-once storage preserves the evidence",
+        "Local disks are too small to hold more than a day of logs",
+        "Log agents cannot parse files that are still being written locally",
+        "Compliance frameworks forbid storing any logs on application servers"
+      ],
+      "answer": 0,
+      "explain": "The first thing a capable intruder does with root is clean the logs. Immediate shipping to tamper-resistant storage in a separate administrative boundary removes that option. The other options are not the reason."
+    },
+    {
+      "q": "A SIEM produces 400 alerts a day and the two analysts close about 60. What is the correct response?",
+      "options": [
+        "Measure true-positive rate per rule, tune or remove the noisy ones, automate first-step enrichment and treat alert volume as an SLO",
+        "Hire enough analysts to close 400 alerts a day",
+        "Raise all alert thresholds until the daily count is around 60",
+        "Route the unworked alerts to a weekly report so nothing is lost"
+      ],
+      "answer": 0,
+      "explain": "An unworkable queue hides real alerts. The fix is signal quality: rules that produce true positives stay, noise is tuned or deleted, enrichment cuts time per alert. Blindly raising thresholds or deferring alerts loses detections; hiring to match noise is not sustainable."
+    },
+    {
+      "q": "What does mapping detections to MITRE ATT&CK techniques give a security team?",
+      "options": [
+        "A coverage map showing which attacker behaviours would be noticed and which would not, guiding what to build next",
+        "Automatic generation of detection rules for every technique in the catalogue",
+        "A guarantee that any technique in the catalogue will produce an alert",
+        "A ranking of which vendors' products detect the most techniques"
+      ],
+      "answer": 0,
+      "explain": "ATT&CK is a shared vocabulary of real techniques. Tagging rules with it shows gaps honestly; it does not write rules or guarantee detection, and it is not a product comparison."
+    },
+    {
+      "q": "A detection for \"new IAM user created outside the deploy pipeline\" was written a year ago. How do you know it still works today?",
+      "options": [
+        "Emulate the technique with a tool such as Stratus Red Team in a test account and confirm the alert fires within the expected time",
+        "Check that the rule still exists in the SIEM's rule list",
+        "Confirm the rule has not produced any alerts, which means no attacks occurred",
+        "Review the rule's syntax for typos"
+      ],
+      "answer": 0,
+      "explain": "Detections rot when log sources, fields or thresholds change. Only executing the behaviour end to end proves the pipeline from event to alert still works. Silence can mean the rule is broken as easily as it can mean no attacks."
+    }
+  ]
+}

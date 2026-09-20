@@ -1,0 +1,186 @@
+{
+  "id": "sec-linux-hardening",
+  "minutes": 35,
+  "intro": "A fresh Linux server is a reasonable starting point and a poor finishing one: password logins enabled, a dozen services listening, every user able to read most of the filesystem, no record of who ran what. Hardening is the process of closing the distance between that default and a host you could defend during an incident. It is not exotic. Most of it is removing what you do not need, restricting what remains, and making sure the machine tells you when something changes. This module walks the standard checklist in the order that matters and shows how to check your work against a published benchmark.",
+  "objectives": [
+    "Lock down SSH and administrative access: keys only, no root login, MFA or an access proxy in front",
+    "Apply least privilege to users, sudo and file permissions, and find the exceptions",
+    "Reduce the attack surface by removing services, tightening the host firewall and keeping packages patched automatically",
+    "Enable audit logging and integrity monitoring so that changes are recorded and visible",
+    "Measure a host against a CIS benchmark and fix the findings that matter"
+  ],
+  "sections": [
+    {
+      "heading": "Start with access: SSH and sudo",
+      "blocks": [
+        {"type": "p", "text": "The first thing an attacker tries on a Linux host is logging in. Make that path narrow. Disable password authentication and root login over SSH, allow only key-based logins for named users or groups, and prefer an access layer (cloud session manager, an identity-aware proxy, a bastion with MFA) so that port 22 is not exposed to the internet at all. Modern keys are Ed25519; anything RSA under 3072 bits or DSA should be retired."},
+        {"type": "code", "lang": "text", "caption": "The lines that matter in /etc/ssh/sshd_config. Validate with `sshd -t`, then `systemctl reload sshd`, and keep a second session open while you test.", "code": "PermitRootLogin no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPubkeyAuthentication yes\nAllowGroups ssh-users\nMaxAuthTries 3\nLoginGraceTime 30\nX11Forwarding no\nAllowAgentForwarding no\nClientAliveInterval 300\nClientAliveCountMax 2\nLogLevel VERBOSE"},
+        {"type": "p", "text": "Administrative rights go through **sudo**, never a shared root password. Grant sudo to a group, require a password (or MFA via a PAM module) for elevation, and log every sudo command; the default `sudo` logs to the auth log, which should ship off the host. Avoid `NOPASSWD: ALL` for humans; where automation needs it, scope the rule to the exact command."},
+        {"type": "code", "lang": "text", "caption": "A scoped sudoers rule for an automation account, placed in /etc/sudoers.d/ and validated with `visudo -cf`.", "code": "# deploy may restart the app service and nothing else\ndeploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart app.service, /usr/bin/systemctl status app.service"},
+        {"type": "callout", "kind": "warning", "text": "Lock yourself out drills happen. Before reloading sshd with new settings, open a second SSH session and keep it open; only close it after a fresh login with the new configuration succeeds."}
+      ]
+    },
+    {
+      "heading": "Users, permissions and the filesystem",
+      "blocks": [
+        {"type": "p", "text": "Every account is an entry point. Remove or lock accounts that nobody uses, give service accounts no shell (`/usr/sbin/nologin`), and make sure no account other than root has UID 0. Set a restrictive default **umask** (027) so new files are not world-readable, and review the files that are: world-writable files and directories, and **setuid** binaries, which run as their owner and are the classic path from a normal user to root."},
+        {"type": "code", "lang": "bash", "caption": "Finding the exceptions worth reviewing.", "code": "# accounts with a login shell\nawk -F: '$7 !~ /(nologin|false)$/ {print $1, $3, $7}' /etc/passwd\n\n# any account with UID 0 that is not root\nawk -F: '$3 == 0 && $1 != \"root\"' /etc/passwd\n\n# world-writable files and directories outside /proc and /tmp-like paths\nfind / -xdev \\( -path /proc -o -path /tmp -o -path /var/tmp \\) -prune -o \\\n  -perm -0002 -type f -print 2>/dev/null\n\n# setuid and setgid binaries: compare with the distribution's expected list\nfind / -xdev \\( -perm -4000 -o -perm -2000 \\) -type f -print 2>/dev/null"},
+        {"type": "p", "text": "Mount options are hardening too: `noexec`, `nosuid` and `nodev` on `/tmp`, `/var/tmp`, `/dev/shm` and removable media stop a downloaded binary from running from the obvious places. Keep secrets in files readable only by the service that needs them (mode 0600 or 0640 with a dedicated group), and never in world-readable environment files or in shell history."},
+        {"type": "callout", "kind": "tip", "text": "Run services as dedicated, unprivileged users with systemd sandboxing (`ProtectSystem=strict`, `PrivateTmp=yes`, `NoNewPrivileges=yes`, `CapabilityBoundingSet=`). It costs a few lines in the unit file and removes most of the damage a compromised process can do."}
+      ]
+    },
+    {
+      "heading": "Shrink the surface: services, firewall, patches",
+      "blocks": [
+        {"type": "p", "text": "Every listening service is a potential entry point and every installed package is potential vulnerable code. List what listens, stop and disable what is not needed, and remove packages you do not use. Then add a **host firewall** that denies inbound by default and allows only the service ports; even behind a cloud security group, the host firewall catches mistakes in the group and traffic from inside the same subnet."},
+        {"type": "code", "lang": "bash", "caption": "Inventory, prune, and a default-deny host firewall with nftables (Debian/Ubuntu: `apt install nftables`).", "code": "# what listens, and which process owns each socket\nsudo ss -tulnp\n\n# disable a service you do not need\nsudo systemctl disable --now avahi-daemon\n\n# minimal nftables policy: allow loopback, established, SSH from the admin network, HTTPS from anywhere\nsudo tee /etc/nftables.conf >/dev/null <<'EOF'\nflush ruleset\ntable inet filter {\n  chain input {\n    type filter hook input priority 0; policy drop;\n    iif lo accept\n    ct state established,related accept\n    ip saddr 10.20.0.0/16 tcp dport 22 accept\n    tcp dport 443 accept\n    icmp type echo-request limit rate 5/second accept\n  }\n  chain forward { type filter hook forward priority 0; policy drop; }\n  chain output  { type filter hook output priority 0; policy accept; }\n}\nEOF\nsudo nft -f /etc/nftables.conf && sudo systemctl enable --now nftables"},
+        {"type": "p", "text": "Patching is the single most effective hardening step and the one most often skipped. Enable unattended security updates for the operating system, schedule reboots for kernel updates within a defined window (or use live patching where available), and rebuild container images and machine images on a cadence rather than patching them in place. A host that has been up for four hundred days is a host running a four-hundred-day-old kernel."},
+        {"type": "code", "lang": "bash", "caption": "Automatic security updates on Debian and Ubuntu; check the log afterwards.", "code": "sudo apt install -y unattended-upgrades\nsudo dpkg-reconfigure -plow unattended-upgrades\n# verify it is active and see what it did\nsystemctl status unattended-upgrades --no-pager\nsudo tail -n 20 /var/log/unattended-upgrades/unattended-upgrades.log"}
+      ]
+    },
+    {
+      "heading": "Know what happened: auditing and integrity",
+      "blocks": [
+        {"type": "p", "text": "Hardening without visibility only delays discovery. The Linux **audit** subsystem (`auditd`) records system calls matching rules you define: who executed which commands, changes to `/etc/passwd` and `sudoers`, access to secret files, module loads. Ship the audit log and the auth log off the host to your logging pipeline the moment they are written; an attacker with root will otherwise edit them."},
+        {"type": "code", "lang": "text", "caption": "Audit rules worth having on every server, in /etc/audit/rules.d/hardening.rules.", "code": "# identity and privilege changes\n-w /etc/passwd -p wa -k identity\n-w /etc/shadow -p wa -k identity\n-w /etc/group -p wa -k identity\n-w /etc/sudoers -p wa -k privilege\n-w /etc/sudoers.d/ -p wa -k privilege\n-w /etc/ssh/sshd_config -p wa -k sshd\n\n# every command run with elevated privileges\n-a always,exit -F arch=b64 -S execve -F euid=0 -F auid>=1000 -F auid!=unset -k root_commands\n\n# kernel module loading\n-w /sbin/insmod -p x -k modules\n-w /sbin/modprobe -p x -k modules\n\n# make the rules immutable until reboot\n-e 2"},
+        {"type": "p", "text": "**File integrity monitoring** (AIDE, or the equivalent in your endpoint agent) takes a baseline of binaries and configuration and reports what changed. Combined with immutable infrastructure, where a host is replaced rather than modified, unexpected change becomes a rare and meaningful event. Finally, make the system clock trustworthy (chrony to reliable NTP sources): every log line and every certificate check depends on it."},
+        {"type": "callout", "kind": "note", "text": "Logs that stay on the host are evidence that the attacker controls. Central, append-only log storage with retention is part of hardening, and the detection module covers what to do with it."}
+      ]
+    },
+    {
+      "heading": "Measure against a benchmark",
+      "blocks": [
+        {"type": "p", "text": "The **CIS Benchmarks** are consensus hardening standards for each major distribution, organised into levels: Level 1 is the safe baseline for any server, Level 2 is stricter and may break things. Auditors ask for them, and they are a good checklist even when nobody is asking. Automated scanners such as OpenSCAP with the SCAP Security Guide, or Lynis for a quick pass, score a host against the benchmark and list failures with remediation."},
+        {"type": "code", "lang": "bash", "caption": "A quick audit with Lynis, then a CIS Level 1 scan with OpenSCAP (Ubuntu package names shown).", "code": "sudo apt install -y lynis && sudo lynis audit system --quick\n\nsudo apt install -y openscap-scanner ssg-base\nsudo oscap xccdf eval \\\n  --profile xccdf_org.ssgproject.content_profile_cis_level1_server \\\n  --report /tmp/cis-report.html \\\n  /usr/share/xml/scap/ssg/content/ssg-ubuntu2404-ds.xml"},
+        {"type": "p", "text": "Do not chase a perfect score. Fix the findings that map to real threats first: access, privilege, exposure, patching, logging. Record the exceptions you consciously keep (with a reason and an owner), bake the fixes into your machine image or configuration management so that every new host starts hardened, and re-scan on a schedule so that drift shows up as a number going the wrong way."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Harden a throwaway VM and score it",
+    "steps": [
+      "Create a small Ubuntu VM (local with Multipass or a cloud instance you will delete). Run `sudo lynis audit system --quick` and note the hardening index as your baseline.",
+      "Apply the SSH settings from the lesson: create an `ssh-users` group, add your user, disable passwords and root login, `sshd -t`, reload, and confirm a fresh login works while a second session stays open.",
+      "Run the account, world-writable and setuid finds. Lock any account you do not recognise with `sudo usermod -L`, and note which setuid binaries are expected on Ubuntu.",
+      "List listening services with `ss -tulnp`, disable at least one you do not need, and install the nftables policy (adjust the admin network to your own IP). Confirm you can still connect.",
+      "Enable unattended-upgrades and install auditd with the rules from the lesson; run `sudo ausearch -k identity` after editing a test user and confirm the event is recorded.",
+      "Run Lynis again and compare the index; then run the OpenSCAP CIS Level 1 profile and open the HTML report. Pick three failed rules, decide fix or accept, and write the reason for each.",
+      "Delete the VM."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Access first: keys only, no root login, sudo via a group with logging, port 22 not on the internet",
+      "Least privilege on the box: no extra UID 0, service accounts without shells, umask 027, review setuid and world-writable",
+      "Shrink the surface: disable unused services, default-deny host firewall, automatic security updates and scheduled reboots",
+      "Visibility: auditd rules for identity, privilege and root commands; ship logs off the host; trustworthy time",
+      "Measure with CIS Level 1 via OpenSCAP or Lynis; fix what maps to threats, record exceptions",
+      "Bake hardening into images so every new host starts compliant"
+    ],
+    "groups": [
+      {"title": "SSH and sudo", "items": [
+        {"syntax": "PermitRootLogin no / PasswordAuthentication no", "desc": "Keys only, never root directly"},
+        {"syntax": "AllowGroups ssh-users", "desc": "Only named group members may log in"},
+        {"syntax": "sshd -t && systemctl reload sshd", "desc": "Validate then apply; keep a session open"},
+        {"syntax": "ssh-keygen -t ed25519", "desc": "Modern key type"},
+        {"syntax": "visudo -cf /etc/sudoers.d/FILE", "desc": "Validate a sudoers drop-in"},
+        {"syntax": "user ALL=(root) NOPASSWD: /usr/bin/CMD", "desc": "Scoped passwordless rule for automation"}
+      ]},
+      {"title": "Accounts and files", "items": [
+        {"syntax": "awk -F: '$3 == 0' /etc/passwd", "desc": "Find UID 0 accounts"},
+        {"syntax": "usermod -L USER / usermod -s /usr/sbin/nologin USER", "desc": "Lock an account / remove its shell"},
+        {"syntax": "find / -xdev -perm -0002 -type f", "desc": "World-writable files"},
+        {"syntax": "find / -xdev -perm -4000 -type f", "desc": "Setuid binaries"},
+        {"syntax": "umask 027", "desc": "New files not readable by others (set in /etc/login.defs and profile)"},
+        {"syntax": "mount -o noexec,nosuid,nodev /tmp", "desc": "No execution from temp locations"}
+      ]},
+      {"title": "Services, firewall, patches", "items": [
+        {"syntax": "ss -tulnp", "desc": "What listens and which process owns it"},
+        {"syntax": "systemctl disable --now SERVICE", "desc": "Stop and prevent start"},
+        {"syntax": "nft -f /etc/nftables.conf", "desc": "Load a default-drop input policy"},
+        {"syntax": "nft list ruleset", "desc": "Show the active rules"},
+        {"syntax": "unattended-upgrades", "desc": "Automatic security patches (Debian/Ubuntu); dnf-automatic on RHEL"},
+        {"syntax": "needrestart / checkrestart", "desc": "Which services still run old libraries after a patch"}
+      ]},
+      {"title": "systemd sandboxing", "items": [
+        {"syntax": "User=app  DynamicUser=yes", "desc": "Run as an unprivileged, even ephemeral, user"},
+        {"syntax": "ProtectSystem=strict  ProtectHome=yes", "desc": "Read-only filesystem except declared paths"},
+        {"syntax": "PrivateTmp=yes  NoNewPrivileges=yes", "desc": "Own /tmp, no setuid escalation"},
+        {"syntax": "CapabilityBoundingSet=  AmbientCapabilities=", "desc": "Drop all capabilities, add back only what is needed"},
+        {"syntax": "systemd-analyze security app.service", "desc": "Score a unit's exposure"}
+      ]},
+      {"title": "Audit and benchmark", "items": [
+        {"syntax": "-w /etc/sudoers -p wa -k privilege", "desc": "Audit writes and attribute changes to a file"},
+        {"syntax": "-a always,exit -F arch=b64 -S execve -F euid=0 ...", "desc": "Record commands run as root"},
+        {"syntax": "ausearch -k KEY  /  aureport -x", "desc": "Query audit events by key / summary of executions"},
+        {"syntax": "lynis audit system --quick", "desc": "Fast hardening index with suggestions"},
+        {"syntax": "oscap xccdf eval --profile ...cis_level1_server", "desc": "CIS scan with an HTML report"}
+      ]}
+    ],
+    "pitfalls": [
+      "Reloading sshd with a typo and no second session open; the host is now unreachable.",
+      "Granting `NOPASSWD: ALL` to a human or a shared account because a script needed it once.",
+      "Hardening the firewall in the cloud console but leaving the host trusting everything on its own subnet.",
+      "Never rebooting for kernel updates; the patch is installed and the vulnerable kernel is still running.",
+      "Keeping audit and auth logs only on the host, where an attacker with root can edit them.",
+      "Chasing a 100% benchmark score and breaking the application, instead of fixing findings that map to real threats."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A server's SSH configuration allows password logins for all users and root login with a key. Which change reduces risk the most?",
+      "options": [
+        "Disable password authentication and root login, and allow only members of a named group to log in with keys",
+        "Increase the SSH port number from 22 to a high random port so scanners do not find it",
+        "Install a banner warning that unauthorised access is prohibited",
+        "Reduce the login grace time from two minutes to thirty seconds"
+      ],
+      "answer": 0,
+      "explain": "Password guessing and direct root access are the common paths; keys only, no root, and an explicit allow group remove them. Changing the port hides nothing from a full scan, a banner has no technical effect, and grace time only limits slow attempts."
+    },
+    {
+      "q": "During a review you find a binary in `/usr/local/bin` with the setuid bit set, owned by root, that the team installed to \"make a script work\". Why is this a finding?",
+      "options": [
+        "Any user who can run it executes code as root, so a flaw in the binary or the script it calls is a privilege escalation path",
+        "Setuid binaries cannot be patched by unattended-upgrades and will fall behind on updates",
+        "The setuid bit disables audit logging for that binary, so its use leaves no trace",
+        "Files in `/usr/local/bin` are world-writable by default, so anyone can replace it"
+      ],
+      "answer": 0,
+      "explain": "Setuid means the program runs with its owner's privileges regardless of who starts it. A root-owned setuid helper turns every bug in it into a way to become root. The other statements are not how patching, auditing or `/usr/local/bin` permissions work."
+    },
+    {
+      "q": "A host sits behind a cloud security group that allows only port 443. Why still run a default-deny host firewall?",
+      "options": [
+        "It catches mistakes in the group and blocks traffic from other hosts in the same subnet, which the group may allow",
+        "Cloud security groups only filter outbound traffic, so inbound needs the host firewall",
+        "The host firewall is required for TLS to terminate correctly on port 443",
+        "Security groups are stateless, so replies would be dropped without a host firewall"
+      ],
+      "answer": 0,
+      "explain": "Defence in depth: groups get widened during incidents, and lateral traffic within a subnet often matches a broad rule. A host policy is an independent control. Security groups are stateful and filter both directions; TLS does not depend on a firewall."
+    },
+    {
+      "q": "Which auditd rule records every command executed with root privileges by a logged-in human user?",
+      "options": [
+        "`-a always,exit -F arch=b64 -S execve -F euid=0 -F auid>=1000 -F auid!=unset -k root_commands`",
+        "`-w /usr/bin/sudo -p x -k root_commands`",
+        "`-w /root -p rwxa -k root_commands`",
+        "`-a always,exit -S open -F uid=0 -k root_commands`"
+      ],
+      "answer": 0,
+      "explain": "The execve syscall with effective UID 0 and an audit UID belonging to a real login captures commands run as root by humans. Watching the sudo binary only records that sudo ran, watching /root records file access, and the open syscall is not execution."
+    },
+    {
+      "q": "An OpenSCAP CIS Level 1 scan reports 180 failed rules on a production web server. What is the sensible next step?",
+      "options": [
+        "Fix findings that map to access, privilege, exposure, patching and logging first; record the exceptions you keep with owners, and bake fixes into the image",
+        "Apply every automated remediation immediately so the score reaches 100% before the audit",
+        "Switch to the Level 2 profile, since Level 1 findings are informational",
+        "Disable the scanner on production and only scan development hosts"
+      ],
+      "answer": 0,
+      "explain": "Benchmarks are checklists, not risk rankings. Fix what reduces real risk, document conscious exceptions, and make the fixes part of the image so new hosts start compliant. Blind remediation on production breaks services; Level 2 is stricter, not less important."
+    }
+  ]
+}

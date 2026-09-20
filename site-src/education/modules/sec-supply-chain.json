@@ -1,0 +1,370 @@
+{
+  "id": "sec-supply-chain",
+  "minutes": 35,
+  "intro": "Your application is a thin layer of your own code on top of thousands of packages written by strangers, built by a pipeline that runs code from more strangers, and shipped as an image assembled from yet more. Attackers noticed. Poisoned packages, hijacked maintainer accounts, compromised build servers and tampered artifacts are now routine, and a single one reaches every customer of every company that depends on it. Supply chain security is about knowing exactly what you ship, proving where it came from, and refusing to run anything that cannot prove it. This module covers dependencies, SBOMs, signing with Sigstore, provenance and the SLSA levels, and protecting the build itself.",
+  "objectives": [
+    "Pin and audit dependencies, and reduce the number of them",
+    "Generate a software bill of materials and use it to answer \"are we affected?\" in minutes",
+    "Sign artifacts and images keylessly with Sigstore and verify signatures before deployment",
+    "Explain SLSA levels and produce build provenance from a hosted pipeline",
+    "Harden the build pipeline: pinned actions, minimal permissions, isolated runners, protected branches"
+  ],
+  "sections": [
+    {
+      "heading": "Dependencies: fewer, pinned, watched",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Every dependency is code you run with your privileges, maintained by someone you have never met, published through an account that can be phished. The attacks are well known: **typosquatting** (a package one letter away from the real one), **dependency confusion** (a public package with the same name as your internal one, and a resolver that prefers the higher version), hijacked maintainer accounts publishing a malicious release, and install-time scripts that run on `npm install`."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Fewer: every dependency you remove is a supplier you no longer have to trust. Question transitive bloat.",
+            "Pinned: lock files with exact versions and hashes (`package-lock.json`, `poetry.lock`, `requirements.txt --require-hashes`, `go.sum`) so an install today and next month are identical.",
+            "Sourced: a private registry or proxy that mirrors approved packages, blocks unknown ones, and makes dependency confusion impossible by design.",
+            "Watched: automated updates (Renovate, Dependabot) with tests, and vulnerability scanning on every change and on a schedule.",
+            "Quiet: disable install scripts where you can (`npm ci --ignore-scripts`) and review packages that need them."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "caption": "Reproducible Python installs with hashes, and a vulnerability check that reads the lock file.",
+          "code": "# generate a fully pinned, hashed requirements file from your top-level deps\npip-compile --generate-hashes requirements.in -o requirements.txt\n\n# installs fail if any package's hash does not match the lock\npip install --require-hashes -r requirements.txt\n\n# known vulnerabilities in exactly what is pinned\npip-audit -r requirements.txt --strict"
+        },
+        {
+          "type": "callout",
+          "kind": "warning",
+          "text": "A new dependency deserves the same review as new code: who maintains it, how many maintainers, when was it last released, does it need install scripts, what does it pull in transitively. Popular is not the same as safe, but abandoned is a clear signal."
+        }
+      ]
+    },
+    {
+      "heading": "Know what you ship: the SBOM",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A **software bill of materials** is a machine-readable inventory of every component in an artifact: packages, versions, licences, and their relationships, in a standard format (SPDX or CycloneDX). Its value is speed under pressure. When the next critical vulnerability in a logging library is announced, teams with SBOMs answer \"which of our two hundred services contain version 2.14.1?\" with a query; teams without spend days grepping. Generate an SBOM for every build, store it next to the artifact, and index it."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "caption": "Generate an SBOM for an image with Syft, then query all stored SBOMs for a vulnerable package with Grype.",
+          "code": "# SBOM in CycloneDX JSON, attached to the build as an artifact\nsyft ghcr.io/acme/orders:sha-1a2b3c4 -o cyclonedx-json > sbom.cdx.json\n\n# scan the SBOM (no need to pull the image again) for known vulnerabilities\ngrype sbom:sbom.cdx.json --fail-on high\n\n# the question that matters during an incident\njq -r '.components[] | select(.name==\"log4j-core\") | .version' sbom.cdx.json"
+        },
+        {
+          "type": "p",
+          "text": "SBOMs also serve customers and regulators who increasingly ask for them, and they feed licence compliance. Attach the SBOM to the image as an attestation (next section) so that it travels with the artifact and cannot be swapped."
+        }
+      ]
+    },
+    {
+      "heading": "Sign it: Sigstore and keyless signatures",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A signature lets a consumer verify that an artifact was produced by a specific identity and not altered since. Traditional signing keys are a liability: they leak, they expire, they get shared. **Sigstore** removes the long-lived key. The signer proves its identity with an OIDC token (a CI job's identity, or a developer's login), receives a short-lived certificate from the Fulcio CA, signs, and records the signature in the Rekor transparency log. Verifiers check the signature against the certificate and confirm the certificate's identity claims: this image was signed by the release workflow of this repository on the main branch."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "caption": "Keyless signing in GitHub Actions after the image push. The job's OIDC token is the identity; no secret is stored.",
+          "code": "permissions:\n  contents: read\n  packages: write\n  id-token: write\n\nsteps:\n  - uses: sigstore/cosign-installer@v3\n  - name: Sign the image by digest\n    run: cosign sign --yes \"ghcr.io/acme/orders@${DIGEST}\"\n    env:\n      DIGEST: ${{ steps.build.outputs.digest }}\n  - name: Attach the SBOM as an attestation\n    run: cosign attest --yes --predicate sbom.cdx.json --type cyclonedx \"ghcr.io/acme/orders@${DIGEST}\"\n    env:\n      DIGEST: ${{ steps.build.outputs.digest }}"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "caption": "Verifying: only images signed by this repository's release workflow on main are accepted. The same check runs in the cluster's admission controller.",
+          "code": "cosign verify \\\n  --certificate-identity-regexp '^https://github.com/acme/orders/.github/workflows/release.yml@refs/heads/main$' \\\n  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\\n  ghcr.io/acme/orders@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        },
+        {
+          "type": "callout",
+          "kind": "tip",
+          "text": "Sign and verify by digest, never by tag. A tag is a mutable pointer; the digest is the content. Deployment manifests should reference digests, and admission should resolve tags to digests and verify those."
+        }
+      ]
+    },
+    {
+      "heading": "Provenance and SLSA",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A signature says who signed; **provenance** says how the artifact was built: which source commit, which builder, which inputs, which build instructions. **SLSA** (Supply-chain Levels for Software Artifacts) is the framework that grades this. Level 1: provenance exists. Level 2: it is generated by a hosted build platform and signed, so it cannot be forged by the developer. Level 3: the build runs on hardened, isolated infrastructure where the provenance cannot be tampered with by the build's own steps. Most teams reach level 2 or 3 by using a hosted CI's provenance generator rather than building their own."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "caption": "Generating SLSA level 3 provenance for a container image with GitHub's attestation action.",
+          "code": "  - uses: actions/attest-build-provenance@v2\n    with:\n      subject-name: ghcr.io/acme/orders\n      subject-digest: ${{ steps.build.outputs.digest }}\n      push-to-registry: true"
+        },
+        {
+          "type": "p",
+          "text": "Provenance makes policy possible. A consumer (a cluster admission controller, a package installer) can require: built from a commit on the protected main branch, by the official workflow, on the hosted builder, with the SBOM attached. Combine with verification by digest and you have closed the gap between \"we build good software\" and \"only software we built can run\"."
+        }
+      ]
+    },
+    {
+      "heading": "Protect the build itself",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "The pipeline is a privileged system that executes code from pull requests and holds the credentials to publish. Attackers target it directly: a malicious pull request that exfiltrates secrets, a compromised third-party action, a poisoned build cache. Treat CI configuration as security-critical code."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Risk",
+            "Control"
+          ],
+          "rows": [
+            [
+              "Third-party actions and images change under you",
+              "Pin actions to a commit SHA, images to a digest; review updates via bot PRs"
+            ],
+            [
+              "Pull requests from forks run with secrets",
+              "Fork PRs get no secrets by default; never use `pull_request_target` with checkout of the PR head"
+            ],
+            [
+              "Workflow token can push code or publish",
+              "`permissions: contents: read` at the top; grant `packages: write` or `id-token: write` only to the job that needs it"
+            ],
+            [
+              "Untrusted input in shell steps",
+              "Pass `${{ github.event.* }}` values through environment variables, never interpolate into `run:`"
+            ],
+            [
+              "Shared, long-lived runners accumulate state",
+              "Ephemeral runners; no persistent credentials on the runner; isolated per job"
+            ],
+            [
+              "Anyone can change the workflow",
+              "Protected branches, required reviews for `.github/`, CODEOWNERS"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "caption": "The shape of a hardened workflow header: minimal default permissions, pinned actions, and untrusted input kept out of the shell.",
+          "code": "permissions:\n  contents: read\n\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2\n      - name: Greet the PR author safely\n        env:\n          TITLE: ${{ github.event.pull_request.title }}\n        # never interpolate the expression directly into the script\n        run: |\n          echo \"PR title is $TITLE\""
+        },
+        {
+          "type": "p",
+          "text": "Finally, review your own trust decisions periodically: which registries you pull from, which actions you allow (GitHub can restrict to verified creators or an allow-list), which people can approve a release. Supply chain security is not a product; it is knowing your suppliers and making the pipeline the only road to production."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Pin, inventory, sign, verify",
+    "steps": [
+      "In a project you own, generate a hashed lock file (`pip-compile --generate-hashes` or `npm ci` with a committed lock) and make CI fail if the lock is out of date with the manifest.",
+      "Run `pip-audit` or `npm audit` and fix or explicitly accept each high finding. Add the check to CI.",
+      "Generate a CycloneDX SBOM for your container image with Syft and answer, with `jq`, how many components it has and which have no declared licence.",
+      "Add keyless `cosign sign` to your release workflow (the zero-to-production pipeline is ready for it: `id-token: write` is already granted). Push a build and confirm a signature exists with `cosign tree` or the registry UI.",
+      "Run `cosign verify` with the exact identity regexp for your workflow; then try a wrong identity and confirm verification fails.",
+      "Pin every action in your workflows to a commit SHA with a version comment. Set the workflow's default `permissions` to `contents: read` and grant write permissions per job.",
+      "Add the provenance attestation step and inspect the resulting attestation for the source commit and builder id."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Fewer dependencies, exact pins with hashes, a private registry, automated updates with tests",
+      "SBOM per build (SPDX or CycloneDX), stored and queryable: \"are we affected?\" in minutes",
+      "Sign by digest with Sigstore keyless; verify identity and issuer before deploy and at admission",
+      "Provenance says how it was built; SLSA levels grade how trustworthy that claim is",
+      "Harden CI: pinned actions, minimal token permissions, no secrets for fork PRs, no untrusted input in shell",
+      "The pipeline is the only road to production, and it is protected like production"
+    ],
+    "groups": [
+      {
+        "title": "Dependencies",
+        "items": [
+          {
+            "syntax": "pip-compile --generate-hashes / pip install --require-hashes",
+            "desc": "Exact, hash-verified Python installs"
+          },
+          {
+            "syntax": "npm ci --ignore-scripts",
+            "desc": "Install from the lock, no install-time scripts"
+          },
+          {
+            "syntax": "pip-audit / npm audit / osv-scanner",
+            "desc": "Known vulnerabilities in what is pinned"
+          },
+          {
+            "syntax": "private registry / proxy with allow-list",
+            "desc": "Blocks dependency confusion and unknown packages"
+          },
+          {
+            "syntax": "Renovate / Dependabot",
+            "desc": "Updates as reviewed PRs with tests"
+          }
+        ]
+      },
+      {
+        "title": "SBOM",
+        "items": [
+          {
+            "syntax": "syft IMAGE -o cyclonedx-json",
+            "desc": "Inventory of an image or directory"
+          },
+          {
+            "syntax": "grype sbom:FILE --fail-on high",
+            "desc": "Scan the SBOM without the artifact"
+          },
+          {
+            "syntax": "jq '.components[] | select(.name==\"PKG\")'",
+            "desc": "Incident-time query"
+          },
+          {
+            "syntax": "cosign attest --type cyclonedx --predicate sbom.cdx.json",
+            "desc": "Attach the SBOM to the image"
+          }
+        ]
+      },
+      {
+        "title": "Sigstore",
+        "items": [
+          {
+            "syntax": "cosign sign --yes IMAGE@DIGEST",
+            "desc": "Keyless signing with the job's OIDC identity"
+          },
+          {
+            "syntax": "cosign verify --certificate-identity-regexp ... --certificate-oidc-issuer ...",
+            "desc": "Accept only your workflow's signatures"
+          },
+          {
+            "syntax": "cosign tree IMAGE",
+            "desc": "List signatures and attestations for an image"
+          },
+          {
+            "syntax": "Fulcio (certs) / Rekor (transparency log)",
+            "desc": "The public infrastructure behind keyless"
+          },
+          {
+            "syntax": "verify by digest, never tag",
+            "desc": "Tags move; digests are content"
+          }
+        ]
+      },
+      {
+        "title": "Provenance and SLSA",
+        "items": [
+          {
+            "syntax": "actions/attest-build-provenance",
+            "desc": "Signed SLSA provenance from GitHub's hosted builder"
+          },
+          {
+            "syntax": "SLSA 1: provenance exists",
+            "desc": "Documented build"
+          },
+          {
+            "syntax": "SLSA 2: hosted platform, signed",
+            "desc": "Developer cannot forge it"
+          },
+          {
+            "syntax": "SLSA 3: isolated, hardened builder",
+            "desc": "Build steps cannot tamper with provenance"
+          },
+          {
+            "syntax": "policy: built from main by release.yml on the hosted builder",
+            "desc": "What admission can require"
+          }
+        ]
+      },
+      {
+        "title": "Pipeline hardening",
+        "items": [
+          {
+            "syntax": "uses: org/action@<40-char sha> # vX.Y.Z",
+            "desc": "Pin actions to commits"
+          },
+          {
+            "syntax": "permissions: {contents: read} at top; per-job writes",
+            "desc": "Least privilege for the workflow token"
+          },
+          {
+            "syntax": "env: X=${{ github.event... }} then $X",
+            "desc": "Never interpolate untrusted input into run:"
+          },
+          {
+            "syntax": "avoid pull_request_target + checkout of PR head",
+            "desc": "Classic secret-exfiltration pattern"
+          },
+          {
+            "syntax": "ephemeral runners; CODEOWNERS for .github/",
+            "desc": "No state, reviewed workflow changes"
+          }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Floating versions (`^1.2.0`, `latest`, `@v4`) that silently pull a compromised release.",
+      "Trusting a public registry to resolve an internal package name.",
+      "Signing with a long-lived key stored as a CI secret, which leaks like any other secret.",
+      "Verifying a signature without checking the certificate identity; anyone can sign anything keylessly.",
+      "Echoing pull request titles or branch names directly in a shell step, giving contributors code execution on the runner.",
+      "Producing SBOMs and never storing or indexing them, so the incident-time question still takes days."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A build resolves an internal package named `acme-billing` from the public registry, where an attacker has published a package with the same name and a higher version. What is this attack and what prevents it structurally?",
+      "options": [
+        "Dependency confusion; a private registry or proxy that serves internal names only from the internal source and blocks unknown public packages",
+        "Typosquatting; a spell-checker on package names in the manifest",
+        "Account hijacking; two-factor authentication on the attacker's registry account",
+        "Cache poisoning; clearing the CI build cache before every build"
+      ],
+      "answer": 0,
+      "explain": "Resolvers that prefer the highest version across sources will pick the public impostor. A registry configuration that scopes internal names to the internal index removes the ambiguity; the other options address different attacks."
+    },
+    {
+      "q": "A critical vulnerability is announced in a widely used library. Which prior practice lets a platform team determine within minutes which of their services are affected?",
+      "options": [
+        "Generating and indexing an SBOM for every build, so affected versions can be queried across all artifacts",
+        "Pinning all dependencies to exact versions in each repository",
+        "Signing every image with Sigstore at build time",
+        "Running a dynamic application scan against staging every week"
+      ],
+      "answer": 0,
+      "explain": "Pins make builds reproducible and signatures prove origin, but neither answers the inventory question across hundreds of services. A queryable SBOM store does. Dynamic scans do not enumerate components."
+    },
+    {
+      "q": "In keyless Sigstore signing from CI, what does the verifier check to trust an image?",
+      "options": [
+        "That the signature is valid for the image digest and the short-lived certificate's identity and OIDC issuer match the expected workflow",
+        "That the image tag matches the version in the repository's changelog",
+        "That the signing key stored in the repository's secrets has not been rotated",
+        "That the image was pushed within the last 24 hours"
+      ],
+      "answer": 0,
+      "explain": "Keyless signing has no stored key. Trust comes from the certificate issued for the job's OIDC identity, recorded in the transparency log; the verifier must check that identity (repository, workflow, branch) and issuer, and verify by digest. Tags and timestamps prove nothing."
+    },
+    {
+      "q": "What distinguishes SLSA level 2 provenance from a provenance document the developer writes and commits alongside the release?",
+      "options": [
+        "Level 2 provenance is generated and signed by the hosted build platform, so the developer cannot forge or alter it",
+        "Level 2 provenance lists licences for every component in addition to build details",
+        "Level 2 provenance is stored in the container image's filesystem rather than in a registry",
+        "Level 2 provenance requires that the build was reproducible bit-for-bit"
+      ],
+      "answer": 0,
+      "explain": "The point of SLSA's ladder is who can tamper with the claim. At level 2 the platform, not the developer, attests how the artifact was built and signs it. Licences are the SBOM's job; reproducibility is a separate property."
+    },
+    {
+      "q": "A workflow step runs `run: echo \"Thanks for PR: ${{ github.event.pull_request.title }}\"`. Why is this a vulnerability?",
+      "options": [
+        "The title is untrusted input interpolated into the shell script, so a crafted title can execute commands on the runner with the workflow's permissions",
+        "Pull request titles can exceed the shell's maximum line length and crash the job",
+        "The step leaks the pull request title to the public logs",
+        "GitHub does not allow expressions inside `run:` blocks and the workflow will fail to parse"
+      ],
+      "answer": 0,
+      "explain": "Expressions are substituted into the script before the shell runs it, so a title containing shell metacharacters becomes code. Pass such values via environment variables and reference them as `$VAR`. The other statements are not real constraints."
+    }
+  ]
+}

@@ -1,0 +1,203 @@
+{
+  "id": "sec-threats",
+  "minutes": 30,
+  "intro": "Security work that starts with a tool list ends with a long bill and the same breaches. Security work that starts with a question ends better: what are we protecting, from whom, and how would they actually get in? Threat modelling is the habit of asking that question early and writing the answers down, so that every later control (a firewall rule, a code review, an alert) exists for a reason you can name. This module gives you the attacker's way of looking at a system and a lightweight method you can run in an hour on a whiteboard.",
+  "objectives": [
+    "Describe a system as assets, entry points, trust boundaries and data flows",
+    "Enumerate threats with STRIDE and rank them by likelihood and impact",
+    "Explain the attack chain from initial access to impact, and where defenders can break it",
+    "Turn a threat model into concrete, testable controls and accepted risks",
+    "Run a one-hour threat modelling session for a real feature or service"
+  ],
+  "sections": [
+    {
+      "heading": "Think like the attacker, plan like the defender",
+      "blocks": [
+        {"type": "p", "text": "Attackers are not magicians. They are people with a goal (money, data, access, disruption), a budget of time and skill, and a preference for the easiest path. A **threat model** is a structured description of your system from that point of view: what is valuable in it, where someone from outside can touch it, and which paths lead from touching it to getting the valuable thing. Defenders who skip this step protect the wrong things beautifully."},
+        {"type": "p", "text": "Four questions drive every threat model. They come from the threat modelling manifesto and they fit on a sticky note:"},
+        {"type": "steps", "items": [
+          "**What are we working on?** Draw the system: components, data stores, external services, the people and machines that call it.",
+          "**What can go wrong?** Enumerate threats systematically, not by brainstorming whatever comes to mind first.",
+          "**What are we going to do about it?** For each threat that matters: mitigate, eliminate, transfer, or accept — and write down which.",
+          "**Did we do a good job?** Check the controls exist, test them, and revisit the model when the system changes."
+        ]},
+        {"type": "callout", "kind": "note", "text": "A threat model is a living document, not a compliance artefact. The useful version is one page per service, updated when a new entry point, data type or dependency appears."}
+      ]
+    },
+    {
+      "heading": "Draw the system: assets, entry points, trust boundaries",
+      "blocks": [
+        {"type": "p", "text": "Start with a **data flow diagram**: boxes for processes, cylinders for data stores, arrows for data flows, and stick figures for external entities (users, third-party APIs, other teams' services). Then draw the **trust boundaries**: dotted lines where the level of trust changes — the internet edge, the boundary between a web tier and a database, the line between a user's browser and your API, the line between one tenant's data and another's. Almost every interesting threat lives on a boundary crossing."},
+        {"type": "p", "text": "Next, list the **assets**, meaning the things an attacker would want or the things whose loss would hurt: customer records, credentials and tokens, the ability to run code on your servers, payment flows, availability of the service itself, and your reputation. Rank them. If you cannot say which asset matters most, you cannot prioritise anything downstream."},
+        {"type": "p", "text": "Finally, mark the **entry points**: every place input arrives from a less-trusted side of a boundary. Public HTTP endpoints, webhooks, file uploads, message queues, admin consoles, SSH, the CI pipeline, and the dependency manifest are all entry points. The attack surface is the sum of them; the smaller and better-known it is, the easier the rest of this work becomes."},
+        {"type": "code", "lang": "text", "caption": "A minimal written model for a small web service, before any diagramming tool.", "code": "SYSTEM: order-api (public REST API + worker + Postgres)\n\nASSETS (ranked)\n  1. customer PII in Postgres            (breach = legal + reputation)\n  2. payment provider API key            (theft = fraud)\n  3. ability to run code on the hosts    (foothold into everything else)\n  4. availability during business hours\n\nENTRY POINTS\n  E1  POST /orders, GET /orders/{id}     internet -> api        (auth: user JWT)\n  E2  POST /webhooks/payment             payment provider -> api (auth: HMAC signature)\n  E3  admin UI on :8443                  office VPN -> api      (auth: SSO + MFA)\n  E4  container image + pip dependencies build pipeline -> hosts\n  E5  SSH to hosts                       ops laptops -> hosts   (auth: keys)\n\nTRUST BOUNDARIES\n  internet | load balancer | api pods | postgres\n  build pipeline | production registry"}
+      ]
+    },
+    {
+      "heading": "Enumerate threats with STRIDE",
+      "blocks": [
+        {"type": "p", "text": "Brainstorming produces the threats you already fear. **STRIDE** produces the ones you forgot, because you walk every data flow and ask six fixed questions. Each letter is a category of threat, and each maps to the security property it violates:"},
+        {"type": "table", "headers": ["Threat", "Violates", "Example on order-api"], "rows": [
+          ["**S**poofing", "Authentication", "A forged webhook claims a payment succeeded"],
+          ["**T**ampering", "Integrity", "Order total modified in the request body after client-side validation"],
+          ["**R**epudiation", "Non-repudiation", "An admin deletes records and there is no log of who did it"],
+          ["**I**nformation disclosure", "Confidentiality", "Stack traces with database details returned on error"],
+          ["**D**enial of service", "Availability", "Unbounded page size on GET /orders exhausts the database"],
+          ["**E**levation of privilege", "Authorisation", "A user reads another user's order by changing the id"]
+        ]},
+        {"type": "p", "text": "Apply STRIDE per element: for each entry point and each boundary crossing, ask all six questions. A five-endpoint API with three boundaries yields perhaps forty candidate threats in half an hour. That is fine; the next step is ranking, not fixing everything."},
+        {"type": "p", "text": "Rank each threat by **likelihood** (how easy is it, how motivated is the attacker, is it already being exploited in the wild) and **impact** (which asset, how badly). A simple high/medium/low on each axis is enough; the point is to compare, not to compute. Anything high on both goes to the top of the backlog with a named owner."},
+        {"type": "callout", "kind": "tip", "text": "For each threat write one sentence in the form: \"An attacker with X access can do Y, causing Z.\" If you cannot fill in all three, it is not yet a threat, it is a worry."}
+      ]
+    },
+    {
+      "heading": "The attack chain and where to break it",
+      "blocks": [
+        {"type": "p", "text": "Real intrusions are chains, not single events. A typical sequence: **reconnaissance** (finding your domains, exposed services, employee emails), **initial access** (phishing, an exposed credential, an unpatched service), **execution and persistence** (running code and surviving a reboot), **privilege escalation**, **lateral movement** to more valuable systems, **collection** of data, and finally **exfiltration** or **impact** (ransomware, fraud, destruction). The public catalogue of these techniques is the MITRE ATT&CK framework; defenders use it as a checklist of what attackers actually do rather than what they theoretically could."},
+        {"type": "p", "text": "Chains are good news. Breaking any link stops the attack, and the cheapest links to break are usually early ones: fewer exposed services, credentials that expire, MFA on everything that faces the internet, patches applied on a schedule. A defence-in-depth design assumes the first control will fail and places another behind it: the web application firewall does not stop every injection, so the database user also has no permission to read other tables, so the network also blocks egress from the database host."},
+        {"type": "list", "items": [
+          "**Reduce the surface**: every service you do not expose is a threat category you do not have.",
+          "**Assume breach**: design so that one compromised component (a pod, a laptop, a key) does not give away everything.",
+          "**Make lateral movement noisy**: segmentation and logging turn a quiet intrusion into an alert.",
+          "**Shorten credential lifetimes**: a stolen token that expires in an hour is a much smaller problem than a key from 2021."
+        ]},
+        {"type": "callout", "kind": "warning", "text": "The most common initial access today is not a clever exploit. It is a leaked credential, a phished login without MFA, or an internet-facing service that missed a patch. Threat models that only list exotic attacks miss the door that is actually open."}
+      ]
+    },
+    {
+      "heading": "From threats to controls",
+      "blocks": [
+        {"type": "p", "text": "Each ranked threat gets one of four responses. **Mitigate**: add a control that reduces likelihood or impact (validate the webhook signature, add rate limits, log admin actions). **Eliminate**: remove the feature or flow that creates the threat (drop the unauthenticated export endpoint nobody uses). **Transfer**: make it someone else's problem contractually or technically (use the payment provider's hosted checkout so card numbers never touch your system). **Accept**: decide the risk is tolerable, write down why and who agreed, and set a date to revisit."},
+        {"type": "p", "text": "A good control is specific and testable. \"Improve input validation\" is not a control; \"reject `page_size` above 100 with HTTP 400, covered by test `test_orders_page_size_cap`\" is. Record each control next to the threat it addresses, so that six months later someone can ask why that check exists and get an answer."},
+        {"type": "code", "lang": "text", "caption": "Threat register entries: the format that survives contact with a backlog.", "code": "T-07  E1  Elevation: user reads another user's order by guessing the id\n      Likelihood HIGH  Impact HIGH  -> MITIGATE\n      Control: every /orders/{id} query is scoped by the caller's user_id\n      Test:    test_get_order_other_user_returns_404\n      Owner:   api team   Status: done 2026-03\n\nT-12  E2  Spoofing: forged payment webhook marks an order as paid\n      Likelihood MED   Impact HIGH  -> MITIGATE\n      Control: verify HMAC signature with the provider secret; reject if > 5 min old\n      Test:    test_webhook_bad_signature_rejected\n\nT-19  E5  Information disclosure: SSH keys on laptops without passphrases\n      Likelihood MED   Impact MED   -> ACCEPT until SSM/SSO rollout (Q3), owner: platform lead"},
+        {"type": "p", "text": "Close the loop with the fourth question. Controls drift: a test gets skipped, a firewall rule gets widened during an incident and never narrowed. Revisit the model on a schedule and whenever the diagram changes: new entry point, new data class, new third-party integration. Later modules in this track are, in effect, the standard controls for the most common threats — identity, cryptography, hardening, supply chain, detection and response."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Threat-model a service you know in one hour",
+    "steps": [
+      "Pick a real service you have worked on (or the API from the DevOps track's capstone). On paper or a whiteboard draw its data flow diagram: processes, stores, external entities, arrows.",
+      "Draw the trust boundaries as dotted lines. There should be at least three: internet edge, between tiers, and between your build system and production.",
+      "List the assets and rank them. Force yourself to put one thing at the top.",
+      "List every entry point in the format `Ex  method/path  from -> to  (auth: ...)`. Include non-HTTP ones: queues, uploads, SSH, CI, dependencies.",
+      "Walk each entry point through the six STRIDE questions and write one-sentence threats: \"An attacker with X can do Y, causing Z.\" Aim for at least fifteen.",
+      "Rate each threat high/medium/low for likelihood and impact. Sort. Take the top five.",
+      "For each of the top five, write the response (mitigate/eliminate/transfer/accept), a specific control, and the name of a test that would prove the control works.",
+      "Save the result as `THREAT_MODEL.md` in the service's repository and open a pull request so it gets reviewed like code."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Four questions: what are we building, what can go wrong, what will we do, did we do a good job",
+      "Threats live on trust boundaries: draw them before enumerating anything",
+      "STRIDE per entry point beats brainstorming: spoofing, tampering, repudiation, information disclosure, denial of service, elevation",
+      "A threat is a sentence: attacker with X can do Y causing Z",
+      "Rank by likelihood and impact; fix the top of the list, write down what you accept",
+      "Attacks are chains; break early links (exposure, credentials, patches) cheaply",
+      "Controls must be specific and testable, and recorded next to the threat"
+    ],
+    "groups": [
+      {"title": "Modelling vocabulary", "items": [
+        {"syntax": "asset", "desc": "Something an attacker wants or whose loss hurts; rank them"},
+        {"syntax": "entry point", "desc": "Where input crosses from a less-trusted side; the attack surface is their sum"},
+        {"syntax": "trust boundary", "desc": "Line where trust level changes; most threats are boundary crossings"},
+        {"syntax": "data flow diagram", "desc": "Processes, stores, flows, external entities, boundaries"},
+        {"syntax": "threat register", "desc": "Numbered threats with rating, response, control, test, owner"}
+      ]},
+      {"title": "STRIDE", "items": [
+        {"syntax": "Spoofing -> authentication", "desc": "Pretending to be a user, service or message source"},
+        {"syntax": "Tampering -> integrity", "desc": "Modifying data or code in transit, at rest, or in the build"},
+        {"syntax": "Repudiation -> non-repudiation", "desc": "Acting without a trustworthy record of who did it"},
+        {"syntax": "Information disclosure -> confidentiality", "desc": "Data reaching someone who should not have it"},
+        {"syntax": "Denial of service -> availability", "desc": "Exhausting a resource: CPU, connections, disk, money"},
+        {"syntax": "Elevation of privilege -> authorisation", "desc": "Doing something the identity is not allowed to do"}
+      ]},
+      {"title": "Rating and response", "items": [
+        {"syntax": "likelihood x impact", "desc": "High/medium/low on each; sort, do not compute"},
+        {"syntax": "mitigate", "desc": "Add a control that lowers likelihood or impact"},
+        {"syntax": "eliminate", "desc": "Remove the feature or flow that creates the threat"},
+        {"syntax": "transfer", "desc": "Hosted checkout, insurance, a vendor's control instead of yours"},
+        {"syntax": "accept", "desc": "Written rationale, named approver, revisit date"}
+      ]},
+      {"title": "Attack chain (ATT&CK stages)", "items": [
+        {"syntax": "recon -> initial access", "desc": "Exposed services, leaked credentials, phishing, unpatched software"},
+        {"syntax": "execution -> persistence", "desc": "Run code, survive reboots (cron, services, tokens)"},
+        {"syntax": "privilege escalation -> lateral movement", "desc": "Root on one box, then the next box"},
+        {"syntax": "collection -> exfiltration / impact", "desc": "Gather data, move it out, or destroy and extort"},
+        {"syntax": "break the chain early", "desc": "MFA, short-lived credentials, patching, smaller surface"}
+      ]},
+      {"title": "One-page threat model template", "items": [
+        {"syntax": "SYSTEM / ASSETS (ranked) / ENTRY POINTS / BOUNDARIES", "desc": "The description, one screen long"},
+        {"syntax": "T-nn  Ex  Category: sentence", "desc": "One threat per line, referencing the entry point"},
+        {"syntax": "Control + Test + Owner + Status", "desc": "What proves the threat is handled"},
+        {"syntax": "Revisit: on diagram change or quarterly", "desc": "Keep it alive"}
+      ]}
+    ],
+    "pitfalls": [
+      "Modelling the architecture diagram from the wiki instead of the system as deployed, with its forgotten admin port and test endpoint.",
+      "Listing threats without an attacker, an action and a consequence, so nothing can be ranked or tested.",
+      "Spending the session on exotic attacks while phishing, leaked keys and missing patches remain the likely door.",
+      "Writing \"improve validation\" as a control; controls need a specific rule and a test.",
+      "Treating the document as done: the model must change when a new entry point or data type appears.",
+      "Accepting risks silently; an accepted risk without an owner and a date is an unmanaged risk."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A team is threat-modelling a new file-upload feature. Which of these is a well-formed threat statement they can rank and act on?",
+      "options": [
+        "An unauthenticated user can upload an executable that a worker later runs, giving code execution on the worker host",
+        "Uploads are dangerous and should be scanned for viruses before we launch the feature",
+        "The upload endpoint might have vulnerabilities that attackers could find over time",
+        "File uploads should be limited in size so that storage costs stay under control"
+      ],
+      "answer": 0,
+      "explain": "A threat names an attacker with some access, an action, and a consequence, so it can be rated and mapped to a control. The other statements are worries or requirements without an attacker or a consequence."
+    },
+    {
+      "q": "During STRIDE on `GET /orders/{id}`, someone notes that changing the id returns another customer's order. Which category is that, and which property is violated?",
+      "options": [
+        "Elevation of privilege, violating authorisation",
+        "Spoofing, violating authentication",
+        "Information disclosure, violating integrity",
+        "Tampering, violating confidentiality"
+      ],
+      "answer": 0,
+      "explain": "The caller is authenticated as themselves but performs an action they are not allowed to: reading data belonging to another user. That is an authorisation failure, STRIDE's elevation of privilege. Data is disclosed as a result, but the root category is the broken authorisation check."
+    },
+    {
+      "q": "A threat register lists forty threats after a STRIDE session. The team has capacity to address five this quarter. What is the right next step?",
+      "options": [
+        "Rate each threat for likelihood and impact, sort, and take the top five with named owners",
+        "Address the five that are quickest to fix so the register shrinks fastest",
+        "Address the five that were raised by the most senior people in the session",
+        "Pick five at random, since every threat in the register is a real risk"
+      ],
+      "answer": 0,
+      "explain": "Threat modelling is about spending limited effort where it reduces the most risk. A simple likelihood-by-impact rating makes the forty comparable; the top of that list, with owners, is the quarter's work. Ease of fixing and seniority are not risk."
+    },
+    {
+      "q": "A service stores card numbers so it can charge customers later. The threat model flags the database as the top asset. Which response eliminates the threat rather than mitigating it?",
+      "options": [
+        "Use the payment provider's tokenised vault so card numbers never enter the system",
+        "Encrypt the card number column with a key held in the cloud key management service",
+        "Restrict database access to the payment worker's service account only",
+        "Add alerts on any query that reads more than one hundred card rows"
+      ],
+      "answer": 0,
+      "explain": "If card numbers are never stored, the threat of their theft from the database no longer exists; that is elimination (and also a transfer to the provider). Encryption, access restriction and alerting are all mitigations that reduce likelihood or impact while the asset remains."
+    },
+    {
+      "q": "Which single change most directly breaks the early links of a typical attack chain for an internet-facing company?",
+      "options": [
+        "Require MFA on every login that is reachable from the internet",
+        "Increase log retention from thirty days to one year",
+        "Run a penetration test against the public website every year",
+        "Encrypt all backups with a key stored in a hardware module"
+      ],
+      "answer": 0,
+      "explain": "The most common initial access is a phished or leaked password. MFA on internet-facing logins removes that link for most attackers. Log retention helps investigation after the fact, pen tests find issues periodically, and backup encryption protects a later stage of the chain."
+    }
+  ]
+}

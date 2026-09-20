@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Container &amp; Kubernetes security — Security | ThavionAI Education</title>
+  <meta name="description" content="Image provenance, non-root containers, RBAC, network policies, pod security standards, admission control." />
+  <meta property="og:title" content="Container &amp; Kubernetes security — ThavionAI Education" />
+  <meta property="og:description" content="Image provenance, non-root containers, RBAC, network policies, pod security standards, admission control." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/sec-containers.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-security" data-module="sec-containers">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../index.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=sec-containers&amp;page=/education/sec-containers.html&amp;title=Container%20%26%20Kubernetes%20security">Feedback</a>
+    <a href="../education.html#security" class="nav-cta">All Security modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#security">Security</a> › Stage 2: Securing systems</div>
+    <h1>Container &amp; Kubernetes security</h1>
+    <p class="lede">Image provenance, non-root containers, RBAC, network policies, pod security standards, admission control.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">~40 min read</span>
+      <span class="chip">Module 8 of 16</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">Containers changed where the security boundaries are. The image is now the operating system, the pod is the process boundary, and the cluster API is the most powerful thing on the network. A container is not a virtual machine: it is a process with a different view of the filesystem and namespaces, sharing the host kernel, and a container running as root with a mounted socket is root on the host. This module covers the four layers that matter — the image you build, the runtime settings of the pod, the cluster's access and network policies, and the admission controls that make the good configuration the only configuration — with the settings that close the paths attackers actually use.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Build minimal, non-root, pinned images and scan them for known vulnerabilities before they run</li><li>Apply Pod Security Standards: no privilege escalation, dropped capabilities, read-only root filesystem, no host namespaces</li><li>Design RBAC and service accounts so a compromised pod cannot become a compromised cluster</li><li>Write default-deny NetworkPolicies and open only the flows the workload needs</li><li>Enforce these controls with admission policies and verify image provenance</li></ul>
+    </div>
+    <section id="the-image-is-the-attack-surface"><h2>The image is the attack surface</h2>
+    <p>Every package in an image is code an attacker can use once inside. A full distribution base image ships hundreds of packages, a shell, a package manager and a compiler; a <strong>distroless</strong> or slim base ships your runtime and little else. Smaller images have fewer vulnerabilities to patch, fewer tools for an attacker to live off, and faster pulls. Pin the base by digest, not by a floating tag, so that a build today and a build next month contain the same bytes until you choose to update.</p>
+    <div class="code"><div class="code-cap">A hardened multi-stage image: build tools stay in the builder, the final stage is distroless, non-root, and pinned by digest.</div><div class="code-head"><span>dockerfile</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># syntax=docker/dockerfile:1
+FROM python:3.12-slim@sha256:0d0a3a2b4d1c7b5f6e8c9a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d AS build
+WORKDIR /src
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+COPY app ./app
+
+FROM gcr.io/distroless/python3-debian12:nonroot
+COPY --from=build /install /usr/local
+COPY --from=build /src/app /app/app
+WORKDIR /app
+USER nonroot:nonroot
+EXPOSE 8000
+ENTRYPOINT ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]</code></pre></div>
+    <p>Scan every image in CI and block on critical findings with a fix available; scan again on a schedule, because vulnerabilities are published after you built. Rebuild images regularly rather than patching containers in place, and never bake secrets into layers (the secrets module). Sign images at build time and verify the signature before they run, so that only images your pipeline produced can be scheduled — the supply chain module covers the signing tooling.</p>
+    <div class="code"><div class="code-cap">Scanning an image with Trivy in CI: fail on critical and high vulnerabilities that have a fix.</div><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>trivy image --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 ghcr.io/acme/orders:sha-1a2b3c4
+
+# what is actually in the image, for the SBOM and for curiosity
+trivy image --format table --list-all-pkgs ghcr.io/acme/orders:sha-1a2b3c4 | head -40</code></pre></div>
+    <div class="callout callout-tip"><strong>Tip</strong><p>Digest pins look ugly and are worth it. Use a bot (Renovate or Dependabot) to open pull requests when the base image publishes a new digest, so pinning does not mean falling behind.</p></div></section>
+  <section id="runtime-what-the-pod-may-do"><h2>Runtime: what the pod may do</h2>
+    <p>A pod's <strong>securityContext</strong> decides how far a compromise inside the container can reach. The defaults are permissive: root user, all default capabilities, a writable root filesystem, and the ability to gain privileges via setuid binaries. The <strong>Pod Security Standards</strong> define three levels (privileged, baseline, restricted); the restricted profile is what production workloads should meet, and the built-in Pod Security Admission controller can enforce it per namespace with a label.</p>
+    <div class="code"><div class="code-cap">A pod spec that satisfies the restricted profile. Most applications run unchanged with these settings; those that write to disk get an emptyDir for the path.</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders
+spec:
+  template:
+    spec:
+      serviceAccountName: orders
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: ghcr.io/acme/orders@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: {cpu: "100m", memory: "128Mi"}
+            limits: {memory: "256Mi"}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}</code></pre></div>
+    <p>Never mount the host's Docker or containerd socket, never use <code>hostPID</code>, <code>hostNetwork</code> or <code>hostPath</code> for application workloads, and never set <code>privileged: true</code> outside a handful of infrastructure components you can name. Each of those is a container escape by design. Resource limits are security too: a pod without a memory limit can take the node down, which is denial of service by accident or on purpose.</p>
+    <div class="code"><div class="code-cap">Enforce the restricted profile for a namespace with Pod Security Admission; warn first, then enforce.</div><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>kubectl label namespace shop \
+  pod-security.kubernetes.io/warn=restricted \
+  pod-security.kubernetes.io/audit=restricted
+# once the warnings are gone:
+kubectl label namespace shop pod-security.kubernetes.io/enforce=restricted --overwrite</code></pre></div></section>
+  <section id="identity-and-rbac-the-cluster-api-is-the-crown-jewel"><h2>Identity and RBAC: the cluster API is the crown jewel</h2>
+    <p>Every pod runs with a <strong>service account</strong>, and by default its token is mounted into the container. A compromised pod with a token that can list secrets or create pods owns the cluster. Give each workload its own service account, do not mount the token unless the application talks to the API, and bind roles that grant exactly the verbs on exactly the resources it needs, in its own namespace. Cluster-wide roles are for controllers, not applications.</p>
+    <div class="code"><div class="code-cap">A role that lets the orders service read one ConfigMap and nothing else, bound to its own service account.</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: shop
+  name: orders-config-reader
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["orders-config"]
+    verbs: ["get", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  namespace: shop
+  name: orders-config-reader
+subjects:
+  - kind: ServiceAccount
+    name: orders
+    namespace: shop
+roleRef:
+  kind: Role
+  name: orders-config-reader
+  apiGroup: rbac.authorization.k8s.io</code></pre></div>
+    <p>For humans, federate cluster access to your identity provider (OIDC) with groups mapped to roles, so that leaving the company removes cluster access automatically, and audit the API server: who created, deleted or exec'd into what. <code>kubectl exec</code> into production pods should be rare, logged and, ideally, gated by an approval. The commands below are how you find privilege you did not intend to grant.</p>
+    <div class="code"><div class="code-cap">Auditing RBAC: who can do the dangerous things.</div><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># can this service account read secrets cluster-wide? (should be no)
+kubectl auth can-i list secrets --all-namespaces --as=system:serviceaccount:shop:orders
+
+# every binding to cluster-admin
+kubectl get clusterrolebindings -o json \
+  | jq -r '.items[] | select(.roleRef.name=="cluster-admin") | .metadata.name + ": " + (.subjects // [] | map(.kind + "/" + .name) | join(", "))'
+
+# roles that allow creating pods or exec (paths to escalation)
+kubectl get roles,clusterroles -A -o json \
+  | jq -r '.items[] | select(.rules[]? | (.resources // []) | index("pods") or index("pods/exec")) | .metadata.namespace + "/" + .metadata.name' | sort -u</code></pre></div></section>
+  <section id="network-policy-zones-inside-the-cluster"><h2>Network policy: zones inside the cluster</h2>
+    <p>By default every pod can reach every other pod and the internet. A <strong>NetworkPolicy</strong> is the cluster equivalent of a security group: it selects pods by label and lists allowed ingress and egress. Start each namespace with a default-deny policy for both directions, then add allows per workload: the API accepts traffic from the ingress controller, talks to its database and its cache, resolves DNS, and reaches the external payment API through the egress gateway — nothing else. Your CNI must support policies for them to have any effect; check before relying on them.</p>
+    <div class="code"><div class="code-cap">Default deny for a namespace, then the orders pod's explicit allows. DNS egress is the one everybody forgets.</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: shop
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orders
+  namespace: shop
+spec:
+  podSelector:
+    matchLabels: {app: orders}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: ingress-nginx}
+      ports: [{protocol: TCP, port: 8000}]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {app: postgres}
+      ports: [{protocol: TCP, port: 5432}]
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
+      ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]</code></pre></div>
+    <div class="callout callout-note"><strong>Note</strong><p>A service mesh adds mTLS and identity-based authorisation on top of network policy: policies say which workload may call which endpoint, not just which IP may reach which port. Network policy is the floor; the mesh is the next layer.</p></div></section>
+  <section id="admission-make-the-right-configuration-the-only-one"><h2>Admission: make the right configuration the only one</h2>
+    <p>Documentation asks; <strong>admission control</strong> enforces. Every object sent to the API passes through admission before it is stored, and a policy engine there can reject what violates the rules: images not from your registry, images without a valid signature, containers without resource limits, pods that run as root, <code>latest</code> tags, missing labels. Kubernetes has built-in Validating Admission Policies (CEL expressions), and engines such as Kyverno or OPA Gatekeeper add richer policy libraries, mutation and reporting.</p>
+    <div class="code"><div class="code-cap">A Kyverno policy: only signed images from the company registry may run. Audit first, then enforce.</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-image-signature
+spec:
+  validationFailureAction: Enforce
+  webhookTimeoutSeconds: 30
+  rules:
+    - name: only-signed-company-images
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [shop, payments]
+      verifyImages:
+        - imageReferences: ["ghcr.io/acme/*"]
+          attestors:
+            - entries:
+                - keyless:
+                    subject: "https://github.com/acme/*/.github/workflows/release.yml@refs/heads/main"
+                    issuer: "https://token.actions.githubusercontent.com"
+          mutateDigest: true
+          required: true</code></pre></div>
+    <figure class="diagram" id="fig-k8s-defence-layers"><div class="diagram-scroll"><svg viewBox="0 0 910 356" role="img" aria-label="An attacker has execution inside a container in a pod. Concentric layers surround the pod: a minimal image with no shell or package manager, a restricted security context with non-root user and dropped capabilities, a service account with a scoped role that RBAC checks at the API server, and a network policy that allows only the database and DNS. Admission control sits in front of the API server and rejects any workload that lacks these settings. The node, the cluster API and other namespaces are shown as targets the layers protect." style="width:100%;max-width:910px;min-width:540px;height:auto;display:block"><defs><marker id="k8s-defence-layers-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="k8s-defence-layers-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="k8s-defence-layers-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="k8s-defence-layers-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="k8s-defence-layers-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><rect x="190" y="19" width="332" height="210" rx="10" class="dg-group"/><text x="200" y="222" font-size="10" font-weight="700" letter-spacing="1" class="dg-group-label">POD: RESTRICTED PROFILE, NO HOST ACCESS</text><polyline points="201.0,70.0 101.0,70.0 101.0,150.0" fill="none" style="stroke:#f87171" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#k8s-defence-layers-arrow-danger)"/><rect x="103.3" y="51.0" width="95.4" height="16" rx="4" class="dg-label-bg"/><text x="151.0" y="59.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:#f87171">escape blocked</text><polyline points="441.0,206.0 441.0,228.0 781.0,228.0 781.0,206.0" fill="none" style="stroke:#f87171" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#k8s-defence-layers-arrow-danger)"/><rect x="545.0" y="231.0" width="132.0" height="16" rx="4" class="dg-label-bg"/><text x="611.0" y="239.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:#f87171">list secrets? denied</text><polyline points="781.0,98.0 781.0,150.0" fill="none" style="stroke:#34d399" stroke-width="1.6" marker-end="url(#k8s-defence-layers-arrow-ok)"/><rect x="784.0" y="116.0" width="119.8" height="16" rx="4" class="dg-label-bg"/><text x="788.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:#34d399">gates every object</text><polyline points="271.0,206.0 271.0,286.0 171.0,286.0" fill="none" style="stroke:#f87171" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#k8s-defence-layers-arrow-danger)"/><rect x="197.7" y="267.0" width="46.6" height="16" rx="4" class="dg-label-bg"/><text x="221.0" y="275.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:#f87171">denied</text><polyline points="441.0,206.0 441.0,286.0 541.0,286.0" fill="none" style="stroke:#34d399" stroke-width="1.6" marker-end="url(#k8s-defence-layers-arrow-ok)"/><rect x="443.3" y="267.0" width="95.4" height="16" rx="4" class="dg-label-bg"/><text x="491.0" y="275.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:#34d399">allowed egress</text><rect x="201" y="42.0" width="140" height="56" rx="8" class="dg-node dg-danger"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#fca5a5">Attacker</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">code runs in the pod</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-ok"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#6ee7b7">Distroless image</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">no shell, no tools</text><rect x="201" y="150.0" width="140" height="56" rx="8" class="dg-node dg-ok"/><text x="271.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#6ee7b7">securityContext</text><text x="271.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">non-root, no caps</text><rect x="371" y="150.0" width="140" height="56" rx="8" class="dg-node dg-ok"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#6ee7b7">Service account</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">scoped Role</text><rect x="711" y="150.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="781.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Cluster API</text><text x="781.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">RBAC decides</text><rect x="711" y="42.0" width="140" height="56" rx="8" class="dg-node dg-ok"/><text x="781.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#6ee7b7">Admission policy</text><text x="781.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">signed images, limits</text><path d="M31,157.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M31,157.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="101.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Node</text><text x="101.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">kernel, other pods</text><rect x="541" y="258.0" width="140" height="56" rx="8" class="dg-node dg-ok"/><text x="611.0" y="279.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#6ee7b7">Only: db, DNS</text><text x="611.0" y="297.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">NetworkPolicy</text><rect x="31" y="258.0" width="140" height="56" rx="8" class="dg-node dg-muted"/><text x="101.0" y="279.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text2)">Other namespaces</text><text x="101.0" y="297.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">unreachable</text></svg></div><figcaption>Five independent layers between an attacker who gets code running in a pod and the rest of the cluster: the image limits what tools exist, the pod's security context limits what the process can do, RBAC limits what the API will allow, network policy limits who it can reach, and admission control makes sure every workload has the other four.</figcaption></figure>
+    <p>Pair admission with runtime detection: a tool such as Falco watches system calls and flags a shell spawned in a container, a process reading <code>/etc/shadow</code>, or an outbound connection from a pod that never makes them. Prevention stops the known bad; detection tells you about the rest. Together with image scanning, restricted pods, scoped RBAC and network policy, you have five independent layers, and an attacker needs to defeat all of them.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Harden a workload on a local cluster</h2>
+    <ol><li>Create a kind cluster with a CNI that supports NetworkPolicy (install Calico or Cilium after <code>kind create cluster --config</code> with the default CNI disabled). Create namespace <code>shop</code>.</li><li>Rebuild the zero-to-production API image using the distroless, non-root Dockerfile from the lesson. Run <code>trivy image</code> against the old and new image and compare vulnerability counts.</li><li>Deploy the hardened Deployment spec. Label the namespace with <code>enforce=restricted</code> and confirm that a pod with <code>privileged: true</code> is rejected.</li><li>Create the <code>orders</code> service account, Role and RoleBinding. Run <code>kubectl auth can-i --list --as=system:serviceaccount:shop:orders</code> and confirm it can only get the ConfigMap.</li><li>Apply the default-deny and orders NetworkPolicies. From a debug pod in the namespace, confirm you cannot reach the orders pod, and from the orders pod confirm DNS still resolves and Postgres is reachable.</li><li>Install Kyverno and apply a policy that rejects <code>latest</code> tags and containers without memory limits in audit mode; read the policy report, then switch to enforce.</li><li>Delete the cluster.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Container &amp; Kubernetes security — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Minimal, non-root, digest-pinned images; scan in CI and on a schedule; rebuild rather than patch</li><li>Restricted Pod Security Standard: runAsNonRoot, no privilege escalation, drop ALL capabilities, read-only root, seccomp</li><li>No host namespaces, no privileged, no Docker socket, memory limits on everything</li><li>One service account per workload, token not mounted unless needed, Role scoped to named resources</li><li>Default-deny NetworkPolicy per namespace, explicit allows including DNS</li><li>Admission enforces: signed images from your registry, no latest, limits present; runtime detection watches the rest</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Image</h3><table><tbody><tr><td><code>FROM image@sha256:...</code></td><td>Pin base by digest; update via bot PRs</td></tr><tr><td><code>gcr.io/distroless/*:nonroot</code></td><td>No shell, no package manager, non-root user</td></tr><tr><td><code>USER nonroot / USER 65532</code></td><td>Never run as root in the final stage</td></tr><tr><td><code>trivy image --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 IMG</code></td><td>Block on fixable serious findings</td></tr><tr><td><code>multi-stage build</code></td><td>Compilers and build tools never reach production</td></tr></tbody></table></div><div class="cheat-group"><h3>Pod securityContext</h3><table><tbody><tr><td><code>runAsNonRoot: true / runAsUser: 65532</code></td><td>Refuse to start as root</td></tr><tr><td><code>allowPrivilegeEscalation: false</code></td><td>No setuid gains</td></tr><tr><td><code>capabilities: {drop: [ALL]}</code></td><td>Add back NET_BIND_SERVICE only if truly needed</td></tr><tr><td><code>readOnlyRootFilesystem: true + emptyDir /tmp</code></td><td>Nothing persists or gets dropped into the image</td></tr><tr><td><code>seccompProfile: {type: RuntimeDefault}</code></td><td>Block dangerous syscalls</td></tr><tr><td><code>automountServiceAccountToken: false</code></td><td>No API token unless the app uses the API</td></tr><tr><td><code>pod-security.kubernetes.io/enforce=restricted</code></td><td>Namespace label enforcing the profile</td></tr></tbody></table></div><div class="cheat-group"><h3>RBAC</h3><table><tbody><tr><td><code>Role + RoleBinding in namespace, resourceNames: [...]</code></td><td>Least privilege per workload</td></tr><tr><td><code>kubectl auth can-i VERB RESOURCE --as=system:serviceaccount:NS:SA</code></td><td>Test what an identity can do</td></tr><tr><td><code>kubectl auth can-i --list --as=...</code></td><td>Everything an identity can do</td></tr><tr><td><code>clusterrolebindings -&gt; cluster-admin</code></td><td>Audit who is cluster admin; should be tiny</td></tr><tr><td><code>OIDC groups -&gt; roles</code></td><td>Human access tied to the identity provider</td></tr></tbody></table></div><div class="cheat-group"><h3>NetworkPolicy</h3><table><tbody><tr><td><code>podSelector: {} + policyTypes [Ingress, Egress]</code></td><td>Default deny for the namespace</td></tr><tr><td><code>namespaceSelector: kubernetes.io/metadata.name: NS</code></td><td>Allow from a specific namespace</td></tr><tr><td><code>egress to kube-dns on 53 UDP/TCP</code></td><td>Do not forget DNS</td></tr><tr><td><code>ipBlock: {cidr: ...}</code></td><td>External destinations by CIDR (prefer an egress gateway)</td></tr><tr><td><code>check CNI supports policy</code></td><td>Otherwise policies are silently ignored</td></tr></tbody></table></div><div class="cheat-group"><h3>Admission and runtime</h3><table><tbody><tr><td><code>Kyverno verifyImages keyless (issuer, subject)</code></td><td>Only images signed by your pipeline</td></tr><tr><td><code>validationFailureAction: Audit -&gt; Enforce</code></td><td>Report first, then block</td></tr><tr><td><code>policies: no :latest, limits required, registry allow-list</code></td><td>The usual starter set</td></tr><tr><td><code>Falco rules: shell in container, sensitive file read</code></td><td>Runtime detection of what got through</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Running as root in the container because the base image does, then mounting a hostPath.</li><li>Mounting the Docker or containerd socket into a CI runner pod; that is root on the node.</li><li>A shared service account with a broad ClusterRole because one job needed it once.</li><li>Applying default-deny without the DNS egress rule and concluding that network policy is broken.</li><li>Pinning images by tag and being surprised when <code>python:3.12-slim</code> changed under you.</li><li>Writing security policy in a wiki instead of an admission controller.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "A CI runner pod mounts `/var/run/docker.sock` so that jobs can build images. Why is this a critical finding?", "options": ["Anything that can talk to the Docker socket can start a privileged container with the host filesystem mounted, which is root on the node", "The socket file is large and will fill the pod's ephemeral storage during long builds", "Docker builds inside Kubernetes are unsupported, so the pod will crash on start", "The socket bypasses the image pull secret and lets jobs pull private images without credentials"], "answer": 0, "explain": "The Docker socket is an unauthenticated root API for the host. A job that can reach it escapes the container entirely. Build images with a rootless builder (BuildKit, kaniko, buildah) instead."}, {"q": "Which pod settings together satisfy the restricted Pod Security Standard?", "options": ["runAsNonRoot, allowPrivilegeEscalation false, drop ALL capabilities, seccomp RuntimeDefault, no host namespaces", "runAsUser 0, privileged true, hostNetwork true, and a memory limit", "A read-only root filesystem and an image pulled from a private registry", "A NetworkPolicy allowing ingress only from the ingress controller"], "answer": 0, "explain": "Restricted requires a non-root user, no privilege escalation, all capabilities dropped (NET_BIND_SERVICE optionally added back), a seccomp profile, and none of the host namespaces or privileged mode. Registry source and network policy are separate controls."}, {"q": "A compromised web pod has a mounted service account token. `kubectl auth can-i list secrets --all-namespaces --as=system:serviceaccount:shop:web` returns yes. What is the consequence?", "options": ["The attacker can read every secret in the cluster, so the compromise of one pod becomes a compromise of everything", "Nothing serious, because secrets are base64-encoded and cannot be read without the decoder", "The pod will be evicted automatically because reading secrets exceeds its resource limits", "Only secrets in the `shop` namespace are exposed, because service accounts are namespaced"], "answer": 0, "explain": "A cluster-wide secrets read permission on a workload identity means every database password, API key and token is one API call away. Base64 is not encryption. Service accounts are namespaced but a ClusterRoleBinding can grant them cluster-wide rights, which is exactly the misconfiguration here."}, {"q": "After applying a default-deny NetworkPolicy to a namespace, the application cannot reach its database even though an egress rule to the postgres pod on port 5432 exists. What is the most likely cause?", "options": ["There is no egress rule allowing DNS to kube-dns, so the database hostname never resolves", "The postgres pod needs a matching ingress rule from the internet gateway", "NetworkPolicies only apply to ingress, so egress rules are ignored", "The policy must be in the kube-system namespace to take effect"], "answer": 0, "explain": "Default deny blocks DNS too, and the application connects by name. Adding UDP and TCP 53 egress to the cluster DNS pods fixes it. Egress policies are supported; policies apply in the namespace where the pods are."}, {"q": "A team documents that all production images must come from the company registry and be signed, but a developer deploys a public image with `:latest` and it runs. What control was missing?", "options": ["An admission policy that rejects unsigned images and images from other registries at the API server", "A NetworkPolicy blocking egress to public registries from application pods", "A stricter Pod Security Standard on the namespace", "A Trivy scan in the CI pipeline with a higher severity threshold"], "answer": 0, "explain": "Rules that live in documentation are requests; admission control enforces them at the point where objects enter the cluster. Network policy does not stop the node from pulling images, Pod Security Standards concern runtime privileges, and CI scanning is bypassed by deploying directly."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="sec-appsec.html"><span>← Previous</span><strong>Application security &amp; the OWASP Top 10</strong></a>
+    <a class="pager-up" href="../education.html#security">All Security modules</a>
+    <a class="pager-link pager-next" href="sec-cloud.html"><span>Next →</span><strong>Cloud security</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=sec-containers&amp;page=/education/sec-containers.html&amp;title=Container%20%26%20Kubernetes%20security">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=sec-containers&amp;page=/education/sec-containers.html&amp;title=Container%20%26%20Kubernetes%20security">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

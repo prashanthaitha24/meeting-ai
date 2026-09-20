@@ -1,0 +1,193 @@
+{
+  "id": "sec-identity",
+  "minutes": 35,
+  "intro": "Most breaches are not about breaking encryption; they are about logging in. A phished password, a token that never expires, a service account with admin rights nobody remembers granting. Identity and access management is where those doors are, and it is the control that pays back fastest when done well. This module separates the two questions every request must answer (who are you, and what may you do), shows how modern web authentication actually works with sessions, tokens, OAuth 2.0 and OpenID Connect, and lays out the least-privilege habits that keep a compromised identity from becoming a compromised company.",
+  "objectives": [
+    "Distinguish authentication from authorisation and place each correctly in a request's life",
+    "Explain how sessions, bearer tokens and JWTs carry identity, and the trade-offs between them",
+    "Describe the OAuth 2.0 authorization code flow with PKCE and what OpenID Connect adds",
+    "Choose MFA methods by phishing resistance and apply them where they matter most",
+    "Design roles and policies that follow least privilege, for humans and for services"
+  ],
+  "sections": [
+    {
+      "heading": "Two questions, two failures",
+      "blocks": [
+        {"type": "p", "text": "**Authentication** (authn) answers \"who are you?\" and produces an identity: a user id, a service name. **Authorisation** (authz) answers \"is this identity allowed to do this to that?\" and produces a yes or no. They fail differently. A weak authentication lets a stranger become someone; a weak authorisation lets a legitimate someone do things they should not. The single most common web vulnerability for years has been broken authorisation: an endpoint checks that you are logged in, then forgets to check that the record you asked for is yours."},
+        {"type": "p", "text": "The clean design puts authentication at the edge once (a gateway or middleware validates the credential and attaches an identity to the request) and authorisation next to every data access, where the code knows what the resource is and who owns it. Authorisation that lives only in the UI (\"the button is hidden\") is not authorisation; the API can be called directly."},
+        {"type": "code", "lang": "python", "caption": "Authorisation next to the data, not next to the login: the query itself is scoped to the caller.", "code": "def get_order(order_id: int, caller: User) -> Order:\n    # Wrong: fetch, then hope someone checks ownership later\n    #   order = db.get(Order, order_id)\n    # Right: the identity is part of the lookup, so a foreign id simply does not exist\n    order = db.query(Order).filter(Order.id == order_id, Order.user_id == caller.id).first()\n    if order is None:\n        raise NotFound()          # 404, not 403: do not confirm that the id exists\n    return order"},
+        {"type": "callout", "kind": "tip", "text": "Return the same 404 whether the record does not exist or belongs to someone else. A 403 tells an attacker that they guessed a valid id."}
+      ]
+    },
+    {
+      "heading": "Sessions, tokens and where identity travels",
+      "blocks": [
+        {"type": "p", "text": "After a successful login the server needs a way to recognise the user on later requests. Two families exist. A **session** is a random opaque id stored in a cookie; the server keeps the session data (user id, expiry) in a store and looks it up per request. Revocation is trivial (delete the row) and nothing sensitive leaves the server. A **bearer token**, typically a JWT, carries the claims itself, signed by the issuer; any service with the public key can verify it without a lookup, which scales across many services but makes revocation hard — the token is valid until it expires."},
+        {"type": "table", "headers": ["Property", "Server session (cookie)", "Signed token (JWT)"], "rows": [
+          ["Revocation", "Immediate: delete the session", "Only via short expiry or a denylist"],
+          ["Cross-service use", "Needs a shared session store", "Verified anywhere with the public key"],
+          ["What leaks if stolen", "An opaque id", "The claims, readable by anyone"],
+          ["Typical lifetime", "Hours to days, sliding", "Minutes; refreshed with a refresh token"]
+        ]},
+        {"type": "p", "text": "For cookies, set `HttpOnly` (JavaScript cannot read it), `Secure` (HTTPS only) and `SameSite=Lax` or `Strict` (blocks most cross-site request forgery). For tokens, keep access tokens short-lived (five to fifteen minutes), issue a longer-lived **refresh token** that can be revoked, and store tokens where cross-site scripts cannot reach them. In browsers that usually means an `HttpOnly` cookie rather than local storage. Whatever carries identity, treat it as a credential: never in URLs, never in logs."},
+        {"type": "callout", "kind": "note", "text": "A JWT's payload is base64, not encrypted. Anyone who sees the token can read the claims. Put identifiers in it, not secrets or personal data you would not want in a log."}
+      ]
+    },
+    {
+      "heading": "OAuth 2.0 and OpenID Connect",
+      "blocks": [
+        {"type": "p", "text": "**OAuth 2.0** is a delegation protocol: it lets an application obtain limited access to a user's resources at another service without ever seeing the user's password. **OpenID Connect** (OIDC) is a thin layer on top that turns the same flow into authentication, adding an **ID token** (a JWT describing the user) and a standard `userinfo` endpoint. When you \"sign in with\" a corporate identity provider, that is OIDC."},
+        {"type": "p", "text": "The flow you should use for web and mobile applications is the **authorization code flow with PKCE**. PKCE (Proof Key for Code Exchange) binds the code to the client that started the flow, which closes the code interception attacks that made the older implicit flow unsafe."},
+        {"type": "steps", "items": [
+          "The app generates a random `code_verifier`, hashes it into a `code_challenge`, and redirects the browser to the identity provider's authorize endpoint with the challenge, the requested scopes, a `state` value and its `redirect_uri`.",
+          "The user authenticates at the provider (password, MFA, whatever policy applies). The provider redirects back to the `redirect_uri` with a short-lived, single-use authorization code and the same `state`.",
+          "The app checks `state` matches what it sent (this is the CSRF protection), then exchanges the code plus the original `code_verifier` at the token endpoint, over TLS, for an access token, an ID token and usually a refresh token.",
+          "The app validates the ID token: signature against the provider's published keys, `iss`, `aud` (must be this app's client id), `exp`, and the `nonce` if one was sent. Only then is the user considered signed in."
+        ]},
+        {"type": "code", "lang": "text", "caption": "The two redirects of the authorization code flow, with the parameters that matter.", "code": "1. Browser -> Identity provider\n   GET /authorize?response_type=code&client_id=web-app&scope=openid%20profile%20email\n       &redirect_uri=https://app.example.com/callback&state=k3j2...&code_challenge=E9Mr...\n       &code_challenge_method=S256\n\n2. Identity provider -> Browser -> App\n   GET https://app.example.com/callback?code=SplxlOBe...&state=k3j2...\n\n3. App (server side) -> Identity provider\n   POST /token  grant_type=authorization_code&code=SplxlOBe...&redirect_uri=...\n                &client_id=web-app&code_verifier=dBjftJeZ...\n   <- { access_token, id_token, refresh_token, expires_in: 600 }"},
+        {"type": "p", "text": "Scopes describe what the access token may do (`read:orders`), and the resource server enforces them; a token with the wrong audience or missing scope must be rejected. Use a maintained library for every step, and register exact `redirect_uri` values at the provider: a wildcard redirect is an open door for token theft. Machine-to-machine calls use the **client credentials** grant (no user involved), and CI systems increasingly use OIDC federation to obtain cloud credentials without stored keys, which the DevOps track covers under secrets."}
+      ]
+    },
+    {
+      "heading": "MFA, passwords and phishing resistance",
+      "blocks": [
+        {"type": "p", "text": "Passwords will be phished, reused and leaked. **Multi-factor authentication** adds something the attacker does not have, but factors differ enormously. SMS codes can be intercepted by SIM-swapping and relayed by phishing pages in real time. Time-based one-time codes (TOTP apps) resist SIM swaps but not real-time phishing: the victim types the code into the fake page and the attacker uses it within thirty seconds. Push notifications suffer from **MFA fatigue**, where the attacker triggers prompts until the victim taps approve. Only **phishing-resistant** methods — FIDO2 security keys and platform **passkeys** — bind the login to the genuine site's origin, so a lookalike domain receives nothing usable."},
+        {"type": "list", "items": [
+          "Require MFA on everything reachable from the internet: email, source control, cloud consoles, VPN, the identity provider itself.",
+          "Prefer passkeys or security keys for administrators and anyone with production access; allow TOTP as a fallback, avoid SMS.",
+          "Enforce number matching or similar on push approvals to blunt fatigue attacks.",
+          "For passwords: minimum length (12+), check against breached-password lists, no forced periodic rotation, no composition rules that produce `Summer2026!`.",
+          "Rate-limit and alert on failed logins per account and per source; lock out slowly, not instantly, to avoid self-inflicted denial of service."
+        ]},
+        {"type": "callout", "kind": "warning", "text": "Recovery flows are part of authentication. A strong login with a \"reset via email\" path means your security equals your email security, and a support desk that resets MFA over the phone is the attacker's favourite entry point."}
+      ]
+    },
+    {
+      "heading": "Least privilege for humans and machines",
+      "blocks": [
+        {"type": "p", "text": "**Least privilege** means every identity has exactly the permissions its current task needs, and no more. It limits the blast radius when (not if) a credential is stolen. In practice you achieve it with **role-based access control** (RBAC): permissions are attached to roles, roles to identities, and both are reviewed. Attribute-based rules (time of day, device posture, resource tags) refine it where roles are too coarse."},
+        {"type": "p", "text": "Machines need identities too, and they are where privilege creep hides. A CI runner with admin because a deploy failed once; a service account shared by six services because nobody wanted to create seven. Give every workload its own identity, scope it to the resources it touches, prefer short-lived credentials obtained at runtime (cloud instance roles, Kubernetes service account tokens, OIDC federation) over long-lived keys, and log every use so anomalies stand out."},
+        {"type": "code", "lang": "json", "caption": "A cloud IAM policy that says what it means: one action set, one resource, one condition. Compare with the wildcard version it replaces.", "code": "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [\n    {\n      \"Sid\": \"ReadInvoicesForThisService\",\n      \"Effect\": \"Allow\",\n      \"Action\": [\"s3:GetObject\", \"s3:ListBucket\"],\n      \"Resource\": [\"arn:aws:s3:::acme-invoices\", \"arn:aws:s3:::acme-invoices/2026/*\"],\n      \"Condition\": {\"Bool\": {\"aws:SecureTransport\": \"true\"}}\n    }\n  ]\n}"},
+        {"type": "p", "text": "Grant temporarily where you can: **just-in-time** elevation for production access, approved and time-boxed, is far safer than standing admin rights. Review access on a schedule, and treat a role nobody can explain as a bug. When someone leaves or changes team, their access should change the same day; the identity provider should be the one place where that happens, with every system federated to it."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Inspect a real login and tighten a policy",
+    "steps": [
+      "Sign in to a site that uses \"Sign in with Google/GitHub/Microsoft\" with your browser's developer tools open on the Network tab. Find the `/authorize` redirect and identify `client_id`, `scope`, `state`, `redirect_uri` and `code_challenge` in the URL.",
+      "Find the callback request and confirm the `state` value matches. Note that you never see a token in the browser: the code exchange happens server side.",
+      "Paste an ID token (from a test provider, or one you issue yourself with a library) into a local decoder script: split on `.`, base64-decode the payload, and list `iss`, `aud`, `exp`, `iat`. Do not paste real tokens into third-party websites.",
+      "Take an IAM policy from a project you have access to (or the DevOps track's zero-to-production project) and rewrite any `\"Action\": \"*\"` or `\"Resource\": \"*\"` to the specific actions and resources actually used. Apply it in a test account and confirm the workload still works.",
+      "Enable a passkey or security key on your own GitHub account and your cloud console, and demote SMS to a recovery method or remove it.",
+      "Write down every place in a service you know where identity is checked. For each, note whether it is authentication or authorisation, and whether the authorisation check lives next to the data access."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Authn = who are you (once, at the edge); authz = may you do this (every data access)",
+      "Broken authorisation is the top web vulnerability: scope every query by the caller",
+      "Sessions revoke instantly; JWTs scale across services but live until expiry — keep them short",
+      "Use authorization code + PKCE; validate state, signature, iss, aud, exp, nonce",
+      "Phishing-resistant MFA (passkeys, security keys) for anything that matters; avoid SMS",
+      "Every workload gets its own identity with short-lived credentials",
+      "Least privilege is specific actions on specific resources, reviewed and time-boxed"
+    ],
+    "groups": [
+      {"title": "Cookies and tokens", "items": [
+        {"syntax": "Set-Cookie: sid=...; HttpOnly; Secure; SameSite=Lax", "desc": "Session cookie that scripts cannot read and cross-site forms cannot send"},
+        {"syntax": "Authorization: Bearer <token>", "desc": "Token in a header; never in a query string"},
+        {"syntax": "access token 5-15 min + refresh token", "desc": "Short exposure, revocable renewal"},
+        {"syntax": "JWT = header.payload.signature (base64url)", "desc": "Readable payload; verify signature before trusting"},
+        {"syntax": "verify iss, aud, exp, nbf, alg (pinned)", "desc": "The claims every verifier must check"}
+      ]},
+      {"title": "OAuth 2.0 / OIDC", "items": [
+        {"syntax": "response_type=code + code_challenge (S256)", "desc": "Authorization code flow with PKCE, for web and mobile"},
+        {"syntax": "state", "desc": "Random per request; must match on callback (CSRF)"},
+        {"syntax": "grant_type=authorization_code + code_verifier", "desc": "Server-side exchange at the token endpoint"},
+        {"syntax": "grant_type=client_credentials", "desc": "Machine-to-machine, no user"},
+        {"syntax": "id_token vs access_token", "desc": "Who the user is vs what the app may call"},
+        {"syntax": "scope=openid profile email", "desc": "openid makes it OIDC; others request claims or API access"}
+      ]},
+      {"title": "MFA by strength", "items": [
+        {"syntax": "passkeys / FIDO2 security keys", "desc": "Origin-bound; phishing resistant; use for admins"},
+        {"syntax": "TOTP app", "desc": "Good fallback; phishable in real time"},
+        {"syntax": "push with number matching", "desc": "Blunts MFA fatigue"},
+        {"syntax": "SMS", "desc": "SIM swap and relay; last resort only"},
+        {"syntax": "recovery: codes stored offline, no phone resets", "desc": "Recovery is part of the login"}
+      ]},
+      {"title": "Least privilege checks", "items": [
+        {"syntax": "no Action: * / Resource: *", "desc": "Name the actions and the resources"},
+        {"syntax": "one identity per workload", "desc": "Blast radius and attribution"},
+        {"syntax": "short-lived credentials (instance roles, OIDC)", "desc": "Nothing to leak that lasts"},
+        {"syntax": "just-in-time elevation, time-boxed", "desc": "No standing production admin"},
+        {"syntax": "quarterly access review; leaver = same-day removal", "desc": "Federate everything to the identity provider"}
+      ]}
+    ],
+    "pitfalls": [
+      "Checking \"is logged in\" but not \"owns this record\", the classic insecure direct object reference.",
+      "Storing JWTs in browser local storage where any injected script can read them.",
+      "Registering a wildcard redirect URI at the identity provider; authorization codes can then be sent anywhere.",
+      "Treating SMS codes as strong MFA, or leaving the recovery path weaker than the login.",
+      "Sharing one service account across many services, so nobody can tell who did what or scope anything down.",
+      "Letting access accumulate; a role nobody can explain is a finding waiting to happen."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "An endpoint `GET /invoices/{id}` requires a valid login and then loads the invoice by id. A logged-in user changes the id and sees another customer's invoice. What failed?",
+      "options": [
+        "Authorisation: the lookup was not scoped to the caller's identity",
+        "Authentication: the login token was not validated properly",
+        "Encryption: the invoice data was not protected in transit",
+        "Session handling: the cookie lacked the HttpOnly attribute"
+      ],
+      "answer": 0,
+      "explain": "The user was authenticated correctly; the code simply never checked that the resource belonged to them. Scoping the query by the caller's id makes foreign ids not exist. This is the classic broken access control bug."
+    },
+    {
+      "q": "A company wants to be able to revoke a user's access within seconds when an employee leaves, across a single web application. Which mechanism fits best?",
+      "options": [
+        "Server-side sessions with an opaque cookie that can be deleted immediately",
+        "Long-lived JWTs so that services can verify without contacting a store",
+        "Tokens embedded in the URL so every link carries the identity",
+        "A JWT with a one-year expiry and the user's roles inside the payload"
+      ],
+      "answer": 0,
+      "explain": "A server session is revoked by deleting it; the next request fails. Signed tokens remain valid until they expire unless a denylist is added, which recreates the lookup a session would have needed anyway. Tokens in URLs leak through logs and referrers."
+    },
+    {
+      "q": "In the OAuth 2.0 authorization code flow, what does the `state` parameter protect against?",
+      "options": [
+        "Cross-site request forgery on the callback, by ensuring the response matches a request the app started",
+        "Interception of the authorization code, by binding it to the client that requested it",
+        "Replay of the access token, by including a timestamp in every API call",
+        "Token theft from local storage, by keeping the token on the server"
+      ],
+      "answer": 0,
+      "explain": "The app generates a random `state`, sends it to the provider, and checks that the callback carries the same value, so an attacker cannot make the app complete a login it did not start. Code interception is what PKCE addresses; the other options describe unrelated controls."
+    },
+    {
+      "q": "Which MFA method still protects an administrator whose password has been phished on a lookalike login page that relays credentials in real time?",
+      "options": [
+        "A FIDO2 security key or passkey, because the credential is bound to the genuine site's origin",
+        "A six-digit TOTP code from an authenticator app entered on the page",
+        "An SMS code sent to the administrator's registered phone number",
+        "A push notification that the administrator approves on their phone"
+      ],
+      "answer": 0,
+      "explain": "Origin-bound authenticators refuse to sign for a domain that is not the real one, so the phishing page receives nothing it can relay. TOTP and SMS codes are typed into the fake page and forwarded within their validity window; push approvals can be triggered by the attacker's relayed login."
+    },
+    {
+      "q": "A CI pipeline uses a long-lived cloud access key stored as a repository secret, with administrator permissions, because \"deploys need to do many things\". What is the best improvement?",
+      "options": [
+        "Replace the key with OIDC federation to a role scoped to the specific resources the deploy touches",
+        "Rotate the administrator key every ninety days and store it in a different secret store",
+        "Keep the key but encrypt it in the repository so only the pipeline can decrypt it",
+        "Split the key into two secrets so that a single leak does not expose the whole value"
+      ],
+      "answer": 0,
+      "explain": "Short-lived credentials obtained at runtime remove the stored secret entirely, and a scoped role limits what a compromised pipeline could do. Rotation and encryption still leave a long-lived administrator credential in existence; splitting the value changes nothing."
+    }
+  ]
+}

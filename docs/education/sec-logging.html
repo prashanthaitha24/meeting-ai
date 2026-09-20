@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Security logging, SIEM &amp; detection — Security | ThavionAI Education</title>
+  <meta name="description" content="What to log, centralising it, writing detections, alert fatigue and the difference between logging and monitoring." />
+  <meta property="og:title" content="Security logging, SIEM &amp; detection — ThavionAI Education" />
+  <meta property="og:description" content="What to log, centralising it, writing detections, alert fatigue and the difference between logging and monitoring." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/sec-logging.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-security" data-module="sec-logging">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../index.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=sec-logging&amp;page=/education/sec-logging.html&amp;title=Security%20logging%2C%20SIEM%20%26%20detection">Feedback</a>
+    <a href="../education.html#security" class="nav-cta">All Security modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#security">Security</a> › Stage 3: Cloud &amp; pipeline</div>
+    <h1>Security logging, SIEM &amp; detection</h1>
+    <p class="lede">What to log, centralising it, writing detections, alert fatigue and the difference between logging and monitoring.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 12 of 16</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">Almost every serious breach was visible in logs that nobody read. Detection is the discipline of collecting the right events, in a place the attacker cannot alter, and writing rules that turn them into a small number of alerts a human will actually investigate. It is not the same as monitoring for reliability: an SRE dashboard shows the service is healthy while an attacker quietly exports the customer table at normal request rates. This module covers what to log for security, how to centralise it in a SIEM or a log platform, how to write detections that catch real attacker behaviour without drowning the on-call, and how to keep the whole system honest.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Decide which events matter for security and make sure they are emitted with the fields an investigator needs</li><li>Centralise logs in tamper-resistant storage with retention and access control</li><li>Write detections mapped to attacker techniques, with a known false-positive rate</li><li>Tune alerting so that every alert is investigated and the queue never becomes noise</li><li>Test detections continuously with simulated attacks</li></ul>
+    </div>
+    <section id="what-to-log-and-what-a-log-line-needs"><h2>What to log, and what a log line needs</h2>
+    <p>Security logging answers four questions after the fact: who, did what, to which resource, from where, and when. Logs that lack any of those are much less useful. Prioritise the sources where attacker behaviour shows up first.</p>
+    <div class="table-wrap"><table><thead><tr><th>Source</th><th>Events that matter</th><th>Typical fields</th></tr></thead><tbody><tr><td>Identity provider / SSO</td><td>Logins, failures, MFA events, password and factor changes, new devices</td><td>user, result, ip, device, geo, factor</td></tr><tr><td>Cloud API audit trail</td><td>Every management call; role assumptions; key creation; policy changes</td><td>identity, action, resource, source ip, user agent</td></tr><tr><td>Hosts</td><td>auth log, sudo, auditd execve, service starts, package installs</td><td>user, command, parent, pid, host</td></tr><tr><td>Applications</td><td>Authn/authz decisions, admin actions, data exports, input validation failures</td><td>user id, action, object id, result, request id</td></tr><tr><td>Network and edge</td><td>Flow logs, DNS queries, WAF blocks, VPN sessions</td><td>src, dst, port, bytes, verdict</td></tr><tr><td>Kubernetes</td><td>API server audit: exec, secrets reads, RBAC changes, pod creation</td><td>user, verb, resource, namespace</td></tr></tbody></table></div>
+    <p>Emit application security events deliberately, in structured form, with a stable event name: <code>auth.login.failed</code>, <code>authz.denied</code>, <code>data.export.requested</code>, <code>admin.user.role_changed</code>. Include the acting identity, the target, the outcome and the request id that ties it to the rest of the trace. Never include secrets, session tokens or full card numbers; redact at the source.</p>
+    <div class="code"><div class="code-cap">A structured security event from an application. One line, JSON, stable names, no secrets.</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import json
+import logging
+from datetime import datetime, timezone
+
+sec = logging.getLogger("security")
+
+
+def security_event(name: str, actor: str, target: str, outcome: str, request_id: str, **extra):
+    sec.info(json.dumps({
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "event": name,            # e.g. "authz.denied", "data.export.requested"
+        "actor": actor,           # user id or service identity, never a token
+        "target": target,         # resource identifier
+        "outcome": outcome,       # "success" | "denied" | "error"
+        "request_id": request_id,
+        **extra,
+    }))
+
+
+security_event("authz.denied", actor="user:1042", target="order:99817", outcome="denied",
+               request_id="7f3c...", src_ip="203.0.113.9")</code></pre></div>
+    <div class="callout callout-note"><strong>Note</strong><p>Clock accuracy is part of logging: correlate events across systems only if every host uses NTP. Log in UTC with timezone-aware timestamps.</p></div></section>
+  <section id="centralise-protect-retain"><h2>Centralise, protect, retain</h2>
+    <p>Logs on the host that produced them are evidence in the attacker's custody. Ship them immediately (an agent such as Fluent Bit, Vector or the cloud provider's agent) to central storage that the source systems can write to but not delete from: object storage with write-once policies, or a log platform with immutability and a separate administrative boundary. A <strong>SIEM</strong> (security information and event management system) is a log platform specialised for this: normalised schemas across sources, correlation rules, case management and long retention. Open-source and cloud-native options exist; the key property is that the security team's data cannot be altered by the people or systems it monitors.</p>
+    <figure class="diagram" id="fig-detection-pipeline"><div class="diagram-scroll"><svg viewBox="0 0 910 464" role="img" aria-label="Sources on the left: identity provider, cloud audit trail, hosts, applications and Kubernetes. Agents forward their events to central write-once storage in a separate administrative boundary. A detection engine runs Sigma-style rules over the stored events and produces alerts that carry a runbook and enrichment. Alerts go to an on-call analyst or to an automated first response. An adversary emulation tool injects known techniques at the sources and checks that alerts appear, feeding gaps back into the detection backlog." style="width:100%;max-width:910px;min-width:540px;height:auto;display:block"><defs><marker id="detection-pipeline-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="detection-pipeline-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="detection-pipeline-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="detection-pipeline-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="detection-pipeline-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><rect x="20" y="19" width="162" height="318" rx="10" class="dg-group"/><text x="30" y="330" font-size="10" font-weight="700" letter-spacing="1" class="dg-group-label">SOURCES</text><rect x="360" y="19" width="502" height="210" rx="10" class="dg-group"/><text x="370" y="222" font-size="10" font-weight="700" letter-spacing="1" class="dg-group-label">SECURITY BOUNDARY: SOURCES CANNOT DELETE</text><polyline points="171.0,70.0 271.0,70.0 271.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#detection-pipeline-arrow-default)"/><polyline points="171.0,178.0 201.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#detection-pipeline-arrow-default)"/><rect x="129.2" y="132.0" width="113.7" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">structured events</text><polyline points="171.0,286.0 271.0,286.0 271.0,206.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#detection-pipeline-arrow-default)"/><polyline points="341.0,178.0 371.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#detection-pipeline-arrow-default)"/><rect x="329.6" y="132.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">forward</text><polyline points="511.0,178.0 541.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#detection-pipeline-arrow-default)"/><rect x="505.8" y="132.0" width="40.5" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">query</text><polyline points="681.0,178.0 711.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#detection-pipeline-arrow-default)"/><rect x="675.8" y="132.0" width="40.5" height="16" rx="4" class="dg-label-bg"/><text x="696.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">match</text><polyline points="781.0,206.0 781.0,258.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#detection-pipeline-arrow-default)"/><rect x="784.0" y="224.0" width="89.3" height="16" rx="4" class="dg-label-bg"/><text x="788.0" y="232.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">page / ticket</text><polyline points="371.0,394.0 101.0,394.0 101.0,314.0" fill="none" style="stroke:#34d399" stroke-width="1.6" marker-end="url(#detection-pipeline-arrow-ok)"/><rect x="185.2" y="375.0" width="101.5" height="16" rx="4" class="dg-label-bg"/><text x="236.0" y="383.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:#34d399">runs techniques</text><polyline points="511.0,394.0 611.0,394.0 611.0,206.0" fill="none" style="stroke:#34d399" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#detection-pipeline-arrow-ok)"/><rect x="614.0" y="292.0" width="83.2" height="16" rx="4" class="dg-label-bg"/><text x="618.0" y="300.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:#34d399">did it fire?</text><rect x="31" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">SSO / IdP</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">logins, MFA events</text><rect x="31" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="101.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Cloud audit log</text><text x="101.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">every API call</text><rect x="31" y="258.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="101.0" y="279.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Hosts and apps</text><text x="101.0" y="297.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">auditd, security.log</text><rect x="201" y="150.0" width="140" height="56" rx="8" class="dg-node dg-muted"/><text x="271.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text2)">Agent</text><text x="271.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">ships in seconds, TLS</text><path d="M371,157.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M371,157.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Write-once store</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">hot 90d, cold 1y+</text><rect x="541" y="150.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="611.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Detections</text><text x="611.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">Sigma, ATT&amp;CK-tagged</text><rect x="711" y="150.0" width="140" height="56" rx="8" class="dg-node dg-danger"/><text x="781.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#fca5a5">Alert + runbook</text><text x="781.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">enriched, severity</text><rect x="711" y="258.0" width="140" height="56" rx="28.0" class="dg-node dg-actor"/><text x="781.0" y="279.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Analyst or bot</text><text x="781.0" y="297.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">investigate or act</text><rect x="371" y="366.0" width="140" height="56" rx="8" class="dg-node dg-ok"/><text x="441.0" y="387.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#6ee7b7">Attack emulation</text><text x="441.0" y="405.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">Stratus, Atomic</text></svg></div><figcaption>From event to action: sources emit structured events, agents ship them off the host within seconds to storage the sources cannot alter, detections turn matching events into alerts with runbooks, and emulated attacks continuously prove the whole chain still fires.</figcaption></figure>
+    <div class="code"><div class="code-cap">A Fluent Bit pipeline: tail the auth log and the application's security log, tag them, and forward to central storage over TLS.</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>pipeline:
+  inputs:
+    - name: tail
+      path: /var/log/auth.log
+      tag: host.auth
+      read_from_head: false
+    - name: tail
+      path: /var/log/app/security.log
+      tag: app.security
+      parser: json
+  filters:
+    - name: record_modifier
+      match: '*'
+      record:
+        - host ${HOSTNAME}
+        - env production
+  outputs:
+    - name: forward
+      match: '*'
+      host: logs.internal
+      port: 24224
+      tls: on
+      tls.verify: on</code></pre></div>
+    <p>Retention is a policy decision with a floor: keep security-relevant logs for at least a year, because intrusions are often discovered months after they begin, and regulators and insurers increasingly require it. Tier the storage — hot for thirty to ninety days of fast search, cold object storage beyond — and control who can read the archive, since logs contain personal data. Test restoration from cold storage before you need it.</p></section>
+  <section id="detections-rules-that-catch-behaviour"><h2>Detections: rules that catch behaviour</h2>
+    <p>A <strong>detection</strong> is a rule that turns events into an alert with a known meaning. Good detections describe attacker behaviour, not just anomalies: a login followed by MFA enrolment from a new country, a service account used from an IP it has never used, <code>curl</code> or <code>python -c</code> executed inside a container that never runs shells, an IAM policy change outside the deploy pipeline, a user reading a hundred times more records than their baseline. Map each detection to the technique it covers (the MITRE ATT&amp;CK catalogue is the shared vocabulary) so that you can see which stages of an attack you would notice and which you would not.</p>
+    <div class="code"><div class="code-cap">A detection in Sigma, the vendor-neutral rule format that converts to most SIEM query languages.</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>title: Interactive shell spawned inside a container
+id: 1c7a2e8f-3b4d-4c5e-9f0a-1b2c3d4e5f60
+status: stable
+description: A shell started in a production container; application containers never run one.
+references:
+  - internal runbook DET-014
+tags:
+  - attack.execution
+  - attack.t1059.004
+logsource:
+  product: linux
+  service: auditd
+detection:
+  selection:
+    type: EXECVE
+    a0|endswith:
+      - '/sh'
+      - '/bash'
+      - '/dash'
+    container_id|contains: '*'
+  filter_debug:
+    container_name|startswith: 'debug-'
+  condition: selection and not filter_debug
+falsepositives:
+  - Engineers using an approved debug container (excluded by name)
+level: high</code></pre></div>
+    <p>Start with a small set of high-value detections rather than a vendor's thousand-rule pack: authentication anomalies, privilege changes, new persistence (new users, new keys, new cron or systemd units), execution in places it should not happen, unusual data access volumes, and known-bad indicators. Each rule ships with a runbook: what it means, how to confirm, what to do. A detection without a runbook produces an alert nobody can act on.</p>
+    <div class="callout callout-tip"><strong>Tip</strong><p>Cloud providers' managed detection services cover a lot of the cloud-layer techniques out of the box. Turn them on first, then write custom rules for your applications and your specific crown jewels.</p></div></section>
+  <section id="alert-fatigue-is-a-security-vulnerability"><h2>Alert fatigue is a security vulnerability</h2>
+    <p>An alert queue that grows faster than it is worked is equivalent to no detection at all; the real alert is in there, unread. Treat alert volume like an SLO: every alert is investigated within its target time, and if the rate makes that impossible, the fix is tuning or automation, not a bigger queue. Measure per rule: how many alerts, how many true positives, median time to close. Rules with near-zero true positives get tuned, demoted to a dashboard, or deleted.</p>
+    <ul><li>Severity means something: <code>critical</code> pages a human; <code>high</code> is worked the same day; <code>medium</code> and below aggregate into a daily review.</li><li>Enrich before alerting: attach the user's manager, the asset's owner, whether the IP is a known VPN egress, recent related alerts. Investigation time drops sharply.</li><li>Automate the first step: an alert for a leaked key can revoke it; an alert for a new admin can post to the owner for confirmation. Humans handle the judgement, not the clicking.</li><li>Suppress with expiry: a known false positive is excluded with a rule that names the reason and a date to reconsider.</li><li>Close the loop: every incident retrospective asks which detection fired, which should have, and what to add.</li></ul>
+    <p>The SRE track's alerting module makes the same argument for reliability alerts: alert on what matters, make every page actionable, and treat noise as a bug. Security alerting borrows all of it.</p></section>
+  <section id="test-the-detections"><h2>Test the detections</h2>
+    <p>Detections rot silently: a log source stops shipping, a field is renamed, a parser breaks, a rule's threshold no longer matches the environment. Test them like code. Unit-test rule logic against sample events. Monitor log pipelines for volume drops per source, which is how you notice a broken agent or an attacker disabling logging. Most importantly, <strong>run the attack</strong>: adversary emulation tools (Atomic Red Team, Stratus Red Team for cloud) execute safe versions of real techniques, and a detection that does not fire is a finding for the detection engineering backlog.</p>
+    <div class="code"><div class="code-cap">Testing a cloud detection with Stratus Red Team: create a backdoor IAM user, confirm the alert fires, clean up.</div><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>stratus warmup aws.persistence.iam-create-backdoor-user
+stratus detonate aws.persistence.iam-create-backdoor-user
+# ...check that your "new IAM user created outside the pipeline" detection produced an alert...
+stratus cleanup aws.persistence.iam-create-backdoor-user</code></pre></div>
+    <p>Keep a coverage map: techniques on one axis, your detections on the other, with a colour for tested-and-fires, exists-but-untested, and absent. It shows leadership what the team can and cannot see, guides what to write next, and is the honest answer to the question every board eventually asks after a breach elsewhere: would we have noticed?</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Ship, detect, test</h2>
+    <ol><li>Add the <code>security_event</code> helper to a small application and emit events for login failure, authorisation denial and an admin action. Confirm each is one JSON line with actor, target, outcome and request id.</li><li>Install Fluent Bit (or Vector) on a test host and forward the auth log plus your application's security log to a local collector (a second container running Fluent Bit with a <code>stdout</code> output is enough). Confirm events arrive with the host and env fields added.</li><li>Write a Sigma rule for five failed logins followed by a success from the same IP within ten minutes. Convert it with <code>sigma convert</code> to the query language of a log tool you can run locally (Loki or OpenSearch work), and trigger it with a script.</li><li>Write the runbook for that rule: meaning, how to confirm it is an attack, what to do. Attach it to the rule's references.</li><li>Simulate a broken pipeline: stop the agent and confirm your "log volume dropped for source X" check notices within fifteen minutes. If you have no such check, build it.</li><li>If you have a cloud test account with managed threat detection enabled, run one Stratus Red Team technique and record whether, and how fast, an alert appeared.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Security logging, SIEM &amp; detection — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Log who, what, which resource, from where, when; structured, stable event names, no secrets</li><li>Highest-value sources: identity provider, cloud audit trail, host auth and audit, application security events, Kubernetes API audit</li><li>Ship immediately to storage the source cannot alter; retain at least a year; tier hot and cold</li><li>Detections describe attacker behaviour, map to ATT&amp;CK, and ship with a runbook</li><li>Alert volume is an SLO: every alert investigated or the rule gets tuned; automate first steps</li><li>Test detections with emulated attacks and monitor log sources for silence</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Event design</h3><table><tbody><tr><td><code>{ts, event, actor, target, outcome, request_id, src_ip}</code></td><td>Minimum fields for a security event</td></tr><tr><td><code>auth.login.failed / authz.denied / data.export.requested</code></td><td>Stable, hierarchical event names</td></tr><tr><td><code>redact at source: tokens, passwords, PAN</code></td><td>Logs are read by many people</td></tr><tr><td><code>UTC, ISO 8601, NTP everywhere</code></td><td>Correlation depends on time</td></tr></tbody></table></div><div class="cheat-group"><h3>Shipping and storage</h3><table><tbody><tr><td><code>Fluent Bit / Vector agent -&gt; forward over TLS</code></td><td>Off the host within seconds</td></tr><tr><td><code>write-once bucket, separate admin boundary</code></td><td>Sources cannot delete their own evidence</td></tr><tr><td><code>hot 30-90d, cold &gt;= 1 year</code></td><td>Fast search recently, affordable archive</td></tr><tr><td><code>volume-per-source monitor</code></td><td>Silence means a broken agent or a disabled log</td></tr><tr><td><code>access control on the archive</code></td><td>Logs contain personal data</td></tr></tbody></table></div><div class="cheat-group"><h3>Detection engineering</h3><table><tbody><tr><td><code>Sigma rule: logsource + detection + condition + level</code></td><td>Vendor-neutral; convert to any SIEM</td></tr><tr><td><code>tags: attack.tXXXX</code></td><td>Map rules to techniques for a coverage map</td></tr><tr><td><code>starter set: auth anomalies, privilege change, new persistence, odd execution, data volume, known-bad</code></td><td>High value, low noise</td></tr><tr><td><code>runbook per rule: meaning, confirm, act</code></td><td>No alert without a next step</td></tr><tr><td><code>filter with reason + expiry</code></td><td>Known false positives, reconsidered</td></tr></tbody></table></div><div class="cheat-group"><h3>Alert hygiene and testing</h3><table><tbody><tr><td><code>per-rule: volume, true-positive rate, time to close</code></td><td>Tune or delete the noisy ones</td></tr><tr><td><code>critical pages; high same day; medium daily review</code></td><td>Severity with meaning</td></tr><tr><td><code>enrich: owner, manager, known-egress, related alerts</code></td><td>Cut investigation time</td></tr><tr><td><code>stratus detonate TECHNIQUE / Atomic Red Team</code></td><td>Prove the rule fires</td></tr><tr><td><code>coverage map: technique x detection x tested</code></td><td>The honest picture</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Logging everything at debug level and nothing structured, so investigators grep prose.</li><li>Keeping logs only on the host, or in a store the compromised account can purge.</li><li>Importing a thousand vendor rules on day one and drowning the on-call in false positives.</li><li>Detections without runbooks; the alert fires and nobody knows what it means.</li><li>Never noticing that a log source went quiet three months ago.</li><li>Treating detections as finished; they are code and need tests and maintenance.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "An application logs `\"User logged in\"` as free text with no user id or source address. During an incident, what can the investigators determine from it?", "options": ["Almost nothing useful; without actor, source and a correlation id the events cannot be attributed or linked to other systems", "Everything needed, since the timestamp alone identifies the session", "The user's identity, because the log platform infers it from the request", "The attacker's location, because the log platform records the client address automatically"], "answer": 0, "explain": "Security events need who, what, target, outcome, from where and a request id. Platforms do not add fields the application did not emit; a timestamp alone identifies nothing."}, {"q": "Why should security logs be shipped off the host immediately to storage the host cannot delete from?", "options": ["An attacker with control of the host can alter or erase local logs; central write-once storage preserves the evidence", "Local disks are too small to hold more than a day of logs", "Log agents cannot parse files that are still being written locally", "Compliance frameworks forbid storing any logs on application servers"], "answer": 0, "explain": "The first thing a capable intruder does with root is clean the logs. Immediate shipping to tamper-resistant storage in a separate administrative boundary removes that option. The other options are not the reason."}, {"q": "A SIEM produces 400 alerts a day and the two analysts close about 60. What is the correct response?", "options": ["Measure true-positive rate per rule, tune or remove the noisy ones, automate first-step enrichment and treat alert volume as an SLO", "Hire enough analysts to close 400 alerts a day", "Raise all alert thresholds until the daily count is around 60", "Route the unworked alerts to a weekly report so nothing is lost"], "answer": 0, "explain": "An unworkable queue hides real alerts. The fix is signal quality: rules that produce true positives stay, noise is tuned or deleted, enrichment cuts time per alert. Blindly raising thresholds or deferring alerts loses detections; hiring to match noise is not sustainable."}, {"q": "What does mapping detections to MITRE ATT&CK techniques give a security team?", "options": ["A coverage map showing which attacker behaviours would be noticed and which would not, guiding what to build next", "Automatic generation of detection rules for every technique in the catalogue", "A guarantee that any technique in the catalogue will produce an alert", "A ranking of which vendors' products detect the most techniques"], "answer": 0, "explain": "ATT&CK is a shared vocabulary of real techniques. Tagging rules with it shows gaps honestly; it does not write rules or guarantee detection, and it is not a product comparison."}, {"q": "A detection for \"new IAM user created outside the deploy pipeline\" was written a year ago. How do you know it still works today?", "options": ["Emulate the technique with a tool such as Stratus Red Team in a test account and confirm the alert fires within the expected time", "Check that the rule still exists in the SIEM's rule list", "Confirm the rule has not produced any alerts, which means no attacks occurred", "Review the rule's syntax for typos"], "answer": 0, "explain": "Detections rot when log sources, fields or thresholds change. Only executing the behaviour end to end proves the pipeline from event to alert still works. Silence can mean the rule is broken as easily as it can mean no attacks."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="sec-devsecops.html"><span>← Previous</span><strong>DevSecOps: security in the pipeline</strong></a>
+    <a class="pager-up" href="../education.html#security">All Security modules</a>
+    <a class="pager-link pager-next" href="sec-vuln.html"><span>Next →</span><strong>Vulnerability management</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=sec-logging&amp;page=/education/sec-logging.html&amp;title=Security%20logging%2C%20SIEM%20%26%20detection">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=sec-logging&amp;page=/education/sec-logging.html&amp;title=Security%20logging%2C%20SIEM%20%26%20detection">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

@@ -1,0 +1,202 @@
+{
+  "id": "sec-appsec",
+  "minutes": 40,
+  "intro": "Most attacks against companies go through the software they wrote themselves. The OWASP Top 10 is the long-running list of the web application weaknesses that actually get exploited, and it is remarkably stable: the same injection, access control and misconfiguration bugs appear year after year, because they come from how code is naturally written under deadline. This module takes the categories that matter most to an engineer, shows how each one works from the attacker's side, and gives the fix that holds — not a filter that blocks yesterday's payload, but a design that removes the bug class.",
+  "objectives": [
+    "Explain how injection, broken access control, SSRF, XSS and CSRF work and recognise them in code",
+    "Apply the fix that removes each bug class: parameterised queries, server-side authorisation, allow-lists, output encoding, same-site cookies",
+    "Configure the security headers and framework defaults that make whole categories harder to exploit",
+    "Validate input and handle errors without leaking information",
+    "Add security tests and reviews to the normal development flow"
+  ],
+  "sections": [
+    {
+      "heading": "Injection: data that becomes code",
+      "blocks": [
+        {"type": "p", "text": "**Injection** happens whenever untrusted input is concatenated into something that is then interpreted: a SQL query, a shell command, an LDAP filter, a template, an OS path. The interpreter cannot tell where your code ends and the attacker's data begins. SQL injection remains the classic: a login form that builds `... WHERE user = '\" + name + \"'` turns the input `' OR 1=1 --` into a query that matches everyone."},
+        {"type": "code", "lang": "python", "caption": "Vulnerable versus safe. Parameters keep data as data; the database never parses it as SQL.", "code": "# VULNERABLE: string formatting builds the query\ncursor.execute(f\"SELECT * FROM users WHERE email = '{email}'\")\n\n# SAFE: parameterised query; the driver sends the value separately from the SQL text\ncursor.execute(\"SELECT * FROM users WHERE email = %s\", (email,))\n\n# SAFE with an ORM (SQLAlchemy): the same principle, expressed as objects\nsession.execute(select(User).where(User.email == email))\n\n# Shell: never build a command string; pass an argument list and do not use shell=True\nsubprocess.run([\"convert\", filename, \"-resize\", \"200x200\", out], check=True)"},
+        {"type": "p", "text": "The fix is structural, not a blocklist: use parameterised queries or an ORM for every query, argument lists for every subprocess, safe APIs for LDAP and XML, and a templating engine that escapes by default. Input validation (is this a valid email, is this integer in range) is still worth doing, but it is a second layer; escaping and parameterisation are the layer that holds when validation misses something."},
+        {"type": "callout", "kind": "warning", "text": "Escaping quotes in a query string is not a fix; it is a fragile filter with encoding edge cases. If you see a query built by concatenation anywhere, rewrite it with parameters, even if \"the input is validated\"."}
+      ]
+    },
+    {
+      "heading": "Broken access control",
+      "blocks": [
+        {"type": "p", "text": "The most common category in real assessments is not injection but **broken access control**: the code verifies that a caller is logged in and then trusts the identifiers they send. Change `/api/orders/1042` to `/api/orders/1043` and read another customer's order (insecure direct object reference). Send `\"role\": \"admin\"` in a profile update and become one (mass assignment). Call an admin endpoint that was only hidden in the UI (missing function-level check)."},
+        {"type": "list", "items": [
+          "Deny by default: every endpoint declares who may call it, and unlisted means forbidden.",
+          "Authorise at the data layer: queries are scoped by the caller's identity, so foreign ids do not exist.",
+          "Bind request bodies to explicit allow-lists of fields; never map arbitrary JSON onto a model.",
+          "Enforce on the server; the client's hidden buttons and disabled fields are not controls.",
+          "Test it: for every endpoint, a test that calls it as the wrong user and expects a 403 or 404."
+        ]},
+        {"type": "code", "lang": "python", "caption": "An explicit schema for updates stops mass assignment: fields not in the model are ignored or rejected, and privileged fields are simply not there.", "code": "from pydantic import BaseModel, EmailStr\n\n\nclass ProfileUpdate(BaseModel):\n    display_name: str | None = None\n    email: EmailStr | None = None\n    # note: no 'role', no 'is_admin', no 'credit_balance'\n\n    model_config = {\"extra\": \"forbid\"}   # unknown fields -> 422, not silently accepted\n\n\n@app.patch(\"/me\")\ndef update_me(body: ProfileUpdate, caller: User = Depends(current_user)):\n    for field, value in body.model_dump(exclude_unset=True).items():\n        setattr(caller, field, value)\n    db.commit()"}
+      ]
+    },
+    {
+      "heading": "The browser side: XSS and CSRF",
+      "blocks": [
+        {"type": "p", "text": "**Cross-site scripting** (XSS) is injection into HTML: untrusted data rendered into a page without encoding becomes script that runs with the victim's session. Stored XSS (a comment containing `<script>`) hits every viewer; reflected XSS arrives in a crafted link; DOM XSS happens entirely in client-side code that writes input into `innerHTML`. The fix is **contextual output encoding**, which modern template engines do by default — the vulnerability appears where someone turns that off (`|safe`, `dangerouslySetInnerHTML`, string-built HTML). A strict **Content Security Policy** is the second layer: with no inline scripts allowed and script sources restricted, an injected `<script>` tag does nothing."},
+        {"type": "p", "text": "**Cross-site request forgery** (CSRF) exploits the browser's habit of attaching cookies to every request: a form on an attacker's page posts to your `/transfer` endpoint and the victim's session cookie goes along. Defences: `SameSite=Lax` (or `Strict`) on session cookies, which modern browsers default to; a per-session anti-CSRF token on state-changing forms; and requiring a custom header or JSON content type for API calls, which cross-site forms cannot set. Never perform state changes on GET."},
+        {"type": "code", "lang": "text", "caption": "Security headers that remove or blunt whole classes of browser-side attack. Set them at the framework or the edge.", "code": "Content-Security-Policy: default-src 'self'; script-src 'self' 'nonce-R4nd0m'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'\nStrict-Transport-Security: max-age=63072000; includeSubDomains; preload\nX-Content-Type-Options: nosniff\nReferrer-Policy: strict-origin-when-cross-origin\nPermissions-Policy: camera=(), microphone=(), geolocation=()\nSet-Cookie: session=...; HttpOnly; Secure; SameSite=Lax; Path=/"},
+        {"type": "callout", "kind": "tip", "text": "Start CSP in report-only mode (`Content-Security-Policy-Report-Only`) with a reporting endpoint. You will discover inline scripts and third-party tags you did not know about, fix them, then enforce."}
+      ]
+    },
+    {
+      "heading": "Server-side request forgery and the cloud",
+      "blocks": [
+        {"type": "p", "text": "**Server-side request forgery** (SSRF) makes your server fetch a URL the attacker chooses: a \"fetch this image\" feature, a webhook tester, a PDF renderer that loads remote resources. Because the request originates inside your network, it reaches things the attacker cannot: internal admin panels, databases with HTTP interfaces, and, most dangerously in the cloud, the **instance metadata service** at `169.254.169.254`, which hands out the instance's credentials. Several major breaches began exactly this way."},
+        {"type": "list", "items": [
+          "Allow-list destinations by host, not by pattern; if users must supply URLs, resolve the name and reject private, loopback, link-local and metadata ranges — after redirects too.",
+          "Make outbound requests from a separate, egress-restricted component with no cloud role, or through a proxy that enforces the allow-list.",
+          "Require the metadata service's hardened mode (session tokens, hop limit 1) so a simple forwarded GET cannot read credentials.",
+          "Do not return the raw response body or headers to the user; leak less."
+        ]},
+        {"type": "code", "lang": "python", "caption": "Validating a user-supplied URL before fetching: scheme, resolved address ranges, and no automatic redirects.", "code": "import ipaddress\nimport socket\nfrom urllib.parse import urlparse\n\nimport httpx\n\nALLOWED_HOSTS = {\"images.partner.example\", \"cdn.example.com\"}\n\n\ndef safe_fetch(url: str) -> bytes:\n    u = urlparse(url)\n    if u.scheme != \"https\" or u.hostname not in ALLOWED_HOSTS:\n        raise ValueError(\"destination not allowed\")\n    for info in socket.getaddrinfo(u.hostname, 443):\n        ip = ipaddress.ip_address(info[4][0])\n        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:\n            raise ValueError(\"resolves to an internal address\")\n    r = httpx.get(url, follow_redirects=False, timeout=5.0)\n    r.raise_for_status()\n    return r.content[:5_000_000]"}
+      ]
+    },
+    {
+      "heading": "Misconfiguration, dependencies and the everyday bugs",
+      "blocks": [
+        {"type": "p", "text": "Several Top 10 categories are less about code than about settings and habits. **Security misconfiguration**: debug mode in production, default credentials, directory listings, verbose stack traces, permissive CORS (`Access-Control-Allow-Origin: *` with credentials), sample apps left deployed. **Vulnerable and outdated components**: the one library with a known remote code execution in a dependency tree of eight hundred. **Identification and authentication failures**: weak password rules, missing rate limits, session ids that never rotate after login. **Logging and monitoring failures**: the attack was visible in logs nobody read."},
+        {"type": "table", "headers": ["Category", "Check that catches it", "Fix that holds"], "rows": [
+          ["Misconfiguration", "Config review; scanner (ZAP) against staging", "Hardened framework defaults; no debug in prod; CORS allow-list"],
+          ["Vulnerable components", "Dependency scanning in CI (pip-audit, npm audit, Trivy)", "Pin, update on a cadence, remove unused libraries"],
+          ["Auth failures", "Login rate-limit test; session rotation test", "Framework auth; MFA; rotate session on login"],
+          ["Logging failures", "Try an attack in staging; did anything alert?", "Structured security events; alerts on auth anomalies"]
+        ]},
+        {"type": "p", "text": "Handle errors so that they inform you and not the attacker: log the full detail with a correlation id, return a generic message with that id to the user. Validate input at the boundary with a schema and reject what does not fit; treat file uploads as hostile (size cap, type checked by content, stored outside the web root with a random name, served with a fixed content type). Rate-limit anything that can be brute-forced or used to exhaust resources."},
+        {"type": "callout", "kind": "note", "text": "Frameworks do most of this for you when you use them as designed: ORM queries, template auto-escaping, built-in CSRF protection, secure session cookies. The bugs appear where someone bypasses the framework \"for flexibility\"."}
+      ]
+    },
+    {
+      "heading": "Making it routine",
+      "blocks": [
+        {"type": "p", "text": "Application security works when it is part of the normal flow rather than an annual event. In code review, look for the patterns: concatenated queries, raw HTML rendering, endpoints without an authorisation decorator, URL fetches, new dependencies. In CI, run static analysis (Semgrep with the OWASP rulesets, CodeQL) and dependency checks on every pull request, and a dynamic scan (ZAP) against staging on a schedule. Write security tests the same way you write functional ones: the wrong-user test for every resource, the injection payload test for every query parameter, the missing-header test for every response."},
+        {"type": "code", "lang": "python", "caption": "Two security tests that belong next to the functional ones.", "code": "def test_cannot_read_another_users_order(client, user_a_token, user_b_order):\n    r = client.get(f\"/orders/{user_b_order.id}\", headers={\"Authorization\": f\"Bearer {user_a_token}\"})\n    assert r.status_code == 404\n\n\ndef test_search_is_not_injectable(client, user_a_token):\n    payload = \"' OR 1=1 --\"\n    r = client.get(\"/orders\", params={\"q\": payload}, headers={\"Authorization\": f\"Bearer {user_a_token}\"})\n    assert r.status_code == 200\n    assert r.json()[\"items\"] == []   # treated as a literal string, matches nothing"},
+        {"type": "p", "text": "Finally, practise on purpose: free deliberately vulnerable applications and lab platforms let you exploit each category safely, and there is no substitute for having seen a payload work. An engineer who has once pulled cloud credentials out of a metadata endpoint through an image-fetch feature never writes an unrestricted URL fetcher again."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Find, exploit and fix in a safe target",
+    "steps": [
+      "Run a deliberately vulnerable app locally (OWASP Juice Shop via Docker is a good choice) and complete the challenges for SQL injection, an access control flaw and a reflected XSS. Note the payload that worked in each case.",
+      "In your own project (or the zero-to-production API), add the `ProfileUpdate`-style schema with `extra: forbid` to one update endpoint, and write the wrong-user 404 test for one resource endpoint.",
+      "Add the six security headers from the lesson in report-only mode for CSP. Load the app, read the violation reports, fix or allow-list what you find, then switch CSP to enforce.",
+      "Grep the codebase for `f\"SELECT`, `format(`, `shell=True`, `|safe`, `innerHTML` and `dangerouslySetInnerHTML`. For each hit decide: safe by construction, or rewrite.",
+      "Add `semgrep --config p/owasp-top-ten` and a dependency audit (`pip-audit` or `npm audit --audit-level=high`) to CI, and make one deliberately vulnerable commit to confirm they fail the build.",
+      "Run ZAP's baseline scan against your staging URL and triage the report: true positive, false positive, accepted."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Injection: parameterise every query, argument lists for every command, escape-by-default templates",
+      "Access control: deny by default, authorise at the data layer, explicit field allow-lists, wrong-user tests",
+      "XSS: contextual output encoding plus a strict CSP; CSRF: SameSite cookies plus tokens; no state change on GET",
+      "SSRF: allow-list destinations, block private and metadata ranges after resolution, egress-restricted fetcher",
+      "Misconfiguration and dependencies: hardened defaults, no debug in prod, scan and update on a cadence",
+      "Security tests and scanners in the same pipeline as functional tests"
+    ],
+    "groups": [
+      {"title": "Injection fixes", "items": [
+        {"syntax": "cursor.execute(\"... WHERE x = %s\", (val,))", "desc": "Parameterised query; data never parsed as SQL"},
+        {"syntax": "subprocess.run([cmd, arg1, arg2], check=True)", "desc": "Argument list, no shell=True"},
+        {"syntax": "ORM query builders", "desc": "Parameterised by construction"},
+        {"syntax": "never: f-strings / concatenation into SQL, shell, LDAP, XPath", "desc": "The bug pattern to grep for"}
+      ]},
+      {"title": "Access control", "items": [
+        {"syntax": "deny by default; explicit @requires(role)", "desc": "Unlisted endpoint is forbidden"},
+        {"syntax": "WHERE id = ? AND owner_id = caller.id", "desc": "Foreign ids do not exist; return 404"},
+        {"syntax": "schema with extra=forbid, no privileged fields", "desc": "Stops mass assignment"},
+        {"syntax": "test: call as wrong user -> 403/404", "desc": "One per resource endpoint"},
+        {"syntax": "server enforces; UI hiding is not a control", "desc": "APIs are called directly"}
+      ]},
+      {"title": "Browser-side", "items": [
+        {"syntax": "auto-escaping templates; avoid |safe, innerHTML", "desc": "Contextual output encoding"},
+        {"syntax": "Content-Security-Policy: script-src 'self' 'nonce-...'", "desc": "Injected scripts do not run"},
+        {"syntax": "Set-Cookie: HttpOnly; Secure; SameSite=Lax", "desc": "Session cookie defaults"},
+        {"syntax": "anti-CSRF token on forms; custom header on APIs", "desc": "Cross-site forms cannot forge"},
+        {"syntax": "Strict-Transport-Security; X-Content-Type-Options: nosniff", "desc": "HTTPS only; no MIME sniffing"}
+      ]},
+      {"title": "SSRF and uploads", "items": [
+        {"syntax": "allow-list hostnames; https only", "desc": "Do not accept arbitrary URLs"},
+        {"syntax": "reject private, loopback, link-local, 169.254.169.254", "desc": "Check after DNS resolution and per redirect"},
+        {"syntax": "follow_redirects=False, timeout, size cap", "desc": "Bound the fetch"},
+        {"syntax": "IMDSv2 required (hop limit 1)", "desc": "Metadata credentials need a token"},
+        {"syntax": "uploads: size cap, content-sniffed type, random name, outside web root", "desc": "Treat files as hostile"}
+      ]},
+      {"title": "Pipeline", "items": [
+        {"syntax": "semgrep --config p/owasp-top-ten", "desc": "Static analysis on every PR"},
+        {"syntax": "pip-audit / npm audit --audit-level=high / trivy fs .", "desc": "Known-vulnerable dependencies"},
+        {"syntax": "zap-baseline.py -t https://staging.example.com", "desc": "Dynamic scan on a schedule"},
+        {"syntax": "review grep: format( SELECT, shell=True, |safe, innerHTML", "desc": "The patterns reviewers look for"}
+      ]}
+    ],
+    "pitfalls": [
+      "Escaping quotes instead of parameterising, then being bypassed by an encoding you did not think of.",
+      "Checking authentication and trusting the ids and fields the client sends.",
+      "Marking template output as safe to render user content \"just this once\".",
+      "Accepting any URL for a fetch feature and forgetting that the cloud metadata endpoint is a URL.",
+      "Running debug mode or verbose errors in production because it helped once during an incident.",
+      "Treating the annual penetration test as the security process instead of tests and scanners on every change."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A code review finds `db.execute(f\"SELECT * FROM users WHERE name = '{name}'\")` with a comment that `name` is validated to contain only letters. What should the reviewer ask for?",
+      "options": [
+        "Rewrite it as a parameterised query regardless of the validation, since parameterisation removes the bug class",
+        "Approve it, because the validation prevents any quote characters from reaching the query",
+        "Add a function that escapes single quotes in `name` before formatting the query",
+        "Wrap the query in a try/except so that malformed input cannot crash the application"
+      ],
+      "answer": 0,
+      "explain": "Validation is a second layer; parameterisation is the one that holds when validation is loosened later or bypassed by an encoding edge case. Escaping is a fragile filter, and exception handling does not stop the query from executing."
+    },
+    {
+      "q": "An image-preview feature fetches any URL the user provides and returns the bytes. A tester supplies `http://169.254.169.254/latest/meta-data/iam/security-credentials/` and receives cloud credentials. What is the vulnerability and the structural fix?",
+      "options": [
+        "SSRF; allow-list destination hosts, block internal and metadata ranges after resolving, and fetch from an egress-restricted component without a cloud role",
+        "XSS; encode the URL before rendering the preview in the page",
+        "Injection; parameterise the URL before passing it to the HTTP client",
+        "Broken authentication; require the user to log in before using the preview feature"
+      ],
+      "answer": 0,
+      "explain": "The server made a request on the attacker's behalf to an internal address, which is server-side request forgery. Login does not help (the tester was a user); encoding and parameterisation are fixes for different bug classes. Restricting destinations and removing privileges from the fetcher removes the attack."
+    },
+    {
+      "q": "A `PATCH /me` endpoint copies every field from the JSON body onto the user model. A user sends `{\"role\": \"admin\"}`. Which fix addresses the root cause?",
+      "options": [
+        "Bind the body to an explicit schema of updatable fields that rejects unknown ones, so privileged fields cannot be set by the client",
+        "Add a check that the user is logged in before applying the update",
+        "Log every PATCH request body so that abuse can be detected later",
+        "Rename the `role` column so that clients cannot guess the field name"
+      ],
+      "answer": 0,
+      "explain": "This is mass assignment, a broken access control bug. An allow-list of fields removes it; the user was already authenticated, logging detects rather than prevents, and renaming is obscurity."
+    },
+    {
+      "q": "Which combination most directly stops a stored `<script>` payload in a comment from running in other users' browsers?",
+      "options": [
+        "Contextual output encoding when rendering the comment, plus a Content Security Policy that disallows inline scripts",
+        "Setting the session cookie to `HttpOnly` and `Secure`",
+        "Validating that comments contain fewer than 500 characters",
+        "Requiring an anti-CSRF token on the comment submission form"
+      ],
+      "answer": 0,
+      "explain": "Encoding turns the tag into harmless text; CSP ensures that even an injected inline script is not executed. HttpOnly limits what a successful XSS can steal but does not stop it; length limits and CSRF tokens address other problems."
+    },
+    {
+      "q": "A form-based `POST /transfer` endpoint authenticates users with a session cookie that lacks the `SameSite` attribute and uses no anti-CSRF token. What can an attacker do?",
+      "options": [
+        "Host a page that auto-submits a form to `/transfer`; a logged-in victim's browser attaches the session cookie and the transfer executes",
+        "Read the victim's session cookie from the attacker's page and replay it from another machine",
+        "Inject SQL into the transfer amount field because the cookie is not validated",
+        "Bypass authentication entirely because cookies without SameSite are not sent to the server"
+      ],
+      "answer": 0,
+      "explain": "That is cross-site request forgery: the browser attaches cookies to cross-site form posts unless SameSite or a token prevents it. The attacker never reads the cookie; the attack works precisely because the browser sends it automatically."
+    }
+  ]
+}

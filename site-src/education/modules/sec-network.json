@@ -1,0 +1,186 @@
+{
+  "id": "sec-network",
+  "minutes": 30,
+  "intro": "For decades network security meant a hard perimeter: a firewall between the internet and a trusted inside. That model fails the moment one laptop, one pod or one credential inside the perimeter is compromised, because inside everything trusts everything. Modern network security keeps the useful parts of the perimeter (fewer exposed services, filtered traffic) and adds the idea that no connection is trusted for where it comes from, only for what it can prove. This module covers segmentation, firewalls and security groups, encrypted transport everywhere, the DNS and egress controls people forget, and what zero trust means when you have to implement it rather than buy it.",
+  "objectives": [
+    "Segment a network into zones so that a compromise in one does not reach the others",
+    "Write stateful firewall and cloud security group rules that allow only what is needed, in both directions",
+    "Explain why egress filtering and DNS controls matter as much as inbound rules",
+    "Describe zero trust as identity-based, per-request access and apply it to services and people",
+    "Verify exposure from the outside with basic scanning tools"
+  ],
+  "sections": [
+    {
+      "heading": "Zones and the blast radius",
+      "blocks": [
+        {"type": "p", "text": "**Segmentation** divides a network into zones with controlled paths between them. The classic three-tier layout is still a good starting point: a public zone for load balancers and nothing else, a private zone for application servers that accept traffic only from the load balancers, and an isolated zone for databases that accept traffic only from the application zone and have no route to the internet at all. Add a management zone for bastion hosts or, better, no bastion and an identity-aware access service instead."},
+        {"type": "p", "text": "The goal is **blast radius**: when an application server is compromised, the attacker should be able to reach the database it already uses, and nothing else. Not the other team's database, not the CI system, not the office network. Every zone boundary is a place to enforce rules and to log traffic, which also makes lateral movement visible."},
+        {"type": "code", "lang": "text", "caption": "A small VPC layout with one subnet per tier per availability zone; the routing tables define who can reach the internet.", "code": "VPC 10.20.0.0/16\n\n  public   10.20.0.0/24  10.20.1.0/24    route: 0.0.0.0/0 -> internet gateway\n           load balancers, NAT gateway\n  private  10.20.10.0/24 10.20.11.0/24   route: 0.0.0.0/0 -> NAT gateway (egress only)\n           application servers, Kubernetes nodes\n  isolated 10.20.20.0/24 10.20.21.0/24   route: local only\n           databases, caches, queues\n\n  allowed flows\n    internet  -> public:443\n    public    -> private:8080\n    private   -> isolated:5432, :6379\n    private   -> internet (via NAT) only for allow-listed destinations"},
+        {"type": "callout", "kind": "note", "text": "Inside Kubernetes the same idea is a NetworkPolicy: by default every pod can talk to every pod; a default-deny policy per namespace plus explicit allows re-creates zones at the workload level. The container security module builds on this."}
+      ]
+    },
+    {
+      "heading": "Firewalls and security groups, done tightly",
+      "blocks": [
+        {"type": "p", "text": "A **stateful firewall** tracks connections, so a rule that allows inbound port 443 automatically allows the reply packets; you do not open high ports for responses. Cloud **security groups** are stateful firewalls attached to instances or network interfaces, and their best feature is that rules can reference other security groups instead of IP ranges: \"allow 5432 from the app tier's group\" keeps working when instances come and go. **Network ACLs** are stateless subnet-level filters, useful as a coarse backstop, awkward for anything precise."},
+        {"type": "p", "text": "Tight rules share four properties: the source is as narrow as possible (a group or a specific range, not `0.0.0.0/0` except on public listeners), the port is specific, the direction is explicit, and every rule has a description saying why it exists. The most common findings in cloud audits are still administrative ports (22, 3389, 5432, 6379, 27017) open to the world; scanners find those within minutes of creation."},
+        {"type": "code", "lang": "hcl", "caption": "Security groups referencing each other. The database accepts traffic only from members of the app group; nobody opens 5432 to a CIDR.", "code": "resource \"aws_security_group\" \"app\" {\n  name   = \"app\"\n  vpc_id = var.vpc_id\n\n  ingress {\n    description     = \"HTTP from the load balancer only\"\n    from_port       = 8080\n    to_port         = 8080\n    protocol        = \"tcp\"\n    security_groups = [aws_security_group.lb.id]\n  }\n}\n\nresource \"aws_security_group\" \"db\" {\n  name   = \"db\"\n  vpc_id = var.vpc_id\n\n  ingress {\n    description     = \"Postgres from app instances only\"\n    from_port       = 5432\n    to_port         = 5432\n    protocol        = \"tcp\"\n    security_groups = [aws_security_group.app.id]\n  }\n\n  egress = []   # a database initiates no outbound connections\n}"},
+        {"type": "callout", "kind": "warning", "text": "Cloud defaults are permissive on egress: a new security group usually allows all outbound traffic. That is how a compromised host downloads tools and exfiltrates data. Restrict egress deliberately; a database tier needs none."}
+      ]
+    },
+    {
+      "heading": "Egress, DNS and the traffic nobody watches",
+      "blocks": [
+        {"type": "p", "text": "Inbound rules stop the first step of an intrusion; **egress** rules stop most of the later ones. Malware calls home, attackers pull tooling, stolen data leaves — all outbound. Route private subnets through a NAT gateway or proxy that only permits known destinations: your package mirrors, your cloud provider's APIs, the third-party services you actually use. Everything else is denied and logged, and a new destination is a change request, not a surprise."},
+        {"type": "p", "text": "**DNS** is both a control point and a leak. Point every host at resolvers you run or control, log the queries (a host asking for a domain registered last week is a strong signal), block known-bad domains, and remember that DNS itself can carry data out in query names if it is the one protocol allowed to reach the internet unfiltered. Encrypted DNS (DoH/DoT) to a resolver you trust protects users on hostile networks; on servers, plain DNS to an internal resolver with logging is usually the better trade."},
+        {"type": "list", "items": [
+          "Flow logs on every VPC or subnet: who talked to whom, on which port, accepted or rejected. Cheap to keep, invaluable during an incident.",
+          "Private endpoints for cloud services (object storage, secrets, queues) so that traffic never touches the public internet and can be restricted by policy.",
+          "TLS everywhere internally: encrypted transport between services is the assumption that lets you stop trusting the network.",
+          "No direct SSH from the internet: use identity-aware access (cloud session manager, an access proxy) with MFA and per-session logging."
+        ]}
+      ]
+    },
+    {
+      "heading": "Zero trust, concretely",
+      "blocks": [
+        {"type": "p", "text": "**Zero trust** is a design principle, not a product: never grant access based on network location; grant it per request based on verified identity, device state and policy, and assume the network is hostile even inside the data centre. The perimeter does not disappear (you still limit exposure), but it stops being the main control."},
+        {"type": "table", "headers": ["Perimeter model", "Zero trust model"], "rows": [
+          ["On the VPN means trusted", "Every request authenticated and authorised, VPN or not"],
+          ["Internal traffic in plaintext", "mTLS between services; identity in the certificate"],
+          ["Flat internal network", "Segmented; policies reference identities, not IP ranges"],
+          ["Access reviewed yearly", "Short-lived credentials; access continuously evaluated"],
+          ["Log at the edge", "Log every access decision, inside and out"]
+        ]},
+        {"type": "p", "text": "For people, the concrete form is an **identity-aware proxy** in front of internal applications: users authenticate with SSO and phishing-resistant MFA, the proxy checks device compliance and policy, and the application receives a signed identity header. No VPN, no flat network access. For services, it is workload identity: each service has a certificate or token that names it, calls between services use mTLS or signed tokens, and authorisation policies say which service may call which endpoint. Service meshes package this, but the same can be done with a sidecar-free approach using SPIFFE-style identities and a small library."},
+        {"type": "code", "lang": "yaml", "caption": "Workload-level policy: only the checkout service may call the payments service, regardless of which node or IP it runs on.", "code": "apiVersion: security.istio.io/v1\nkind: AuthorizationPolicy\nmetadata:\n  name: payments-allow-checkout\n  namespace: payments\nspec:\n  selector:\n    matchLabels:\n      app: payments\n  action: ALLOW\n  rules:\n    - from:\n        - source:\n            principals: [\"cluster.local/ns/shop/sa/checkout\"]\n      to:\n        - operation:\n            methods: [\"POST\"]\n            paths: [\"/v1/charges\"]"},
+        {"type": "callout", "kind": "tip", "text": "Start zero trust with the two highest-value moves: SSO plus phishing-resistant MFA in front of every internal app (retire the VPN as a trust signal), and mTLS or signed identities between the services that handle money or personal data."}
+      ]
+    },
+    {
+      "heading": "Check your exposure from the outside",
+      "blocks": [
+        {"type": "p", "text": "Diagrams describe intent; scanners describe reality. Run an external port scan against your own public ranges on a schedule and compare the result with the list of services you intend to expose. Anything unexpected is either a misconfiguration or a forgotten system, and both are findings. Do the same from inside a private zone to confirm that the database tier really is unreachable from, say, the CI runners."},
+        {"type": "code", "lang": "bash", "caption": "Quick external exposure check with nmap. Only scan systems you own or are authorised to test.", "code": "# Which TCP ports answer on your public IP? (-Pn: do not rely on ping, -sS needs root)\nsudo nmap -Pn -sS -p- --open 203.0.113.10\n\n# What is actually listening on a host you administer, and which process owns it\nsudo ss -tlnp\n\n# Confirm the database is NOT reachable from an application host (should time out)\nnc -zv -w 3 10.20.20.15 5432"},
+        {"type": "p", "text": "Keep an inventory of internet-facing assets: domains, IPs, load balancers, object storage buckets with public access, and the SaaS consoles that hold your data. The attack surface you do not know about is the one that gets used. Cloud providers offer configuration scanners that flag public buckets, open groups and missing flow logs; turn them on, and treat a new public exposure as an alert, not a report."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Segment a small environment and prove the rules hold",
+    "steps": [
+      "Draw the three-tier layout from the lesson for the zero-to-production project (or any small service): public, private, isolated. Write the allowed flows as a table of source, destination, port.",
+      "In a cloud test account, create the three security groups with Terraform, referencing groups rather than CIDRs, with `egress = []` on the database group. Run `terraform plan` and read every rule back against your table.",
+      "Launch one small instance in the private tier and one in the isolated tier. From the private instance, confirm `nc -zv` reaches the isolated instance on 5432 and nothing else; from the isolated instance, confirm outbound `curl https://example.com` fails.",
+      "Enable VPC flow logs, generate some traffic, and find both an ACCEPT and a REJECT record for your test connections.",
+      "From your laptop run `nmap -Pn -p- --open` against the public IP of the load balancer or instance and list what answers. Compare with intent; close anything extra.",
+      "Write a default-deny NetworkPolicy for a namespace on a local kind cluster, deploy two pods, and confirm one cannot reach the other until you add an explicit allow.",
+      "Tear the test resources down."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Zones limit blast radius: public, private, isolated, with explicit flows between them",
+      "Security groups are stateful and can reference other groups; never open admin ports to 0.0.0.0/0",
+      "Egress is where exfiltration happens: default-deny outbound, allow-list destinations",
+      "Log DNS and network flows; a new destination is a signal",
+      "Zero trust = identity per request, mTLS between services, no trust from network location",
+      "Verify exposure with scans and asset inventory, not diagrams"
+    ],
+    "groups": [
+      {"title": "Layout and rules", "items": [
+        {"syntax": "public / private / isolated subnets", "desc": "Load balancers / apps / data; routing decides internet reach"},
+        {"syntax": "security_groups = [other_sg.id]", "desc": "Reference a tier, not an IP range"},
+        {"syntax": "egress = []", "desc": "Database tier makes no outbound connections"},
+        {"syntax": "NAT gateway + allow-listed egress", "desc": "Private tier reaches only known destinations"},
+        {"syntax": "network ACL", "desc": "Stateless subnet backstop; both directions must be written"},
+        {"syntax": "description = \"why\"", "desc": "Every rule explains itself"}
+      ]},
+      {"title": "Kubernetes and mesh", "items": [
+        {"syntax": "NetworkPolicy: podSelector: {} + policyTypes [Ingress, Egress]", "desc": "Default deny for a namespace"},
+        {"syntax": "ingress.from.podSelector / namespaceSelector", "desc": "Explicit allows by label"},
+        {"syntax": "AuthorizationPolicy principals: [ns/sa]", "desc": "Service-to-service allow by workload identity"},
+        {"syntax": "PeerAuthentication mode: STRICT", "desc": "Require mTLS in a namespace (Istio)"}
+      ]},
+      {"title": "Verification commands", "items": [
+        {"syntax": "sudo nmap -Pn -sS -p- --open HOST", "desc": "All open TCP ports from outside (authorised targets only)"},
+        {"syntax": "sudo ss -tlnp", "desc": "Listening sockets and their processes on a host"},
+        {"syntax": "nc -zv -w 3 HOST PORT", "desc": "Is a port reachable from here?"},
+        {"syntax": "dig +short NAME @RESOLVER", "desc": "What does this host resolve, via which resolver"},
+        {"syntax": "traceroute / mtr HOST", "desc": "Which path and which hop drops the traffic"}
+      ]},
+      {"title": "Zero trust building blocks", "items": [
+        {"syntax": "SSO + phishing-resistant MFA", "desc": "Identity is the perimeter"},
+        {"syntax": "identity-aware proxy", "desc": "Internal apps without a VPN; per-request policy"},
+        {"syntax": "mTLS / SPIFFE identities", "desc": "Services prove who they are on every connection"},
+        {"syntax": "device posture", "desc": "Managed, patched, disk-encrypted before access"},
+        {"syntax": "log every access decision", "desc": "Inside and outside the old perimeter"}
+      ]}
+    ],
+    "pitfalls": [
+      "Opening SSH, RDP or a database port to the world \"temporarily\"; scanners find it in minutes and temporary becomes permanent.",
+      "Leaving default allow-all egress on private tiers, giving a compromised host a free path out.",
+      "Treating the VPN as authentication: once connected, everything on the flat network is reachable.",
+      "Writing rules against IP ranges that change when instances are replaced, then widening them to make things work.",
+      "Assuming internal traffic is safe in plaintext; the network you trust is the one the attacker is on.",
+      "Never scanning your own perimeter, so the forgotten test server stays exposed for years."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "An application server in the private tier is compromised. Which design decision most limits what the attacker can do next?",
+      "options": [
+        "The database group only accepts connections from the app group, and the private tier's egress is restricted to allow-listed destinations",
+        "The application server runs a host-based antivirus agent that scans files every night",
+        "All tiers share one security group so that rules are easier to audit centrally",
+        "The database is reachable from the office network so administrators can respond quickly"
+      ],
+      "answer": 0,
+      "explain": "Segmentation and egress filtering bound the blast radius: the attacker reaches only what the app already used and cannot freely pull tools or push data out. A shared group or office reachability widens the radius; antivirus does not address network reach."
+    },
+    {
+      "q": "A Terraform review shows a security group rule allowing port 5432 from `10.20.0.0/16` with the comment \"app servers\". What is the better rule?",
+      "options": [
+        "Allow 5432 with `security_groups` set to the app tier's group id, so only app instances match regardless of their IPs",
+        "Narrow the CIDR to the exact current IPs of the app instances",
+        "Allow 5432 from `0.0.0.0/0` but require TLS on the database connection",
+        "Keep the rule and add a network ACL denying 5432 from the public subnets"
+      ],
+      "answer": 0,
+      "explain": "Group references express intent (the app tier) and stay correct as instances are replaced. Exact IPs rot and get widened; a whole VPC range includes every other tier; opening to the world with TLS still exposes the port to attack."
+    },
+    {
+      "q": "Why is default allow-all outbound traffic on a private subnet a security problem, even though nothing inbound is exposed?",
+      "options": [
+        "A compromised host can download tooling and exfiltrate data freely; egress is where later stages of an attack happen",
+        "It doubles the cost of the NAT gateway because reply packets are also billed",
+        "It prevents the security group from being stateful, so inbound replies are dropped",
+        "It allows other tenants of the cloud provider to reach the hosts through the NAT"
+      ],
+      "answer": 0,
+      "explain": "Intrusions rarely end at initial access. Command-and-control, tool download and data theft all rely on outbound connections, so allow-listing egress destinations and logging denials cuts those stages off. The other options are not how stateful groups or NAT work."
+    },
+    {
+      "q": "Which statement best describes zero trust?",
+      "options": [
+        "Access is granted per request based on verified identity, device state and policy, never on network location",
+        "All traffic is routed through a single VPN so it can be inspected in one place",
+        "Internal services trust each other because the perimeter firewall has already filtered external threats",
+        "Every user must re-enter their password before each action in an application"
+      ],
+      "answer": 0,
+      "explain": "Zero trust removes network location as a trust signal and replaces it with authenticated identity and policy on every access, inside or outside. A VPN concentrates trust rather than removing it; re-typing passwords is friction, not a trust model."
+    },
+    {
+      "q": "A team's network diagram shows only port 443 exposed to the internet. What is the most reliable way to confirm that this is true?",
+      "options": [
+        "Run an authorised external port scan against the public addresses and compare the open ports with the intended list",
+        "Review the Terraform code, since infrastructure as code guarantees the deployed state",
+        "Check the load balancer's listener configuration in the console",
+        "Ask the team that built the environment to confirm nothing else was opened"
+      ],
+      "answer": 0,
+      "explain": "Only observation from outside reflects reality, including changes made outside Terraform, forgotten hosts and misconfigured groups. Code, console listeners and people describe intent; a scan describes exposure."
+    }
+  ]
+}

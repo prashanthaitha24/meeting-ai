@@ -1,0 +1,194 @@
+{
+  "id": "sec-vuln",
+  "minutes": 30,
+  "intro": "Tens of thousands of vulnerabilities are published every year. A scanner will happily list a thousand of them across your estate, and most will never be exploited by anyone. Vulnerability management is the discipline of finding the ones that matter to you, fixing them within a time that reflects their real risk, and being able to prove it. It sits between the scanning tools of the earlier modules and the incident response of the next one: done well, the emergency patch at 2 a.m. is rare, because the exposed, exploitable things were fixed on Tuesday afternoon. This module covers how vulnerabilities are identified and scored, how to prioritise with exploitability rather than raw severity, what patch SLAs look like in practice, and how to verify that what you think is patched actually is.",
+  "objectives": [
+    "Read a CVE record and a CVSS vector, and explain what the score does and does not tell you",
+    "Prioritise with exploitability (EPSS, known-exploited lists), exposure and asset value, not severity alone",
+    "Run an inventory-driven scanning program across hosts, containers, code dependencies and cloud configuration",
+    "Set and meet remediation SLAs with owners, exceptions and escalation",
+    "Verify remediation and report coverage honestly"
+  ],
+  "sections": [
+    {
+      "heading": "CVE, CVSS and what a score means",
+      "blocks": [
+        {"type": "p", "text": "A **CVE** (Common Vulnerabilities and Exposures) identifier names one vulnerability in one product: `CVE-2024-3094` is the xz backdoor, always and everywhere. Details live in the National Vulnerability Database and the vendor's advisory: affected versions, fixed versions, a description, and a **CVSS** score. CVSS rates the vulnerability's intrinsic severity from 0 to 10 using a vector of properties: attack vector (network, adjacent, local, physical), complexity, privileges required, user interaction, and impact on confidentiality, integrity and availability."},
+        {"type": "code", "lang": "text", "caption": "Reading a CVSS v3.1 vector: this one is remotely exploitable with no privileges or user interaction and total impact, which is why it scores 9.8.", "code": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H   -> 9.8 Critical\n\nAV:N  attack vector: network         (reachable remotely)\nAC:L  attack complexity: low        (reliable exploit)\nPR:N  privileges required: none     (unauthenticated)\nUI:N  user interaction: none        (no click needed)\nS:U   scope: unchanged\nC:H/I:H/A:H  full impact on confidentiality, integrity, availability"},
+        {"type": "p", "text": "CVSS describes the worst case for the vulnerability in the abstract. It does not know whether the affected code path is reachable in your deployment, whether the service is on the internet, whether an exploit exists, or whether anyone is using it. Two 9.8s can be a five-alarm fire and a non-event. That is why severity alone is a poor sorting key."},
+        {"type": "callout", "kind": "note", "text": "Scanners also report vulnerabilities from vendor advisories and distribution trackers that are not (yet) CVEs, and distributions often backport fixes without changing the upstream version number, which confuses version-matching scanners. Prefer scanners that understand your distribution's security tracker."}
+      ]
+    },
+    {
+      "heading": "Prioritise by risk, not by score",
+      "blocks": [
+        {"type": "p", "text": "Risk is likelihood times impact, in your environment. For likelihood, use **EPSS** (Exploit Prediction Scoring System), a daily-updated probability that a CVE will be exploited in the next thirty days, and the **Known Exploited Vulnerabilities** catalogue maintained by CISA, which lists what is being exploited right now. For exposure, use your own inventory: is the vulnerable component reachable from the internet, does it face untrusted users, what would its compromise give an attacker. For impact, use asset classification: the customer database versus a build-cache server."},
+        {"type": "table", "headers": ["Signal", "Question it answers", "Source"], "rows": [
+          ["CVSS", "How bad is it in the worst case?", "NVD, vendor advisory"],
+          ["EPSS", "How likely is exploitation soon?", "FIRST, updated daily"],
+          ["KEV list", "Is it being exploited now?", "CISA catalogue"],
+          ["Exposure", "Can an attacker reach it in our estate?", "Your inventory, network scans"],
+          ["Asset value", "What does compromise cost us?", "Your data classification"]
+        ]},
+        {"type": "code", "lang": "python", "caption": "A simple, explainable priority that combines the signals. The point is a stable ranking, not precision.", "code": "def priority(cvss: float, epss: float, on_kev: bool, internet_exposed: bool, asset_tier: int) -> float:\n    \"\"\"asset_tier: 1 = crown jewels ... 3 = low value. Higher result = fix sooner.\"\"\"\n    likelihood = 1.0 if on_kev else max(epss, 0.01)   # KEV means it is happening now\n    exposure = 1.0 if internet_exposed else 0.4\n    impact = cvss / 10 * {1: 1.0, 2: 0.6, 3: 0.3}[asset_tier]\n    return round(likelihood * exposure * impact, 3)\n\n\n# a 9.8 on an internal build server with negligible EPSS ranks below\n# a 7.5 on the internet-facing API that is on the KEV list\nprint(priority(9.8, 0.02, False, False, 3))   # 0.002\nprint(priority(7.5, 0.60, True, True, 1))     # 0.75"},
+        {"type": "p", "text": "Whatever formula you use, publish it. Engineers accept \"fix this first\" when they can see why, and auditors accept a documented risk-based process far more readily than a pile of unfixed criticals with no rationale."}
+      ]
+    },
+    {
+      "heading": "Inventory and scanning across every layer",
+      "blocks": [
+        {"type": "p", "text": "You cannot prioritise what you have not found, and you cannot find vulnerabilities in assets you do not know about. The inventory comes first: every host, container image, function, code repository, cloud account and SaaS integration, with an owner. Then scan each layer with the tool that understands it, on a schedule and on change."},
+        {"type": "list", "items": [
+          "**Hosts and VMs**: agent-based or authenticated network scanning for OS and installed packages (OpenVAS, cloud-native inspectors, commercial scanners).",
+          "**Container images**: scan in the registry continuously, not just at build; a clean image last month has new findings today (Trivy, Grype, registry-native scanning).",
+          "**Code dependencies**: SCA on every repository, stored SBOMs re-scanned daily so new advisories match existing builds.",
+          "**Cloud configuration**: misconfiguration is a vulnerability class; benchmark scanning from the cloud module.",
+          "**Web applications**: DAST on a schedule against staging, plus periodic penetration tests for what tools miss."
+        ]},
+        {"type": "code", "lang": "bash", "caption": "Re-scanning stored SBOMs is the cheapest continuous scan: no image pulls, and new advisories match old builds within a day.", "code": "# nightly: scan every stored SBOM and emit JSON for the tracker\nfor f in sboms/*.cdx.json; do\n  grype \"sbom:$f\" --output json --add-cpes-if-none > \"results/$(basename \"$f\" .cdx.json).json\"\ndone\n\n# which images carry a specific CVE today?\ngrep -l 'CVE-2025-12345' results/*.json"},
+        {"type": "p", "text": "Feed every scanner into one tracker (a purpose-built vulnerability management system, or at minimum a deduplicated database) so a vulnerability is one record with many affected assets, one owner, one status. Twelve scanner dashboards are how findings fall between the cracks."}
+      ]
+    },
+    {
+      "heading": "SLAs, exceptions and the patch process",
+      "blocks": [
+        {"type": "p", "text": "A remediation **SLA** turns priority into a commitment. Typical targets: known-exploited or critical-and-exposed within days, high within weeks, medium within a quarter, low in the normal maintenance cycle. The numbers matter less than three properties: they are agreed with the teams that must do the work, they are measured, and missing them escalates to someone who can reallocate time. Emergency out-of-band patching for actively exploited internet-facing vulnerabilities is a separate, faster path with its own playbook."},
+        {"type": "table", "headers": ["Priority", "Example", "Target"], "rows": [
+          ["P1: exploited or critical + exposed", "KEV-listed bug in the public API's framework", "72 hours, emergency change"],
+          ["P2: high, reachable", "Auth bypass in an internal admin tool", "14 days"],
+          ["P3: medium or unreachable high", "Local privilege escalation on a locked-down host", "90 days"],
+          ["P4: low", "Informational library advisory", "Next scheduled update"]
+        ]},
+        {"type": "p", "text": "Some findings cannot be fixed on time: the vendor has no patch, the fix breaks a dependency, the system is being retired. An **exception** records the risk, the compensating control (network isolation, WAF rule, monitoring), the approver and an expiry date, after which it is reviewed again. Exceptions without expiry are how a temporary decision becomes a permanent hole. Make patching itself boring: automatic OS updates in maintenance windows, image rebuilds on a cadence, dependency bots opening pull requests, and immutable infrastructure so that the fix is a redeploy rather than a login."}
+      ]
+    },
+    {
+      "heading": "Verify, measure, report",
+      "blocks": [
+        {"type": "p", "text": "\"We patched it\" is a claim; a rescan is evidence. Verify every P1 and P2 fix by rescanning the specific asset, and confirm the vulnerable process actually restarted — a library updated on disk while the old version stays loaded in memory is the most common false fix. Track the metrics that describe the program's health rather than its busyness: **time to remediate** by priority, **SLA compliance** by team, **age of the oldest open P1**, **coverage** (percentage of inventory scanned in the last week), and **exception count and age**."},
+        {"type": "code", "lang": "bash", "caption": "Checking that a patched library is actually out of memory on a host.", "code": "# processes still using deleted (replaced) shared libraries need a restart\nsudo lsof -nP +c 15 2>/dev/null | grep -E 'DEL|\\(deleted\\)' | awk '{print $1, $2}' | sort -u\n\n# Debian/Ubuntu: which services need restarting after the last apt upgrade\nsudo needrestart -r l"},
+        {"type": "p", "text": "Report the picture honestly: findings you know about and their ages, the inventory you cover and the gaps you do not, exceptions and their expiry. A dashboard that shows zero criticals because scanning covers a third of the estate is worse than none. The program is working when the emergency patch is rare, the backlog is small and known, and the next disclosed critical is a routine morning's work instead of a week of surprises."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Build a risk-ranked backlog from real scans",
+    "steps": [
+      "Scan three container images you use (base images count) with `trivy image --format json` and collect the CVE ids with CVSS scores.",
+      "Fetch EPSS scores for those CVEs from the public EPSS API (a single request accepts a comma-separated list) and check each against the CISA KEV catalogue download.",
+      "For each image, decide whether it is internet-exposed and assign an asset tier. Run the `priority` function from the lesson over every finding and sort.",
+      "Compare the top ten by priority with the top ten by CVSS. Write down two cases where they differ and why the priority ordering is the better one.",
+      "Assign an SLA target from the lesson's table to the top ten and record an owner for each in a simple tracker (a spreadsheet is fine).",
+      "Fix the highest-priority finding by updating the base image or dependency, rebuild, rescan, and confirm the CVE no longer appears.",
+      "Write one exception for a finding you cannot fix now: risk, compensating control, approver, expiry date."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "CVSS is worst-case severity in the abstract; it does not know your exposure or whether exploits exist",
+      "Prioritise with EPSS, the KEV list, exposure and asset value; publish the formula",
+      "Inventory first, then scan every layer on change and on schedule; re-scan stored SBOMs daily",
+      "One tracker: a vulnerability is one record with many assets, one owner, one status",
+      "SLAs by priority, agreed and measured; exceptions with compensating controls and expiry",
+      "Verify with a rescan and a process restart check; report coverage and gaps honestly"
+    ],
+    "groups": [
+      {"title": "Reading advisories", "items": [
+        {"syntax": "CVE-YYYY-NNNNN", "desc": "One vulnerability, one identifier, everywhere"},
+        {"syntax": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/...", "desc": "Vector: how reachable, how easy, how much impact"},
+        {"syntax": "AV:N + PR:N + UI:N", "desc": "Remote, unauthenticated, no click: treat as urgent if exposed"},
+        {"syntax": "EPSS 0.0-1.0", "desc": "Probability of exploitation in 30 days; updated daily"},
+        {"syntax": "KEV catalogue", "desc": "Actively exploited; fix regardless of score"},
+        {"syntax": "fixed version / backported fix", "desc": "Check the distribution tracker, not just upstream version"}
+      ]},
+      {"title": "Scanning by layer", "items": [
+        {"syntax": "trivy image --format json IMG", "desc": "Container packages and app dependencies"},
+        {"syntax": "grype sbom:FILE", "desc": "Re-scan stored SBOMs without pulling images"},
+        {"syntax": "pip-audit / npm audit / osv-scanner", "desc": "Code dependencies per repository"},
+        {"syntax": "authenticated host scan (OpenVAS, cloud inspector)", "desc": "OS packages and configuration on hosts"},
+        {"syntax": "prowler / checkov", "desc": "Cloud and IaC misconfiguration"},
+        {"syntax": "zap-baseline + periodic pen test", "desc": "Web application, runtime and logic bugs"}
+      ]},
+      {"title": "Process", "items": [
+        {"syntax": "P1 72h / P2 14d / P3 90d / P4 next cycle", "desc": "Example SLA ladder; agree your own"},
+        {"syntax": "exception = risk + compensating control + approver + expiry", "desc": "Temporary by construction"},
+        {"syntax": "emergency path for KEV + exposed", "desc": "Out-of-band change with its own playbook"},
+        {"syntax": "auto-updates, image rebuild cadence, dependency bots", "desc": "Make patching routine"},
+        {"syntax": "immutable infra: fix = redeploy", "desc": "No patching by hand"}
+      ]},
+      {"title": "Verification and metrics", "items": [
+        {"syntax": "rescan the asset after the fix", "desc": "Claims are not evidence"},
+        {"syntax": "needrestart -r l / lsof | grep deleted", "desc": "Old library still loaded? Restart the process"},
+        {"syntax": "time to remediate by priority", "desc": "The core health metric"},
+        {"syntax": "SLA compliance by team; oldest open P1", "desc": "Where escalation is needed"},
+        {"syntax": "coverage % of inventory scanned this week", "desc": "Zero findings on a third of the estate is not zero"},
+        {"syntax": "exception count and age", "desc": "Growing means the process is leaking"}
+      ]}
+    ],
+    "pitfalls": [
+      "Sorting by CVSS and spending the quarter on unreachable 9.8s while an exploited 7.5 on the edge waits.",
+      "Scanning without an inventory, so the forgotten systems are also the unscanned ones.",
+      "Twelve scanner dashboards and no single tracker; findings fall between them.",
+      "Exceptions without expiry, quietly permanent.",
+      "Updating a library on disk and never restarting the process that loaded the old one.",
+      "Reporting zero criticals from a scan that covers a fraction of the estate."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "Two findings: a CVSS 9.8 in a library on an internal build server with EPSS 0.02, and a CVSS 7.5 in the framework of the internet-facing API that appears on the KEV list. Which is fixed first, and why?",
+      "options": [
+        "The 7.5: it is actively exploited and exposed, so its real likelihood is far higher despite the lower severity score",
+        "The 9.8: CVSS is the industry standard and critical always outranks high",
+        "Both simultaneously, since all findings above 7.0 must be fixed within 72 hours",
+        "Neither until the vendor confirms which is more dangerous"
+      ],
+      "answer": 0,
+      "explain": "Risk is likelihood times impact in your environment. Active exploitation and internet exposure dominate an abstract severity score. The 9.8 still gets fixed, on its own SLA."
+    },
+    {
+      "q": "What does a CVSS base score tell you, and what does it not?",
+      "options": [
+        "It describes the vulnerability's worst-case intrinsic severity; it says nothing about your exposure, reachability or whether exploits exist",
+        "It measures how likely the vulnerability is to be exploited in the next 30 days",
+        "It reflects how many organisations have been breached through the vulnerability",
+        "It indicates whether a patch is available from the vendor"
+      ],
+      "answer": 0,
+      "explain": "CVSS rates the flaw in the abstract via its vector. Exploitation likelihood is EPSS and the KEV list; breach counts and patch availability come from other sources."
+    },
+    {
+      "q": "A team updates a vulnerable OpenSSL package on a host and closes the finding. A rescan a week later shows the vulnerability still present. What most likely happened?",
+      "options": [
+        "The process using the library was never restarted and still has the old version loaded in memory",
+        "The scanner is caching last week's result and needs its database rebuilt",
+        "The CVE was assigned a new identifier after the patch",
+        "The update installed the fix but the CVSS score increased, reopening the finding"
+      ],
+      "answer": 0,
+      "explain": "Updating files on disk does not change what running processes have mapped. Tools like `needrestart` or checking for deleted libraries in `lsof` reveal this. Verification by rescan is exactly what caught it."
+    },
+    {
+      "q": "A finding cannot be fixed because the vendor has no patch and the system is due for retirement in six months. What is the correct handling?",
+      "options": [
+        "Record an exception with the risk, a compensating control such as network isolation, an approver and an expiry date for review",
+        "Mark the finding as a false positive so it stops appearing in reports",
+        "Delete the finding since the system will be gone eventually",
+        "Lower the finding's CVSS score in the tracker to match the reduced risk"
+      ],
+      "answer": 0,
+      "explain": "Accepted risk must be visible, mitigated and time-limited. Hiding it, deleting it or editing the score removes the record without removing the risk."
+    },
+    {
+      "q": "A vulnerability dashboard shows zero open critical findings. What question must be asked before trusting it?",
+      "options": [
+        "What percentage of the inventory was actually scanned in the reporting period, and what is missing from the inventory?",
+        "Which scanner vendor produced the dashboard?",
+        "How many findings were closed as false positives last month?",
+        "Whether the dashboard's colour scheme matches the severity ladder"
+      ],
+      "answer": 0,
+      "explain": "Zero findings on partial coverage is not zero risk. Coverage of a complete inventory is the precondition for any other number on the dashboard meaning anything."
+    }
+  ]
+}

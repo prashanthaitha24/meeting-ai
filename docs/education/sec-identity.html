@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Identity &amp; access — Security | ThavionAI Education</title>
+  <meta name="description" content="Authentication vs authorisation, MFA, sessions and tokens, OAuth 2.0 and OIDC, least privilege." />
+  <meta property="og:title" content="Identity &amp; access — ThavionAI Education" />
+  <meta property="og:description" content="Authentication vs authorisation, MFA, sessions and tokens, OAuth 2.0 and OIDC, least privilege." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/sec-identity.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-security" data-module="sec-identity">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../index.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=sec-identity&amp;page=/education/sec-identity.html&amp;title=Identity%20%26%20access">Feedback</a>
+    <a href="../education.html#security" class="nav-cta">All Security modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#security">Security</a> › Stage 1: Foundations</div>
+    <h1>Identity &amp; access</h1>
+    <p class="lede">Authentication vs authorisation, MFA, sessions and tokens, OAuth 2.0 and OIDC, least privilege.</p>
+    <div class="meta">
+      <span class="chip">Beginner</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 3 of 16</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">Most breaches are not about breaking encryption; they are about logging in. A phished password, a token that never expires, a service account with admin rights nobody remembers granting. Identity and access management is where those doors are, and it is the control that pays back fastest when done well. This module separates the two questions every request must answer (who are you, and what may you do), shows how modern web authentication actually works with sessions, tokens, OAuth 2.0 and OpenID Connect, and lays out the least-privilege habits that keep a compromised identity from becoming a compromised company.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Distinguish authentication from authorisation and place each correctly in a request's life</li><li>Explain how sessions, bearer tokens and JWTs carry identity, and the trade-offs between them</li><li>Describe the OAuth 2.0 authorization code flow with PKCE and what OpenID Connect adds</li><li>Choose MFA methods by phishing resistance and apply them where they matter most</li><li>Design roles and policies that follow least privilege, for humans and for services</li></ul>
+    </div>
+    <section id="two-questions-two-failures"><h2>Two questions, two failures</h2>
+    <p><strong>Authentication</strong> (authn) answers "who are you?" and produces an identity: a user id, a service name. <strong>Authorisation</strong> (authz) answers "is this identity allowed to do this to that?" and produces a yes or no. They fail differently. A weak authentication lets a stranger become someone; a weak authorisation lets a legitimate someone do things they should not. The single most common web vulnerability for years has been broken authorisation: an endpoint checks that you are logged in, then forgets to check that the record you asked for is yours.</p>
+    <p>The clean design puts authentication at the edge once (a gateway or middleware validates the credential and attaches an identity to the request) and authorisation next to every data access, where the code knows what the resource is and who owns it. Authorisation that lives only in the UI ("the button is hidden") is not authorisation; the API can be called directly.</p>
+    <div class="code"><div class="code-cap">Authorisation next to the data, not next to the login: the query itself is scoped to the caller.</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>def get_order(order_id: int, caller: User) -&gt; Order:
+    # Wrong: fetch, then hope someone checks ownership later
+    #   order = db.get(Order, order_id)
+    # Right: the identity is part of the lookup, so a foreign id simply does not exist
+    order = db.query(Order).filter(Order.id == order_id, Order.user_id == caller.id).first()
+    if order is None:
+        raise NotFound()          # 404, not 403: do not confirm that the id exists
+    return order</code></pre></div>
+    <div class="callout callout-tip"><strong>Tip</strong><p>Return the same 404 whether the record does not exist or belongs to someone else. A 403 tells an attacker that they guessed a valid id.</p></div></section>
+  <section id="sessions-tokens-and-where-identity-travels"><h2>Sessions, tokens and where identity travels</h2>
+    <p>After a successful login the server needs a way to recognise the user on later requests. Two families exist. A <strong>session</strong> is a random opaque id stored in a cookie; the server keeps the session data (user id, expiry) in a store and looks it up per request. Revocation is trivial (delete the row) and nothing sensitive leaves the server. A <strong>bearer token</strong>, typically a JWT, carries the claims itself, signed by the issuer; any service with the public key can verify it without a lookup, which scales across many services but makes revocation hard — the token is valid until it expires.</p>
+    <div class="table-wrap"><table><thead><tr><th>Property</th><th>Server session (cookie)</th><th>Signed token (JWT)</th></tr></thead><tbody><tr><td>Revocation</td><td>Immediate: delete the session</td><td>Only via short expiry or a denylist</td></tr><tr><td>Cross-service use</td><td>Needs a shared session store</td><td>Verified anywhere with the public key</td></tr><tr><td>What leaks if stolen</td><td>An opaque id</td><td>The claims, readable by anyone</td></tr><tr><td>Typical lifetime</td><td>Hours to days, sliding</td><td>Minutes; refreshed with a refresh token</td></tr></tbody></table></div>
+    <p>For cookies, set <code>HttpOnly</code> (JavaScript cannot read it), <code>Secure</code> (HTTPS only) and <code>SameSite=Lax</code> or <code>Strict</code> (blocks most cross-site request forgery). For tokens, keep access tokens short-lived (five to fifteen minutes), issue a longer-lived <strong>refresh token</strong> that can be revoked, and store tokens where cross-site scripts cannot reach them. In browsers that usually means an <code>HttpOnly</code> cookie rather than local storage. Whatever carries identity, treat it as a credential: never in URLs, never in logs.</p>
+    <div class="callout callout-note"><strong>Note</strong><p>A JWT's payload is base64, not encrypted. Anyone who sees the token can read the claims. Put identifiers in it, not secrets or personal data you would not want in a log.</p></div></section>
+  <section id="oauth-2-0-and-openid-connect"><h2>OAuth 2.0 and OpenID Connect</h2>
+    <p><strong>OAuth 2.0</strong> is a delegation protocol: it lets an application obtain limited access to a user's resources at another service without ever seeing the user's password. <strong>OpenID Connect</strong> (OIDC) is a thin layer on top that turns the same flow into authentication, adding an <strong>ID token</strong> (a JWT describing the user) and a standard <code>userinfo</code> endpoint. When you "sign in with" a corporate identity provider, that is OIDC.</p>
+    <p>The flow you should use for web and mobile applications is the <strong>authorization code flow with PKCE</strong>. PKCE (Proof Key for Code Exchange) binds the code to the client that started the flow, which closes the code interception attacks that made the older implicit flow unsafe.</p>
+    <ol><li>The app generates a random <code>code_verifier</code>, hashes it into a <code>code_challenge</code>, and redirects the browser to the identity provider's authorize endpoint with the challenge, the requested scopes, a <code>state</code> value and its <code>redirect_uri</code>.</li><li>The user authenticates at the provider (password, MFA, whatever policy applies). The provider redirects back to the <code>redirect_uri</code> with a short-lived, single-use authorization code and the same <code>state</code>.</li><li>The app checks <code>state</code> matches what it sent (this is the CSRF protection), then exchanges the code plus the original <code>code_verifier</code> at the token endpoint, over TLS, for an access token, an ID token and usually a refresh token.</li><li>The app validates the ID token: signature against the provider's published keys, <code>iss</code>, <code>aud</code> (must be this app's client id), <code>exp</code>, and the <code>nonce</code> if one was sent. Only then is the user considered signed in.</li></ol>
+    <figure class="diagram" id="fig-oidc-code-flow"><div class="diagram-scroll"><svg viewBox="0 0 910 356" role="img" aria-label="The user&#x27;s browser is redirected from the app to the identity provider&#x27;s authorize endpoint with a code challenge and state. The user authenticates there. The provider redirects the browser back to the app&#x27;s callback with a code and the same state. The app&#x27;s server checks state, then posts the code and the code verifier to the provider&#x27;s token endpoint and receives an ID token, access token and refresh token. The app validates the ID token and creates its own session." style="width:100%;max-width:910px;min-width:540px;height:auto;display:block"><defs><marker id="oidc-code-flow-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="oidc-code-flow-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="oidc-code-flow-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="oidc-code-flow-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="oidc-code-flow-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><rect x="190" y="19" width="332" height="318" rx="10" class="dg-group"/><text x="200" y="330" font-size="10" font-weight="700" letter-spacing="1" class="dg-group-label">YOUR APPLICATION</text><rect x="700" y="19" width="162" height="318" rx="10" class="dg-group"/><text x="710" y="330" font-size="10" font-weight="700" letter-spacing="1" class="dg-group-label">IDENTITY PROVIDER</text><polyline points="371.0,162.0 171.0,162.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#oidc-code-flow-arrow-default)"/><rect x="189.8" y="116.0" width="162.5" height="16" rx="4" class="dg-label-bg"/><text x="271.0" y="124.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">1. redirect · 4. callback</text><polyline points="171.0,194.0 371.0,194.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#oidc-code-flow-arrow-default)"/><polyline points="87.0,150.0 87.0,20.0 767.0,20.0 767.0,42.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#oidc-code-flow-arrow-default)"/><rect x="373.2" y="1.0" width="107.6" height="16" rx="4" class="dg-label-bg"/><text x="427.0" y="9.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">2. sign in (MFA)</text><polyline points="711.0,84.0 115.0,84.0 115.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#oidc-code-flow-arrow-default)"/><rect x="362.2" y="65.0" width="101.5" height="16" rx="4" class="dg-label-bg"/><text x="413.0" y="73.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">3. code + state</text><polyline points="511.0,178.0 781.0,178.0 781.0,258.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#oidc-code-flow-arrow-default)"/><rect x="586.1" y="159.0" width="119.8" height="16" rx="4" class="dg-label-bg"/><text x="646.0" y="167.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">5. code + verifier</text><polyline points="711.0,302.0 457.0,302.0 457.0,206.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#oidc-code-flow-arrow-default)"/><rect x="511.9" y="283.0" width="144.2" height="16" rx="4" class="dg-label-bg"/><text x="584.0" y="291.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">6. id, access, refresh</text><polyline points="425.0,206.0 425.0,270.0 341.0,270.0" fill="none" style="stroke:#34d399" stroke-width="1.6" marker-end="url(#oidc-code-flow-arrow-ok)"/><rect x="317.0" y="251.0" width="132.0" height="16" rx="4" class="dg-label-bg"/><text x="383.0" y="259.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:#34d399">7. validate, sign in</text><rect x="31" y="150.0" width="140" height="56" rx="28.0" class="dg-node dg-actor"/><text x="101.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Browser</text><text x="101.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">carries only the code</text><rect x="371" y="150.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">App server</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">holds code_verifier</text><rect x="711" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="781.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">/authorize</text><text x="781.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">login + MFA</text><rect x="711" y="258.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="781.0" y="279.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">/token</text><text x="781.0" y="297.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">checks verifier</text><rect x="201" y="258.0" width="140" height="56" rx="8" class="dg-node dg-ok"/><text x="271.0" y="279.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#6ee7b7">Session</text><text x="271.0" y="297.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">HttpOnly cookie</text></svg></div><figcaption>The authorization code flow with PKCE: the browser only ever carries a short-lived, single-use code; the app exchanges it server-side, with the verifier, for tokens that the browser never sees.</figcaption></figure>
+    <div class="code"><div class="code-cap">The two redirects of the authorization code flow, with the parameters that matter.</div><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>1. Browser -&gt; Identity provider
+   GET /authorize?response_type=code&amp;client_id=web-app&amp;scope=openid%20profile%20email
+       &amp;redirect_uri=https://app.example.com/callback&amp;state=k3j2...&amp;code_challenge=E9Mr...
+       &amp;code_challenge_method=S256
+
+2. Identity provider -&gt; Browser -&gt; App
+   GET https://app.example.com/callback?code=SplxlOBe...&amp;state=k3j2...
+
+3. App (server side) -&gt; Identity provider
+   POST /token  grant_type=authorization_code&amp;code=SplxlOBe...&amp;redirect_uri=...
+                &amp;client_id=web-app&amp;code_verifier=dBjftJeZ...
+   &lt;- { access_token, id_token, refresh_token, expires_in: 600 }</code></pre></div>
+    <p>Scopes describe what the access token may do (<code>read:orders</code>), and the resource server enforces them; a token with the wrong audience or missing scope must be rejected. Use a maintained library for every step, and register exact <code>redirect_uri</code> values at the provider: a wildcard redirect is an open door for token theft. Machine-to-machine calls use the <strong>client credentials</strong> grant (no user involved), and CI systems increasingly use OIDC federation to obtain cloud credentials without stored keys, which the DevOps track covers under secrets.</p></section>
+  <section id="mfa-passwords-and-phishing-resistance"><h2>MFA, passwords and phishing resistance</h2>
+    <p>Passwords will be phished, reused and leaked. <strong>Multi-factor authentication</strong> adds something the attacker does not have, but factors differ enormously. SMS codes can be intercepted by SIM-swapping and relayed by phishing pages in real time. Time-based one-time codes (TOTP apps) resist SIM swaps but not real-time phishing: the victim types the code into the fake page and the attacker uses it within thirty seconds. Push notifications suffer from <strong>MFA fatigue</strong>, where the attacker triggers prompts until the victim taps approve. Only <strong>phishing-resistant</strong> methods — FIDO2 security keys and platform <strong>passkeys</strong> — bind the login to the genuine site's origin, so a lookalike domain receives nothing usable.</p>
+    <ul><li>Require MFA on everything reachable from the internet: email, source control, cloud consoles, VPN, the identity provider itself.</li><li>Prefer passkeys or security keys for administrators and anyone with production access; allow TOTP as a fallback, avoid SMS.</li><li>Enforce number matching or similar on push approvals to blunt fatigue attacks.</li><li>For passwords: minimum length (12+), check against breached-password lists, no forced periodic rotation, no composition rules that produce <code>Summer2026!</code>.</li><li>Rate-limit and alert on failed logins per account and per source; lock out slowly, not instantly, to avoid self-inflicted denial of service.</li></ul>
+    <div class="callout callout-warning"><strong>Watch out</strong><p>Recovery flows are part of authentication. A strong login with a "reset via email" path means your security equals your email security, and a support desk that resets MFA over the phone is the attacker's favourite entry point.</p></div></section>
+  <section id="least-privilege-for-humans-and-machines"><h2>Least privilege for humans and machines</h2>
+    <p><strong>Least privilege</strong> means every identity has exactly the permissions its current task needs, and no more. It limits the blast radius when (not if) a credential is stolen. In practice you achieve it with <strong>role-based access control</strong> (RBAC): permissions are attached to roles, roles to identities, and both are reviewed. Attribute-based rules (time of day, device posture, resource tags) refine it where roles are too coarse.</p>
+    <p>Machines need identities too, and they are where privilege creep hides. A CI runner with admin because a deploy failed once; a service account shared by six services because nobody wanted to create seven. Give every workload its own identity, scope it to the resources it touches, prefer short-lived credentials obtained at runtime (cloud instance roles, Kubernetes service account tokens, OIDC federation) over long-lived keys, and log every use so anomalies stand out.</p>
+    <div class="code"><div class="code-cap">A cloud IAM policy that says what it means: one action set, one resource, one condition. Compare with the wildcard version it replaces.</div><div class="code-head"><span>json</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadInvoicesForThisService",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:ListBucket"],
+      "Resource": ["arn:aws:s3:::acme-invoices", "arn:aws:s3:::acme-invoices/2026/*"],
+      "Condition": {"Bool": {"aws:SecureTransport": "true"}}
+    }
+  ]
+}</code></pre></div>
+    <p>Grant temporarily where you can: <strong>just-in-time</strong> elevation for production access, approved and time-boxed, is far safer than standing admin rights. Review access on a schedule, and treat a role nobody can explain as a bug. When someone leaves or changes team, their access should change the same day; the identity provider should be the one place where that happens, with every system federated to it.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Inspect a real login and tighten a policy</h2>
+    <ol><li>Sign in to a site that uses "Sign in with Google/GitHub/Microsoft" with your browser's developer tools open on the Network tab. Find the <code>/authorize</code> redirect and identify <code>client_id</code>, <code>scope</code>, <code>state</code>, <code>redirect_uri</code> and <code>code_challenge</code> in the URL.</li><li>Find the callback request and confirm the <code>state</code> value matches. Note that you never see a token in the browser: the code exchange happens server side.</li><li>Paste an ID token (from a test provider, or one you issue yourself with a library) into a local decoder script: split on <code>.</code>, base64-decode the payload, and list <code>iss</code>, <code>aud</code>, <code>exp</code>, <code>iat</code>. Do not paste real tokens into third-party websites.</li><li>Take an IAM policy from a project you have access to (or the DevOps track's zero-to-production project) and rewrite any <code>"Action": "*"</code> or <code>"Resource": "*"</code> to the specific actions and resources actually used. Apply it in a test account and confirm the workload still works.</li><li>Enable a passkey or security key on your own GitHub account and your cloud console, and demote SMS to a recovery method or remove it.</li><li>Write down every place in a service you know where identity is checked. For each, note whether it is authentication or authorisation, and whether the authorisation check lives next to the data access.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Identity &amp; access — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Authn = who are you (once, at the edge); authz = may you do this (every data access)</li><li>Broken authorisation is the top web vulnerability: scope every query by the caller</li><li>Sessions revoke instantly; JWTs scale across services but live until expiry — keep them short</li><li>Use authorization code + PKCE; validate state, signature, iss, aud, exp, nonce</li><li>Phishing-resistant MFA (passkeys, security keys) for anything that matters; avoid SMS</li><li>Every workload gets its own identity with short-lived credentials</li><li>Least privilege is specific actions on specific resources, reviewed and time-boxed</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Cookies and tokens</h3><table><tbody><tr><td><code>Set-Cookie: sid=...; HttpOnly; Secure; SameSite=Lax</code></td><td>Session cookie that scripts cannot read and cross-site forms cannot send</td></tr><tr><td><code>Authorization: Bearer &lt;token&gt;</code></td><td>Token in a header; never in a query string</td></tr><tr><td><code>access token 5-15 min + refresh token</code></td><td>Short exposure, revocable renewal</td></tr><tr><td><code>JWT = header.payload.signature (base64url)</code></td><td>Readable payload; verify signature before trusting</td></tr><tr><td><code>verify iss, aud, exp, nbf, alg (pinned)</code></td><td>The claims every verifier must check</td></tr></tbody></table></div><div class="cheat-group"><h3>OAuth 2.0 / OIDC</h3><table><tbody><tr><td><code>response_type=code + code_challenge (S256)</code></td><td>Authorization code flow with PKCE, for web and mobile</td></tr><tr><td><code>state</code></td><td>Random per request; must match on callback (CSRF)</td></tr><tr><td><code>grant_type=authorization_code + code_verifier</code></td><td>Server-side exchange at the token endpoint</td></tr><tr><td><code>grant_type=client_credentials</code></td><td>Machine-to-machine, no user</td></tr><tr><td><code>id_token vs access_token</code></td><td>Who the user is vs what the app may call</td></tr><tr><td><code>scope=openid profile email</code></td><td>openid makes it OIDC; others request claims or API access</td></tr></tbody></table></div><div class="cheat-group"><h3>MFA by strength</h3><table><tbody><tr><td><code>passkeys / FIDO2 security keys</code></td><td>Origin-bound; phishing resistant; use for admins</td></tr><tr><td><code>TOTP app</code></td><td>Good fallback; phishable in real time</td></tr><tr><td><code>push with number matching</code></td><td>Blunts MFA fatigue</td></tr><tr><td><code>SMS</code></td><td>SIM swap and relay; last resort only</td></tr><tr><td><code>recovery: codes stored offline, no phone resets</code></td><td>Recovery is part of the login</td></tr></tbody></table></div><div class="cheat-group"><h3>Least privilege checks</h3><table><tbody><tr><td><code>no Action: * / Resource: *</code></td><td>Name the actions and the resources</td></tr><tr><td><code>one identity per workload</code></td><td>Blast radius and attribution</td></tr><tr><td><code>short-lived credentials (instance roles, OIDC)</code></td><td>Nothing to leak that lasts</td></tr><tr><td><code>just-in-time elevation, time-boxed</code></td><td>No standing production admin</td></tr><tr><td><code>quarterly access review; leaver = same-day removal</code></td><td>Federate everything to the identity provider</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Checking "is logged in" but not "owns this record", the classic insecure direct object reference.</li><li>Storing JWTs in browser local storage where any injected script can read them.</li><li>Registering a wildcard redirect URI at the identity provider; authorization codes can then be sent anywhere.</li><li>Treating SMS codes as strong MFA, or leaving the recovery path weaker than the login.</li><li>Sharing one service account across many services, so nobody can tell who did what or scope anything down.</li><li>Letting access accumulate; a role nobody can explain is a finding waiting to happen.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "An endpoint `GET /invoices/{id}` requires a valid login and then loads the invoice by id. A logged-in user changes the id and sees another customer's invoice. What failed?", "options": ["Authorisation: the lookup was not scoped to the caller's identity", "Authentication: the login token was not validated properly", "Encryption: the invoice data was not protected in transit", "Session handling: the cookie lacked the HttpOnly attribute"], "answer": 0, "explain": "The user was authenticated correctly; the code simply never checked that the resource belonged to them. Scoping the query by the caller's id makes foreign ids not exist. This is the classic broken access control bug."}, {"q": "A company wants to be able to revoke a user's access within seconds when an employee leaves, across a single web application. Which mechanism fits best?", "options": ["Server-side sessions with an opaque cookie that can be deleted immediately", "Long-lived JWTs so that services can verify without contacting a store", "Tokens embedded in the URL so every link carries the identity", "A JWT with a one-year expiry and the user's roles inside the payload"], "answer": 0, "explain": "A server session is revoked by deleting it; the next request fails. Signed tokens remain valid until they expire unless a denylist is added, which recreates the lookup a session would have needed anyway. Tokens in URLs leak through logs and referrers."}, {"q": "In the OAuth 2.0 authorization code flow, what does the `state` parameter protect against?", "options": ["Cross-site request forgery on the callback, by ensuring the response matches a request the app started", "Interception of the authorization code, by binding it to the client that requested it", "Replay of the access token, by including a timestamp in every API call", "Token theft from local storage, by keeping the token on the server"], "answer": 0, "explain": "The app generates a random `state`, sends it to the provider, and checks that the callback carries the same value, so an attacker cannot make the app complete a login it did not start. Code interception is what PKCE addresses; the other options describe unrelated controls."}, {"q": "Which MFA method still protects an administrator whose password has been phished on a lookalike login page that relays credentials in real time?", "options": ["A FIDO2 security key or passkey, because the credential is bound to the genuine site's origin", "A six-digit TOTP code from an authenticator app entered on the page", "An SMS code sent to the administrator's registered phone number", "A push notification that the administrator approves on their phone"], "answer": 0, "explain": "Origin-bound authenticators refuse to sign for a domain that is not the real one, so the phishing page receives nothing it can relay. TOTP and SMS codes are typed into the fake page and forwarded within their validity window; push approvals can be triggered by the attacker's relayed login."}, {"q": "A CI pipeline uses a long-lived cloud access key stored as a repository secret, with administrator permissions, because \"deploys need to do many things\". What is the best improvement?", "options": ["Replace the key with OIDC federation to a role scoped to the specific resources the deploy touches", "Rotate the administrator key every ninety days and store it in a different secret store", "Keep the key but encrypt it in the repository so only the pipeline can decrypt it", "Split the key into two secrets so that a single leak does not expose the whole value"], "answer": 0, "explain": "Short-lived credentials obtained at runtime remove the stored secret entirely, and a scoped role limits what a compromised pipeline could do. Rotation and encryption still leave a long-lived administrator credential in existence; splitting the value changes nothing."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="sec-crypto.html"><span>← Previous</span><strong>Cryptography in practice</strong></a>
+    <a class="pager-up" href="../education.html#security">All Security modules</a>
+    <a class="pager-link pager-next" href="sec-network.html"><span>Next →</span><strong>Network security &amp; zero trust</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=sec-identity&amp;page=/education/sec-identity.html&amp;title=Identity%20%26%20access">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=sec-identity&amp;page=/education/sec-identity.html&amp;title=Identity%20%26%20access">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

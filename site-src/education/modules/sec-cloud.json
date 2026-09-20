@@ -1,0 +1,189 @@
+{
+  "id": "sec-cloud",
+  "minutes": 35,
+  "intro": "Cloud breaches rarely involve the provider being hacked. They involve a public storage bucket, an access key in a repository, a role that could do everything, or a logging service nobody turned on. The provider secures the data centre and the hypervisor; everything you configure on top is yours to get right, and the configuration surface is enormous. This module gives you the model for splitting that responsibility, the identity and access patterns that prevent most cloud incidents, the handful of misconfigurations that account for most of the rest, and the logging and automated checks that catch drift before an attacker does. Examples use AWS terminology; the ideas map directly to Azure and Google Cloud.",
+  "objectives": [
+    "Explain the shared responsibility model and list what is yours for compute, managed services and serverless",
+    "Design cloud IAM around roles, least privilege, and short-lived credentials, with guardrails at the organisation level",
+    "Recognise and fix the high-impact misconfigurations: public storage, open security groups, unencrypted data, missing MFA",
+    "Turn on and centralise the logs that every cloud investigation depends on",
+    "Run continuous configuration checks and treat findings as alerts"
+  ],
+  "sections": [
+    {
+      "heading": "Shared responsibility, precisely",
+      "blocks": [
+        {"type": "p", "text": "The provider is responsible for the security **of** the cloud: physical facilities, hardware, the hypervisor, the managed service's underlying software. You are responsible for security **in** the cloud: identities and permissions, network configuration, operating systems on your instances, application code, data classification and encryption choices, and logging. The line moves with the service model: on a virtual machine you patch the OS; on a managed database the provider patches the engine but you configure access and backups; on a serverless function you own only code, configuration and permissions."},
+        {"type": "table", "headers": ["Layer", "Virtual machines", "Managed database", "Serverless functions"], "rows": [
+          ["Physical, hypervisor", "Provider", "Provider", "Provider"],
+          ["OS and runtime patches", "You", "Provider", "Provider"],
+          ["Network exposure, IAM", "You", "You", "You"],
+          ["Data, encryption keys, backups", "You", "You (provider offers tools)", "You"],
+          ["Application code and dependencies", "You", "n/a", "You"]
+        ]},
+        {"type": "p", "text": "The practical consequence is that cloud security is mostly configuration security. The same three questions from the threat modelling module apply to every resource: who can reach it (network), who can act on it (IAM), and what happens to the data (encryption, backups, logging). Almost every cloud incident is a wrong answer to one of them."}
+      ]
+    },
+    {
+      "heading": "Identity: roles, not keys; guardrails, not hope",
+      "blocks": [
+        {"type": "p", "text": "Cloud IAM is the control plane for everything else, so it gets the strictest treatment. Humans authenticate through single sign-on with phishing-resistant MFA and assume **roles** for specific tasks; nobody uses the root or owner account for daily work, and its credentials live in a safe with hardware MFA. Workloads use roles attached to the compute (instance profiles, pod identity, function roles) that issue rotating temporary credentials; long-lived access keys exist only where nothing else is possible, with an expiry date and an owner."},
+        {"type": "code", "lang": "json", "caption": "A permission boundary style policy: however broad a developer-created role is, it can never touch IAM or disable logging.", "code": "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [\n    {\"Effect\": \"Allow\", \"Action\": \"*\", \"Resource\": \"*\"},\n    {\n      \"Effect\": \"Deny\",\n      \"Action\": [\n        \"iam:*\", \"organizations:*\", \"cloudtrail:StopLogging\", \"cloudtrail:DeleteTrail\",\n        \"guardduty:Delete*\", \"config:Delete*\", \"kms:ScheduleKeyDeletion\"\n      ],\n      \"Resource\": \"*\"\n    }\n  ]\n}"},
+        {"type": "p", "text": "Above individual accounts sit **organisation-level guardrails**: service control policies (or Azure Policy, GCP organisation policies) that apply to every account regardless of what its administrators do — deny leaving the organisation, deny disabling audit logs, deny public storage, restrict regions. Separate accounts or subscriptions per environment (production, staging, sandbox) so a compromised sandbox key cannot touch production at all. Finally, use the access analysers the provider offers: they list roles and resources reachable from outside your organisation and permissions that have never been used, which is a ready-made least-privilege backlog."},
+        {"type": "callout", "kind": "warning", "text": "`\"Action\": \"*\", \"Resource\": \"*\"` on a workload role is the most common serious finding in cloud reviews. Start from what the workload actually calls (the access analyser will tell you) and write that."}
+      ]
+    },
+    {
+      "heading": "The misconfigurations that cause most incidents",
+      "blocks": [
+        {"type": "p", "text": "A short list accounts for a large share of real cloud breaches. Learn them, then automate checking for them."},
+        {"type": "list", "items": [
+          "**Public object storage**: a bucket or blob container readable by everyone, often holding backups or exports. Turn on the account-level public access block and make exceptions explicit and reviewed.",
+          "**Open security groups**: SSH, RDP, databases or the Kubernetes API reachable from `0.0.0.0/0`. Covered in the network module; scanners find these within minutes.",
+          "**Leaked credentials**: access keys in code, in images, in CI logs. Prefer roles; scan for keys; alert on use from new locations.",
+          "**Over-privileged roles**: wildcard policies, cross-account trust to anyone, roles assumable without conditions.",
+          "**No MFA on the root or owner account**, or on console users with production access.",
+          "**Unencrypted storage and snapshots**: volumes, databases and backups without provider-managed or customer-managed keys; public snapshots.",
+          "**Metadata service v1** on instances, which turns any SSRF into stolen role credentials. Require v2 (token-based) everywhere.",
+          "**Logging off**: no audit trail, no flow logs, no object access logs, so there is nothing to investigate with."
+        ]},
+        {"type": "code", "lang": "bash", "caption": "Finding three of them from the CLI: public buckets, wide-open security group rules, and instances that still allow metadata v1.", "code": "# buckets without the public access block (should be none; also set it at the account level)\nfor b in $(aws s3api list-buckets --query 'Buckets[].Name' --output text); do\n  aws s3api get-public-access-block --bucket \"$b\" >/dev/null 2>&1 || echo \"NO PUBLIC ACCESS BLOCK: $b\"\ndone\n\n# security group rules open to the world on anything other than 80/443\naws ec2 describe-security-group-rules \\\n  --query \"SecurityGroupRules[?CidrIpv4=='0.0.0.0/0' && !IsEgress && FromPort!=\\`80\\` && FromPort!=\\`443\\`].[GroupId,FromPort,ToPort]\" --output table\n\n# instances not requiring IMDSv2\naws ec2 describe-instances \\\n  --query \"Reservations[].Instances[?MetadataOptions.HttpTokens!='required'].[InstanceId,MetadataOptions.HttpTokens]\" --output table"},
+        {"type": "p", "text": "Encryption at rest is cheap and should be the default for every volume, database, queue and bucket, using provider-managed keys at minimum and customer-managed keys where you need to control access and rotation or prove it to an auditor. Encryption in transit is TLS to every endpoint, including the provider's own APIs, which policy can require (`aws:SecureTransport`)."}
+      ]
+    },
+    {
+      "heading": "Logs are the investigation",
+      "blocks": [
+        {"type": "p", "text": "When something goes wrong in the cloud, the questions are always the same: which identity did what, from where, to which resource, when. The **API audit trail** (CloudTrail, Azure Activity Log, Cloud Audit Logs) answers them, but only if it is enabled in every region and account, delivered to a central bucket the source account cannot delete from, and retained long enough — a year is a reasonable floor, since intrusions are often discovered months later. Add **flow logs** for network questions and **data access logs** for the storage that holds anything sensitive."},
+        {"type": "code", "lang": "hcl", "caption": "An organisation-wide trail: all regions, all accounts, log file validation on, delivered to a central account.", "code": "resource \"aws_cloudtrail\" \"org\" {\n  name                          = \"org-trail\"\n  s3_bucket_name                = aws_s3_bucket.audit_logs.id\n  is_organization_trail         = true\n  is_multi_region_trail         = true\n  include_global_service_events = true\n  enable_log_file_validation    = true\n  kms_key_id                    = aws_kms_key.audit.arn\n\n  event_selector {\n    read_write_type           = \"All\"\n    include_management_events = true\n    data_resource {\n      type   = \"AWS::S3::Object\"\n      values = [\"arn:aws:s3:::acme-customer-exports/\"]\n    }\n  }\n}"},
+        {"type": "p", "text": "Logs you never look at are still valuable in an incident, but logs that raise alerts are valuable before one. The provider's threat detection services (GuardDuty, Defender for Cloud, Security Command Center) consume these logs and flag credential use from unusual locations, crypto-mining patterns, calls from known-bad addresses and privilege escalation sequences. Turning them on is one API call and is usually the best-value security control in the account."}
+      ]
+    },
+    {
+      "heading": "Continuous checks and infrastructure as code",
+      "blocks": [
+        {"type": "p", "text": "Configuration drifts: a rule is widened during an incident, a bucket is made public for a demo, a role gains a wildcard to make a deploy work. Continuous **configuration checks** compare the live estate against a baseline (the CIS cloud benchmarks are the usual one) and report or auto-remediate: the provider's config services and open-source tools such as Prowler do this across hundreds of rules. Treat a new critical finding as an alert with an owner, not as a monthly report."},
+        {"type": "code", "lang": "bash", "caption": "A baseline check with Prowler, and a policy-as-code check on Terraform before it is applied.", "code": "# assess an account against the CIS benchmark and write an HTML report\nprowler aws --compliance cis_2.0_aws --output-formats html --output-directory ./prowler-out\n\n# catch the misconfiguration before it exists: scan the Terraform plan in CI\ncheckov -d infra/ --framework terraform --check CKV_AWS_18,CKV_AWS_19,CKV_AWS_23,CKV_AWS_53,CKV_AWS_54,CKV_AWS_55,CKV_AWS_56"},
+        {"type": "p", "text": "The most durable fix is upstream: because your infrastructure is code, the security rules can be tests on that code. Policy checks in the pipeline reject a public bucket or an open port before the plan is applied, the same way unit tests reject broken logic. Combine that with guardrails at the organisation level, roles instead of keys, encryption by default, central logging and threat detection, and the cloud stops being the place where one checkbox takes the company down."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Audit an account and fix what you find",
+    "steps": [
+      "In a test account (or the one from the zero-to-production project) run the three CLI checks from the lesson: public access blocks, world-open security group rules, and IMDSv1 instances. Note every finding.",
+      "Enable the account-level public access block for object storage and re-run the bucket check.",
+      "Set `http_tokens = \"required\"` in the Terraform `metadata_options` of an instance, apply, and confirm from the instance that a plain metadata `curl` without a token now fails.",
+      "Open the IAM access analyser (or its equivalent) and list unused permissions for one workload role; rewrite the role to the actions it actually used in the last 90 days.",
+      "Create a multi-region audit trail with log file validation to a bucket in the same account, then use the trail's lookup to find your own console login event.",
+      "Run `prowler aws --severity critical high` and pick three findings: fix two in Terraform and document one as accepted with a reason.",
+      "Add `checkov -d infra/` to the CI workflow of a Terraform repository and make a deliberately public bucket change to confirm the pipeline fails."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Provider secures the cloud; you secure what you configure in it: IAM, network, data, logging",
+      "Roles and temporary credentials for humans and workloads; root/owner locked with hardware MFA",
+      "Organisation guardrails: SCPs that nobody in an account can override; separate accounts per environment",
+      "The usual breaches: public storage, open groups, leaked keys, wildcard roles, no MFA, unencrypted data, IMDSv1, logging off",
+      "Central, tamper-resistant audit trail in every region plus threat detection turned on",
+      "Continuous checks against a benchmark; policy-as-code on Terraform before apply"
+    ],
+    "groups": [
+      {"title": "IAM patterns", "items": [
+        {"syntax": "SSO + phishing-resistant MFA -> assume role", "desc": "Humans never use long-lived keys"},
+        {"syntax": "instance profile / pod identity / function role", "desc": "Workloads get rotating temporary credentials"},
+        {"syntax": "permission boundary: Deny iam:*, cloudtrail:StopLogging", "desc": "Caps what any created role can do"},
+        {"syntax": "SCP: deny leave org, deny disable logging, deny public S3", "desc": "Guardrails above accounts"},
+        {"syntax": "access analyser: external access, unused permissions", "desc": "Least-privilege backlog, generated"},
+        {"syntax": "root: no keys, hardware MFA, alarm on use", "desc": "Break-glass only"}
+      ]},
+      {"title": "Quick checks (AWS CLI)", "items": [
+        {"syntax": "aws s3api get-public-access-block --bucket B", "desc": "Missing block = candidate for exposure"},
+        {"syntax": "aws ec2 describe-security-group-rules --query \"...CidrIpv4=='0.0.0.0/0'...\"", "desc": "World-open ingress rules"},
+        {"syntax": "describe-instances ... MetadataOptions.HttpTokens!='required'", "desc": "Instances still on IMDSv1"},
+        {"syntax": "aws iam get-credential-report", "desc": "Users with keys, key age, MFA status"},
+        {"syntax": "aws cloudtrail lookup-events --lookup-attributes AttributeKey=Username,AttributeValue=U", "desc": "What an identity did"}
+      ]},
+      {"title": "Data and logging", "items": [
+        {"syntax": "encryption at rest by default (SSE-KMS / CMK)", "desc": "Volumes, databases, buckets, snapshots"},
+        {"syntax": "Condition: aws:SecureTransport true", "desc": "Require TLS to the API and storage"},
+        {"syntax": "org trail, multi-region, log file validation, central bucket", "desc": "Audit trail nobody can quietly disable"},
+        {"syntax": "flow logs + S3 data events on sensitive buckets", "desc": "Network and object access questions"},
+        {"syntax": "GuardDuty / Defender / SCC on", "desc": "Managed threat detection from the logs"},
+        {"syntax": "retention >= 1 year", "desc": "Breaches are found late"}
+      ]},
+      {"title": "Continuous checks", "items": [
+        {"syntax": "prowler aws --compliance cis_2.0_aws", "desc": "Benchmark the live account"},
+        {"syntax": "checkov -d infra/ --framework terraform", "desc": "Block misconfiguration at plan time"},
+        {"syntax": "config rules / Azure Policy / org policies", "desc": "Provider-native drift detection and remediation"},
+        {"syntax": "new critical finding = alert with owner", "desc": "Not a monthly PDF"}
+      ]}
+    ],
+    "pitfalls": [
+      "Working from the root or owner account because it was the first one created.",
+      "A wildcard workload role that was going to be tightened after launch.",
+      "Making a bucket public for a demo and forgetting; the account-level block prevents the class.",
+      "Leaving IMDSv1 enabled, so any SSRF in any app hands out instance credentials.",
+      "Logging in one region only, or to a bucket the same account can delete from.",
+      "Reading cloud security reports monthly instead of alerting on new critical findings."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A team runs its application on a managed database service. Which of these is still their responsibility rather than the provider's?",
+      "options": [
+        "Restricting network access to the database and choosing who can authenticate to it",
+        "Patching the database engine's software vulnerabilities",
+        "Securing the hypervisor the database's virtual machine runs on",
+        "Physically securing the data centre where the storage lives"
+      ],
+      "answer": 0,
+      "explain": "Managed services shift OS and engine patching to the provider, but access configuration, identities, data classification, encryption choices and backups remain the customer's. The other options are on the provider's side of the shared responsibility line."
+    },
+    {
+      "q": "A workload role has `\"Action\": \"*\", \"Resource\": \"*\"`. What is the most practical way to reduce it without breaking the workload?",
+      "options": [
+        "Use the access analyser's unused-permission or last-accessed data to rewrite the policy to the actions actually called, then monitor for access-denied errors",
+        "Remove the role entirely and switch the workload to a long-lived access key with the same permissions",
+        "Keep the policy but add MFA to the role so that it can only be assumed interactively",
+        "Move the workload into a different region where the policy does not apply"
+      ],
+      "answer": 0,
+      "explain": "Providers record which actions a role has used; that list is the least-privilege policy. Keys are worse than roles, workloads cannot do MFA, and policies are not regional."
+    },
+    {
+      "q": "Why does requiring metadata service version 2 (token-based) on instances matter for application security?",
+      "options": [
+        "With v1, any server-side request forgery bug in an application can fetch the instance role's credentials with a single GET; v2 requires a token obtained with a PUT that forwarded requests cannot make",
+        "Version 2 encrypts the instance's disk, which protects credentials stored on it",
+        "Version 1 allows other tenants on the same host to read the instance's metadata",
+        "Version 2 disables the instance role so that applications must use access keys instead"
+      ],
+      "answer": 0,
+      "explain": "The v2 session token must be requested with a PUT and a hop-limit header, which typical SSRF primitives and proxies cannot produce. It closes the most common path from a web bug to cloud credentials. The other statements are not what IMDSv2 does."
+    },
+    {
+      "q": "An intrusion in a cloud account is discovered four months after it began. Which earlier decision most determines whether the investigation can establish what happened?",
+      "options": [
+        "Whether the multi-region audit trail was enabled and delivered to a central bucket with at least a year of retention",
+        "Whether the instances used the latest operating system image at the time",
+        "Whether the account's monthly cost reports were reviewed by finance",
+        "Whether the security groups referenced other groups rather than CIDR ranges"
+      ],
+      "answer": 0,
+      "explain": "Without a complete, retained, tamper-resistant API audit trail there is no record of which identity did what. Image freshness and group design affect prevention, not investigation; cost reports rarely show intrusions in time."
+    },
+    {
+      "q": "A developer's Terraform change makes a storage bucket public to serve a demo. Where is the best place to stop this class of mistake?",
+      "options": [
+        "Policy-as-code in the CI pipeline that fails the plan, plus an account-level public access block as a backstop",
+        "A quarterly manual review of all buckets by the security team",
+        "A wiki page listing which buckets are allowed to be public",
+        "An email alert to the developer after the bucket has been public for 24 hours"
+      ],
+      "answer": 0,
+      "explain": "Catching the misconfiguration before it exists (in the plan) and making it impossible at the account level are preventive; reviews, wikis and delayed alerts are detective at best and slow."
+    }
+  ]
+}

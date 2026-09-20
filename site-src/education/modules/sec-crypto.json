@@ -1,0 +1,189 @@
+{
+  "id": "sec-crypto",
+  "minutes": 35,
+  "intro": "You will never implement a cipher, and you should not try. What you will do, constantly, is choose between primitives that look similar and behave very differently: a hash versus a MAC, encryption versus signing, a password hash versus a fast hash, TLS that verifies the server versus TLS that merely encrypts. Getting those choices right is most of applied cryptography for an engineer. This module covers the handful of primitives you actually use, what each one guarantees, the standard algorithms to reach for in 2026, and the mistakes that turn strong cryptography into decoration.",
+  "objectives": [
+    "Choose correctly between hashing, MACs, symmetric encryption, asymmetric encryption and signatures for a given need",
+    "Store and verify passwords with a modern, slow, salted hash",
+    "Explain how TLS establishes an encrypted, authenticated channel and how certificates chain to a trusted root",
+    "Generate keys, certificates and random values with standard tools instead of improvising",
+    "Recognise the classic misuse patterns: ECB mode, reused nonces, unverified certificates, MD5 for passwords, secrets in code"
+  ],
+  "sections": [
+    {
+      "heading": "Five primitives, five guarantees",
+      "blocks": [
+        {"type": "p", "text": "Almost every security property you need is built from five building blocks. Each one answers a different question, and using the wrong one is the root of most cryptographic bugs."},
+        {"type": "table", "headers": ["Primitive", "Question it answers", "Use in 2026"], "rows": [
+          ["**Hash** (SHA-256)", "Is this the same data? (integrity, fingerprint)", "Checksums, content addressing, commit ids"],
+          ["**MAC** (HMAC-SHA256)", "Did someone with the shared key produce this?", "Webhook signatures, session cookies, API request signing"],
+          ["**Symmetric encryption** (AES-256-GCM, ChaCha20-Poly1305)", "Can only key holders read this?", "Data at rest, tokens, backups; both sides share a key"],
+          ["**Asymmetric encryption / key exchange** (X25519, RSA-OAEP)", "Can I send a secret to someone whose public key I have?", "TLS key exchange, envelope encryption, age/GPG"],
+          ["**Signature** (Ed25519, ECDSA P-256, RSA-PSS)", "Did the holder of this private key produce it, and can anyone verify?", "Certificates, JWTs, signed commits, artifact signing"]
+        ]},
+        {"type": "p", "text": "Two consequences follow. A plain hash proves nothing about who produced data, because anyone can compute it; if you need authenticity, you need a MAC (shared secret) or a signature (public/private pair). And encryption alone does not prevent tampering: someone can flip bits in ciphertext and you would decrypt garbage without noticing. That is why modern symmetric modes are **authenticated encryption** (AEAD), which encrypt and MAC in one operation, and why you should refuse to use anything else."},
+        {"type": "callout", "kind": "warning", "text": "Never use MD5 or SHA-1 for anything security-related; both have practical collision attacks. Never use AES in ECB mode; identical plaintext blocks produce identical ciphertext blocks and patterns leak straight through. Never reuse a nonce with the same key in GCM or ChaCha20-Poly1305; a single reuse breaks the authentication."}
+      ]
+    },
+    {
+      "heading": "Passwords are not data to encrypt",
+      "blocks": [
+        {"type": "p", "text": "Passwords need a different kind of hash. Fast hashes such as SHA-256 let an attacker who steals your database try billions of guesses per second on a GPU. A **password hashing function** is deliberately slow and memory-hungry, and includes a random **salt** per password so that identical passwords hash differently and precomputed tables are useless. The current recommendations are Argon2id first, then scrypt, then bcrypt; all three are fine, PBKDF2 is acceptable where nothing else is available."},
+        {"type": "code", "lang": "python", "caption": "Hashing and verifying a password with Argon2id. The library chooses the salt and encodes the parameters into the hash string.", "code": "from argon2 import PasswordHasher\nfrom argon2.exceptions import VerifyMismatchError\n\nph = PasswordHasher()  # argon2id, sensible defaults: 64 MiB memory, 3 iterations\n\nstored = ph.hash(\"correct horse battery staple\")\n# '$argon2id$v=19$m=65536,t=3,p=4$<salt>$<hash>'  -> save this whole string\n\n\ndef login(candidate: str) -> bool:\n    try:\n        ph.verify(stored, candidate)\n    except VerifyMismatchError:\n        return False\n    # parameters can be raised over time; rehash on login if they are now too weak\n    if ph.check_needs_rehash(stored):\n        pass  # store ph.hash(candidate) in place of the old value\n    return True"},
+        {"type": "p", "text": "Two related rules. Compare secrets with a **constant-time comparison** (`hmac.compare_digest` in Python, `crypto.timingSafeEqual` in Node) so that response time does not leak how many leading bytes matched. And never log, email or store a password in the clear — not even temporarily, not even in a debug message."},
+        {"type": "callout", "kind": "tip", "text": "Encrypting passwords instead of hashing them is a classic mistake: whoever holds the key can read every password, and keys get copied. Hashing is one-way by design; the system never needs the original."}
+      ]
+    },
+    {
+      "heading": "TLS and certificates, without the mystique",
+      "blocks": [
+        {"type": "p", "text": "TLS gives a connection three things: **confidentiality** (an eavesdropper sees noise), **integrity** (modifications are detected) and **server authentication** (you are talking to the server the certificate names). Modern TLS 1.3 does this in one round trip: the client sends a key share, the server replies with its own key share, its certificate and a signature proving it holds the certificate's private key, and both sides derive the session keys with the exchanged shares. The private key never crosses the wire; a captured recording cannot be decrypted later because the session keys are ephemeral (**forward secrecy**)."},
+        {"type": "p", "text": "The certificate is a signed statement: \"this public key belongs to `api.example.com`, says this certificate authority, until this date.\" The client trusts it because the CA's certificate is signed by an intermediate that is signed by a **root** in the client's trust store. Break any link (expired, wrong name, unknown issuer) and the connection must fail. Clients that disable verification to make an error go away (`verify=False`, `-k`, `InsecureSkipVerify`) have turned TLS into encryption with a stranger."},
+        {"type": "code", "lang": "bash", "caption": "Inspecting a live certificate chain and its expiry from the command line.", "code": "# Show the chain the server presents and who issued each certificate\nopenssl s_client -connect example.com:443 -servername example.com </dev/null 2>/dev/null \\\n  | openssl x509 -noout -subject -issuer -dates\n\n# Verify against the system trust store; exit code is non-zero on failure\ncurl -sSI https://example.com/ >/dev/null && echo \"chain ok\"\n\n# Fingerprint a certificate file (for pinning or comparing)\nopenssl x509 -in server.crt -noout -fingerprint -sha256"},
+        {"type": "p", "text": "For services you run, get certificates from a public CA via ACME (Let's Encrypt or your cloud provider's certificate manager) and let automation renew them; expired certificates remain one of the most common self-inflicted outages. Inside a cluster or between your own services, use **mutual TLS** (mTLS), where the client also presents a certificate, typically issued by a private CA or a service mesh. That turns \"encrypted\" into \"encrypted and both sides know who the other is.\""}
+      ]
+    },
+    {
+      "heading": "Keys, randomness and where things live",
+      "blocks": [
+        {"type": "p", "text": "Cryptography is only as strong as the handling of its keys. The practical rules: generate keys and random values from the operating system's cryptographic source (`/dev/urandom`, `secrets` in Python, `crypto.randomBytes` in Node), never from a general-purpose random function or a timestamp. Keep private keys and symmetric keys out of source code and images; load them from a secrets manager or a cloud **key management service** (KMS) at runtime. Rotate keys on a schedule and immediately on suspicion, which means every consumer must handle more than one valid key at a time."},
+        {"type": "p", "text": "Cloud KMS services also enable **envelope encryption**: a data encryption key encrypts the data, and the KMS master key (which never leaves the hardware) encrypts the data key. You store the encrypted data key next to the data and ask the KMS to unwrap it when needed. Applications never see the master key, access is logged per call, and revoking access is one policy change. It is the standard way to encrypt large data at rest."},
+        {"type": "code", "lang": "bash", "caption": "Generating keys and secrets correctly with standard tools.", "code": "# 32 random bytes as hex, for an API secret or HMAC key\nopenssl rand -hex 32\n\n# Modern signing key pair (Ed25519) for SSH or artifact signing\nssh-keygen -t ed25519 -C \"deploy@example.com\" -f deploy_key\n\n# Private CA key and self-signed root, then a server certificate signed by it\nopenssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \\\n  -keyout ca.key -out ca.crt -days 3650 -subj \"/CN=internal-ca\"\nopenssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \\\n  -keyout svc.key -out svc.csr -subj \"/CN=api.internal\"\nopenssl x509 -req -in svc.csr -CA ca.crt -CAkey ca.key -CAcreateserial \\\n  -out svc.crt -days 365 -copy_extensions copyall"},
+        {"type": "callout", "kind": "note", "text": "Key sizes that are fine today: AES-256, SHA-256, RSA 3072 or larger, ECDSA P-256, Ed25519, X25519. Post-quantum key exchange (ML-KEM) is arriving in TLS libraries and browsers; you adopt it by upgrading, not by changing your code."}
+      ]
+    },
+    {
+      "heading": "Putting it together: tokens, signatures and the API",
+      "blocks": [
+        {"type": "p", "text": "A **JWT** is a signed (sometimes encrypted) JSON document. The signature proves it was issued by the holder of the signing key and has not been altered; it does not make the contents secret, since the payload is only base64-encoded. Verify the signature with the expected algorithm pinned in code (never trust the `alg` header from the token), check `exp`, `iss` and `aud`, and keep lifetimes short. The same rules apply to any signed cookie or webhook: verify before parsing, reject on failure, and treat replay (a valid old message sent again) with timestamps or nonces."},
+        {"type": "code", "lang": "python", "caption": "Verifying a webhook signature the way providers document it: HMAC over the raw body, constant-time comparison, timestamp window.", "code": "import hmac\nimport hashlib\nimport time\n\nSECRET = b\"...from the secrets manager...\"\n\n\ndef verify(raw_body: bytes, signature_header: str, sent_at: int) -> bool:\n    if abs(time.time() - sent_at) > 300:          # 5-minute replay window\n        return False\n    expected = hmac.new(SECRET, f\"{sent_at}.\".encode() + raw_body, hashlib.sha256).hexdigest()\n    return hmac.compare_digest(expected, signature_header)"},
+        {"type": "p", "text": "The theme of this module is choosing, not inventing. Hash to fingerprint, MAC or sign to prove origin, AEAD to keep secrets, TLS to protect the wire, a slow salted hash for passwords, the OS for randomness, a KMS for keys. If you find yourself writing a loop that XORs bytes, or building your own token format, stop and use the library that a thousand other teams already audit."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Hash, sign, verify and inspect",
+    "steps": [
+      "Install the Argon2 library (`pip install argon2-cffi`) and hash the same password twice. Confirm the two hashes differ (different salts) and that both verify.",
+      "Time `ph.verify` with the default parameters, then create a `PasswordHasher(time_cost=8)` and time it again. Note the trade-off you are choosing between login latency and attacker cost.",
+      "Write the webhook verifier from the lesson and a tiny sender that signs a body. Send a valid message, a tampered body, and a message with a timestamp 10 minutes old. All three outcomes should be what you expect.",
+      "Run the `openssl s_client` command against three public sites and note the issuer and the expiry of each leaf certificate.",
+      "Create the private CA and the server certificate from the lesson, start a local HTTPS server with them, and `curl` it once with `--cacert ca.crt` (works) and once without (fails). Read the failure message carefully.",
+      "Generate a 32-byte secret with `openssl rand -hex 32` and store it in your shell's secrets manager or a `.env` file that is git-ignored; confirm `git status` does not list it."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Hash = integrity fingerprint; MAC = origin with shared key; signature = origin verifiable by anyone",
+      "Encryption without authentication is broken; use AEAD (AES-GCM, ChaCha20-Poly1305) only",
+      "Passwords: Argon2id/scrypt/bcrypt with a per-password salt, never a fast hash, never encryption",
+      "TLS: verify the certificate chain and name; disabling verification removes authentication",
+      "Randomness and keys come from the OS and a KMS, never from code or timestamps",
+      "Verify signatures and MACs in constant time, pin the algorithm, check expiry and audience",
+      "Never reuse a nonce with the same key; never use ECB, MD5 or SHA-1 for security"
+    ],
+    "groups": [
+      {"title": "Which primitive", "items": [
+        {"syntax": "SHA-256", "desc": "Fingerprint / checksum; proves nothing about who made it"},
+        {"syntax": "HMAC-SHA256", "desc": "Authenticity with a shared secret: webhooks, cookies, signed URLs"},
+        {"syntax": "AES-256-GCM / ChaCha20-Poly1305", "desc": "Authenticated symmetric encryption; unique nonce per message"},
+        {"syntax": "X25519 / RSA-OAEP", "desc": "Key exchange or encrypting to a public key"},
+        {"syntax": "Ed25519 / ECDSA P-256 / RSA-PSS", "desc": "Signatures: certificates, JWTs, commits, artifacts"},
+        {"syntax": "Argon2id / scrypt / bcrypt", "desc": "Password hashing: slow, memory-hard, salted"}
+      ]},
+      {"title": "OpenSSL and friends", "items": [
+        {"syntax": "openssl rand -hex 32", "desc": "256-bit secret from the OS random source"},
+        {"syntax": "openssl s_client -connect HOST:443 -servername HOST", "desc": "Show the presented certificate chain"},
+        {"syntax": "openssl x509 -in FILE -noout -subject -issuer -dates", "desc": "Read a certificate's identity and validity"},
+        {"syntax": "openssl x509 -noout -fingerprint -sha256", "desc": "Fingerprint for pinning or comparison"},
+        {"syntax": "ssh-keygen -t ed25519", "desc": "Modern SSH / signing key pair"},
+        {"syntax": "sha256sum FILE", "desc": "Checksum a download; compare with the published value"}
+      ]},
+      {"title": "Passwords and comparisons", "items": [
+        {"syntax": "PasswordHasher().hash(pw)", "desc": "Argon2id with defaults; store the full encoded string"},
+        {"syntax": "ph.verify(stored, candidate)", "desc": "Raises on mismatch; catch VerifyMismatchError"},
+        {"syntax": "ph.check_needs_rehash(stored)", "desc": "Upgrade parameters at next successful login"},
+        {"syntax": "hmac.compare_digest(a, b)", "desc": "Constant-time equality for secrets and MACs"},
+        {"syntax": "secrets.token_urlsafe(32)", "desc": "Random token for sessions, reset links, API keys"}
+      ]},
+      {"title": "TLS facts", "items": [
+        {"syntax": "TLS 1.3: 1-RTT, forward secrecy", "desc": "Ephemeral keys; recordings cannot be decrypted later"},
+        {"syntax": "chain: leaf <- intermediate <- root", "desc": "Root must be in the client trust store"},
+        {"syntax": "SAN must match the hostname", "desc": "Name mismatch is a failure, not a warning to click through"},
+        {"syntax": "ACME (Let's Encrypt)", "desc": "Automated issuance and renewal; expiry outages are self-inflicted"},
+        {"syntax": "mTLS", "desc": "Both sides present certificates; service identity inside the perimeter"}
+      ]},
+      {"title": "Tokens and JWTs", "items": [
+        {"syntax": "pin alg in code, ignore header alg", "desc": "Prevents none / HS256-with-public-key confusion attacks"},
+        {"syntax": "check exp, iss, aud", "desc": "Expired, wrong issuer or wrong audience must fail"},
+        {"syntax": "payload is base64, not encrypted", "desc": "Never put secrets in a JWT payload"},
+        {"syntax": "timestamp + nonce", "desc": "Replay protection for webhooks and signed requests"}
+      ]}
+    ],
+    "pitfalls": [
+      "Using `verify=False` or `-k` to silence a certificate error in production code; you have removed authentication, not fixed anything.",
+      "Storing passwords with SHA-256 or, worse, encrypting them so they can be recovered.",
+      "Reusing a nonce or IV with the same key in GCM; one reuse leaks the authentication key.",
+      "Comparing a MAC with `==`, which leaks timing information byte by byte.",
+      "Trusting the `alg` field inside a JWT instead of pinning the expected algorithm.",
+      "Hard-coding keys in source or baking them into container images; rotate them and load them from a secrets manager."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A payment provider sends your API a webhook with a header containing a value computed over the request body and a shared secret. What is that value, and what does verifying it prove?",
+      "options": [
+        "An HMAC; it proves the message came from a holder of the shared secret and was not altered",
+        "A SHA-256 hash; it proves the body has not been altered in transit",
+        "An asymmetric signature; it proves the provider's identity to any third party",
+        "An encrypted copy of the body; it proves that nobody else could read the payload"
+      ],
+      "answer": 0,
+      "explain": "A MAC over the body with a shared key gives both integrity and authenticity between the two parties that hold the key. A plain hash could be recomputed by anyone who changed the body, and a signature would need the provider's public key rather than a shared secret."
+    },
+    {
+      "q": "You inherit a user table whose passwords are stored as unsalted SHA-256 hashes. What is the correct fix?",
+      "options": [
+        "Rehash each password with Argon2id (or bcrypt) at the user's next successful login and switch verification to the new hash",
+        "Encrypt the existing SHA-256 column with AES-256-GCM using a key from the KMS",
+        "Add a global salt to the application and rehash the existing SHA-256 values with it",
+        "Switch to SHA-512, which is significantly slower for attackers to compute"
+      ],
+      "answer": 0,
+      "explain": "Passwords need a slow, memory-hard, per-user salted hash. You cannot convert existing hashes without the original passwords, so you upgrade transparently when each user next logs in. Encrypting the column or changing to another fast hash does not stop GPU guessing, and a single global salt does not prevent cracking many users at once."
+    },
+    {
+      "q": "A service encrypts records with AES-256-GCM and, for simplicity, uses the same nonce for every record under one key. What is the consequence?",
+      "options": [
+        "The authentication is broken and an attacker can forge or tamper with ciphertexts",
+        "Nothing serious, because the key is 256 bits and remains secret",
+        "Records become slightly larger because the nonce is stored with each one",
+        "Decryption becomes slower because the nonce cannot be cached"
+      ],
+      "answer": 0,
+      "explain": "GCM requires a unique nonce per message under a given key. Reusing it leaks the XOR of plaintexts and, critically, allows recovery of the authentication subkey so forgeries are possible. Key length does not help; the mode's guarantees depend on nonce uniqueness."
+    },
+    {
+      "q": "A deployment script fails with a certificate verification error when calling an internal API. A colleague suggests adding `-k` to the `curl` command. What is the correct response?",
+      "options": [
+        "Fix the trust instead: install the internal CA certificate on the client or issue the API a certificate from a trusted CA",
+        "Accept the suggestion for internal traffic, since the network is private and the data is already encrypted",
+        "Accept it temporarily and add a comment so the flag can be removed when someone has time",
+        "Replace `-k` with a longer timeout, since verification errors are usually caused by slow responses"
+      ],
+      "answer": 0,
+      "explain": "Disabling verification keeps encryption but removes authentication; anyone on the path can present their own certificate and read everything. The fix is to make the chain valid: trust the internal CA on the client, or use a certificate the client already trusts."
+    },
+    {
+      "q": "An API validates JWTs by reading the `alg` field from the token header and verifying accordingly. Why is that dangerous?",
+      "options": [
+        "An attacker can choose the algorithm, for example `none` or a symmetric one using the public key as the secret, and forge tokens",
+        "It makes verification slower because the algorithm must be looked up for each request",
+        "It prevents key rotation because the algorithm is fixed inside every token",
+        "It leaks the signing algorithm to clients, which weakens the signature's security"
+      ],
+      "answer": 0,
+      "explain": "The verifier must decide the algorithm, not the token. Historic attacks set `alg` to `none` (no signature) or switched an RSA-verified service to HMAC using the public key as the shared secret. Pin the expected algorithm and key in code."
+    }
+  ]
+}

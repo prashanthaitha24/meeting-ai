@@ -1,0 +1,187 @@
+{
+  "id": "sec-devsecops",
+  "minutes": 30,
+  "intro": "Security that happens once a year, in a document, after the code has shipped, is a report about the past. DevSecOps moves the checks into the place where code actually changes: the pull request, the build, the deploy. Done badly it is a wall of red findings that everyone learns to ignore. Done well it is a set of fast, precise gates that catch the specific bug classes that matter, plus a steady stream of low-severity findings handled like any other technical debt. This module shows which scanners belong at which stage, how to tune them so that a failing check means something, and how to measure whether the whole thing is working.",
+  "objectives": [
+    "Place SAST, secret scanning, dependency scanning, container scanning, IaC scanning and DAST at the right stage of the pipeline",
+    "Configure gates that block on high-confidence, high-severity findings and report the rest",
+    "Manage findings as work: triage, ownership, suppression with reasons, expiry",
+    "Keep pipelines fast enough that security checks are not skipped",
+    "Track the metrics that show whether the program reduces risk"
+  ],
+  "sections": [
+    {
+      "heading": "The right check at the right stage",
+      "blocks": [
+        {"type": "p", "text": "Each class of scanner sees a different kind of problem and costs a different amount of time, so each belongs at a specific point. Fast, precise checks run on every commit; slower or noisier ones run on merge or on a schedule; the slowest run against a deployed environment."},
+        {"type": "table", "headers": ["Stage", "Check", "Catches"], "rows": [
+          ["Pre-commit / PR", "Secret scanning, linting, SAST on the diff", "Leaked keys, injection patterns, insecure APIs"],
+          ["PR", "Dependency audit, IaC scanning, licence check", "Known-vulnerable packages, public buckets, open ports"],
+          ["Build on merge", "Container scanning, SBOM, signing, provenance", "Vulnerable base images, unsigned artifacts"],
+          ["Deploy", "Admission policy, config validation", "Unsigned or non-compliant workloads"],
+          ["Scheduled (nightly/weekly)", "Full SAST, DAST against staging, re-scan stored SBOMs", "Newly published vulnerabilities, runtime-only bugs"]
+        ]},
+        {"type": "p", "text": "**SAST** (static analysis) reads code for dangerous patterns: string-built queries, unsafe deserialisation, hard-coded credentials. **DAST** (dynamic analysis) attacks a running application over HTTP and finds what only shows at runtime: missing headers, reflected input, authentication issues. **SCA** (software composition analysis) is dependency scanning. IaC scanners read Terraform and Kubernetes manifests for misconfiguration. Each has blind spots; together they cover most of the OWASP categories before a human reviewer looks."},
+        {"type": "callout", "kind": "note", "text": "The DevOps and supply chain modules already put secret scanning, dependency audit, image scanning and signing into the pipeline. This module is about running all of it as a system without slowing delivery down."}
+      ]
+    },
+    {
+      "heading": "Gates that mean something",
+      "blocks": [
+        {"type": "p", "text": "A check that fails on every pull request trains people to click past it. Block only on findings that are both **high severity** and **high confidence**: a critical vulnerability with a fix available, a verified secret, a public bucket, a SQL injection pattern with a taint path from a request parameter. Everything else is reported in the pull request as a comment or in a dashboard, tracked as a ticket with an owner, and fixed on a schedule. Severity thresholds should be explicit in the pipeline configuration, not in someone's head."},
+        {"type": "code", "lang": "yaml", "caption": "A PR security job: fast checks that block, slower ones that only report. Each blocking step has an explicit threshold.", "code": "name: security\n\non:\n  pull_request:\n\npermissions:\n  contents: read\n  security-events: write\n\njobs:\n  gate:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n      - name: Secrets (blocks)\n        uses: gitleaks/gitleaks-action@v2\n        env:\n          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n      - name: SAST on OWASP rules (blocks on ERROR severity only)\n        run: |\n          pip install semgrep\n          semgrep scan --config p/owasp-top-ten --severity ERROR --error .\n      - name: Dependencies (blocks on fixable high/critical)\n        run: |\n          pip install pip-audit\n          pip-audit -r requirements.txt --strict --ignore-vuln GHSA-xxxx-accepted-until-2026-12\n      - name: IaC (blocks on the misconfiguration set we agreed)\n        run: |\n          pip install checkov\n          checkov -d infra/ --framework terraform --check CKV_AWS_18,CKV_AWS_19,CKV_AWS_23,CKV_AWS_53,CKV_AWS_54,CKV_AWS_55,CKV_AWS_56 --compact\n\n  report:\n    runs-on: ubuntu-latest\n    continue-on-error: true\n    steps:\n      - uses: actions/checkout@v4\n      - name: Full SAST, uploaded as code scanning alerts (does not block)\n        run: |\n          pip install semgrep\n          semgrep scan --config auto --sarif --output semgrep.sarif . || true\n      - uses: github/codeql-action/upload-sarif@v3\n        with:\n          sarif_file: semgrep.sarif"},
+        {"type": "p", "text": "Note the split: the `gate` job fails the pull request; the `report` job never does, and its findings appear as code scanning alerts where they can be triaged. As the backlog shrinks, thresholds tighten. This is the ratchet: start permissive enough that the pipeline is green today, and never let it get looser."}
+      ]
+    },
+    {
+      "heading": "Findings are work, not noise",
+      "blocks": [
+        {"type": "p", "text": "Every finding gets one of three outcomes: **fix** (with a pull request), **accept** (with a reason, an owner and an expiry date), or **false positive** (with a suppression that names the rule and why). Suppressions live in code next to the finding, are reviewed like code, and expire so that they are reconsidered. A finding with no outcome after its SLA is a process failure that the metrics should show."},
+        {"type": "code", "lang": "python", "caption": "Inline suppression with a reason. The rule id, the justification and the reviewer are all in the diff.", "code": "import subprocess\n\n# nosemgrep: python.lang.security.audit.subprocess-shell-true\n# Justification: `cmd` is a constant from config, never user input; reviewed by @security 2026-06.\nresult = subprocess.run(cmd, shell=True, check=True, capture_output=True)"},
+        {"type": "table", "headers": ["Severity", "Fix SLA", "Where it blocks"], "rows": [
+          ["Critical (exploitable, exposed)", "24 hours", "PR gate and deploy"],
+          ["High", "7 days", "PR gate if fix available"],
+          ["Medium", "30 days", "Report only; tracked"],
+          ["Low / informational", "Backlog", "Report only"]
+        ]},
+        {"type": "callout", "kind": "tip", "text": "Give every service a security owner and a dashboard of its open findings by age. The conversation changes from \"security says\" to \"our service has three highs older than a week\"."}
+      ]
+    },
+    {
+      "heading": "Keep it fast",
+      "blocks": [
+        {"type": "p", "text": "Security checks compete with test suites for a developer's patience. Keep the blocking path under a few minutes: scan only the diff in SAST on pull requests and the whole codebase nightly; cache scanner databases and dependency downloads; run independent scanners in parallel jobs; scan container images once per build by digest rather than per environment. Put DAST, which takes long and needs a deployed target, on a schedule against staging or as a post-deploy check, never in the pull request path."},
+        {"type": "code", "lang": "bash", "caption": "Diff-scoped SAST: only files changed in the pull request, against the base branch.", "code": "git fetch origin \"$BASE_BRANCH\" --depth=1\nCHANGED=$(git diff --name-only \"origin/$BASE_BRANCH\"...HEAD -- '*.py' '*.js' '*.ts' '*.go')\nif [ -n \"$CHANGED\" ]; then\n  # shellcheck disable=SC2086\n  semgrep scan --config p/owasp-top-ten --severity ERROR --error $CHANGED\nelse\n  echo \"no source files changed\"\nfi"},
+        {"type": "p", "text": "Developer experience decides whether the program survives. Findings should appear where the developer already is (as pull request annotations, not in a separate portal), say what to change (a fix suggestion beats a CWE number), and be reproducible locally with the same command the pipeline runs. A pre-commit hook for the fastest checks catches most issues before a pull request exists."}
+      ]
+    },
+    {
+      "heading": "Measure the program",
+      "blocks": [
+        {"type": "p", "text": "Counting findings measures scanner output, not risk. Measure outcomes instead: **mean time to remediate** by severity, **percentage of services** with the full gate enabled, **age of the oldest open critical**, **escaped vulnerabilities** (found in production or by a pen test that the pipeline should have caught), and **pipeline duration** for the security stage. Rising remediation time or a growing pile of accepted risks are early warnings; a falling escape rate is the number that proves the investment."},
+        {"type": "list", "items": [
+          "Coverage: which repositories and images have which checks. Gaps are usually the oldest, most important services.",
+          "Signal quality: the ratio of findings marked false positive. Above a third, tune the rules or change tools.",
+          "Ratchet progress: thresholds tightened per quarter, suppressions expired and re-evaluated.",
+          "Escapes: every production vulnerability gets a retrospective question — which stage should have caught it?"
+        ]},
+        {"type": "p", "text": "The end state is unremarkable: security checks are simply part of the definition of done, the same as tests and linting, owned by the teams that own the code, with a small central group maintaining the tooling and the thresholds. That is what DevSecOps means when the buzzword is removed."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Build a two-tier security workflow",
+    "steps": [
+      "Add the `security.yml` workflow from the lesson to a repository with Python code and a Terraform folder (the zero-to-production project fits). Run it on a pull request and read the output of each step.",
+      "Introduce a deliberate SQL string-format bug and a fake AWS key in a pull request; confirm the gate fails and identify which step caught which.",
+      "Suppress one Semgrep finding inline with a justification comment, then confirm the gate passes and the suppression is visible in the diff.",
+      "Move full-codebase SAST to a scheduled workflow (`on: schedule`) and confirm PR runs take under three minutes.",
+      "Run OWASP ZAP's baseline scan (`zap-baseline.py -t URL`) against your staging URL from a scheduled job and upload the report as an artifact.",
+      "Create a one-page dashboard (a spreadsheet is fine) with: services covered, open findings by severity and age, and time to remediate for the last five fixes."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Fast precise checks on every PR; slow or noisy ones on merge, on a schedule, or against staging",
+      "Block only on high-severity, high-confidence findings with explicit thresholds; report the rest",
+      "Every finding: fix, accept (reason, owner, expiry) or false positive (suppression in code)",
+      "Ratchet: never loosen thresholds; tighten as the backlog shrinks",
+      "Keep the blocking path minutes long: diff-scoped SAST, caching, parallel jobs, scan by digest once",
+      "Measure remediation time, coverage, escapes and false-positive ratio, not raw finding counts"
+    ],
+    "groups": [
+      {"title": "Scanner by stage", "items": [
+        {"syntax": "gitleaks (pre-commit + PR)", "desc": "Secrets; always blocks"},
+        {"syntax": "semgrep --config p/owasp-top-ten --severity ERROR --error", "desc": "SAST gate on high-confidence rules"},
+        {"syntax": "pip-audit --strict / npm audit --audit-level=high", "desc": "Dependency gate on fixable highs"},
+        {"syntax": "checkov -d infra/ --check ...", "desc": "IaC gate on an agreed misconfiguration set"},
+        {"syntax": "trivy image --exit-code 1 --severity CRITICAL,HIGH --ignore-unfixed", "desc": "Container gate at build"},
+        {"syntax": "zap-baseline.py -t URL (scheduled)", "desc": "DAST against staging, never in the PR path"}
+      ]},
+      {"title": "Gate design", "items": [
+        {"syntax": "gate job fails; report job continue-on-error", "desc": "Two tiers in one workflow"},
+        {"syntax": "upload SARIF -> code scanning alerts", "desc": "Findings where developers already look"},
+        {"syntax": "thresholds in config, not in heads", "desc": "Explicit and reviewable"},
+        {"syntax": "diff-scoped on PR, full on schedule", "desc": "Speed without losing coverage"}
+      ]},
+      {"title": "Findings management", "items": [
+        {"syntax": "# nosemgrep: RULE  + justification + reviewer + date", "desc": "Suppression in code, reviewed"},
+        {"syntax": "--ignore-vuln ID (with expiry in the name/comment)", "desc": "Accepted dependency risk"},
+        {"syntax": "SLA: critical 24h, high 7d, medium 30d", "desc": "Ownership by severity"},
+        {"syntax": "owner per service + findings-by-age dashboard", "desc": "Makes the backlog visible"}
+      ]},
+      {"title": "Metrics", "items": [
+        {"syntax": "mean time to remediate (by severity)", "desc": "Are fixes happening?"},
+        {"syntax": "coverage: % repos/images with the full gate", "desc": "Where are the gaps?"},
+        {"syntax": "escaped vulnerabilities", "desc": "Found in prod or pen test; which stage missed it?"},
+        {"syntax": "false-positive ratio", "desc": "Above ~1/3: tune rules"},
+        {"syntax": "security stage duration", "desc": "Keep it minutes"}
+      ]}
+    ],
+    "pitfalls": [
+      "Turning on every rule at ERROR severity on day one; the pipeline goes red and stays red until people stop looking.",
+      "Suppressing findings in a central config nobody reviews, without reasons or expiry.",
+      "Running DAST in the pull request path and doubling build times.",
+      "Measuring the program by findings count, which rewards noisy tools.",
+      "One security team triaging findings for fifty services instead of owners doing it for their own.",
+      "Scanning the same image in every environment instead of once by digest."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A team enables a SAST tool with all rules at blocking severity. Within a week, developers add a step that runs it with `|| true`. What went wrong and what is the fix?",
+      "options": [
+        "The gate blocked on low-confidence, low-severity findings; block only on high-severity, high-confidence rules and report the rest",
+        "The tool was too slow; move all static analysis to a nightly schedule and remove it from pull requests",
+        "Developers lack security training; require a course before they may open pull requests",
+        "The tool's licence expired, so results were unreliable"
+      ],
+      "answer": 0,
+      "explain": "A gate that fails constantly on noise is bypassed, and the bypass removes the signal too. Tiered gates keep the blocking path meaningful; nightly-only scanning loses the pull request feedback loop."
+    },
+    {
+      "q": "Which check belongs in a scheduled job against staging rather than in the pull request pipeline?",
+      "options": [
+        "A dynamic application scan that crawls and attacks the running application",
+        "Secret scanning of the diff",
+        "A dependency audit of the lock file",
+        "Static analysis of changed files for injection patterns"
+      ],
+      "answer": 0,
+      "explain": "DAST needs a deployed target and takes long; it fits a schedule or a post-deploy check. Secret, dependency and diff-scoped static checks are fast and belong on every pull request."
+    },
+    {
+      "q": "A scanner flags `subprocess.run(cmd, shell=True)` where `cmd` is a constant from configuration. What is the correct handling?",
+      "options": [
+        "Suppress the specific rule inline with a justification, reviewer and date, so the decision is in the diff and can be reconsidered",
+        "Add the whole file to a global ignore list so the scanner skips it",
+        "Delete the scanner rule from the organisation's configuration",
+        "Rewrite the code to avoid `shell=True` even though the input is constant, to keep the scanner quiet"
+      ],
+      "answer": 0,
+      "explain": "A justified, visible, reviewable suppression records a true false positive without losing coverage. Global ignores and deleted rules hide future real findings; rewriting safe code just to silence a tool is fine but not required and misses the process point."
+    },
+    {
+      "q": "Which metric best indicates whether a DevSecOps program is actually reducing risk?",
+      "options": [
+        "The number of vulnerabilities found in production or by penetration tests that the pipeline should have caught, trending down",
+        "The total number of findings produced by all scanners per month, trending up",
+        "The number of scanner tools integrated into the pipeline",
+        "The number of suppressions added per quarter"
+      ],
+      "answer": 0,
+      "explain": "Escapes measure outcomes. Finding counts measure tool noise, tool counts measure procurement, and suppressions can mean either good triage or hidden problems."
+    },
+    {
+      "q": "Pull request pipelines take 25 minutes, most of it in a full-repository static scan. Developers merge around it. What is the best change?",
+      "options": [
+        "Scan only the changed files in pull requests with the high-confidence ruleset, and run the full scan nightly with results as alerts",
+        "Remove static analysis from the pipeline entirely and rely on code review",
+        "Run the full scan on every pull request but allow merging while it is still running",
+        "Increase the runner size so the full scan completes in 20 minutes instead of 25"
+      ],
+      "answer": 0,
+      "explain": "Diff-scoped scanning keeps the fast feedback loop and blocks the specific new bug, while the nightly full scan preserves coverage. Removing the check loses coverage; merging before results makes the gate meaningless; a marginally faster full scan does not solve the behaviour."
+    }
+  ]
+}

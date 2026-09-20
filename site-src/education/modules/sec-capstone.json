@@ -1,0 +1,190 @@
+{
+  "id": "sec-capstone",
+  "minutes": 40,
+  "intro": "Fifteen modules have each handed you one layer. The capstone is where you stack them on a real service and find out which ones actually hold. You will take a small web service — the DevOps track's zero-to-production API is ideal, but any service you can deploy works — and carry it through the full cycle: threat model, harden, scan, sign, monitor, detect, respond, and prove it with evidence. The result is a repository and a written record that show a hiring manager, an auditor or your future self exactly how you make a service defensible. Nothing here is new; the skill being built is doing all of it, in order, without skipping the steps that feel like paperwork.",
+  "objectives": [
+    "Produce a threat model for a real service and derive its control list from it",
+    "Apply identity, network, host, container and secrets controls to the service and verify each with a test",
+    "Put scanning, signing and admission verification into the service's pipeline",
+    "Instrument security logging and at least three working detections with runbooks",
+    "Run a simulated incident end to end and write the postmortem and the evidence pack"
+  ],
+  "sections": [
+    {
+      "heading": "The target and the deliverables",
+      "blocks": [
+        {"type": "p", "text": "Choose a service with the shape of something real: an HTTP API with authentication, a database, at least one secret (an API key or a database password), a container image, a pipeline and a deployed environment you control. The zero-to-production project supplies all of that. Keep a `security/` directory in the repository for everything you produce, because the deliverable is as much the record as the configuration."},
+        {"type": "table", "headers": ["Deliverable", "Where it lives", "Module it comes from"], "rows": [
+          ["`THREAT_MODEL.md` with register and controls", "`security/`", "Threat modelling"],
+          ["Hardened infrastructure and workload config, with tests", "`infra/`, `deploy/`, `tests/security/`", "Identity, network, hardening, containers, secrets"],
+          ["Pipeline with gates, SBOM, signature, provenance, admission check", "`.github/workflows/`", "Supply chain, DevSecOps"],
+          ["Security events, detections and runbooks", "`security/detections/`, `security/runbooks/`", "Logging and detection"],
+          ["Incident timeline and postmortem from the drill", "`security/incidents/`", "Incident response"],
+          ["Control records with evidence scripts", "`security/controls/`", "Compliance"]
+        ]},
+        {"type": "callout", "kind": "note", "text": "Budget two to three focused days. Do the phases in order; each one's output is the next one's input, and the threat model is what stops this from becoming an unbounded checklist."}
+      ]
+    },
+    {
+      "heading": "Phase 1: model, then decide",
+      "blocks": [
+        {"type": "p", "text": "Run the one-hour threat model from the first module against the service as deployed, not as designed. Draw the data flow diagram with trust boundaries, list assets in rank order, enumerate entry points including the pipeline and the dependency manifest, walk STRIDE, and rate. Take the top eight threats and, for each, write the response and the specific control with a test name. This list is your work plan for the next phases; anything not on it is optional."},
+        {"type": "code", "lang": "text", "caption": "The register you should end up with for a small API. Yours will differ; the shape should not.", "code": "T-01 E1 Elevation: read another user's order by id            -> MITIGATE  scoped queries      test_orders_other_user_404\nT-02 E1 Spoofing: forged JWT accepted                           -> MITIGATE  pinned alg, aud, exp test_jwt_wrong_alg_rejected\nT-03 E4 Tampering: unsigned image deployed                      -> MITIGATE  cosign + admission   test_admission_rejects_unsigned\nT-04 E5 Info disclosure: DB password in image layer             -> ELIMINATE runtime secret fetch test_image_has_no_secrets\nT-05 E2 Spoofing: forged payment webhook                        -> MITIGATE  HMAC + timestamp     test_webhook_bad_sig_rejected\nT-06 --  Elevation: pod escape via root + hostPath              -> MITIGATE  restricted PSS       test_pod_spec_restricted\nT-07 --  Info disclosure: DB reachable from CI runners          -> MITIGATE  sg references + NP   test_db_unreachable_from_ci\nT-08 --  Repudiation: admin deletes with no record              -> MITIGATE  security events      test_admin_delete_emits_event"}
+      ]
+    },
+    {
+      "heading": "Phase 2: harden and prove it",
+      "blocks": [
+        {"type": "p", "text": "Work down the register. For each control, make the change and write the test that would fail if the control were removed. Application controls get unit or integration tests (`tests/security/`). Infrastructure controls get policy tests on the Terraform (checkov rules or a small script that parses the plan) and, where possible, a live probe (`nc -zv` from the wrong place must fail). Kubernetes controls get a conformance test: apply a deliberately bad manifest and assert rejection."},
+        {"type": "code", "lang": "python", "caption": "A test that proves the container image carries no secret and runs as non-root; it fails the build if someone regresses the Dockerfile.", "code": "import json\nimport subprocess\n\nIMAGE = \"ghcr.io/acme/orders:test\"\n\n\ndef inspect(image: str) -> dict:\n    out = subprocess.run([\"docker\", \"image\", \"inspect\", image], capture_output=True, text=True, check=True).stdout\n    return json.loads(out)[0]\n\n\ndef test_image_runs_as_non_root():\n    user = inspect(IMAGE)[\"Config\"].get(\"User\", \"\")\n    assert user not in (\"\", \"0\", \"root\"), f\"image runs as root (User={user!r})\"\n\n\ndef test_image_has_no_secret_shaped_env():\n    env = inspect(IMAGE)[\"Config\"].get(\"Env\") or []\n    bad = [e for e in env if any(k in e.upper() for k in (\"PASSWORD\", \"SECRET\", \"TOKEN\", \"AKIA\"))]\n    assert not bad, f\"secret-shaped environment in image: {bad}\"\n\n\ndef test_image_layers_contain_no_private_keys():\n    r = subprocess.run([\"trivy\", \"image\", \"--scanners\", \"secret\", \"--exit-code\", \"1\", \"--quiet\", IMAGE],\n                       capture_output=True, text=True)\n    assert r.returncode == 0, r.stdout"},
+        {"type": "p", "text": "The minimum set for most services: SSO plus phishing-resistant MFA for anything administrative; authorisation scoped at the data layer; security group references and a default-deny NetworkPolicy; a hardened host image with auditd and automatic updates; a distroless non-root image under the restricted profile; secrets fetched at runtime by workload identity; TLS on every hop. Record each as a control with owner and evidence as you go — it costs minutes now and saves days later."}
+      ]
+    },
+    {
+      "heading": "Phase 3: the pipeline as the only road",
+      "blocks": [
+        {"type": "p", "text": "Extend the service's pipeline until nothing reaches production that has not been checked, inventoried, signed and verified. Two-tier gates on pull requests (secrets, diff-scoped SAST, dependency audit, IaC policy), image scanning by digest at build, SBOM generation and attestation, keyless signing, provenance, and an admission policy in the cluster (or an equivalent check in the deploy step for a non-Kubernetes target) that refuses unsigned images. Pin every action, minimise token permissions, and confirm fork pull requests receive no secrets."},
+        {"type": "code", "lang": "bash", "caption": "The end-to-end proof: an unsigned image must be refused by the cluster, and the signed one from the pipeline must be accepted.", "code": "# an image built outside the pipeline, pushed by hand, with no signature\ndocker build -t ghcr.io/acme/orders:rogue . && docker push ghcr.io/acme/orders:rogue\nkubectl -n shop set image deployment/orders app=ghcr.io/acme/orders:rogue\n# expected: admission webhook denies the change; the running pods are unchanged\nkubectl -n shop get events --field-selector reason=PolicyViolation | tail -3\n\n# the pipeline-built, signed image by digest is accepted\ncosign verify --certificate-identity-regexp '^https://github.com/acme/orders/' \\\n  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\\n  ghcr.io/acme/orders@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08 >/dev/null && echo \"signed by our workflow\""},
+        {"type": "callout", "kind": "tip", "text": "Keep the pull request pipeline under five minutes. Everything slower runs on merge or on a schedule. A capstone that produces a pipeline nobody would tolerate has not solved the problem."}
+      ]
+    },
+    {
+      "heading": "Phase 4: see it, then break in",
+      "blocks": [
+        {"type": "p", "text": "Add structured security events to the application for authentication results, authorisation denials, admin actions and data exports. Ship them, the host auth and audit logs, and the cloud audit trail to central storage. Write at least three detections with runbooks: for example, five failed logins then a success from one address; an authorisation denial burst from one user (id enumeration); a shell spawned in an application container; a new IAM user or key created outside the pipeline's identity. Then test them: trigger each with a script or an emulation tool and record whether and how fast the alert arrived."},
+        {"type": "p", "text": "Now run the incident drill. Have a colleague (or a script you wrote earlier and forgot the details of) do one realistic thing: leak a test credential into a public paste, add an SSH key to the host, or exploit a deliberately re-introduced injection bug in a branch deployed to staging. Respond as the incident module describes: declare, roles, timeline, evidence, scope, contain, eradicate, recover. Time yourself. Write the postmortem with dwell time and time to containment, and the detection or control that would have caught it sooner."},
+        {"type": "code", "lang": "bash", "caption": "A minimal detection test harness: trigger the behaviour, poll for the alert, record the latency.", "code": "#!/usr/bin/env bash\nset -euo pipefail\nSTART=$(date -u +%s)\n\n# behaviour: five failed logins then a success from this machine\nfor i in 1 2 3 4 5; do curl -s -o /dev/null -X POST https://staging.example.com/login -d 'user=alice&pass=wrong'; done\ncurl -s -o /dev/null -X POST https://staging.example.com/login -d \"user=alice&pass=$ALICE_PASS\"\n\n# poll the alert API (adapt to your SIEM) for up to 10 minutes\nfor _ in $(seq 1 60); do\n  if curl -s \"$ALERT_API/search?q=rule:brute-force-then-success&since=$START\" | grep -q '\"count\":[1-9]'; then\n    echo \"alert fired after $(( $(date -u +%s) - START ))s\"; exit 0\n  fi\n  sleep 10\ndone\necho \"NO ALERT within 10 minutes\"; exit 1"}
+      ]
+    },
+    {
+      "heading": "Phase 5: the evidence pack and the write-up",
+      "blocks": [
+        {"type": "p", "text": "Finish by making the work legible to someone who was not there. The `security/controls/` directory holds one record per control with its evidence script; run the scripts once and commit the dated output for the capstone period. `security/README.md` is the write-up: the service, the threat model summary, the controls and how each is tested, the pipeline guarantees, the detections and their measured latency, the drill's timeline and postmortem, and an honest list of what is not covered and why. This is the document you link from a CV or hand to an auditor; write it for that reader."},
+        {"type": "list", "items": [
+          "Every claim in the write-up points at a file, a test or a dated evidence export.",
+          "The threat register shows status for all eight threats, including any you accepted, with reasons.",
+          "The postmortem names dwell time, time to containment and one concrete improvement you then implemented.",
+          "The gaps section is real: nobody believes a service with no residual risk, and stating it shows judgement."
+        ]},
+        {"type": "p", "text": "When it is done, you will have exercised every layer of this track on one system and seen how they interact: the threat model chose the controls, the controls produced the evidence, the pipeline enforced the integrity, the detections turned logs into alerts, the drill tested the response, and the record turned all of it into something you can show. That loop — model, harden, verify, detect, respond, record — is the job."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Complete the capstone",
+    "steps": [
+      "Phase 1 (2 hours): threat-model the deployed service; commit `security/THREAT_MODEL.md` with a register of at least eight rated threats, each with response, control and test name.",
+      "Phase 2 (half a day): implement the top eight controls across identity, network, host, container and secrets; write a test for each under `tests/security/` or as an infrastructure policy check; all must pass in CI.",
+      "Phase 3 (half a day): add the two-tier security workflow, image scanning by digest, SBOM attestation, keyless signing, provenance and an admission or deploy-time signature check. Prove an unsigned image is refused.",
+      "Phase 4a (2 hours): add security events to the application, ship logs centrally, write three detections with runbooks, and measure alert latency for each with a trigger script.",
+      "Phase 4b (2 hours): run the incident drill against staging with a colleague or a pre-written script; keep the timeline; write the postmortem with dwell time, time to containment and one implemented improvement.",
+      "Phase 5 (2 hours): write `security/README.md` linking every claim to evidence, run the control evidence scripts once, commit the outputs, and list residual risks honestly.",
+      "Ask someone who did not build it to read the README and try to break one control. Fix what they find, add it to the postmortem section, and you are done."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Model first: the top eight rated threats are the work plan, not a generic checklist",
+      "Every control has a test that fails when the control is removed",
+      "The pipeline is the only road to production: gates, SBOM, signature, provenance, admission",
+      "Detections are measured (alert latency) and tested by triggering the behaviour",
+      "The drill is real: timeline, dwell time, containment time, one implemented improvement",
+      "The write-up links every claim to a file; residual risks are stated"
+    ],
+    "groups": [
+      {"title": "Repository layout", "items": [
+        {"syntax": "security/THREAT_MODEL.md", "desc": "DFD, assets, entry points, STRIDE register with status"},
+        {"syntax": "tests/security/", "desc": "Tests per control; run in CI"},
+        {"syntax": "security/controls/CONTROL-*.md + evidence/", "desc": "Control records and dated evidence exports"},
+        {"syntax": "security/detections/*.yml + security/runbooks/", "desc": "Sigma rules and what to do when they fire"},
+        {"syntax": "security/incidents/YYYY-MM-DD-drill.md", "desc": "Timeline and postmortem"},
+        {"syntax": "security/README.md", "desc": "The write-up for an outside reader"}
+      ]},
+      {"title": "Minimum control set", "items": [
+        {"syntax": "SSO + WebAuthn for admin; authz scoped at data layer", "desc": "Identity"},
+        {"syntax": "sg references, default-deny NetworkPolicy, egress allow-list", "desc": "Network"},
+        {"syntax": "hardened image, auditd, unattended-upgrades, no SSH from internet", "desc": "Host"},
+        {"syntax": "distroless non-root, restricted PSS, scoped RBAC", "desc": "Container"},
+        {"syntax": "runtime secret fetch by workload identity; no secrets in layers or env", "desc": "Secrets"},
+        {"syntax": "TLS every hop; security headers", "desc": "Transport and browser"}
+      ]},
+      {"title": "Pipeline guarantees", "items": [
+        {"syntax": "PR: gitleaks, diff SAST (ERROR), pip-audit, checkov", "desc": "Fast blocking tier"},
+        {"syntax": "merge: trivy by digest, syft SBOM, cosign sign + attest, provenance", "desc": "Build-time integrity"},
+        {"syntax": "deploy: admission verifies identity + issuer; digests only", "desc": "Unsigned is refused"},
+        {"syntax": "pinned actions, contents: read default, no secrets for forks", "desc": "Pipeline hardening"}
+      ]},
+      {"title": "Detect and respond", "items": [
+        {"syntax": "events: auth.login.*, authz.denied, admin.*, data.export.*", "desc": "Application security telemetry"},
+        {"syntax": "3+ detections with runbooks, latency measured", "desc": "Prove they fire"},
+        {"syntax": "drill: declare, roles, timeline, evidence, scope, contain, eradicate, recover", "desc": "The incident loop"},
+        {"syntax": "postmortem: dwell time, time to contain, improvement shipped", "desc": "Numbers that should improve"}
+      ]}
+    ],
+    "pitfalls": [
+      "Skipping the threat model and applying every control you can think of; the write-up cannot explain why.",
+      "Controls without tests; a month later half of them have silently regressed.",
+      "A signing setup that is never verified anywhere, so unsigned images still run.",
+      "Detections that were written but never triggered; you do not know if they work.",
+      "A drill where the responder also planted the incident and knows exactly where to look.",
+      "A README with claims that point at nothing."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "In the capstone, why does the threat model come before any hardening work?",
+      "options": [
+        "Its ranked threats define which controls are worth implementing and testing, keeping the work bounded and explainable",
+        "Auditors require the threat model document to be dated earlier than the controls",
+        "Hardening tools cannot be installed until a threat model file exists in the repository",
+        "The threat model generates the Terraform code for the controls automatically"
+      ],
+      "answer": 0,
+      "explain": "Without a model, hardening becomes an unbounded checklist with no rationale. The model turns threats into a prioritised list of controls, each with a test, which is the work plan for every later phase."
+    },
+    {
+      "q": "What is the purpose of writing a test for each security control, such as `test_image_runs_as_non_root`?",
+      "options": [
+        "So that removing or regressing the control fails the build, keeping the control in place over time",
+        "So that the security team can count how many controls exist",
+        "So that the tests can replace the need for a threat model",
+        "So that auditors can run the tests instead of sampling evidence"
+      ],
+      "answer": 0,
+      "explain": "Controls decay when nothing checks them. A failing test on regression is the mechanism that keeps a hardened configuration hardened. Counting, replacing the model and auditor convenience are not the point."
+    },
+    {
+      "q": "Which single experiment proves that the pipeline is the only road to production?",
+      "options": [
+        "Pushing an image built by hand without a signature and confirming the cluster's admission policy refuses to run it",
+        "Confirming that the release workflow completes without errors",
+        "Reading the admission policy YAML and confirming it references the right registry",
+        "Checking that the SBOM for the latest image contains no critical vulnerabilities"
+      ],
+      "answer": 0,
+      "explain": "Only a negative test demonstrates enforcement: the rogue image must be rejected. A green workflow, a plausible policy file and a clean SBOM show that the good path works, not that the bad path is blocked."
+    },
+    {
+      "q": "A capstone's detections were written and committed but never triggered. What is the problem?",
+      "options": [
+        "There is no evidence they produce an alert; a log field mismatch or a parsing error would leave the team blind without knowing it",
+        "Untriggered detections consume more storage in the SIEM",
+        "Detections must be triggered to be counted toward compliance controls",
+        "The rules will be automatically disabled by the SIEM after 30 days without alerts"
+      ],
+      "answer": 0,
+      "explain": "A detection is a hypothesis until a triggered behaviour produces the alert. Testing each one, with measured latency, is how you know the event pipeline and the rule both work."
+    },
+    {
+      "q": "The drill's postmortem records a dwell time of three hours and a containment time of twenty minutes. Which follow-up delivers the most value?",
+      "options": [
+        "Implement the detection or control that would have cut the three-hour dwell time, then re-run the drill to confirm",
+        "Celebrate the twenty-minute containment and close the drill",
+        "Increase log retention so future drills have more data",
+        "Add more roles to the incident process to speed up containment further"
+      ],
+      "answer": 0,
+      "explain": "Dwell time is the larger number and the one detection can reduce. Turning the postmortem's finding into an implemented improvement, verified by another run, is what makes the drill worth doing."
+    }
+  ]
+}
