@@ -1,0 +1,210 @@
+{
+  "id": "cert-cka",
+  "minutes": 45,
+  "intro": "The Certified Kubernetes Administrator is different from every other exam in this track: there are no multiple-choice questions. You get a terminal, several live clusters, and a list of tasks — create this, fix that, find out why this pod is not scheduling — and two hours to finish as many as you can. It is a test of fluency, not recall. People who know Kubernetes well fail it by being slow; people who practise the specific tasks until they are automatic pass it comfortably. This guide covers the exam environment and rules, the five domains as published by the CNCF with the tasks each one turns into, the speed techniques that decide the outcome, and a six-week plan that is mostly typing. Exam facts were checked against the CNCF and Linux Foundation pages in September 2026; confirm before you book, because the environment version changes quarterly.",
+  "objectives": [
+    "Describe the CKA exam format, environment, rules and scoring",
+    "Map the five domains to the concrete tasks the exam sets",
+    "Work fast in the exam terminal: aliases, imperative commands, generating manifests, using the docs efficiently",
+    "Troubleshoot cluster components, nodes, networking and workloads systematically",
+    "Follow a six-week plan built around timed task practice"
+  ],
+  "sections": [
+    {
+      "heading": "The exam at a glance",
+      "blocks": [
+        {"type": "p", "text": "The CKA is a **performance-based** exam: two hours, a proctored browser-based environment (PSI's secure browser with a remote desktop and terminal), around fifteen to twenty tasks of varying weight, across several clusters that you switch between with a provided `kubectl config use-context` command at the start of each task. The passing score is **66%**. Registration costs 445 USD and includes one free retake and two sessions of the killer.sh simulator, which reproduces the environment and difficulty closely. The certification is valid for two years. The environment tracks Kubernetes releases; it is currently on v1.35, so practise on a recent version."},
+        {"type": "table", "headers": ["Domain", "Weight", "What the tasks look like"], "rows": [
+          ["Cluster Architecture, Installation & Configuration", "25%", "RBAC, kubeadm install and upgrade, etcd backup and restore, managing cluster components, installing a CNI, Helm and Kustomize, operators and CRDs"],
+          ["Workloads & Scheduling", "15%", "Deployments and rollouts, ConfigMaps and Secrets, scaling and autoscaling, resource requests and limits, node affinity, taints and tolerations, self-healing"],
+          ["Services & Networking", "20%", "Services and endpoints, Ingress and Gateway API, NetworkPolicy, CoreDNS, pod-to-pod connectivity"],
+          ["Storage", "10%", "StorageClasses, PersistentVolumes and claims, access and reclaim modes, dynamic provisioning"],
+          ["Troubleshooting", "30%", "Failed pods, node NotReady, control-plane components, networking, application logs and events"]
+        ]},
+        {"type": "callout", "kind": "note", "text": "You may use the official Kubernetes documentation (kubernetes.io and its subdomains) in a browser tab inside the exam environment, and nothing else. Knowing where things are in the docs is a skill to practise, not a fallback."}
+      ]
+    },
+    {
+      "heading": "Speed: the skill that decides the result",
+      "blocks": [
+        {"type": "p", "text": "Two hours for roughly seventeen tasks is about seven minutes each, including reading, switching context and verifying. Every second spent typing a manifest by hand or scrolling the docs is a second not spent on the next task. The techniques below are what separate passing from failing; make them reflexes before exam day."},
+        {"type": "code", "lang": "bash", "caption": "Set up the shell in the first thirty seconds. The exam environment has kubectl completion available; these lines are worth typing every time.", "code": "alias k=kubectl\nexport do=\"--dry-run=client -o yaml\"\nexport now=\"--force --grace-period=0\"\nsource <(kubectl completion bash) && complete -o default -F __start_kubectl k\n\n# generate manifests instead of writing them\nk run web --image=nginx:1.27 --port=80 $do > pod.yaml\nk create deploy api --image=ghcr.io/acme/api:1.4 --replicas=3 $do > deploy.yaml\nk expose deploy api --port=80 --target-port=8080 --type=ClusterIP $do > svc.yaml\nk create cm app-config --from-literal=LOG_LEVEL=info $do > cm.yaml\nk create secret generic db --from-literal=password=REPLACE $do > secret.yaml\nk create ingress web --rule=\"shop.example.com/*=web:80\" $do > ing.yaml\nk create job once --image=busybox -- /bin/sh -c 'echo hi' $do > job.yaml\nk create cronjob nightly --image=busybox --schedule='0 2 * * *' -- date $do > cj.yaml"},
+        {"type": "list", "items": [
+          "**Imperative first**: create with `kubectl create`/`run`/`expose`, then `kubectl edit` or patch the one field the task needs. Write YAML from scratch only for things with no generator (NetworkPolicy, PV/PVC, RBAC beyond the basics), and copy those from the docs.",
+          "**Explain, not search**: `kubectl explain deploy.spec.template.spec.containers.resources --recursive` gives field names faster than the docs.",
+          "**Verify every task**: `k get`, `k describe`, `k logs`, `k exec ... -- curl`. Points are for end state, and a typo in a namespace is zero points.",
+          "**Context and namespace**: run the task's `use-context` line every time, and use `-n` explicitly; wrong-cluster answers are the most common way to lose easy points.",
+          "**Triage**: read all tasks in the first two minutes, do the quick high-weight ones first, flag the long ones (kubeadm upgrade, etcd restore) for later, and skip anything that stalls you for more than ten minutes."
+        ]},
+        {"type": "callout", "kind": "tip", "text": "Use `vim` with `set expandtab tabstop=2 shiftwidth=2` in `~/.vimrc` (or type `:set et ts=2 sw=2`) so pasted YAML indents correctly. Broken indentation is the most common self-inflicted wound."}
+      ]
+    },
+    {
+      "heading": "Cluster architecture, installation and configuration (25%)",
+      "blocks": [
+        {"type": "p", "text": "This domain has the longest tasks and the most points. **RBAC**: create Roles, ClusterRoles, RoleBindings and ClusterRoleBindings for users and service accounts, and verify with `kubectl auth can-i`. **kubeadm**: initialise a control plane, join a worker, and — a near-certain task — **upgrade** a node one minor version: drain, upgrade kubeadm, `kubeadm upgrade apply` (control plane) or `upgrade node` (worker), upgrade kubelet and kubectl, restart kubelet, uncordon. **etcd**: take a snapshot with `etcdctl` using the certificates from the static pod manifest, and restore one to a new data directory, then point the etcd static pod at it. Also: static pods in `/etc/kubernetes/manifests`, certificate locations, installing a CNI from a manifest, using Helm to install a chart and Kustomize to build overlays, and finding CRDs and their instances."},
+        {"type": "code", "lang": "bash", "caption": "The two long tasks worth rehearsing until they are automatic: a kubeadm upgrade of a control-plane node, and an etcd backup and restore.", "code": "# --- upgrade control plane to 1.35.x (adjust the version to the task) ---\nk drain cp-node --ignore-daemonsets --delete-emptydir-data\nsudo apt-mark unhold kubeadm && sudo apt-get install -y kubeadm=1.35.1-1.1 && sudo apt-mark hold kubeadm\nsudo kubeadm upgrade plan\nsudo kubeadm upgrade apply v1.35.1 -y\nsudo apt-mark unhold kubelet kubectl && sudo apt-get install -y kubelet=1.35.1-1.1 kubectl=1.35.1-1.1 && sudo apt-mark hold kubelet kubectl\nsudo systemctl daemon-reload && sudo systemctl restart kubelet\nk uncordon cp-node\n# workers: same, but 'kubeadm upgrade node' instead of 'upgrade apply'\n\n# --- etcd backup ---\nsudo ETCDCTL_API=3 etcdctl snapshot save /opt/etcd-backup.db \\\n  --endpoints=https://127.0.0.1:2379 \\\n  --cacert=/etc/kubernetes/pki/etcd/ca.crt \\\n  --cert=/etc/kubernetes/pki/etcd/server.crt \\\n  --key=/etc/kubernetes/pki/etcd/server.key\n\n# --- etcd restore to a new directory, then point the static pod at it ---\nsudo ETCDCTL_API=3 etcdctl snapshot restore /opt/etcd-backup.db --data-dir /var/lib/etcd-restored\nsudo sed -i 's#/var/lib/etcd#/var/lib/etcd-restored#' /etc/kubernetes/manifests/etcd.yaml   # the hostPath volume\n# kubelet restarts the etcd static pod; watch with: sudo crictl ps | grep etcd"},
+        {"type": "p", "text": "The certificate paths and flags for etcdctl are in the etcd static pod manifest (`/etc/kubernetes/manifests/etcd.yaml`); reading them from there is faster and safer than remembering. The docs page \"Operating etcd clusters for Kubernetes\" has the exact commands and is allowed."}
+      ]
+    },
+    {
+      "heading": "Workloads, networking and storage (15% + 20% + 10%)",
+      "blocks": [
+        {"type": "p", "text": "**Workloads**: create and scale Deployments, perform and undo rollouts (`rollout status`, `rollout undo`, `rollout history`), set image versions, configure ConfigMaps and Secrets as environment variables or mounted files, set resource requests and limits (and know that a pod exceeding its memory limit is OOMKilled, while unschedulable requests leave it Pending), add a liveness or readiness probe, schedule with `nodeSelector`, node affinity, taints and tolerations, and run DaemonSets. Horizontal Pod Autoscaler tasks require the metrics server to be present."},
+        {"type": "p", "text": "**Networking**: expose workloads with ClusterIP, NodePort and LoadBalancer Services and confirm endpoints exist (an empty Endpoints list means the selector does not match the pod labels — the most common Service bug); create an Ingress with host and path rules and know that an ingress controller must exist; write a **NetworkPolicy** that allows only specific ingress or egress (default deny, then allow by pod or namespace selector, and remember DNS egress); check CoreDNS with a busybox `nslookup`; know the Gateway API resources (GatewayClass, Gateway, HTTPRoute) at the level of creating an HTTPRoute for a host. **Storage**: create a PersistentVolume (hostPath or local for the exam), a PersistentVolumeClaim that binds to it (matching storage class, access mode and size), mount it in a pod, and understand reclaim policies (Retain versus Delete), access modes (RWO, ROX, RWX) and dynamic provisioning through a StorageClass with `volumeBindingMode`."},
+        {"type": "code", "lang": "yaml", "caption": "A NetworkPolicy you will write from memory or from the docs: allow ingress to the api pods only from the frontend, and allow DNS egress. Default deny is implied by selecting the pods and listing policyTypes.", "code": "apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: api-allow-frontend\n  namespace: shop\nspec:\n  podSelector:\n    matchLabels:\n      app: api\n  policyTypes: [Ingress, Egress]\n  ingress:\n    - from:\n        - podSelector:\n            matchLabels:\n              app: frontend\n      ports:\n        - protocol: TCP\n          port: 8080\n  egress:\n    - to:\n        - namespaceSelector:\n            matchLabels:\n              kubernetes.io/metadata.name: kube-system\n      ports:\n        - protocol: UDP\n          port: 53\n        - protocol: TCP\n          port: 53"}
+      ]
+    },
+    {
+      "heading": "Troubleshooting (30%)",
+      "blocks": [
+        {"type": "p", "text": "The heaviest domain rewards a fixed procedure. For a **pod**: `k get pod -o wide` (status, restarts, node), `k describe pod` (events: image pull, scheduling, probe failures, mounts), `k logs --previous` (why it crashed), `k get events --sort-by=.metadata.creationTimestamp`. For a **node NotReady**: `k describe node` (conditions, taints), then on the node `systemctl status kubelet`, `journalctl -u kubelet -f`, check `/var/lib/kubelet/config.yaml` and the container runtime (`crictl ps`, `systemctl status containerd`). For **control-plane components**: they are static pods; check `crictl ps -a` and `/etc/kubernetes/manifests/*.yaml` for a broken flag or a wrong path, and `kubectl` may not even work if the API server is down, so use `crictl logs`. For **networking**: Service without endpoints (labels), NetworkPolicy blocking traffic (test with a temporary pod), CoreDNS pods and config, kube-proxy DaemonSet."},
+        {"type": "code", "lang": "bash", "caption": "The troubleshooting toolkit, in the order to reach for it.", "code": "k get pods -A -o wide | grep -vE 'Running|Completed'          # what is unhealthy anywhere\nk describe pod POD -n NS | sed -n '/Events/,$p'                # the events section only\nk logs POD -n NS --previous --tail=50                          # crash reason\nk get events -n NS --sort-by=.metadata.creationTimestamp | tail -20\n\nk get nodes; k describe node NODE | grep -A8 Conditions        # node health\nssh NODE 'sudo systemctl status kubelet --no-pager; sudo journalctl -u kubelet -n 50 --no-pager'\nssh NODE 'sudo crictl ps -a; sudo crictl logs $(sudo crictl ps -a -q --name kube-apiserver | head -1) 2>&1 | tail -20'\n\nk get svc,ep -n NS                                             # empty endpoints = selector mismatch\nk run tmp --rm -it --image=busybox:1.36 --restart=Never -- sh   # then: nslookup api.shop.svc.cluster.local; wget -qO- http://api.shop:80"},
+        {"type": "callout", "kind": "warning", "text": "Do not fix symptoms. A pod stuck Pending with an Insufficient cpu event needs a smaller request or a bigger node, not a restart; a node NotReady because kubelet points at the wrong certificate needs the config fixed, not a reboot. Read the event or log line that names the cause, then change that."}
+      ]
+    },
+    {
+      "heading": "The six-week plan",
+      "blocks": [
+        {"type": "table", "headers": ["Week", "Focus", "Practice"], "rows": [
+          ["1", "Environment: kind or a two-node kubeadm cluster on VMs; aliases, generators, explain, vim; core objects", "30 timed tasks: pods, deployments, services, configmaps, secrets — under 5 min each"],
+          ["2", "Scheduling, probes, resources, rollouts, DaemonSets, HPA; storage: PV/PVC/StorageClass", "Tasks from the curriculum's workloads and storage sections, twice each"],
+          ["3", "Networking: Services, Ingress, Gateway API, NetworkPolicy, CoreDNS", "Write five NetworkPolicies from the docs page without copying twice"],
+          ["4", "Cluster admin: RBAC, kubeadm upgrade, etcd backup/restore, static pods, Helm, Kustomize, CRDs", "Upgrade a real kubeadm cluster; back up and restore etcd three times"],
+          ["5", "Troubleshooting drills: break the cluster on purpose (kubelet config, API server flag, CNI, Service selector)", "Ten breaks, each fixed with the procedure above and timed"],
+          ["6", "Full simulations", "Both killer.sh sessions; review every missed task; rest the day before"]
+        ]},
+        {"type": "p", "text": "Build tasks from the open-source curriculum on GitHub and from the practice repositories the community maintains; the point is volume and timing, not novelty. Keep a log of every task that took over seven minutes and drill it. Schedule the exam for the end of week six at a time of day you are sharp, run the PSI compatibility check a week before, clear the desk, and on the day set up aliases first, read all tasks, and start with the ones you can finish in three minutes."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Six-week study plan, condensed",
+    "steps": [
+      "Book the exam for six weeks out. Build a two-node kubeadm cluster on VMs (or in the cloud) on the exam's Kubernetes minor version, plus a kind cluster for quick experiments.",
+      "Every study session starts by typing the alias block from memory in under thirty seconds. Then do the week's tasks with a timer: seven minutes per task, verification included.",
+      "Weeks 1 to 3: work through core objects, scheduling, storage and networking with imperative generators and the docs, logging every task over seven minutes.",
+      "Week 4: perform a kubeadm upgrade and an etcd backup and restore on the real cluster at least three times each until no step needs the docs.",
+      "Week 5: break the cluster ten different ways (edit the kubelet config, add a bad flag to the API server manifest, delete the CNI, change a Service selector, add a deny-all NetworkPolicy) and fix each using the procedure.",
+      "Week 6: use both killer.sh sessions on separate days, review every missed task in the docs, rerun your seven-minute-plus list once, and stop the day before.",
+      "Exam day: aliases, read all tasks, easy high-weight first, run use-context for every task, verify every end state, never spend more than ten minutes stuck."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Performance-based: end state is scored; speed and verification decide the result",
+      "Aliases and dry-run generators first; write YAML from scratch only for NetworkPolicy, PV/PVC and RBAC",
+      "Run the task's use-context every time; always pass -n",
+      "Troubleshooting procedure: get -> describe (Events) -> logs --previous -> node kubelet -> static pod manifests",
+      "The long tasks: kubeadm upgrade (drain, kubeadm, upgrade apply/node, kubelet, restart, uncordon) and etcd snapshot save/restore",
+      "Service with no endpoints = label mismatch; Pending = scheduling (resources, taints, affinity); OOMKilled = memory limit"
+    ],
+    "groups": [
+      {"title": "Exam facts (verified Sept 2026, confirm before booking)", "items": [
+        {"syntax": "2 hours · ~15-20 tasks · live clusters · pass 66%", "desc": "Performance-based, remotely proctored"},
+        {"syntax": "445 USD · one free retake · 2 killer.sh sessions", "desc": "Included with registration"},
+        {"syntax": "valid 2 years · environment Kubernetes v1.35", "desc": "Updated quarterly; practise on a matching version"},
+        {"syntax": "Cluster 25 · Workloads 15 · Networking 20 · Storage 10 · Troubleshooting 30", "desc": "Domain weights"},
+        {"syntax": "allowed: kubernetes.io docs only", "desc": "One extra browser tab"}
+      ]},
+      {"title": "Speed setup", "items": [
+        {"syntax": "alias k=kubectl; export do='--dry-run=client -o yaml'; export now='--force --grace-period=0'", "desc": "First thirty seconds"},
+        {"syntax": "k run / create deploy / expose / create cm|secret|ingress|job|cronjob ... $do > f.yaml", "desc": "Generate, then edit"},
+        {"syntax": "k explain RESOURCE.spec... --recursive", "desc": "Field names without the docs"},
+        {"syntax": ":set et ts=2 sw=2 (vim)", "desc": "Sane YAML indentation"},
+        {"syntax": "k config use-context NAME (given per task)", "desc": "Wrong cluster = zero points"},
+        {"syntax": "k -n NS get all; k get X -o yaml | less", "desc": "Inspect quickly"}
+      ]},
+      {"title": "Cluster admin", "items": [
+        {"syntax": "k create role/clusterrole R --verb=get,list --resource=pods; k create rolebinding B --role=R --user=U|--serviceaccount=NS:SA", "desc": "RBAC"},
+        {"syntax": "k auth can-i list pods --as=U -n NS", "desc": "Verify RBAC"},
+        {"syntax": "drain -> kubeadm upgrade apply|node -> kubelet+kubectl -> restart kubelet -> uncordon", "desc": "Upgrade sequence"},
+        {"syntax": "etcdctl snapshot save FILE --endpoints --cacert --cert --key", "desc": "Backup (flags from the etcd manifest)"},
+        {"syntax": "etcdctl snapshot restore FILE --data-dir NEW; edit etcd.yaml hostPath", "desc": "Restore"},
+        {"syntax": "/etc/kubernetes/manifests/, /etc/kubernetes/pki/, /var/lib/kubelet/config.yaml", "desc": "Where things live"},
+        {"syntax": "helm install R CHART -n NS; kubectl kustomize DIR | k apply -f -", "desc": "Packaging tools"}
+      ]},
+      {"title": "Workloads, networking, storage", "items": [
+        {"syntax": "k set image deploy/D c=IMG; k rollout status|undo|history deploy/D", "desc": "Rollouts"},
+        {"syntax": "k scale deploy/D --replicas=N; k autoscale deploy/D --min=2 --max=10 --cpu-percent=70", "desc": "Scaling and HPA"},
+        {"syntax": "k taint nodes N key=val:NoSchedule; tolerations / nodeSelector / affinity in pod spec", "desc": "Scheduling"},
+        {"syntax": "k get ep SVC (empty -> selector mismatch)", "desc": "Service debugging"},
+        {"syntax": "NetworkPolicy: podSelector + policyTypes + from/to + DNS egress", "desc": "Default deny + allows"},
+        {"syntax": "PV (capacity, accessModes, storageClassName, hostPath) -> PVC (same class, mode, <= size) -> volumes/volumeMounts", "desc": "Static storage binding"}
+      ]},
+      {"title": "Troubleshooting", "items": [
+        {"syntax": "k describe pod P | sed -n '/Events/,$p'", "desc": "Events tell the cause"},
+        {"syntax": "k logs P --previous; k get events --sort-by=.metadata.creationTimestamp", "desc": "Crash reasons and timeline"},
+        {"syntax": "systemctl status kubelet; journalctl -u kubelet -n 50", "desc": "Node NotReady"},
+        {"syntax": "crictl ps -a; crictl logs CID", "desc": "Control plane when kubectl is down"},
+        {"syntax": "Pending: Insufficient cpu/memory, taints, affinity, PVC unbound", "desc": "Scheduling failures"},
+        {"syntax": "CrashLoopBackOff: logs --previous; OOMKilled: raise memory limit", "desc": "Runtime failures"}
+      ]}
+    ],
+    "pitfalls": [
+      "Working in the wrong context or namespace and losing full points on a correct answer.",
+      "Writing YAML by hand when a generator plus one edit would take a quarter of the time.",
+      "Spending fifteen minutes on a low-weight task instead of moving on.",
+      "Fixing a NotReady node by rebooting instead of reading the kubelet log.",
+      "Forgetting to uncordon after an upgrade, or to restart kubelet after installing it.",
+      "Not verifying the end state; a Service with no endpoints looks done and scores nothing."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A task asks you to create a Deployment with three replicas of a specific image in namespace `shop` and expose it internally on port 80. Which approach is fastest and safest in the exam?",
+      "options": [
+        "`kubectl create deploy` and `kubectl expose` with `--dry-run=client -o yaml`, adjust if needed, apply, then verify endpoints exist",
+        "Write the Deployment and Service YAML from scratch in vim from memory",
+        "Copy a Deployment example from the docs and edit every field to match",
+        "Create the pods individually with `kubectl run` and a Service by hand"
+      ],
+      "answer": 0,
+      "explain": "Generators produce correct manifests in seconds; verification with `kubectl get ep` confirms the Service selects the pods. Hand-written YAML and individual pods are slower and error-prone."
+    },
+    {
+      "q": "A Service exists and the Deployment's pods are Running, but `kubectl get endpoints` for the Service shows `<none>`. What is the most likely cause?",
+      "options": [
+        "The Service's selector does not match the pods' labels",
+        "The pods lack a readiness probe",
+        "The Service type is ClusterIP instead of NodePort",
+        "CoreDNS is not running"
+      ],
+      "answer": 0,
+      "explain": "Endpoints are the pods whose labels match the Service selector; no matches means an empty list. Readiness only removes not-ready pods; Service type and DNS do not affect endpoint selection."
+    },
+    {
+      "q": "During a kubeadm control-plane upgrade task, which sequence is correct?",
+      "options": [
+        "Drain the node, upgrade kubeadm, run `kubeadm upgrade apply`, upgrade kubelet and kubectl, restart kubelet, uncordon",
+        "Upgrade kubelet first, then kubeadm, then run `kubeadm upgrade node`, then drain",
+        "Run `kubeadm upgrade apply`, then reboot the node, then upgrade the packages",
+        "Uncordon the node, upgrade all packages, then run `kubeadm upgrade apply`"
+      ],
+      "answer": 0,
+      "explain": "The documented order matters: workloads are drained, kubeadm goes first because it drives the upgrade, `upgrade apply` is for control-plane nodes (`upgrade node` for workers), kubelet is upgraded and restarted after, and the node is returned with uncordon."
+    },
+    {
+      "q": "A pod is stuck in Pending. `kubectl describe pod` shows an event `0/3 nodes are available: 3 Insufficient memory`. What is the correct fix?",
+      "options": [
+        "Reduce the pod's memory request (or add capacity); the scheduler cannot place the request as specified",
+        "Delete and recreate the pod so the scheduler retries",
+        "Add a toleration to the pod so it can use tainted nodes",
+        "Increase the pod's memory limit so the kubelet accepts it"
+      ],
+      "answer": 0,
+      "explain": "The event names the cause: no node has enough allocatable memory for the request. Recreating changes nothing, tolerations address taints not resources, and limits do not affect scheduling."
+    },
+    {
+      "q": "A node shows NotReady. Where should you look first, and why?",
+      "options": [
+        "`kubectl describe node` for conditions, then the kubelet's status and journal on the node, because kubelet health determines node readiness",
+        "The CoreDNS pods, because DNS failures mark nodes NotReady",
+        "The etcd static pod manifest, because etcd stores node status",
+        "The Ingress controller logs, because it reports node health"
+      ],
+      "answer": 0,
+      "explain": "Node readiness is reported by the kubelet; its conditions and logs (`systemctl status kubelet`, `journalctl -u kubelet`) reveal certificate, config or runtime problems. DNS, etcd and ingress are not the source of node status."
+    }
+  ]
+}

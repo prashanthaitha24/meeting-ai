@@ -272,6 +272,7 @@ def main():
         "STAT_TRACKS": len(tracks), "STAT_LESSONS": n_live, "STAT_PLANNED": n_planned,
         "STAT_QUIZ": n_live * 5, "STAT_DIAGRAMS": count_diagrams(tracks),
         "STAT_PROJECTS": sum(p["live"] for tr in tracks for p in tr["projects"]),
+        "STAT_CERTS": sum(m["live"] for tr in tracks if tr["id"] == "certs" for m in tr["modules"]),
     }
     index = fill((SRC / "site" / "index.html").read_text(), {
         **stats,

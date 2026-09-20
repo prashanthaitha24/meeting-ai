@@ -1,0 +1,203 @@
+{
+  "id": "cert-terraform",
+  "minutes": 40,
+  "intro": "The HashiCorp Terraform Associate is a one-hour multiple-choice exam that tests whether you understand how Terraform actually works — providers, state, the plan-apply workflow, modules, expressions, drift, import and HCP Terraform — rather than whether you can memorise a cloud's resource types. Its questions are short and specific, which makes it the most predictable exam in this track: know the eight objectives of the current version (004), have run every command in them, and understand the handful of concepts people get wrong (what state is for, what `terraform init` does and does not do, how variable precedence works, what locking protects). This guide follows the 004 objectives exactly, gives the commands and rules behind each, and lays out a three-week plan. Confirm the exam details on HashiCorp's certification page before booking.",
+  "objectives": [
+    "Describe the Terraform Associate 004 format and its eight objectives",
+    "Explain providers, state, the core workflow and the configuration language at the depth the questions require",
+    "Use modules, remote state with locking, import and drift handling correctly",
+    "Describe HCP Terraform workspaces, projects, runs, variables and policy at the level tested",
+    "Follow a three-week plan that runs every command in the objectives"
+  ],
+  "sections": [
+    {
+      "heading": "The exam at a glance",
+      "blocks": [
+        {"type": "p", "text": "Terraform Associate (004) is a one-hour, multiple-choice and multiple-select exam taken online with a proctor, costing 70.50 USD plus tax, valid for two years. HashiCorp says version 004 is a significant update from 003, adding custom conditions validation and HCP Terraform workspace organisation among its new topics. The objectives are published in full with a review guide and tutorials on HashiCorp's developer site, which is the study material to trust. Questions are conceptual and command-level (\"which command…\", \"what happens when…\", \"which block…\"), and several test exact behaviour that differs from intuition."},
+        {"type": "table", "headers": ["Objective", "Tests"], "rows": [
+          ["1. Infrastructure as Code with Terraform", "What IaC is, its advantages, multi-cloud and service-agnostic workflows"],
+          ["2. Terraform fundamentals", "Installing and versioning providers, how providers are used, multiple providers, how state is used"],
+          ["3. Core Terraform workflow", "write, plan, apply; init, validate, plan, apply, destroy, fmt"],
+          ["4. Terraform configuration", "resource vs data, references, variables and outputs, complex types, expressions and functions, dependencies, custom conditions, sensitive data and Vault"],
+          ["5. Terraform modules", "Sources, variable scope, using modules, versioning"],
+          ["6. Terraform state management", "Local backend, locking, remote backend block, drift and state operations"],
+          ["7. Maintain infrastructure", "Import, inspecting state with the CLI, verbose logging"],
+          ["8. HCP Terraform", "Creating infrastructure, collaboration and governance, workspaces and projects, integration"]
+        ]},
+        {"type": "callout", "kind": "note", "text": "The DevOps track's Terraform module covers the practice; this guide is about the exam's specific angles and the facts it checks. Run every command below on a real project (the zero-to-production infrastructure works) — the questions assume you have."}
+      ]
+    },
+    {
+      "heading": "Fundamentals: providers and state (objectives 1–2)",
+      "blocks": [
+        {"type": "p", "text": "Terraform is provider-based: the core reads configuration, builds a graph and drives **providers** (plugins) that talk to APIs — AWS, Azure, Kubernetes, GitHub, a database — which is why one workflow spans many services and clouds. Providers are declared in `required_providers` with a source and a version constraint; `terraform init` downloads them into `.terraform/` and records exact versions in `.terraform.lock.hcl`, which you commit so every run uses the same builds. Multiple instances of one provider (two regions) use `alias`. The exam checks constraint syntax (`~> 5.0` allows 5.x but not 6.0) and that `terraform init -upgrade` is what moves within constraints."},
+        {"type": "p", "text": "**State** is Terraform's record of what it manages: a mapping from configuration addresses to real resource ids and attributes, used to plan changes, detect drift and know what to destroy. It is stored in `terraform.tfstate` locally by default, in a backend for teams, and it can contain sensitive values in plain text, so it must be protected and never committed. The exam asks why state exists (mapping, metadata, performance via caching), what happens without it (Terraform would create duplicates), and that refresh reads real infrastructure to update state before planning."},
+        {"type": "code", "lang": "hcl", "caption": "The blocks the exam expects you to read: provider requirements with constraints, a provider alias, and a remote backend with locking.", "code": "terraform {\n  required_version = \">= 1.10\"\n  required_providers {\n    aws = {\n      source  = \"hashicorp/aws\"\n      version = \"~> 5.80\"      # >= 5.80, < 6.0\n    }\n  }\n  backend \"s3\" {\n    bucket       = \"acme-tfstate\"\n    key          = \"prod/network.tfstate\"\n    region       = \"eu-west-1\"\n    encrypt      = true\n    use_lockfile = true         # S3-native locking (Terraform 1.10+)\n  }\n}\n\nprovider \"aws\" {\n  region = \"eu-west-1\"\n}\n\nprovider \"aws\" {\n  alias  = \"us\"\n  region = \"us-east-1\"\n}\n\nresource \"aws_acm_certificate\" \"cdn\" {\n  provider    = aws.us          # CloudFront certificates must live in us-east-1\n  domain_name = \"shop.example.com\"\n  validation_method = \"DNS\"\n}"}
+      ]
+    },
+    {
+      "heading": "Workflow and configuration (objectives 3–4)",
+      "blocks": [
+        {"type": "p", "text": "The **core workflow** is write, plan, apply. `terraform init` prepares the directory (backend, providers, modules) and must be rerun when any of those change; it never modifies infrastructure. `terraform validate` checks syntax and internal consistency without touching APIs (it needs init first). `terraform plan` refreshes state and shows the proposed changes; `-out=FILE` saves a plan that `apply FILE` executes exactly, with no further prompt. `terraform apply` without a saved plan re-plans and asks for confirmation unless `-auto-approve`. `terraform destroy` (or `apply -destroy`) removes everything in state. `terraform fmt` rewrites files to canonical style; `fmt -check` is for CI."},
+        {"type": "p", "text": "**Configuration**: `resource` blocks create and manage; `data` blocks read existing things. References (`aws_vpc.main.id`) create implicit dependencies; `depends_on` adds explicit ones when there is no reference. **Variables** have types (string, number, bool, list, map, set, object, tuple), defaults, validation blocks, `sensitive = true` (redacted in output, still in state), and a precedence order the exam loves: environment variables `TF_VAR_name`, then `terraform.tfvars`, then `*.auto.tfvars` in filename order, then `-var` and `-var-file` on the command line, later ones winning. **Outputs** expose values, can be marked sensitive, and are read from state. Expressions include conditionals, `for` expressions, splat, `dynamic` blocks, and built-in functions (`lookup`, `merge`, `flatten`, `jsonencode`, `file`, `templatefile`); there are no user-defined functions."},
+        {"type": "code", "lang": "hcl", "caption": "Custom conditions (new in 004): a variable validation, a precondition on a resource, and a postcondition that checks the real result.", "code": "variable \"instance_type\" {\n  type = string\n  validation {\n    condition     = can(regex(\"^t3\\\\.\", var.instance_type))\n    error_message = \"Only t3 instance types are allowed in this environment.\"\n  }\n}\n\nresource \"aws_instance\" \"app\" {\n  ami           = data.aws_ami.al2023.id\n  instance_type = var.instance_type\n\n  lifecycle {\n    precondition {\n      condition     = data.aws_ami.al2023.architecture == \"x86_64\"\n      error_message = \"The selected AMI must be x86_64.\"\n    }\n    postcondition {\n      condition     = self.public_ip == null\n      error_message = \"Instances in this module must not receive a public IP.\"\n    }\n  }\n}"},
+        {"type": "callout", "kind": "tip", "text": "Sensitive data on the exam: mark variables and outputs `sensitive`, remember state still holds the values, keep secrets out of code with a secrets manager or the Vault provider, and never rely on `.gitignore` alone."}
+      ]
+    },
+    {
+      "heading": "Modules and state management (objectives 5–6)",
+      "blocks": [
+        {"type": "p", "text": "A **module** is any directory of Terraform files; the root module is where you run commands, and child modules are called with a `module` block. Sources: local paths, the public or a private registry (`namespace/name/provider` with a `version` constraint, which only registry sources support), Git URLs (pin with `?ref=`), and archives. Variables are scoped to the module: a child sees only what is passed as inputs, and the parent reads only the child's declared outputs. Providers are inherited by default from the parent unless passed explicitly. `terraform get` or `init` downloads modules; `-upgrade` picks newer versions within constraints."},
+        {"type": "p", "text": "**State management**: the local backend is a file; remote backends (S3, Azure Storage, GCS, HCP Terraform and others) share state and support **locking**, which prevents two applies from corrupting it — with S3 that is the `use_lockfile` option or a DynamoDB table, and `-lock=false` exists but is dangerous. `terraform state list|show|mv|rm|pull|push` inspect and surgically edit state (`mv` renames without recreating; `rm` forgets without destroying). **Drift** is when reality differs from state: `plan` shows it after refresh; `terraform apply -refresh-only` updates state to match reality without changing infrastructure; `-replace=ADDRESS` forces recreation (the old `taint`). Workspaces (`terraform workspace new|select`) keep separate state files for the same configuration."},
+        {"type": "code", "lang": "bash", "caption": "State and drift commands the exam asks about by name.", "code": "terraform state list                                   # addresses in state\nterraform state show aws_instance.app                  # attributes of one resource\nterraform state mv aws_instance.app aws_instance.web   # rename without destroy/create\nterraform state rm aws_s3_bucket.legacy                # stop managing; resource stays\nterraform apply -refresh-only                          # accept drift into state, no infra changes\nterraform apply -replace=aws_instance.app              # force recreate (replaces 'taint')\nterraform workspace new staging && terraform workspace select staging\nterraform force-unlock LOCK_ID                         # only when a lock is truly stale"}
+      ]
+    },
+    {
+      "heading": "Maintaining infrastructure and HCP Terraform (objectives 7–8)",
+      "blocks": [
+        {"type": "p", "text": "**Import** brings existing infrastructure under management: write the resource block, then `terraform import ADDRESS ID`, or declare an `import` block and let `plan` generate configuration with `-generate-config-out`. Import writes to state only; the configuration must match or the next plan shows changes. **Inspecting**: `terraform show` prints state or a saved plan; `terraform output` reads outputs; `terraform graph` draws dependencies. **Logging**: `TF_LOG` (TRACE, DEBUG, INFO, WARN, ERROR) with `TF_LOG_PATH` writes verbose logs; `TF_LOG_CORE` and `TF_LOG_PROVIDER` separate the two."},
+        {"type": "p", "text": "**HCP Terraform** (formerly Terraform Cloud; Terraform Enterprise is the self-hosted version) runs Terraform remotely with shared state, locking, run history, variable storage (including sensitive variables encrypted at rest), VCS-driven workflows (a pull request triggers a speculative plan, a merge triggers an apply), team access controls, and **policy as code** with Sentinel or OPA to enforce rules before apply. **Workspaces** in HCP Terraform are the unit of state and configuration (unlike CLI workspaces, which are just state files), and **projects** group workspaces for permissions and organisation. The CLI connects with a `cloud` block, and runs can be remote, local, or agent-based for private networks. The private registry hosts modules and providers for the organisation, and run tasks integrate external checks."},
+        {"type": "code", "lang": "hcl", "caption": "Connecting a configuration to HCP Terraform: the cloud block selects the organisation and workspace; runs and state move to the platform.", "code": "terraform {\n  cloud {\n    organization = \"acme\"\n    workspaces {\n      name = \"network-prod\"       # or tags = [\"network\"] to select several\n    }\n  }\n}\n\n# import block (Terraform 1.5+): declare, then 'terraform plan -generate-config-out=generated.tf'\nimport {\n  to = aws_s3_bucket.assets\n  id = \"acme-assets-prod\"\n}"},
+        {"type": "callout", "kind": "warning", "text": "Two facts that trip people: `terraform init` does not create infrastructure or lock state, and `terraform state rm` does not destroy anything. Read each option for exactly what the command does."}
+      ]
+    },
+    {
+      "heading": "The three-week plan",
+      "blocks": [
+        {"type": "table", "headers": ["Week", "Objectives", "Do"], "rows": [
+          ["1", "1–4: fundamentals, workflow, configuration", "Build a small project from scratch: providers with constraints and an alias, variables of every type with validation, outputs, data sources, a dynamic block, preconditions; run init, validate, plan -out, apply, fmt -check, destroy"],
+          ["2", "5–7: modules, state, maintenance", "Extract a module, call it twice with different inputs, pin a registry module; move to an S3 backend with locking; practise state mv/rm, refresh-only, -replace, workspaces; import a bucket both ways; run with TF_LOG=DEBUG"],
+          ["3", "8 plus review", "Connect the project to a free HCP Terraform organisation with a VCS workflow, a workspace variable set, a project, and one Sentinel or OPA policy; then HashiCorp's sample questions and a timed run through the review guide"]
+        ]},
+        {"type": "p", "text": "HashiCorp's own study guide, review guide and tutorials for 004 are the authoritative source and are free; read the review guide's objectives one by one and be able to say a sentence about each. The exam is short: one hour goes quickly, so answer confidently, flag the few you doubt, and return. Most people who have run every command in this guide finish with time to spare."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Three-week study plan, condensed",
+    "steps": [
+      "Book the exam for three weeks out. Create a small project (the zero-to-production infrastructure or a fresh VPC-plus-instance) and a free HCP Terraform account.",
+      "Week 1: rebuild the project to exercise objectives 1–4: constraints and a provider alias, every variable type, validation and lifecycle conditions, a dynamic block, sensitive outputs. Run the full command set and read every plan line.",
+      "Week 2: refactor into a module and call it twice; add a registry module with a version pin; switch to a remote backend with locking and observe a lock during apply; run state mv and rm and import (CLI and import block); force a drift by changing a tag in the console and resolve it with refresh-only; run once with TF_LOG=DEBUG.",
+      "Week 3: connect to HCP Terraform with a cloud block, trigger a speculative plan from a pull request, set workspace variables including a sensitive one, create a project, and attach one policy that fails a plan. Then do HashiCorp's sample questions and reread the review guide.",
+      "Keep a one-page list of 'exact behaviour' facts: what init does, variable precedence, what rm and mv do, lock semantics, sensitive versus state, registry-only versioning.",
+      "Exam day: read every option for exact command behaviour; eliminate options that describe what a command does not do; flag and return."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Providers are plugins declared with source and version constraints; init downloads them and writes the lock file",
+      "State maps configuration to real resources; it is sensitive, must be protected, and enables plan, drift detection and destroy",
+      "init prepares; validate checks syntax offline; plan refreshes and proposes; apply executes; destroy removes; fmt formats",
+      "Variable precedence: TF_VAR env < terraform.tfvars < *.auto.tfvars < -var/-var-file (later wins); sensitive hides output, not state",
+      "Modules scope variables; registry sources support version; providers inherit unless passed",
+      "state mv renames, state rm forgets without destroying, refresh-only accepts drift, -replace recreates, locking prevents concurrent applies"
+    ],
+    "groups": [
+      {"title": "Exam facts (verified Sept 2026, confirm before booking)", "items": [
+        {"syntax": "Terraform Associate 004 · 1 hour · multiple choice/select", "desc": "Online proctored"},
+        {"syntax": "70.50 USD + tax · valid 2 years", "desc": "Registration"},
+        {"syntax": "8 objectives: IaC, fundamentals, workflow, configuration, modules, state, maintain, HCP Terraform", "desc": "Study the review guide by objective"},
+        {"syntax": "new in 004: custom conditions, HCP workspaces and projects", "desc": "Do not use only 003 materials"}
+      ]},
+      {"title": "Commands", "items": [
+        {"syntax": "terraform init [-upgrade] [-reconfigure|-migrate-state]", "desc": "Backend, providers, modules; no infra changes"},
+        {"syntax": "terraform validate", "desc": "Syntax and consistency; no API calls"},
+        {"syntax": "terraform plan -out=tfplan; terraform apply tfplan", "desc": "Saved plan applies exactly, no prompt"},
+        {"syntax": "terraform apply -auto-approve / -refresh-only / -replace=ADDR / -destroy", "desc": "Apply variants"},
+        {"syntax": "terraform fmt -check -recursive", "desc": "CI formatting gate"},
+        {"syntax": "terraform show [tfplan] / output [-json] / graph", "desc": "Inspect"},
+        {"syntax": "terraform state list|show|mv|rm|pull|push", "desc": "State surgery"},
+        {"syntax": "terraform import ADDR ID / import {} block + -generate-config-out", "desc": "Adopt existing resources"},
+        {"syntax": "terraform workspace new|select|list", "desc": "CLI workspaces = separate state files"},
+        {"syntax": "TF_LOG=DEBUG TF_LOG_PATH=tf.log", "desc": "Verbose logging"}
+      ]},
+      {"title": "Configuration rules", "items": [
+        {"syntax": "version = \"~> 5.80\"", "desc": ">= 5.80, < 6.0"},
+        {"syntax": "provider \"aws\" { alias = \"us\" } / provider = aws.us", "desc": "Multiple provider instances"},
+        {"syntax": "resource (manage) vs data (read)", "desc": "Objective 4a"},
+        {"syntax": "implicit dependency via reference; depends_on when none", "desc": "Ordering"},
+        {"syntax": "variable { type, default, validation {}, sensitive }", "desc": "Inputs"},
+        {"syntax": "lifecycle { precondition / postcondition / create_before_destroy / prevent_destroy / ignore_changes }", "desc": "Resource behaviour and checks"},
+        {"syntax": "dynamic \"block\" { for_each = ... content {} }", "desc": "Repeated nested blocks"},
+        {"syntax": "count vs for_each (map/set) ", "desc": "Multiple instances; for_each keys are stable"},
+        {"syntax": "no user-defined functions", "desc": "Built-ins only"}
+      ]},
+      {"title": "Modules, state, HCP", "items": [
+        {"syntax": "module \"x\" { source = \"ns/name/aws\" version = \"~> 3.0\" }", "desc": "Registry source with version"},
+        {"syntax": "source = \"git::https://...?ref=v1.2.0\" / \"./modules/x\"", "desc": "Git and local sources (no version argument)"},
+        {"syntax": "backend \"s3\" { use_lockfile = true }", "desc": "Remote state with locking"},
+        {"syntax": "-lock=false / force-unlock ID", "desc": "Dangerous; only for stale locks"},
+        {"syntax": "cloud { organization, workspaces { name | tags } }", "desc": "HCP Terraform connection"},
+        {"syntax": "HCP workspace = state + config + variables + runs; project = group of workspaces", "desc": "Not the same as CLI workspaces"},
+        {"syntax": "VCS workflow: PR -> speculative plan, merge -> apply", "desc": "Collaboration"},
+        {"syntax": "Sentinel / OPA policies; run tasks; private registry; agents", "desc": "Governance and integration"}
+      ]}
+    ],
+    "pitfalls": [
+      "Believing init applies changes or that validate contacts the cloud.",
+      "Getting variable precedence backwards; command-line values win.",
+      "Thinking sensitive = true removes the value from state.",
+      "Adding a version argument to a Git or local module source.",
+      "Using state rm expecting the resource to be destroyed, or destroy expecting only state to change.",
+      "Confusing CLI workspaces (state files) with HCP Terraform workspaces (full environments)."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A team member runs `terraform init` in a new clone of a project and asks whether it changed any cloud resources. What is the correct answer?",
+      "options": [
+        "No; init only configures the backend and downloads providers and modules",
+        "Yes; init creates any resources missing from state",
+        "Only if the backend is remote; then it applies the last saved plan",
+        "Yes; init refreshes and repairs drifted resources"
+      ],
+      "answer": 0,
+      "explain": "init prepares the working directory and never touches infrastructure. Creating, refreshing and repairing are plan/apply behaviours."
+    },
+    {
+      "q": "A variable is set to `a` in `terraform.tfvars`, `b` in `prod.auto.tfvars`, and `c` via `-var` on the command line. Which value does Terraform use?",
+      "options": [
+        "`c`, because command-line values have the highest precedence",
+        "`a`, because terraform.tfvars is loaded last",
+        "`b`, because auto.tfvars files override everything",
+        "Terraform errors because the variable is defined more than once"
+      ],
+      "answer": 0,
+      "explain": "Precedence is environment variables, then terraform.tfvars, then *.auto.tfvars, then -var and -var-file in the order given; later sources win, so the command-line value applies."
+    },
+    {
+      "q": "Someone deleted a security group in the console that Terraform manages. What does the next `terraform plan` show, and what does `terraform apply -refresh-only` do?",
+      "options": [
+        "Plan proposes to recreate the group; refresh-only would instead update state to record that it no longer exists, without creating anything",
+        "Plan shows no changes because the resource is still in state; refresh-only recreates it",
+        "Plan fails because state is corrupt; refresh-only repairs the backend",
+        "Both commands recreate the group immediately"
+      ],
+      "answer": 0,
+      "explain": "Refresh detects the drift; a normal plan wants to restore the configured resource, while refresh-only accepts reality into state and changes no infrastructure."
+    },
+    {
+      "q": "Two engineers run `terraform apply` against the same remote state at the same time. What prevents corruption?",
+      "options": [
+        "State locking in the backend; the second apply waits or fails until the first releases the lock",
+        "Terraform merges both sets of changes automatically",
+        "The provider serialises API calls so the applies cannot conflict",
+        "Nothing; remote state is always safe for concurrent use"
+      ],
+      "answer": 0,
+      "explain": "Locking is the backend feature that makes shared state safe; it is why disabling it with -lock=false is dangerous and why force-unlock is only for stale locks."
+    },
+    {
+      "q": "What distinguishes an HCP Terraform workspace from a CLI workspace?",
+      "options": [
+        "An HCP Terraform workspace holds state, configuration, variables and run history for one environment; a CLI workspace is only a separate state file for the same configuration",
+        "They are identical; the names differ only in documentation",
+        "CLI workspaces support policy as code, HCP workspaces do not",
+        "HCP workspaces cannot be selected from the CLI"
+      ],
+      "answer": 0,
+      "explain": "The two share a name and little else. HCP Terraform workspaces are full remote environments (and are grouped into projects); CLI workspaces only switch state files locally or in a backend."
+    }
+  ]
+}
