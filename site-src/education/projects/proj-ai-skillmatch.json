@@ -1,0 +1,174 @@
+{
+  "id": "proj-ai-skillmatch",
+  "track": "ai",
+  "title": "SkillMatch AI: from semester project to shipped app",
+  "summary": "Take a Streamlit career recommender built on Sentence-BERT embeddings and cosine similarity — a typical course project that only runs on its author's laptop — and turn it into something anyone can open in a browser: reproducible installs, tests, a public demo on Hugging Face Spaces, a container, automated deploys from GitHub, an evaluation gate in CI, and basic usage monitoring.",
+  "outcome": "A live public URL on Hugging Face Spaces where anyone can paste their skills and get ranked careers with a skill-gap breakdown; a GitHub repository (public or private, your choice) with pinned dependencies, tests, a Dockerfile, a CI workflow that runs the evaluation harness and redeploys the Space on every merge, and a README with an \"Open in Spaces\" badge. The pattern transfers to any Streamlit or Gradio ML app.",
+  "hours": 6,
+  "level": "Intermediate",
+  "prereqs": [
+    "The SkillMatch AI repository (a Streamlit app with `app.py`, `src/`, `data/careers.csv`, `evaluate.py` and `requirements.txt`); any similar Streamlit ML app works the same way",
+    "Git, Python 3.11 or 3.12, and Docker Desktop installed (the DevOps zero-to-production project covers installation)",
+    "A free GitHub account and a free Hugging Face account",
+    "About 2 GB of disk for the PyTorch CPU wheel and the model cache"
+  ],
+  "tools": [
+    {"name": "Hugging Face Spaces", "why": "free CPU hosting for Streamlit apps with a public URL, built straight from a git repository", "url": "https://huggingface.co/spaces"},
+    {"name": "Streamlit", "why": "the app's UI framework; Spaces has a native Streamlit runtime", "url": "https://streamlit.io/"},
+    {"name": "sentence-transformers + PyTorch (CPU)", "why": "the embedding model; the CPU wheel keeps installs small and fast", "url": "https://www.sbert.net/"},
+    {"name": "pytest", "why": "tests for the recommender and the evaluation gate in CI", "url": "https://docs.pytest.org/"},
+    {"name": "GitHub Actions", "why": "run tests on pull requests and push to the Space on merge", "url": "https://docs.github.com/actions"},
+    {"name": "Docker", "why": "a portable image for anyone who wants to run it without Python, and an alternative Space type", "url": "https://docs.docker.com/get-docker/"}
+  ],
+  "layout": "skillmatch-ai/\n├── .github/workflows/\n│   ├── ci.yml              # tests + evaluation gate on every PR\n│   └── deploy.yml          # push to the Hugging Face Space on merge to main\n├── .streamlit/\n│   └── config.toml         # theme and server settings\n├── app.py                  # Streamlit UI (existing)\n├── src/                    # embedder, preprocess, recommender, skill_gap (existing)\n├── data/careers.csv        # curated career dataset (existing)\n├── tests/\n│   ├── test_recommender.py\n│   └── test_app_smoke.py\n├── evaluate.py             # Top-K accuracy harness (existing, now emits JSON)\n├── requirements.txt        # pinned, CPU-only torch\n├── Dockerfile\n├── .dockerignore\n├── .gitignore\n└── README.md               # Spaces front matter + badges + how to run",
+  "phases": [
+    {
+      "title": "Run it locally and understand what it needs",
+      "goal": "A clean clone runs on your machine, and you know exactly which files, downloads and caches the app depends on — the things a hosting platform must also provide.",
+      "steps": [
+        {"text": "Clone the repository into a fresh directory and open it in your editor. If the repository is private, cloning with the GitHub CLI handles authentication.",
+         "code": {"lang": "bash", "code": "gh repo clone prashanthaitha24/skillmatch-ai\ncd skillmatch-ai\ncode ."}},
+        {"text": "Create a virtual environment and install the dependencies. The first install pulls PyTorch, which is large; that is one of the things you will fix in the next phase.",
+         "code": {"lang": "bash", "code": "python3.12 -m venv .venv\nsource .venv/bin/activate\npip install --upgrade pip\npip install -r requirements.txt"},
+         "note": "Windows PowerShell: `.venv\\Scripts\\Activate.ps1`."},
+        {"text": "Run the evaluation harness first. It loads the model (downloading about 90 MB from the Hugging Face Hub on first use) and reports Top-K accuracy on the hand-labelled cases; it is the fastest proof the pipeline works.",
+         "code": {"lang": "bash", "code": "python evaluate.py"},
+         "check": "It prints an accuracy figure and no traceback. A `data/career_embeddings.npz` cache file now exists (it is git-ignored)."},
+        {"text": "Start the Streamlit app and try the one-click example profiles.",
+         "code": {"lang": "bash", "code": "streamlit run app.py"},
+         "check": "The browser opens at http://localhost:8501, the spinner says it is loading the SBERT model, and a profile returns ranked careers with matched and missing skills."},
+        {"text": "Write down the runtime dependencies you just observed, because a hosting platform has to satisfy each one: Python packages (including PyTorch), outbound access to the Hugging Face Hub to download the model on first run, a writable directory for the model cache and for `data/career_embeddings.npz`, and roughly 1 to 2 GB of RAM while the model is loaded.",
+         "note": "Hugging Face Spaces provides all four on its free CPU tier, which is why it is the first deployment target."}
+      ]
+    },
+    {
+      "title": "Make it reproducible and testable",
+      "goal": "Pinned dependencies that install quickly anywhere, a couple of tests, an evaluation script that can gate a pipeline, and Streamlit configuration in the repository.",
+      "steps": [
+        {"text": "Create a branch for the deployment work.",
+         "code": {"lang": "bash", "code": "git switch -c feat/deploy"}},
+        {"text": "Replace the loose `>=` requirements with pinned versions, and install the CPU-only PyTorch wheel: it is a fraction of the size of the default build and all the app needs. The extra index line is honoured by pip inside a requirements file.",
+         "code": {"lang": "text", "code": "--extra-index-url https://download.pytorch.org/whl/cpu\ntorch==2.5.1+cpu\n\nsentence-transformers==3.3.1\nscikit-learn==1.6.1\npandas==2.2.3\nnumpy==2.2.1\nstreamlit==1.41.1\npypdf==5.1.0"},
+         "note": "Save as `requirements.txt`. If a version is unavailable when you read this, pick the current stable release of each package and keep the `+cpu` suffix on torch. On Apple Silicon the `+cpu` wheel is not published; for local installs on a Mac use plain `torch==2.5.1` and keep the CPU line for Linux hosts by using a second file `requirements-linux.txt`, or simply accept the default wheel locally."},
+        {"text": "Reinstall from the pinned file in a fresh environment and confirm the app still works. This is the install the Space and the CI runner will perform.",
+         "code": {"lang": "bash", "code": "deactivate; rm -rf .venv\npython3.12 -m venv .venv && source .venv/bin/activate\npip install -r requirements.txt\npython evaluate.py"},
+         "check": "Install time and download size drop noticeably; the evaluation result is unchanged."},
+        {"text": "Add a small test module for the recommender: the top result for a clear data-science profile must be a data role, results must be ranked by similarity, and the skill gap must never list a skill the user already has.",
+         "code": {"lang": "python", "code": "# tests/test_recommender.py\nfrom pathlib import Path\n\nimport pytest\n\nfrom src.recommender import CareerRecommender\n\nDATA = Path(__file__).resolve().parents[1] / \"data\" / \"careers.csv\"\n\n\n@pytest.fixture(scope=\"module\")\ndef rec():\n    return CareerRecommender(DATA)   # loads the model once for the module\n\n\ndef test_data_profile_ranks_a_data_role_first(rec):\n    matches = rec.recommend(\"I know Python, SQL, machine learning, and data visualization.\", top_k=3)\n    assert \"Data\" in matches[0].career_title or \"Analyst\" in matches[0].career_title\n\n\ndef test_results_are_sorted_by_similarity(rec):\n    matches = rec.recommend(\"I build React frontends with JavaScript, HTML and CSS.\", top_k=5)\n    sims = [m.similarity for m in matches]\n    assert sims == sorted(sims, reverse=True)\n\n\ndef test_gap_excludes_skills_already_present(rec):\n    matches = rec.recommend(\"Python, SQL, Docker, Kubernetes, Terraform\", top_k=3)\n    for m in matches:\n        assert not set(s.lower() for s in m.matched_skills) & set(s.lower() for s in m.missing_skills)"},
+         "note": "Adjust the method name (`recommend`) and attribute names to match `src/recommender.py` if they differ; the README's description of the match object is the reference."},
+        {"text": "Add a smoke test that imports the Streamlit app in headless mode using Streamlit's testing API, so a broken import or a crash on load fails CI before anything is deployed.",
+         "code": {"lang": "python", "code": "# tests/test_app_smoke.py\nfrom streamlit.testing.v1 import AppTest\n\n\ndef test_app_renders_without_exception():\n    at = AppTest.from_file(\"app.py\", default_timeout=120)\n    at.run()\n    assert not at.exception\n    assert any(\"SkillMatch\" in t.value for t in at.title)"}},
+        {"text": "Install pytest into a dev requirements file and run everything once.",
+         "code": {"lang": "bash", "code": "printf -- '-r requirements.txt\\npytest==8.3.4\\n' > requirements-dev.txt\npip install -r requirements-dev.txt\npytest -q"},
+         "check": "Four tests pass. The first run is slow while the model loads; later runs use the cache."},
+        {"text": "Make `evaluate.py` usable as a gate: print the Top-K accuracy as JSON and exit non-zero below a threshold. Append this to the end of the script (adapt the variable holding the accuracy to the script's own name).",
+         "code": {"lang": "python", "code": "import json\nimport sys\n\nTHRESHOLD = 0.8   # minimum acceptable Top-3 accuracy on the labelled cases\n\n\ndef report(accuracy: float, k: int) -> None:\n    result = {\"top_k\": k, \"accuracy\": round(accuracy, 3), \"threshold\": THRESHOLD}\n    print(json.dumps(result))\n    with open(\"eval_results.json\", \"w\") as f:\n        json.dump(result, f)\n    if accuracy < THRESHOLD:\n        print(f\"FAIL: accuracy {accuracy:.3f} below threshold {THRESHOLD}\", file=sys.stderr)\n        sys.exit(1)"},
+         "note": "Call `report(accuracy, k)` where the script currently prints its result. Now a change to the dataset or the model that degrades ranking quality fails the pipeline instead of shipping silently."},
+        {"text": "Add a Streamlit configuration file so the app looks the same everywhere and never tries to open a browser or collect usage statistics on a server.",
+         "code": {"lang": "toml", "code": "[server]\nheadless = true\nenableCORS = false\nenableXsrfProtection = true\n\n[browser]\ngatherUsageStats = false\n\n[theme]\nbase = \"dark\"\nprimaryColor = \"#8b5cf6\""},
+         "note": "Save as `.streamlit/config.toml`. Keep `.streamlit/secrets.toml` in `.gitignore` (it already is) even though this app needs no secrets."},
+        {"text": "Commit the work.",
+         "code": {"lang": "bash", "code": "git add requirements.txt requirements-dev.txt tests .streamlit evaluate.py\ngit commit -m \"chore: pinned CPU deps, tests, evaluation gate, streamlit config\""}}
+      ]
+    },
+    {
+      "title": "Deploy to Hugging Face Spaces",
+      "goal": "A public URL running the app on the free CPU tier, built from a git push, with the GitHub repository staying private if you want it to.",
+      "steps": [
+        {"text": "Create the Space in the browser: go to huggingface.co, sign in, click your avatar → New Space. Name it `skillmatch-ai`, choose the **Streamlit** SDK, hardware **CPU basic** (free), visibility **Public**, and create it. Note the URL it gives you: `https://huggingface.co/spaces/YOUR_HF_USER/skillmatch-ai`.",
+         "note": "A Space is itself a git repository. You will push your code to it directly; the GitHub repository can remain private because the Space never reads from GitHub unless you tell it to."},
+        {"text": "Create a Hugging Face access token with **write** permission: avatar → Settings → Access Tokens → Create new token → type Write. Copy it once; it is the password for git pushes to the Space.",
+         "note": "Treat it like any secret: never commit it. You will also store it as a GitHub Actions secret in the next phase."},
+        {"text": "Add the Space's front matter to the top of `README.md`. Spaces read these fields to know how to run the app. Use the Streamlit version the Space creation page listed as supported (it shows the allowed range); keep it equal to the pin in `requirements.txt` if that version is allowed.",
+         "code": {"lang": "text", "code": "---\ntitle: SkillMatch AI\nemoji: 🧭\ncolorFrom: indigo\ncolorTo: purple\nsdk: streamlit\nsdk_version: 1.41.1\napp_file: app.py\npinned: false\nlicense: mit\n---\n\n# 🧭 SkillMatch AI (existing README content continues below)"},
+         "note": "`app_file` must point at the Streamlit entry point. If the Space rejects the `sdk_version`, change it to one from the supported list; the Space's build log tells you."},
+        {"text": "Add the Space as a second git remote and push the branch to the Space's `main`. Git will ask for a username (your Hugging Face username) and a password (paste the write token).",
+         "code": {"lang": "bash", "code": "git remote add space https://huggingface.co/spaces/YOUR_HF_USER/skillmatch-ai\ngit push space feat/deploy:main --force"},
+         "note": "The `--force` is only needed on this first push because the new Space already contains a placeholder commit. On macOS the token is stored in Keychain by the git credential helper after the first push; on Linux consider `git config credential.helper store` or use the token in the URL for a one-off."},
+        {"text": "Watch the build: open the Space page and click the **Logs** tab (or the \"Building\" status). It installs `requirements.txt`, then starts Streamlit. The first start downloads the model from the Hub, which is fast because it stays inside Hugging Face's network.",
+         "check": "The status turns to **Running** and the app loads at `https://YOUR_HF_USER-skillmatch-ai.hf.space` (also embedded on the Space page). Try an example profile."},
+        {"text": "If the build fails, the log names the cause. The three usual ones: an unsupported `sdk_version` (change it to a listed one), a package version that does not exist for Linux (pin to one that does), or an import error from a missing file (make sure `src/` and `data/careers.csv` were pushed; check `.gitignore`).",
+         "note": "Spaces run Linux on x86-64, so the `torch==...+cpu` wheel from the extra index works there even if you used the default wheel on a Mac."},
+        {"text": "Confirm the model cache behaves: reload the page a few times. The recommender is wrapped in `st.cache_resource`, so the model loads once per process; subsequent visitors get instant results. Spaces on the free tier go to sleep after a period of inactivity and wake on the next visit with a cold start of about a minute — acceptable for a demo, and the Space settings show the sleep timer.",
+         "check": "Second and later profile submissions return in well under a second."},
+        {"text": "Merge the branch on GitHub through a pull request so `main` matches what is deployed.",
+         "code": {"lang": "bash", "code": "git push -u origin feat/deploy\ngh pr create --fill && gh pr merge --squash --delete-branch\ngit switch main && git pull"}}
+      ]
+    },
+    {
+      "title": "Automate: test on pull requests, deploy on merge",
+      "goal": "Every pull request runs the tests and the evaluation gate; every merge to main updates the Space automatically, so the demo never drifts from the code.",
+      "steps": [
+        {"text": "Store the Hugging Face token as a GitHub Actions secret and your Space id as a variable.",
+         "code": {"lang": "bash", "code": "gh secret set HF_TOKEN            # paste the write token when prompted\ngh variable set HF_SPACE --body \"YOUR_HF_USER/skillmatch-ai\""}},
+        {"text": "Create the CI workflow: install the pinned CPU dependencies with caching, run the tests, then run the evaluation gate and keep its JSON output as an artifact.",
+         "code": {"lang": "yaml", "code": "name: ci\n\non:\n  pull_request:\n  push:\n    branches: [main]\n\npermissions:\n  contents: read\n\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-python@v5\n        with:\n          python-version: \"3.12\"\n          cache: pip\n      - run: pip install -r requirements-dev.txt\n      - name: Cache the sentence-transformers model between runs\n        uses: actions/cache@v4\n        with:\n          path: ~/.cache/huggingface\n          key: hf-models-all-MiniLM-L6-v2\n      - run: pytest -q\n      - name: Evaluation gate (Top-K accuracy must clear the threshold)\n        run: python evaluate.py\n      - uses: actions/upload-artifact@v4\n        with:\n          name: eval-results\n          path: eval_results.json"},
+         "note": "Save as `.github/workflows/ci.yml`. Caching the model directory keeps CI runs to a couple of minutes."},
+        {"text": "Create the deploy workflow: on every push to `main`, after CI succeeds, push the same commit to the Space. Pushing the full history with `--force` keeps the Space an exact mirror of `main`.",
+         "code": {"lang": "yaml", "code": "name: deploy\n\non:\n  workflow_run:\n    workflows: [ci]\n    types: [completed]\n    branches: [main]\n\npermissions:\n  contents: read\n\njobs:\n  push-to-space:\n    if: github.event.workflow_run.conclusion == 'success'\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n          lfs: true\n      - name: Push main to the Hugging Face Space\n        env:\n          HF_TOKEN: ${{ secrets.HF_TOKEN }}\n          HF_SPACE: ${{ vars.HF_SPACE }}\n        run: |\n          git push --force \"https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}\" HEAD:main"},
+         "note": "Save as `.github/workflows/deploy.yml`. The username in the URL is ignored when a token is supplied; `user` is a placeholder. If you ever add files over 10 MB, track them with git LFS, which Spaces require for large files."},
+        {"text": "Open a pull request with the workflows and watch CI run on it; then merge and watch the deploy workflow push to the Space and the Space rebuild.",
+         "code": {"lang": "bash", "code": "git switch -c ci/pipelines\ngit add .github\ngit commit -m \"ci: tests and evaluation gate on PRs, deploy to Spaces on merge\"\ngit push -u origin ci/pipelines\ngh pr create --fill && gh pr checks --watch\ngh pr merge --squash --delete-branch\ngit switch main && git pull && gh run watch"},
+         "check": "The Space's commit history (Files tab) shows your merge commit, and the app reflects any change you made."},
+        {"text": "Prove the gate works: in a branch, remove three careers from `data/careers.csv` that the evaluation cases expect, open a pull request, and confirm CI fails on the evaluation step. Close the pull request without merging.",
+         "check": "The `Evaluation gate` step is red with the accuracy and threshold in its output; the Space is untouched."}
+      ]
+    },
+    {
+      "title": "Containerise it",
+      "goal": "A Docker image anyone can run with one command, and the option to host the same image as a Docker-type Space or on any container platform.",
+      "steps": [
+        {"text": "Create a branch and write a multi-stage Dockerfile. The build stage installs the CPU wheels; the final stage is slim, non-root, and pre-downloads the model so the container starts without network access to the Hub.",
+         "code": {"lang": "dockerfile", "code": "# syntax=docker/dockerfile:1\nFROM python:3.12-slim AS build\nWORKDIR /src\nCOPY requirements.txt .\nRUN python -m venv /venv && /venv/bin/pip install --no-cache-dir -r requirements.txt\n\nFROM python:3.12-slim\nRUN useradd --create-home --uid 10001 app\nWORKDIR /home/app\nCOPY --from=build /venv /venv\nCOPY app.py evaluate.py ./\nCOPY src ./src\nCOPY data ./data\nCOPY .streamlit ./.streamlit\nENV PATH=\"/venv/bin:$PATH\" HF_HOME=/home/app/.cache/huggingface PYTHONUNBUFFERED=1\n# bake the model into the image so cold starts need no download\nRUN python -c \"from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')\" \\\n    && chown -R app:app /home/app\nUSER app\nEXPOSE 8501\nHEALTHCHECK --interval=30s --timeout=5s CMD python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health')\"\nCMD [\"streamlit\", \"run\", \"app.py\", \"--server.port=8501\", \"--server.address=0.0.0.0\"]"}},
+        {"text": "Add a `.dockerignore` so tests, caches and the virtual environment stay out of the image.",
+         "code": {"lang": "text", "code": ".git\n.venv\n.github\ntests\n__pycache__\n*.pyc\n.pytest_cache\ndata/career_embeddings.npz\neval_results.json\n.streamlit/secrets.toml"}},
+        {"text": "Build and run the image, then open the app.",
+         "code": {"lang": "bash", "code": "docker build -t skillmatch-ai:local .\ndocker run --rm -p 8501:8501 skillmatch-ai:local"},
+         "check": "http://localhost:8501 loads and returns results with the container's network disconnected (`docker run --network none ...` also works, proving the model is baked in)."},
+        {"text": "Optional: host the container on Hugging Face instead of the Streamlit runtime. Create a second Space with the **Docker** SDK, set its front matter to `sdk: docker` and `app_port: 8501`, and push the same repository. Docker Spaces are the route to custom system packages or to running the app on other platforms (Cloud Run, Fly.io, a VM) with the identical image.",
+         "note": "For a Docker Space the container must listen on the port named in `app_port`, which this Dockerfile does."},
+        {"text": "Add the image build to CI so a broken Dockerfile is caught on pull requests. Append a job to `ci.yml`.",
+         "code": {"lang": "yaml", "code": "  image:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: docker/setup-buildx-action@v3\n      - uses: docker/build-push-action@v6\n        with:\n          context: .\n          push: false\n          tags: skillmatch-ai:ci\n          cache-from: type=gha\n          cache-to: type=gha,mode=max"},
+         "note": "Indent it so `image:` sits at the same level as `test:` under `jobs:`."},
+        {"text": "Commit and merge through a pull request; the deploy workflow updates the Space as before.",
+         "code": {"lang": "bash", "code": "git add Dockerfile .dockerignore .github/workflows/ci.yml\ngit commit -m \"build: multi-stage Docker image with the model baked in\"\ngit push -u origin HEAD\ngh pr create --fill && gh pr checks --watch && gh pr merge --squash --delete-branch\ngit switch main && git pull"}}
+      ]
+    },
+    {
+      "title": "Evaluate, monitor and publish",
+      "goal": "Know whether the recommender is actually good, see whether anyone uses it, and make the project easy to find and run.",
+      "steps": [
+        {"text": "Grow the evaluation set. Add at least twenty labelled profiles to `evaluate.py` (or move them to `tests/eval_cases.json`), including tricky ones: abbreviations (`ml`, `k8s`), profiles that fit two careers, and a profile with skills from no career. Rerun the harness and adjust the threshold to a level the current model clears with a small margin.",
+         "check": "`python evaluate.py` prints the new accuracy; CI still passes; the threshold is written next to the number it was derived from."},
+        {"text": "Add a second metric to the harness: mean reciprocal rank (1 divided by the position of the expected career), which rewards ranking the right answer first, not just within the top K. Report both in the JSON.",
+         "code": {"lang": "python", "code": "def mean_reciprocal_rank(ranked_titles: list[list[str]], expected: list[str]) -> float:\n    total = 0.0\n    for titles, want in zip(ranked_titles, expected):\n        for i, t in enumerate(titles, start=1):\n            if t == want:\n                total += 1 / i\n                break\n    return total / len(expected)"}},
+        {"text": "Add lightweight usage logging inside the app: one structured log line per recommendation request with the length of the input, the number of results and the top similarity — never the user's text itself. Streamlit's process logs are visible in the Space's Logs tab.",
+         "code": {"lang": "python", "code": "import json\nimport logging\nimport time\n\nlog = logging.getLogger(\"skillmatch\")\n\n\ndef log_request(profile_text: str, matches, started: float) -> None:\n    log.info(json.dumps({\n        \"event\": \"recommend\",\n        \"input_chars\": len(profile_text),\n        \"results\": len(matches),\n        \"top_similarity\": round(float(matches[0].similarity), 3) if matches else None,\n        \"latency_ms\": int((time.time() - started) * 1000),\n    }))"},
+         "note": "Call it where the app computes recommendations, wrapping the call with `started = time.time()`. Logging inputs would make the demo a store of other people's résumés; the counts and latency are all you need to see usage and performance."},
+        {"text": "Use the Space's built-in analytics (the Space page shows views and likes) and its Logs tab for the request lines above. If you want persistence, write the same JSON lines to a Hugging Face dataset repository with the `huggingface_hub` library; for a demo the logs tab is enough.",
+         "note": "Free Spaces have no uptime guarantee; if the demo matters for a job application, consider the paid always-on setting for the week it counts."},
+        {"text": "Update the README: an \"Open in Spaces\" badge at the top, the one-line local run, the Docker run, how to run the tests and the evaluation, and the accuracy and MRR figures with the date they were measured. Link to the lesson on RAG and evals in the AI track for readers who want the theory.",
+         "code": {"lang": "text", "code": "[![Open in Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Open%20in%20Spaces-blue)](https://huggingface.co/spaces/YOUR_HF_USER/skillmatch-ai)\n\n## Try it\n\nLive demo: https://huggingface.co/spaces/YOUR_HF_USER/skillmatch-ai\n\n## Run locally\n\n    python3.12 -m venv .venv && source .venv/bin/activate\n    pip install -r requirements.txt\n    streamlit run app.py\n\n## Run with Docker\n\n    docker build -t skillmatch-ai .\n    docker run --rm -p 8501:8501 skillmatch-ai\n\n## Tests and evaluation\n\n    pip install -r requirements-dev.txt\n    pytest -q\n    python evaluate.py     # Top-3 accuracy 0.92, MRR 0.85 on 24 labelled cases (measured 2026-09-21)"},
+         "note": "Replace the figures with your own from `eval_results.json`."},
+        {"text": "Decide on the GitHub repository's visibility. The Space is public either way. Making the GitHub repository public lets people read the code and the CI setup, which is the point if this is a portfolio piece: Settings → General → Danger Zone → Change visibility. If you keep it private, add a line to the README on the Space saying the source is available on request.",
+         "check": "Merge the README through a pull request; the Space redeploys and shows the badge and the demo link at the top of its page."}
+      ]
+    }
+  ],
+  "troubleshooting": [
+    {"symptom": "The Space build fails with a message about `sdk_version` not being supported", "fix": "Open the Space's Settings or the creation form to see the allowed Streamlit versions and set `sdk_version` in the README front matter to one of them; pin `streamlit` in `requirements.txt` to the same version."},
+    {"symptom": "`pip` on the Space cannot find `torch==2.5.1+cpu`", "fix": "Make sure the `--extra-index-url https://download.pytorch.org/whl/cpu` line is the first line of `requirements.txt`, and that the torch version exists on that index; if not, use the newest version listed there."},
+    {"symptom": "The app starts but shows a traceback about a missing `data/careers.csv` or `src` module", "fix": "The files were not pushed. Run `git ls-files` and check `.gitignore`; the dataset must be committed, only the `.npz` cache is ignored."},
+    {"symptom": "The first request on the Space takes over a minute or times out", "fix": "That is the model download on first start plus embedding the careers. It happens once per container start; keep `st.cache_resource` on the recommender. For instant cold starts use the Docker Space with the model baked into the image."},
+    {"symptom": "The deploy workflow fails with `authentication failed` when pushing to the Space", "fix": "The token must be a **write** token and stored as the `HF_TOKEN` secret; regenerate it if in doubt. Check that `HF_SPACE` is `user/space-name`, not the full URL."},
+    {"symptom": "Pushing to the Space is rejected because a file is larger than 10 MB", "fix": "Spaces require git LFS for large files: `git lfs install`, `git lfs track \"*.npz\"` (or the file type), commit `.gitattributes`, and push again. Better: do not commit generated caches at all."},
+    {"symptom": "`AppTest` smoke test times out in CI", "fix": "Model loading exceeds the default timeout on a cold runner. The test sets `default_timeout=120`; make sure the model cache step in `ci.yml` is before `pytest`, and increase the timeout if the runner is slow."},
+    {"symptom": "The evaluation gate fails after adding new careers to the dataset", "fix": "New careers change the ranking of existing cases. Inspect which cases now fail, decide whether the new ranking is actually better (then update the expected label) or worse (then fix the career description), and keep the threshold honest."}
+  ],
+  "next": [
+    "Swap the embedding model for a stronger one (a larger sentence-transformers model) behind the same `Embedder` interface and compare accuracy and latency with the evaluation harness before switching the demo.",
+    "Add retrieval-augmented explanations: use the AI track's RAG lesson to generate a short \"why this career\" paragraph grounded in the career description, with the citation shown.",
+    "Deploy the Docker image to a cloud container service with the Terraform and CI patterns from the DevOps zero-to-production project, and put the SRE track's SLOs on it.",
+    "Add a privacy notice and a rate limit before promoting the demo widely; résumé text is personal data even if you never store it."
+  ]
+}
