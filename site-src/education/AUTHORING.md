@@ -69,13 +69,17 @@ at most **8 steps**, and the quiz has exactly **5 questions** with **4 options**
 ## Building and previewing
 
 ```
-python3 scripts/build_education.py --strict      # rebuild every page; fails if any module is missing or invalid
-cd docs && python3 -m http.server 8765           # then open http://localhost:8765/education.html
+python3 scripts/build_education.py --strict      # lessons: fails if a module in a "live" track is missing or invalid
+python3 scripts/build_projects.py                # guided projects -> docs/education/projects/
+python3 scripts/build_site.py                    # landing page + Education hub from tracks.json (run last)
+cd docs && python3 -m http.server 8765           # then open http://localhost:8765/
 ```
 
-The module list, titles and one-line descriptions live in `tracks.json` and are duplicated in the hand-written hub
-page `docs/education.html`. If you add, rename or reorder a module, change both, and update the counts on the hub
-(the tab badges, each track's "0 / N complete", and the hero figures for lessons and quiz questions).
+`tracks.json` is the single manifest: tracks (id, name, short, emoji, accent, tagline, blurb, fit, status, resources),
+their stages and modules, each track's `projects`, and the top-level `interview` kits. The hub and landing page are
+**generated** from it — never hand-edit `docs/index.html` or `docs/education.html`; edit `site-src/site/*.html` and rebuild.
+A module, project or kit is "live" as soon as its JSON file exists; until then the pages show it as "Coming soon".
+Tracks with `"status": "building"` may be incomplete under `--strict`; set `"live"` once every module exists.
 
 ### Code blocks are linted
 
@@ -146,6 +150,16 @@ delete the block.
   points at an existing block. It cannot see arrows crossing boxes, so **look at the rendered figure**: build, serve, open
   the lesson, and check that no line runs through a box and no label sits on another label. Reroute with `hv`/`vh`/`over`/
   `under`, move a node, or drop a label until it is clean.
+
+## Guided projects
+
+`projects/<id>.json` (listed under a track's `projects` in `tracks.json`) is an end-to-end build in plain numbered
+steps. Fields: `id, track, title, summary, outcome, hours, level, prereqs[], tools[{name, why, url}], layout` (a text
+tree of the final repo), `phases[{title, goal, steps[]}], troubleshooting[{symptom, fix}], next[]`. Each step has `text`
+and optionally `code {lang, code}`, `note` (context or the Windows/Linux variant) and `check` (how the reader confirms it
+worked). Rules: 4-12 phases, 25+ steps total, every command real and current (pin versions), one thing per step, no
+placeholders in angle brackets (use `YOUR_GITHUB_USER`), and a teardown step so nothing keeps costing money. Code blocks
+are linted like lesson blocks. Validate with `python3 scripts/build_projects.py --check <id>`.
 
 ## Validate before you finish
 

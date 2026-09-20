@@ -238,12 +238,12 @@ PAGE = """<!DOCTYPE html>
 <nav>
   <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
   <div class="nav-links" id="navLinks">
-    <a href="../index.html#features">Features</a>
-    <a href="../index.html#products">Products</a>
-    <a href="../education.html" class="active">Education</a>
-    <a href="../index.html#about">About</a>
-    <a href="../index.html#pricing">Pricing</a>
-    <a href="../index.html#contact" class="nav-cta">Contact Us</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../index.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module={id}&amp;page=/education/{id}.html&amp;title={title_q}">Feedback</a>
+    <a href="../education.html#{track}" class="nav-cta">All {track_short} modules</a>
   </div>
   <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
 </nav>
@@ -330,7 +330,7 @@ PAGE = """<!DOCTYPE html>
 
 <footer>
   <div class="wrap footer-row">
-    <p>© 2025 ThavionAI. All rights reserved.</p>
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
     <div class="footer-legal">
       <a href="../education.html">Education</a>
       <a href="../privacy.html">Privacy</a>
@@ -432,10 +432,13 @@ def main(argv):
     index = {}
     for t in tracks:
         flat = [(s, mod) for s in t["stages"] for mod in s["modules"]]
+        # prev/next only link to modules that have content, so a half-written track never 404s
+        live = [mod for _, mod in flat if (SRC / "modules" / f"{mod['id']}.json").exists()]
         for i, (s, mod) in enumerate(flat):
+            k = next((j for j, l in enumerate(live) if l["id"] == mod["id"]), None)
             index[mod["id"]] = {"track": t, "stage": s, "mod": mod, "pos": i + 1, "total": len(flat),
-                                "prev": flat[i - 1][1] if i else None,
-                                "next": flat[i + 1][1] if i + 1 < len(flat) else None}
+                                "prev": live[k - 1] if k else None,
+                                "next": live[k + 1] if k is not None and k + 1 < len(live) else None}
 
     ids = wanted or list(index)
     failed = built = missing = 0
@@ -446,9 +449,11 @@ def main(argv):
             continue
         path = SRC / "modules" / f"{mod_id}.json"
         if not path.exists():
-            missing += 1
-            if wanted or strict:
-                print(f"MISSING {mod_id}: {path.relative_to(ROOT)} does not exist")
+            # tracks marked "building" in tracks.json are allowed to be incomplete, even under --strict
+            if index[mod_id]["track"].get("status", "live") == "live":
+                missing += 1
+                if wanted or strict:
+                    print(f"MISSING {mod_id}: {path.relative_to(ROOT)} does not exist")
             continue
         try:
             m = json.loads(path.read_text())
