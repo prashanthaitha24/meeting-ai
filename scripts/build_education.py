@@ -17,6 +17,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import quote
 
 try:
     import yaml
@@ -323,6 +324,8 @@ PAGE = """<!DOCTYPE html>
     <a class="pager-up" href="../education.html#{track}">All {track_short} modules</a>
     {next_link}
   </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module={id}&amp;page=/education/{id}.html&amp;title={title_q}">Tell me what to improve →</a></p>
 </main>
 
 <footer>
@@ -332,7 +335,7 @@ PAGE = """<!DOCTYPE html>
       <a href="../education.html">Education</a>
       <a href="../privacy.html">Privacy</a>
       <a href="../terms.html">Terms</a>
-      <a href="mailto:support@thavionai.com?subject=Education%20feedback%3A%20{id}">Report an error</a>
+      <a href="../feedback.html?module={id}&amp;page=/education/{id}.html&amp;title={title_q}">Report an error</a>
     </div>
   </div>
 </footer>
@@ -400,7 +403,7 @@ def render(m, ctx, figures=()):
     quiz_json = json.dumps(m["quiz"], ensure_ascii=False).replace("</", "<\\/")
     return PAGE.format(
         id=m["id"], track=ctx["track"]["id"], track_short=html.escape(ctx["track"]["short"]),
-        title=html.escape(ctx["mod"]["title"], quote=False), title_attr=html.escape(ctx["mod"]["title"]),
+        title=html.escape(ctx["mod"]["title"], quote=False), title_attr=html.escape(ctx["mod"]["title"]), title_q=quote(ctx["mod"]["title"]),
         desc=html.escape(ctx["mod"]["desc"], quote=False), desc_attr=html.escape(ctx["mod"]["desc"]),
         stage_num=ctx["stage"]["num"], stage_title=html.escape(ctx["stage"]["title"], quote=False),
         level=html.escape(ctx["stage"]["level"]), minutes=m["minutes"], pos=ctx["pos"], total=ctx["total"],
