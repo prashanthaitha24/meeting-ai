@@ -60,6 +60,19 @@
 
 <section id="tracks" style="padding-top:20px">
   <div class="max-w">
+    <div class="progress-panel" id="progressPanel">
+      <div class="progress-panel-text">
+        <strong>Your progress is saved in this browser.</strong>
+        <span id="progressSummary">Ticks, quiz scores and project steps stay on this device — no account, nothing sent to us.</span>
+        <span class="progress-panel-hint">Switching device or clearing site data would lose it, so you can export a backup file and import it anywhere.</span>
+      </div>
+      <div class="progress-panel-actions">
+        <button type="button" class="btn btn-secondary btn-sm" id="exportProgress">Export backup</button>
+        <label class="btn btn-secondary btn-sm" for="importProgress">Import backup</label>
+        <input type="file" id="importProgress" accept="application/json,.json" hidden />
+        <button type="button" class="btn-link" id="resetProgress">Reset</button>
+      </div>
+    </div>
     <div class="track-tabs" role="tablist" aria-label="Learning tracks" id="trackTabs" hidden>
       <button class="track-tab" role="tab" id="tab-devops" aria-controls="devops" aria-selected="true" data-track="devops" style="--tc:#60a5fa">⚙️ DevOps <span class="n">17/17</span></button>
       <button class="track-tab" role="tab" id="tab-sre" aria-controls="sre" aria-selected="false" data-track="sre" tabindex="-1" style="--tc:#34d399">📈 Site Reliability <span class="n">16/16</span></button>
@@ -134,7 +147,7 @@
           <div class="box-label">Guided projects</div>
           <div class="proj-list">
             <a href="education/projects/proj-devops-zero-to-prod.html"><span><span class="t">Zero to production: API with CI/CD, Docker, Terraform and dashboards</span><span class="d">Start from an empty GitHub repo and finish with a containerised API deployed by a pipeline onto Terraform-managed infrastructure, with logs, metrics and a Grafana dashboard.</span></span><span class="m">about 8 h<br />Beginner to intermediate</span></a>
-            <a class="soon-item" tabindex="-1" aria-disabled="true"><span><span class="t">GitOps on Kubernetes with Argo CD</span><span class="d">Local kind cluster, Helm chart, Argo CD syncing from git, Prometheus and Grafana, and a pull-request-driven release flow.</span></span><span class="m">Coming soon</span></a>
+            <a href="education/projects/proj-devops-gitops.html"><span><span class="t">GitOps on Kubernetes with Argo CD</span><span class="d">Local kind cluster, Helm chart, Argo CD syncing from git, Prometheus and Grafana, and a pull-request-driven release flow.</span></span><span class="m">about 6 h<br />Intermediate</span></a>
             <a class="soon-item" tabindex="-1" aria-disabled="true"><span><span class="t">Terraform an AWS environment from scratch</span><span class="d">VPC, subnets, load balancer, ECS service, RDS and remote state, with plan-on-PR and apply-on-merge in GitHub Actions.</span></span><span class="m">Coming soon</span></a>
           </div>
         </div>
@@ -222,7 +235,7 @@
           <div class="box-label">Guided projects</div>
           <div class="proj-list">
             <a href="education/projects/proj-sre-slo-stack.html"><span><span class="t">SLOs from scratch</span><span class="d">Instrument a service, scrape it with Prometheus, define SLIs, set an SLO, write burn-rate alerts, build the dashboard and the runbook.</span></span><span class="m">about 6 h<br />Intermediate</span></a>
-            <a class="soon-item" tabindex="-1" aria-disabled="true"><span><span class="t">Run a full incident drill</span><span class="d">Break a service on purpose, page yourself, follow the incident roles, restore, and write the blameless postmortem.</span></span><span class="m">Coming soon</span></a>
+            <a href="education/projects/proj-sre-incident-drill.html"><span><span class="t">Run a full incident drill</span><span class="d">Break a service on purpose, page yourself, follow the incident roles, restore, and write the blameless postmortem.</span></span><span class="m">about 4 h<br />Intermediate</span></a>
             <a class="soon-item" tabindex="-1" aria-disabled="true"><span><span class="t">Progressive delivery with automated analysis</span><span class="d">Weighted canary releases, metrics comparison against baseline, automatic rollback, and a release dashboard.</span></span><span class="m">Coming soon</span></a>
           </div>
         </div>
@@ -712,6 +725,58 @@
     }
     if (!fromHash(true)) select(TRACKS[0], { updateHash: false });
     window.addEventListener('hashchange', function () { fromHash(true); });
+  })();
+
+
+  // PROGRESS BACKUP — export / import / reset of everything stored for the Education section
+  (function () {
+    var KEYS = ['thavionai-edu-progress', 'thavionai-edu-quiz', 'thavionai-edu-projects'];
+    function read(k) { try { return JSON.parse(localStorage.getItem(k)) || {}; } catch (e) { return {}; } }
+    function summary() {
+      var done = Object.keys(read(KEYS[0])).length, quizzes = Object.keys(read(KEYS[1])).length;
+      var proj = read(KEYS[2]); var steps = 0; Object.keys(proj).forEach(function (p) { steps += Object.keys(proj[p] || {}).length; });
+      var el = document.getElementById('progressSummary');
+      if (!done && !quizzes && !steps) return;
+      el.textContent = done + ' module' + (done === 1 ? '' : 's') + ' completed, ' + quizzes + ' quiz score' + (quizzes === 1 ? '' : 's') + ', ' + steps + ' project step' + (steps === 1 ? '' : 's') + ' ticked — all stored on this device only.';
+    }
+    summary();
+    // ask the browser not to evict this site's data under storage pressure
+    try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
+
+    document.getElementById('exportProgress').addEventListener('click', function () {
+      var payload = { site: 'thavionai.com', version: 1, exported: new Date().toISOString() };
+      KEYS.forEach(function (k) { payload[k] = read(k); });
+      var blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      var a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+      a.download = 'thavionai-progress-' + payload.exported.slice(0, 10) + '.json';
+      document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(a.href);
+    });
+    document.getElementById('importProgress').addEventListener('change', function (ev) {
+      var file = ev.target.files && ev.target.files[0]; if (!file) return;
+      var reader = new FileReader();
+      reader.onload = function () {
+        var data; try { data = JSON.parse(reader.result); } catch (e) { alert('That file is not a ThavionAI progress backup.'); return; }
+        if (!data || data.site !== 'thavionai.com') { alert('That file is not a ThavionAI progress backup.'); return; }
+        var merged = 0;
+        KEYS.forEach(function (k) {
+          var cur = read(k), add = data[k] || {};
+          Object.keys(add).forEach(function (id) {
+            if (k === 'thavionai-edu-quiz') { cur[id] = Math.max(cur[id] || 0, add[id]); }
+            else if (k === 'thavionai-edu-projects') { cur[id] = Object.assign({}, cur[id] || {}, add[id]); }
+            else { cur[id] = add[id]; }
+            merged++;
+          });
+          try { localStorage.setItem(k, JSON.stringify(cur)); } catch (e) {}
+        });
+        alert('Imported ' + merged + ' entries. Reloading to show them.'); location.reload();
+      };
+      reader.readAsText(file);
+    });
+    document.getElementById('resetProgress').addEventListener('click', function () {
+      if (!confirm('Clear all saved progress on this device? Export a backup first if you want to keep it.')) return;
+      KEYS.forEach(function (k) { try { localStorage.removeItem(k); } catch (e) {} });
+      location.reload();
+    });
   })();
 
   // PROGRESS — stored only in this browser; the page works the same if storage is unavailable

@@ -60,6 +60,19 @@
 
 <section id="tracks" style="padding-top:20px">
   <div class="max-w">
+    <div class="progress-panel" id="progressPanel">
+      <div class="progress-panel-text">
+        <strong>Your progress is saved in this browser.</strong>
+        <span id="progressSummary">Ticks, quiz scores and project steps stay on this device — no account, nothing sent to us.</span>
+        <span class="progress-panel-hint">Switching device or clearing site data would lose it, so you can export a backup file and import it anywhere.</span>
+      </div>
+      <div class="progress-panel-actions">
+        <button type="button" class="btn btn-secondary btn-sm" id="exportProgress">Export backup</button>
+        <label class="btn btn-secondary btn-sm" for="importProgress">Import backup</label>
+        <input type="file" id="importProgress" accept="application/json,.json" hidden />
+        <button type="button" class="btn-link" id="resetProgress">Reset</button>
+      </div>
+    </div>
     <div class="track-tabs" role="tablist" aria-label="Learning tracks" id="trackTabs" hidden>
 {{TABS}}
     </div>
@@ -174,6 +187,58 @@
     }
     if (!fromHash(true)) select(TRACKS[0], { updateHash: false });
     window.addEventListener('hashchange', function () { fromHash(true); });
+  })();
+
+
+  // PROGRESS BACKUP — export / import / reset of everything stored for the Education section
+  (function () {
+    var KEYS = ['thavionai-edu-progress', 'thavionai-edu-quiz', 'thavionai-edu-projects'];
+    function read(k) { try { return JSON.parse(localStorage.getItem(k)) || {}; } catch (e) { return {}; } }
+    function summary() {
+      var done = Object.keys(read(KEYS[0])).length, quizzes = Object.keys(read(KEYS[1])).length;
+      var proj = read(KEYS[2]); var steps = 0; Object.keys(proj).forEach(function (p) { steps += Object.keys(proj[p] || {}).length; });
+      var el = document.getElementById('progressSummary');
+      if (!done && !quizzes && !steps) return;
+      el.textContent = done + ' module' + (done === 1 ? '' : 's') + ' completed, ' + quizzes + ' quiz score' + (quizzes === 1 ? '' : 's') + ', ' + steps + ' project step' + (steps === 1 ? '' : 's') + ' ticked — all stored on this device only.';
+    }
+    summary();
+    // ask the browser not to evict this site's data under storage pressure
+    try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
+
+    document.getElementById('exportProgress').addEventListener('click', function () {
+      var payload = { site: 'thavionai.com', version: 1, exported: new Date().toISOString() };
+      KEYS.forEach(function (k) { payload[k] = read(k); });
+      var blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      var a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+      a.download = 'thavionai-progress-' + payload.exported.slice(0, 10) + '.json';
+      document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(a.href);
+    });
+    document.getElementById('importProgress').addEventListener('change', function (ev) {
+      var file = ev.target.files && ev.target.files[0]; if (!file) return;
+      var reader = new FileReader();
+      reader.onload = function () {
+        var data; try { data = JSON.parse(reader.result); } catch (e) { alert('That file is not a ThavionAI progress backup.'); return; }
+        if (!data || data.site !== 'thavionai.com') { alert('That file is not a ThavionAI progress backup.'); return; }
+        var merged = 0;
+        KEYS.forEach(function (k) {
+          var cur = read(k), add = data[k] || {};
+          Object.keys(add).forEach(function (id) {
+            if (k === 'thavionai-edu-quiz') { cur[id] = Math.max(cur[id] || 0, add[id]); }
+            else if (k === 'thavionai-edu-projects') { cur[id] = Object.assign({}, cur[id] || {}, add[id]); }
+            else { cur[id] = add[id]; }
+            merged++;
+          });
+          try { localStorage.setItem(k, JSON.stringify(cur)); } catch (e) {}
+        });
+        alert('Imported ' + merged + ' entries. Reloading to show them.'); location.reload();
+      };
+      reader.readAsText(file);
+    });
+    document.getElementById('resetProgress').addEventListener('click', function () {
+      if (!confirm('Clear all saved progress on this device? Export a backup first if you want to keep it.')) return;
+      KEYS.forEach(function (k) { try { localStorage.removeItem(k); } catch (e) {} });
+      location.reload();
+    });
   })();
 
   // PROGRESS — stored only in this browser; the page works the same if storage is unavailable

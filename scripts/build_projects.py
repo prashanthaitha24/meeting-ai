@@ -132,7 +132,7 @@ PAGE = """<!DOCTYPE html>
       </div>
     </div>
     {layout}
-    <p class="pj-hint">Tick each step as you finish it — your progress is saved in this browser. Every code block has a copy button. If something goes wrong, the <a href="#troubleshooting">troubleshooting</a> section at the end covers the usual suspects.</p>
+    <p class="pj-hint">Tick each step as you finish it — your progress is saved in this browser only (<a href="../../education.html#progressPanel">back up or restore</a> on the hub). Every code block has a copy button. If something goes wrong, the <a href="#troubleshooting">troubleshooting</a> section at the end covers the usual suspects.</p>
   </section>
 
 {phases}

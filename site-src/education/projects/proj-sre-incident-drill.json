@@ -1,0 +1,270 @@
+{
+  "id": "proj-sre-incident-drill",
+  "track": "sre",
+  "title": "Run a full incident drill",
+  "summary": "Turn a page into a practised response. You will set up on-call tooling that works for one person or a small team, write the incident process and the roles, prepare the runbooks and the comms templates, then have a colleague (or a script) break the SLO-instrumented service in a way you were not told about. You respond end to end — declare, investigate, mitigate, communicate, resolve — with a scribe's timeline, and finish with a blameless postmortem and at least one improvement shipped.",
+  "outcome": "An `incidents/` directory with the incident process, role cards, severity levels, comms templates and runbooks; Alertmanager wired to a real notification channel with an escalation path; two recorded drills with full timelines (time to acknowledge, to mitigate, to resolve); two blameless postmortems with action items, one of which is implemented and verified by re-running the drill.",
+  "hours": 4,
+  "level": "Intermediate",
+  "prereqs": [
+    "The **SLOs from scratch** project running (the service with burn-rate alerts, Alertmanager, Grafana and the alert sink), or any service with alerts you can trigger",
+    "The SRE track's modules on on-call, incident response and postmortems",
+    "A second person for at least one drill: a colleague, a friend who can run two commands, or, failing that, a script you write in advance and forget"
+  ],
+  "tools": [
+    {
+      "name": "Alertmanager",
+      "why": "routes the page; you will add real receivers and an escalation route",
+      "url": "https://prometheus.io/docs/alerting/latest/configuration/"
+    },
+    {
+      "name": "A notification channel",
+      "why": "Slack, Discord or ntfy (free push notifications to your phone); the drill needs a page that reaches you",
+      "url": "https://ntfy.sh/"
+    },
+    {
+      "name": "Grafana + the SLO dashboard",
+      "why": "the first place the incident commander looks",
+      "url": "https://grafana.com/docs/grafana/latest/"
+    },
+    {
+      "name": "A shared document and a timer",
+      "why": "the timeline is the incident's memory; a Google Doc, a Markdown file in a shared repo, or a chat channel all work",
+      "url": "https://response.pagerduty.com/"
+    }
+  ],
+  "layout": "zero-to-prod/\n├── incidents/\n│   ├── PROCESS.md               # severities, roles, declare/resolve criteria, comms cadence\n│   ├── roles/                   # one card each: commander, investigator, comms, scribe\n│   ├── templates/\n│   │   ├── timeline.md\n│   │   ├── status-update.md\n│   │   └── postmortem.md\n│   ├── runbooks/                # from the SLO project, extended\n│   └── 2026-xx-xx-drill-1/      # timeline.md, postmortem.md, chat export\n├── deploy/alertmanager.yml      # real receivers + escalation\n└── chaos/\n    ├── scenarios/               # the breaker's scripts (kept in a private branch or a separate repo)\n    └── README.md",
+  "phases": [
+    {
+      "title": "Paging that actually reaches you",
+      "goal": "A page from Alertmanager arrives on your phone within a minute, with the runbook link, and escalates to a second route if nobody acknowledges.",
+      "steps": [
+        {
+          "text": "Create the branch and the directory layout, and copy the SLO project's runbook into `incidents/runbooks/` so everything the responder needs lives in one place.",
+          "code": {
+            "lang": "bash",
+            "code": "cd zero-to-prod && git switch -c feat/incidents\nmkdir -p incidents/roles incidents/templates incidents/runbooks chaos/scenarios deploy/relay\ncp slo/RUNBOOK-orders-api.md incidents/runbooks/orders-api.md"
+          }
+        },
+        {
+          "text": "Pick a channel that reaches your phone. For a free, no-account option use ntfy: install the app, subscribe to a topic with an unguessable name, and confirm a test push arrives.",
+          "code": {
+            "lang": "bash",
+            "code": "TOPIC=\"oncall-$(openssl rand -hex 6)\"; echo \"$TOPIC\"\ncurl -s -d \"test page from the drill setup\" \"https://ntfy.sh/$TOPIC\"\n# subscribe to $TOPIC in the ntfy app; the message should appear within seconds"
+          },
+          "note": "Slack or Discord incoming webhooks work the same way with a different URL; PagerDuty or Opsgenie free tiers add proper acknowledgement and escalation if you want the real thing."
+        },
+        {
+          "text": "Alertmanager cannot post to ntfy's simple API directly with the right headers, so add a tiny relay next to the alert sink that turns an Alertmanager webhook into a push with title, priority and the runbook link.",
+          "code": {
+            "lang": "python",
+            "code": "# deploy/relay/relay.py  (run in a small python:3.12-slim container)\nimport json\nimport os\nimport urllib.request\nfrom http.server import BaseHTTPRequestHandler, HTTPServer\n\nTOPIC = os.environ[\"NTFY_TOPIC\"]\n\n\nclass H(BaseHTTPRequestHandler):\n    def do_POST(self):\n        body = json.loads(self.rfile.read(int(self.headers[\"Content-Length\"])))\n        for a in body.get(\"alerts\", []):\n            firing = a[\"status\"] == \"firing\"\n            title = (\"FIRING: \" if firing else \"RESOLVED: \") + a[\"labels\"].get(\"alertname\", \"?\")\n            msg = a[\"annotations\"].get(\"summary\", \"\") + \"\\n\" + a[\"annotations\"].get(\"runbook\", \"\")\n            req = urllib.request.Request(f\"https://ntfy.sh/{TOPIC}\", data=msg.encode(), method=\"POST\")\n            req.add_header(\"Title\", title)\n            req.add_header(\"Priority\", \"urgent\" if firing and a[\"labels\"].get(\"severity\") == \"page\" else \"default\")\n            req.add_header(\"Tags\", \"rotating_light\" if firing else \"white_check_mark\")\n            urllib.request.urlopen(req, timeout=10)\n        self.send_response(200); self.end_headers()\n\n\nHTTPServer((\"0.0.0.0\", 8090), H).serve_forever()"
+          },
+          "note": "Compose: a service `relay` built from a two-line Dockerfile (`FROM python:3.12-slim`, `COPY relay.py /relay.py`, `CMD [\"python\", \"/relay.py\"]`) with `NTFY_TOPIC` from `.env`. Never commit the topic name; it is effectively a secret."
+        },
+        {
+          "text": "Add the relay to the Compose stack and validate the Alertmanager configuration before restarting it.",
+          "code": {
+            "lang": "yaml",
+            "code": "# deploy/compose.yml (addition)\nservices:\n  relay:\n    build: ./relay\n    environment:\n      NTFY_TOPIC: ${NTFY_TOPIC}\n    restart: unless-stopped"
+          },
+          "note": "Put `NTFY_TOPIC=...` in `deploy/.env` (git-ignored). Validate with `docker run --rm -v \"$PWD/deploy/alertmanager.yml:/a.yml:ro\" --entrypoint amtool prom/alertmanager:v0.28.0 check-config /a.yml`, then `docker compose -f deploy/compose.yml up -d --build relay alertmanager`."
+        },
+        {
+          "text": "Route pages to the relay with an escalation: if the same alert is still firing after 15 minutes, a second route with a louder priority fires. Alertmanager has no acknowledgement concept, so escalation is modelled by `repeat_interval` on a second receiver plus a time-based route; for real acknowledgement, a pager product is the answer, and the drill notes that gap.",
+          "code": {
+            "lang": "yaml",
+            "code": "# deploy/alertmanager.yml (routes section)\nroute:\n  receiver: tickets\n  group_by: [alertname, service]\n  group_wait: 10s\n  group_interval: 2m\n  repeat_interval: 4h\n  routes:\n    - matchers: [severity=\"page\"]\n      receiver: oncall-primary\n      continue: true\n      repeat_interval: 15m            # re-pages every 15 min while firing\n    - matchers: [severity=\"page\"]\n      receiver: oncall-escalation\n      group_wait: 15m                 # first notification only after 15 min of firing\n      repeat_interval: 30m\n\nreceivers:\n  - name: oncall-primary\n    webhook_configs: [{url: http://relay:8090/, send_resolved: true}]\n  - name: oncall-escalation\n    webhook_configs: [{url: http://relay:8090/escalation, send_resolved: true}]\n  - name: tickets\n    webhook_configs: [{url: http://alert-sink:8080/tickets, send_resolved: true}]"
+          },
+          "note": "Extend the relay to treat the `/escalation` path as priority `max` with a different tag, and to include `ESCALATED` in the title."
+        },
+        {
+          "text": "Prove the page path with the SLO project's chaos variable, then reset. Note the time from injection to the push arriving; that is your alerting latency and it belongs in the process doc.",
+          "code": {
+            "lang": "bash",
+            "code": "date -u && CHAOS_ERROR_RATE=0.05 docker compose -f deploy/compose.yml up -d app\n# wait for the push; then\nCHAOS_ERROR_RATE=0 docker compose -f deploy/compose.yml up -d app"
+          },
+          "check": "A push titled `FIRING: OrdersApiAvailabilityFastBurn` arrives with the runbook URL; a `RESOLVED` push follows after the fix."
+        },
+        {
+          "text": "Test the escalation path deliberately: leave the injected fault in place for twenty minutes and confirm the second, louder push arrives at the fifteen-minute mark. Then reset. Record both latencies (first page, escalation) in `PROCESS.md` under \"alerting latency\".",
+          "code": {
+            "lang": "bash",
+            "code": "date -u && CHAOS_ERROR_RATE=0.05 docker compose -f deploy/compose.yml up -d app\n# wait ~20 minutes; expect the ESCALATED push at about +15 min\nCHAOS_ERROR_RATE=0 docker compose -f deploy/compose.yml up -d app"
+          },
+          "check": "Two pushes with different titles and priorities, roughly fifteen minutes apart."
+        }
+      ]
+    },
+    {
+      "title": "The process, on paper, before the pressure",
+      "goal": "Severity levels, roles, declare and resolve criteria, a comms cadence and the templates — short enough that people actually use them at 3 a.m.",
+      "steps": [
+        {
+          "text": "Write `PROCESS.md`. Keep it to one screen per section. Severities decide who is woken and how often updates go out; roles decide who talks and who types.",
+          "code": {
+            "lang": "text",
+            "code": "# incidents/PROCESS.md\n\n## Severities\nSEV1  customer-facing outage or data loss; error budget burning >14x     page now; updates every 30 min; postmortem required\nSEV2  degraded (latency SLO burning, partial feature outage)             page in hours; updates hourly; postmortem required\nSEV3  internal-only or single-customer impact; workaround exists          ticket; next business day; postmortem optional\n\n## Declare when\n- a page fires and is confirmed real, or\n- anyone believes customers are affected. Declaring is cheap; do it early. Downgrade later if wrong.\n\n## Roles (one person can hold several; every role is named in the channel)\nIncident Commander (IC)  owns decisions, keeps the timeline moving, decides mitigation vs investigation, calls resolve\nInvestigator             hands on the system; reports findings to the IC; does not communicate outward\nCommunications           writes status updates on the cadence; answers stakeholders so nobody else has to\nScribe                   records every observation, decision and action with a UTC timestamp\n\n## During\n- mitigate before you diagnose: rollback, feature flag, scale, failover; investigation continues after\n- one channel, one timeline, one IC; hand over roles explicitly (\"you have IC\") and log it\n- no speculation in status updates: what we know, what we are doing, when the next update is\n\n## Resolve when\n- the SLI is back within target for 15 minutes and the mitigation is stable, then\n- IC posts the resolution and the postmortem owner\n\n## After\n- postmortem draft within 2 business days, review within 5, action items with owners and dates\n- blameless: we fix the system that allowed the failure, not the person who touched it"
+          }
+        },
+        {
+          "text": "Decide and write down the on-call expectations that the process assumes: response time to a page (for example 10 minutes), how handovers happen, and what compensation or time off applies. For a solo project this is one paragraph, but it belongs in the file because the numbers in the drill are measured against it.",
+          "code": {
+            "lang": "text",
+            "code": "# incidents/PROCESS.md (on-call section)\n## On-call\n- one primary, one escalation contact; rotation weekly; handover Monday 10:00 with a written summary of open issues\n- expected: acknowledge a page within 10 minutes, be at a keyboard within 20\n- a paged night earns time off the next morning; more than two pages a week triggers a review of the alert, not the person"
+          }
+        },
+        {
+          "text": "Write the role cards: one file each with the three things that role does first, what it must not do, and the handover phrase. The scribe's card includes the timeline format.",
+          "code": {
+            "lang": "text",
+            "code": "# incidents/roles/scribe.md\nFirst three things:\n  1. Open incidents/templates/timeline.md as incidents/<date>-<name>/timeline.md; record the page time and who acknowledged.\n  2. Pin the channel message \"Timeline: <link>\".\n  3. Log every observation, decision, action and handover as it happens, with `date -u` timestamps. Ask \"can you say that in one line for the timeline?\"\n\nDo not: investigate, fix, or communicate outward. If you are alone, you are IC and scribe; the timeline still gets written.\n\nFormat:\n  HH:MM:SSZ  [who]  observation | decision | action | handover  - text\n  10:02:14Z  [alert]  action  - FIRING OrdersApiAvailabilityFastBurn, page delivered\n  10:03:40Z  [alice]  observation - dashboard: 503s from all pods since 09:58; no deploy since yesterday\n  10:05:02Z  [alice]  decision - IC: mitigate first; rolling back to previous digest\n\nHandover: \"You have scribe.\" / \"I have scribe.\""
+          },
+          "note": "Write `commander.md`, `investigator.md` and `communications.md` the same way. The comms card holds the status-update template and the rule that the first update goes out within 15 minutes of declaring, even if it only says \"we are investigating\"."
+        },
+        {
+          "text": "Write the two templates that get used under pressure: the status update and the postmortem skeleton.",
+          "code": {
+            "lang": "text",
+            "code": "# incidents/templates/status-update.md\n[SEVn] <service> - <one-line impact> - update #<n> at <HH:MM UTC>\nWhat we know:   <facts only>\nWhat we are doing: <current mitigation / investigation>\nCustomer impact: <who, what, since when>\nNext update:    <time, at most the cadence for this severity>\nIC: <name>   Channel: <link>\n\n# incidents/templates/postmortem.md\n# <date> <service>: <title>\nOwner:            Reviewed:            Severity:            Duration (impact):\n\n## Summary (3 sentences a director can read)\n## Impact (numbers: error budget consumed, requests failed, customers affected)\n## Timeline (from the scribe's file; keep it factual)\n## Root cause and contributing factors (the system, not the person)\n## What went well / What went poorly / Where we got lucky\n## Detection: time from start of impact to page; what would have caught it sooner\n## Action items\n| # | action | owner | due | type (prevent / detect / mitigate / process) | status |\n## Lessons for other teams"
+          }
+        },
+        {
+          "text": "Extend the runbooks from the SLO project with the three mitigations the drill may need, each as an exact command: roll back to the previous image, scale out, and disable the chaos variables. A mitigation you have to look up during an incident is not a mitigation.",
+          "code": {
+            "lang": "bash",
+            "code": "# incidents/runbooks/orders-api.md (mitigations section)\n# 1. roll back to the previous known-good image (digest recorded at every deploy in deploy/RELEASES.md)\nsed -i 's#^APP_IMAGE=.*#APP_IMAGE=ghcr.io/YOUR_GITHUB_USER/zero-to-prod@sha256:PREVIOUS#' deploy/.env\ndocker compose -f deploy/compose.yml up -d app\n\n# 2. scale out (local stack: more app replicas behind the compose network; production: the ASG / HPA)\ndocker compose -f deploy/compose.yml up -d --scale app=3 app\n\n# 3. remove injected faults (the drill's favourite)\nsed -i 's/^CHAOS_.*//' deploy/.env && docker compose -f deploy/compose.yml up -d app"
+          },
+          "note": "Add `deploy/RELEASES.md` and have the release workflow append a line with the date and digest on every deploy; the rollback command needs it."
+        },
+        {
+          "text": "Commit the process, and brief your breaker: give them the `chaos/README.md` with the rules (what they may break, what they must not, how to restore if the drill goes wrong) and three or four scenario ideas — but let them choose and keep it secret.",
+          "code": {
+            "lang": "text",
+            "code": "# chaos/README.md (for the breaker)\nYou may: change env vars in deploy/.env, stop/restart containers, edit deploy/prometheus.yml or the rules,\n        change the Grafana datasource, fill the disk with a large file, add latency with `tc` inside the app container.\nYou must not: delete volumes, delete the repo, touch the laptop's network.\nScenarios (pick one, do not tell the responder which):\n  A. CHAOS_ERROR_RATE=0.08 (clear signal, tests the page path and rollback reflex - they will look for a deploy)\n  B. CHAOS_SLOW_RATE=0.6 + stop prometheus for 10 min (latency burn AND blind dashboards: tests recovery of observability)\n  C. edit deploy/rules/slo_alerts.yml to break the fast-burn expression, then A (tests noticing the missing page)\n  D. `docker exec app tc qdisc add dev eth0 root netem delay 400ms` (needs NET_ADMIN; tests investigation without a config change)\nRestore: git checkout deploy/ && docker compose -f deploy/compose.yml up -d --force-recreate"
+          },
+          "check": "The process files are merged; the breaker has the README and a time window; you have the ntfy app on and your role cards open."
+        },
+        {
+          "text": "Dry-run the process with a tabletop before the live drill: read a scenario aloud, and have each role say what they do first, using only the cards. Fix anything that needed explaining; the cards should be enough.",
+          "check": "Each role card answers 'what do I do first' without discussion; the status-update template can be filled in under a minute."
+        }
+      ]
+    },
+    {
+      "title": "Drill one",
+      "goal": "Respond to an unknown fault end to end with the process, producing a complete timeline and hard numbers for detection, mitigation and resolution.",
+      "steps": [
+        {
+          "text": "Start the load generator so the SLIs have traffic, then step away. The breaker acts sometime in the next hour without telling you.",
+          "code": {
+            "lang": "bash",
+            "code": "hey -z 90m -q 20 -c 2 http://localhost/orders/42 > /dev/null 2>&1 &"
+          }
+        },
+        {
+          "text": "When the page arrives: acknowledge in the channel (\"ack, looking\"), open the timeline from the template, record the page time, and declare. If you are alone, you are IC, investigator and scribe; say so in the timeline.",
+          "code": {
+            "lang": "text",
+            "code": "10:02:14Z  [alert]   action     - page delivered (ntfy) FIRING OrdersApiAvailabilityFastBurn\n10:02:51Z  [you]     action     - ack; declaring SEV1 (customer-facing 5xx); roles: IC+investigator+scribe = me\n10:03:10Z  [you]     action     - status update #1 posted: investigating elevated errors on orders-api, next update 10:30Z"
+          },
+          "note": "Post the first status update within the first few minutes even though you know nothing yet; the template makes that a thirty-second task."
+        },
+        {
+          "text": "Investigate in the runbook's order, and mitigate the moment you have a plausible lever. Log each observation as a line. The dashboard's status-code panel, the app logs and `git log` on `deploy/` answer most scenarios; a stopped Prometheus (scenario B) shows up as a flat dashboard and an Alertmanager with no data — notice it and restart it before anything else.",
+          "code": {
+            "lang": "bash",
+            "code": "docker compose -f deploy/compose.yml ps\ndocker compose -f deploy/compose.yml logs app --tail 100 | grep -v ' 200 '\ngit -C deploy log --oneline -5 -- .\ngrep CHAOS deploy/.env\ndocker compose -f deploy/compose.yml exec app sh -c 'tc qdisc show dev eth0 2>/dev/null || echo no-netem'"
+          },
+          "check": "The timeline shows an observation naming the cause (or a decision to mitigate blindly by rollback while investigation continues) within ten minutes of the page."
+        },
+        {
+          "text": "Mitigate with the runbook command, confirm on the dashboard, post update #2, and keep watching until the SLI has been within target for fifteen minutes. Then resolve: post the resolution, the impact in plain terms (minutes of burn, requests failed from the Prometheus counter), and name the postmortem owner.",
+          "code": {
+            "lang": "promql",
+            "code": "# requests failed during the incident window (put the times in)\nsum(increase(http_requests_total{job=\"app\", status=~\"5..\"}[25m] offset 0m))\n# error budget consumed by the incident, as a fraction of the 30-day budget\n(sum(increase(http_requests_total{job=\"app\", status=~\"5..\"}[25m])) / sum(increase(http_requests_total{job=\"app\"}[25m]))) / 0.001 * (25 / (30*24*60))"
+          },
+          "check": "The timeline ends with a `resolved` line, and the three numbers are computed: time to acknowledge (page → ack), time to mitigate (page → SLI recovering), time to resolve (page → resolved)."
+        },
+        {
+          "text": "Immediately after resolving, while it is fresh, write three bullet points in the timeline file under \"hot notes\": what was confusing, what took longest, and what you wished you had. These become the seed of the postmortem and are lost by tomorrow if not written now.",
+          "check": "The timeline file has a hot-notes section with at least three bullets and the final numbers."
+        }
+      ]
+    },
+    {
+      "title": "The postmortem, and the second drill",
+      "goal": "A blameless postmortem with action items, one improvement actually shipped, and a second drill that shows the numbers moving.",
+      "steps": [
+        {
+          "text": "Within two days, write the postmortem from the timeline using the template. The root cause section describes the system: not \"the breaker set the error rate\" but \"an environment variable can put the service into a failing state with no deploy, no alert on the config change, and no guard\". Contributing factors: what slowed detection or mitigation.",
+          "check": "Every section filled; the detection section states the page latency and what would have caught it sooner; at least three action items with owners and dates, tagged prevent, detect, mitigate or process."
+        },
+        {
+          "text": "Hold a thirty-minute review with the breaker (they know what they did and what they expected you to do). Go through the timeline together and agree the action items. Typical outcomes from this drill: a config-change alert (any change to `.env` on the host emits an event), a `RELEASES.md` that the rollback command can actually use, a Grafana annotation from every deploy, a status-update reminder timer.",
+          "note": "If the breaker chose scenario C (broken alert rule), the headline action is a `promtool test rules` gate in CI and a \"no page fired\" detection: an alert on `absent(sli:availability_error_ratio:rate5m)` or on rule evaluation failures."
+        },
+        {
+          "text": "Ship one action item before the next drill, and make it testable. The config-change detection is a good first one: the host emits a log line whenever `deploy/.env` changes, and a Loki-less version just alerts on the file's modification time through a textfile collector metric.",
+          "code": {
+            "lang": "bash",
+            "code": "# deploy/env-watch.sh: run by a cron every minute on the host (or a sidecar in compose)\n#!/bin/bash\nMTIME=$(stat -c %Y /opt/app/.env)\nmkdir -p /var/lib/node_exporter/textfile\necho \"app_env_file_mtime_seconds $MTIME\" > /var/lib/node_exporter/textfile/app_env.prom\n\n# deploy/rules/config_alerts.yml\n# - alert: OrdersApiConfigChanged\n#   expr: changes(app_env_file_mtime_seconds[10m]) > 0\n#   labels: {severity: ticket, service: orders-api}\n#   annotations: {summary: \"deploy/.env on the host changed (no deploy pipeline run)\"}"
+          },
+          "note": "node-exporter reads `*.prom` files from a directory given by `--collector.textfile.directory`; mount it in Compose. The alert is a ticket, not a page, but during an incident it is the first thing the investigator sees on the alerts page."
+        },
+        {
+          "text": "Add a Grafana annotation to every deploy so the dashboard shows deploy markers; a page that starts at a marker points straight at a rollback. The release workflow posts to Grafana's annotations API after the SSM deploy command.",
+          "code": {
+            "lang": "bash",
+            "code": "curl -s -X POST \"http://$GRAFANA_HOST:3000/api/annotations\" \\\n  -H \"Authorization: Bearer $GRAFANA_TOKEN\" -H 'Content-Type: application/json' \\\n  -d \"{\\\"tags\\\":[\\\"deploy\\\",\\\"orders-api\\\"],\\\"text\\\":\\\"deploy ${IMAGE_DIGEST:7:12} by ${GITHUB_ACTOR}\\\"}\""
+          },
+          "note": "Create a Grafana service account token with the Editor role and store it as a repository secret; in the local lab, Grafana is only reachable from your IP, so run the same curl from the deploy runbook instead of CI."
+        },
+        {
+          "text": "Run drill two, a week later if you can, with a different scenario and ideally a different breaker. Same process, same timeline discipline. Compare the three numbers with drill one, and check whether the shipped improvement changed the response (it should appear in the timeline as the moment the cause became obvious).",
+          "check": "Drill two's timeline, postmortem and numbers are in `incidents/`, and the postmortem's \"what went well\" names the improvement from drill one."
+        },
+        {
+          "text": "Close out: a short `incidents/README.md` that links the process, the two drills and their numbers, and a table of action items with status. Merge it. You now have an on-call practice, not just an alert.",
+          "code": {
+            "lang": "bash",
+            "code": "pkill hey || true\ngit add incidents deploy chaos && git commit -m \"incidents: process, roles, templates, two drills with postmortems, config-change detection\"\ngit push -u origin HEAD && gh pr create --fill && gh pr merge --squash --delete-branch"
+          }
+        }
+      ]
+    }
+  ],
+  "troubleshooting": [
+    {
+      "symptom": "No push arrives although Alertmanager shows the alert",
+      "fix": "Check the relay's logs (`docker compose logs relay`); a wrong `NTFY_TOPIC`, a missing `Content-Length` (Alertmanager always sends it) or an outbound network block are the usual causes. `curl -d test https://ntfy.sh/TOPIC` from inside the relay container isolates the network."
+    },
+    {
+      "symptom": "The page arrives, but the RESOLVED notification never does",
+      "fix": "`send_resolved: true` must be set on the receiver, and the alert must actually resolve in Prometheus (both windows of the burn-rate expression below threshold). With the 1h window it can take a while after the fix; the SLO project explains why."
+    },
+    {
+      "symptom": "The escalation route fires immediately instead of after 15 minutes",
+      "fix": "`group_wait` applies per route group; make sure the escalation route has its own `group_wait: 15m` and that `continue: true` is on the primary route so the alert reaches both. Test with `amtool config routes test --config.file alertmanager.yml severity=page`."
+    },
+    {
+      "symptom": "The breaker's scenario took the whole stack down and the drill cannot proceed",
+      "fix": "That is a finding: record it, restore with the `chaos/README.md` command, and add \"blast radius of the breaker's tools\" to the rules. In production the equivalent is a game day with a pre-agreed abort criterion."
+    },
+    {
+      "symptom": "The postmortem turns into a discussion of who did what",
+      "fix": "Reframe every sentence about a person as a sentence about the system: 'the variable could be changed without a record' rather than 'X changed the variable'. If the review cannot do that, stop and restart it with the blameless section of the SRE track's postmortem module read aloud."
+    },
+    {
+      "symptom": "The timeline is empty because everyone was busy fixing",
+      "fix": "That is the most common failure and the reason the scribe role exists. Solo responders: write one line per action before executing it; it costs five seconds and is the only record you will have."
+    }
+  ],
+  "next": [
+    "Replace ntfy with a pager product's free tier to get real acknowledgement, escalation policies and on-call schedules, and run drill three on a schedule handover.",
+    "Run the drill against the GitOps cluster from the DevOps track: mitigation becomes `git revert`, and the config-change detection becomes Argo CD's OutOfSync notification.",
+    "Add a customer-facing status page (a static page updated from the status-update template) and include publishing it in the comms role.",
+    "Take the Cybersecurity track's incident response module and run a security drill with the same process; the roles and timeline are identical, the containment steps differ.",
+    "Compute error budget consumed per incident automatically from Prometheus and put it in the postmortem template's impact section."
+  ]
+}

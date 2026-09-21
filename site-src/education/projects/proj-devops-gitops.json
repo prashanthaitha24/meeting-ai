@@ -1,0 +1,307 @@
+{
+  "id": "proj-devops-gitops",
+  "track": "devops",
+  "title": "GitOps on Kubernetes with Argo CD",
+  "summary": "Run the zero-to-production API on a local Kubernetes cluster the GitOps way: a Helm chart for the app, a separate config repository that describes what should be running, Argo CD keeping the cluster equal to that repository, Prometheus and Grafana installed the same way, and a release flow where the only path to production is a merged pull request that bumps an image digest. Drift, rollback and environment promotion all become git operations.",
+  "outcome": "Two repositories — the app repo with a Helm chart and a CI job that builds, pushes and opens a pull request against the config repo, and the config repo with Kustomize overlays for dev and prod that Argo CD syncs to a kind cluster. Argo CD's UI shows the app, the monitoring stack and their health; a manual `kubectl edit` is reverted automatically; a bad release is rolled back by reverting a commit; prod only changes after dev has been synced and healthy.",
+  "hours": 6,
+  "level": "Intermediate",
+  "prereqs": [
+    "The zero-to-production project (its image on GHCR is what you deploy), or any container image with a `/health` and `/metrics` endpoint",
+    "The DevOps track's Kubernetes, Helm and GitOps modules",
+    "Docker Desktop, kind, kubectl, Helm and the GitHub CLI installed; 6 GB RAM free for the cluster"
+  ],
+  "tools": [
+    {
+      "name": "kind",
+      "why": "a local Kubernetes cluster in Docker, rebuilt in a minute",
+      "url": "https://kind.sigs.k8s.io/"
+    },
+    {
+      "name": "Helm",
+      "why": "packages the app with values per environment",
+      "url": "https://helm.sh/docs/"
+    },
+    {
+      "name": "Kustomize",
+      "why": "environment overlays in the config repo without templating everything",
+      "url": "https://kustomize.io/"
+    },
+    {
+      "name": "Argo CD",
+      "why": "continuous reconciliation of the cluster to git, with a UI that shows drift and health",
+      "url": "https://argo-cd.readthedocs.io/"
+    },
+    {
+      "name": "kube-prometheus-stack",
+      "why": "Prometheus, Alertmanager and Grafana as one chart, deployed by Argo CD like everything else",
+      "url": "https://github.com/prometheus-community/helm-charts"
+    }
+  ],
+  "layout": "zero-to-prod/                      # app repo (existing)\n├── chart/\n│   ├── Chart.yaml\n│   ├── values.yaml\n│   └── templates/ (deployment, service, ingress, servicemonitor, hpa)\n└── .github/workflows/release.yml  # + bump the digest in the config repo via PR\n\nzero-to-prod-config/               # config repo (new): the desired state\n├── apps/\n│   └── orders-api/\n│       ├── base/kustomization.yaml         # HelmChart inflation from the app repo's chart\n│       ├── dev/kustomization.yaml          # image digest + dev values\n│       └── prod/kustomization.yaml         # image digest + prod values\n├── platform/\n│   ├── monitoring/                         # kube-prometheus-stack Application\n│   └── ingress-nginx/\n├── argocd/\n│   ├── project.yaml                        # AppProject with allowed repos and namespaces\n│   ├── app-of-apps.yaml                    # root Application pointing at apps/ and platform/\n│   └── applications/*.yaml\n└── README.md",
+  "phases": [
+    {
+      "title": "Cluster and Argo CD",
+      "goal": "A kind cluster with ingress, Argo CD installed and reachable, and the CLI logged in.",
+      "steps": [
+        {
+          "text": "Create a kind cluster with port mappings for the ingress controller, so services are reachable at `localhost`.",
+          "code": {
+            "lang": "bash",
+            "code": "cat > kind.yaml <<'EOF'\nkind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnodes:\n  - role: control-plane\n    kubeadmConfigPatches:\n      - |\n        kind: InitConfiguration\n        nodeRegistration:\n          kubeletExtraArgs:\n            node-labels: \"ingress-ready=true\"\n    extraPortMappings:\n      - containerPort: 80\n        hostPort: 80\n      - containerPort: 443\n        hostPort: 443\n  - role: worker\nEOF\nkind create cluster --name gitops --config kind.yaml\nkubectl cluster-info --context kind-gitops"
+          },
+          "check": "`kubectl get nodes` shows two Ready nodes."
+        },
+        {
+          "text": "Install the ingress-nginx controller for kind (this one is installed by hand; Argo CD will manage everything after it exists), then Argo CD.",
+          "code": {
+            "lang": "bash",
+            "code": "kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.12.0/deploy/static/provider/kind/deploy.yaml\nkubectl -n ingress-nginx wait --for=condition=ready pod -l app.kubernetes.io/component=controller --timeout=180s\n\nkubectl create namespace argocd\nkubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/v2.13.3/manifests/install.yaml\nkubectl -n argocd wait --for=condition=available deploy/argocd-server --timeout=300s"
+          },
+          "note": "Argo CD publishes a pinned install manifest per release; use the current stable tag if v2.13 has moved on. The rest of the guide uses features that have existed since 2.x."
+        },
+        {
+          "text": "Expose the Argo CD UI through an Ingress (insecure mode behind the ingress, which is fine for a local lab) and log in with the CLI.",
+          "code": {
+            "lang": "bash",
+            "code": "kubectl -n argocd patch configmap argocd-cmd-params-cm --type merge -p '{\"data\":{\"server.insecure\":\"true\"}}'\nkubectl -n argocd rollout restart deploy/argocd-server\ncat <<'EOF' | kubectl apply -f -\napiVersion: networking.k8s.io/v1\nkind: Ingress\nmetadata:\n  name: argocd\n  namespace: argocd\n  annotations:\n    nginx.ingress.kubernetes.io/backend-protocol: \"HTTP\"\nspec:\n  ingressClassName: nginx\n  rules:\n    - host: argocd.localtest.me\n      http:\n        paths:\n          - path: /\n            pathType: Prefix\n            backend:\n              service:\n                name: argocd-server\n                port:\n                  number: 80\nEOF\nbrew install argocd    # or the release binary on Linux/Windows\nPASS=$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d)\nargocd login argocd.localtest.me --username admin --password \"$PASS\" --plaintext\nargocd account update-password --current-password \"$PASS\" --new-password 'pick-a-long-one'"
+          },
+          "check": "http://argocd.localtest.me opens the UI (`localtest.me` resolves to 127.0.0.1); `argocd app list` returns an empty list. `localtest.me` and its subdomains resolve to localhost without any hosts-file edits."
+        }
+      ]
+    },
+    {
+      "title": "A Helm chart for the app",
+      "goal": "The zero-to-production API packaged as a chart with sensible defaults, probes, resources, a ServiceMonitor and per-environment values, tested locally with Helm before Argo CD ever sees it.",
+      "steps": [
+        {
+          "text": "In the app repository, scaffold a chart and replace the generated templates with a minimal, explicit set.",
+          "code": {
+            "lang": "bash",
+            "code": "cd zero-to-prod && git switch -c feat/helm-chart\nhelm create chart && rm -rf chart/templates/* chart/charts chart/values.yaml"
+          }
+        },
+        {
+          "text": "Write `Chart.yaml` and `values.yaml`. The image is referenced by digest, and the values file is what the config repo overrides per environment.",
+          "code": {
+            "lang": "yaml",
+            "code": "# chart/Chart.yaml\napiVersion: v2\nname: orders-api\ndescription: The zero-to-production FastAPI service\ntype: application\nversion: 0.1.0\nappVersion: \"0.1.0\"\n\n# chart/values.yaml\nimage:\n  repository: ghcr.io/YOUR_GITHUB_USER/zero-to-prod\n  digest: \"\"            # set per environment by the config repo; empty means :latest for local testing\n  tag: latest\nreplicaCount: 2\nservice:\n  port: 80\n  targetPort: 8000\ningress:\n  enabled: true\n  className: nginx\n  host: orders.localtest.me\nresources:\n  requests: {cpu: 100m, memory: 128Mi}\n  limits: {memory: 256Mi}\nenv:\n  GREETING: \"hello from kubernetes\"\nmetrics:\n  serviceMonitor: true\nautoscaling:\n  enabled: false\n  minReplicas: 2\n  maxReplicas: 6\n  targetCPU: 70"
+          }
+        },
+        {
+          "text": "Write the Deployment template with probes, the restricted security context and the image reference logic.",
+          "code": {
+            "lang": "helm",
+            "code": "# chart/templates/deployment.yaml\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: {{ .Release.Name }}\n  labels: {app.kubernetes.io/name: {{ .Chart.Name }}, app.kubernetes.io/instance: {{ .Release.Name }}}\nspec:\n  replicas: {{ .Values.replicaCount }}\n  selector:\n    matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}}\n  template:\n    metadata:\n      labels: {app.kubernetes.io/name: {{ .Chart.Name }}, app.kubernetes.io/instance: {{ .Release.Name }}}\n    spec:\n      securityContext:\n        runAsNonRoot: true\n        runAsUser: 10001\n        seccompProfile: {type: RuntimeDefault}\n      containers:\n        - name: app\n          image: \"{{ .Values.image.repository }}{{ if .Values.image.digest }}@{{ .Values.image.digest }}{{ else }}:{{ .Values.image.tag }}{{ end }}\"\n          ports: [{name: http, containerPort: 8000}]\n          env:\n            {{- range $k, $v := .Values.env }}\n            - name: {{ $k }}\n              value: {{ $v | quote }}\n            {{- end }}\n          readinessProbe:\n            httpGet: {path: /health, port: http}\n            periodSeconds: 5\n          livenessProbe:\n            httpGet: {path: /health, port: http}\n            periodSeconds: 15\n          resources: {{- toYaml .Values.resources | nindent 12 }}\n          securityContext:\n            allowPrivilegeEscalation: false\n            readOnlyRootFilesystem: true\n            capabilities: {drop: [ALL]}"
+          },
+          "note": "Add `service.yaml`, `ingress.yaml` (host from values, path `/`), `hpa.yaml` (guarded by `.Values.autoscaling.enabled`) and `servicemonitor.yaml` (guarded by `.Values.metrics.serviceMonitor`, selecting the Service, endpoint `http`, path `/metrics`). The ServiceMonitor's API group is `monitoring.coreos.com/v1`, which exists once the monitoring stack is installed in Phase 4; keep it disabled in dev values until then."
+        },
+        {
+          "text": "Add the remaining templates: the Service, the Ingress and the ServiceMonitor. Each is small; the guard on the ServiceMonitor lets the chart install before the monitoring CRDs exist.",
+          "code": {
+            "lang": "helm",
+            "code": "# chart/templates/service.yaml\napiVersion: v1\nkind: Service\nmetadata:\n  name: {{ .Release.Name }}\n  labels: {app.kubernetes.io/instance: {{ .Release.Name }}}\nspec:\n  selector: {app.kubernetes.io/instance: {{ .Release.Name }}}\n  ports:\n    - name: http\n      port: {{ .Values.service.port }}\n      targetPort: http\n---\n# chart/templates/ingress.yaml\n{{- if .Values.ingress.enabled }}\napiVersion: networking.k8s.io/v1\nkind: Ingress\nmetadata:\n  name: {{ .Release.Name }}\nspec:\n  ingressClassName: {{ .Values.ingress.className }}\n  rules:\n    - host: {{ .Values.ingress.host }}\n      http:\n        paths:\n          - path: /\n            pathType: Prefix\n            backend:\n              service:\n                name: {{ .Release.Name }}\n                port: {name: http}\n{{- end }}\n---\n# chart/templates/servicemonitor.yaml\n{{- if .Values.metrics.serviceMonitor }}\napiVersion: monitoring.coreos.com/v1\nkind: ServiceMonitor\nmetadata:\n  name: {{ .Release.Name }}\n  labels: {release: monitoring}\nspec:\n  selector:\n    matchLabels: {app.kubernetes.io/instance: {{ .Release.Name }}}\n  endpoints:\n    - port: http\n      path: /metrics\n      interval: 15s\n{{- end }}"
+          },
+          "check": "`helm template orders-api chart` renders four documents (Deployment, Service, Ingress, ServiceMonitor) with no template errors."
+        },
+        {
+          "text": "Lint and render the chart, then install it into the cluster by hand once to prove it works — the last manual install you will do.",
+          "code": {
+            "lang": "bash",
+            "code": "helm lint chart\nhelm template orders-api chart --set metrics.serviceMonitor=false | kubectl apply --dry-run=server -f -\nhelm upgrade --install orders-api chart -n orders --create-namespace --set metrics.serviceMonitor=false\nkubectl -n orders rollout status deploy/orders-api\ncurl -s http://orders.localtest.me/health"
+          },
+          "check": "`{\"status\":\"ok\"}`. Uninstall afterwards (`helm uninstall orders-api -n orders`) so Argo CD owns it from here."
+        },
+        {
+          "text": "Add a chart test job in CI (`helm lint` and a server-side dry run against a kind cluster in the workflow) and merge the chart through a pull request.",
+          "code": {
+            "lang": "bash",
+            "code": "git add chart && git commit -m \"feat: Helm chart for orders-api\" && git push -u origin feat/helm-chart\ngh pr create --fill && gh pr merge --squash --delete-branch && git switch main && git pull"
+          },
+          "note": "For the CI job use `helm/kind-action@v1` to spin up a cluster, then the same two commands as above."
+        }
+      ]
+    },
+    {
+      "title": "The config repository and Argo CD Applications",
+      "goal": "A separate repository describing dev and prod as Kustomize overlays of the chart, and Argo CD Applications that sync them, created through an app-of-apps so even the Applications are in git.",
+      "steps": [
+        {
+          "text": "Create the config repository. Separating configuration from application code is the GitOps convention: the app repo changes when code changes, the config repo changes when what runs changes, and the second is what Argo CD watches.",
+          "code": {
+            "lang": "bash",
+            "code": "cd .. && gh repo create zero-to-prod-config --public --clone && cd zero-to-prod-config\nmkdir -p apps/orders-api/{base,dev,prod} platform/{monitoring,ingress-nginx} argocd/applications"
+          }
+        },
+        {
+          "text": "Write the base as a Kustomize HelmChart inflation pointing at the chart in the app repository, and the environment overlays that pin the image digest and set environment-specific values.",
+          "code": {
+            "lang": "yaml",
+            "code": "# apps/orders-api/base/kustomization.yaml\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nhelmCharts:\n  - name: orders-api\n    repo: oci://ghcr.io/YOUR_GITHUB_USER/charts      # publish the chart as an OCI artifact from CI (Phase 5)\n    version: 0.1.0\n    releaseName: orders-api\n    namespace: orders\n    valuesFile: values.yaml\n\n# apps/orders-api/dev/kustomization.yaml\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nnamespace: orders-dev\nresources: [../base]\npatches:\n  - target: {kind: Deployment, name: orders-api}\n    patch: |\n      - op: replace\n        path: /spec/replicas\n        value: 1\nimages:\n  - name: ghcr.io/YOUR_GITHUB_USER/zero-to-prod\n    digest: sha256:REPLACE_WITH_A_REAL_DIGEST\n\n# apps/orders-api/prod/kustomization.yaml\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nnamespace: orders-prod\nresources: [../base]\nimages:\n  - name: ghcr.io/YOUR_GITHUB_USER/zero-to-prod\n    digest: sha256:REPLACE_WITH_A_REAL_DIGEST"
+          },
+          "note": "Until the chart is published to an OCI registry in Phase 5, use a local path instead: copy `chart/` into `apps/orders-api/base/chart` and reference it with `helmCharts[0].repo` omitted and `name: chart`. Get a real digest with `docker buildx imagetools inspect ghcr.io/YOUR_GITHUB_USER/zero-to-prod:latest`. Set the ingress host per environment in each overlay's values (`orders-dev.localtest.me`, `orders.localtest.me`)."
+        },
+        {
+          "text": "Define the Argo CD project (what may be deployed where) and the Applications for both environments. Dev syncs automatically with pruning and self-heal; prod syncs automatically too but only after a change lands in its own directory, which the release flow gates.",
+          "code": {
+            "lang": "yaml",
+            "code": "# argocd/project.yaml\napiVersion: argoproj.io/v1alpha1\nkind: AppProject\nmetadata:\n  name: zero-to-prod\n  namespace: argocd\nspec:\n  sourceRepos:\n    - https://github.com/YOUR_GITHUB_USER/zero-to-prod-config\n    - https://prometheus-community.github.io/helm-charts\n    - oci://ghcr.io/YOUR_GITHUB_USER/charts\n  destinations:\n    - {namespace: \"orders-*\", server: https://kubernetes.default.svc}\n    - {namespace: monitoring, server: https://kubernetes.default.svc}\n  clusterResourceWhitelist:\n    - {group: \"\", kind: Namespace}\n    - {group: apiextensions.k8s.io, kind: CustomResourceDefinition}\n    - {group: rbac.authorization.k8s.io, kind: ClusterRole}\n    - {group: rbac.authorization.k8s.io, kind: ClusterRoleBinding}\n\n# argocd/applications/orders-api-dev.yaml\napiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: orders-api-dev\n  namespace: argocd\nspec:\n  project: zero-to-prod\n  source:\n    repoURL: https://github.com/YOUR_GITHUB_USER/zero-to-prod-config\n    targetRevision: main\n    path: apps/orders-api/dev\n  destination: {server: https://kubernetes.default.svc, namespace: orders-dev}\n  syncPolicy:\n    automated: {prune: true, selfHeal: true}\n    syncOptions: [CreateNamespace=true]\n\n# argocd/applications/orders-api-prod.yaml: same with name orders-api-prod, path apps/orders-api/prod,\n# namespace orders-prod, and syncPolicy.automated.selfHeal: true, prune: false (prod deletions are manual)"
+          },
+          "note": "Argo CD needs Kustomize's Helm support enabled: patch `argocd-cm` with `kustomize.buildOptions: --enable-helm`, then restart the repo server."
+        },
+        {
+          "text": "Write the app-of-apps root Application, apply only that one manually, and watch Argo CD create the rest from the repository.",
+          "code": {
+            "lang": "yaml",
+            "code": "# argocd/app-of-apps.yaml\napiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: root\n  namespace: argocd\nspec:\n  project: default\n  source:\n    repoURL: https://github.com/YOUR_GITHUB_USER/zero-to-prod-config\n    targetRevision: main\n    path: argocd\n    directory: {recurse: true, exclude: app-of-apps.yaml}\n  destination: {server: https://kubernetes.default.svc, namespace: argocd}\n  syncPolicy:\n    automated: {prune: true, selfHeal: true}"
+          }
+        },
+        {
+          "text": "Before committing, render each overlay locally exactly as Argo CD will, so a Kustomize or Helm mistake is caught on your laptop rather than as a red Application.",
+          "code": {
+            "lang": "bash",
+            "code": "kustomize build --enable-helm apps/orders-api/dev | kubectl apply --dry-run=server -f -\nkustomize build --enable-helm apps/orders-api/prod | grep -A1 'image:'"
+          },
+          "check": "Both overlays render; the prod output shows the image with the `@sha256:` digest you pinned."
+        },
+        {
+          "text": "Commit the config repository, enable Kustomize's Helm support, and bootstrap.",
+          "code": {
+            "lang": "bash",
+            "code": "git add . && git commit -m \"feat: orders-api dev/prod overlays, AppProject, Applications, app-of-apps\" && git push -u origin main\nkubectl -n argocd patch configmap argocd-cm --type merge -p '{\"data\":{\"kustomize.buildOptions\":\"--enable-helm\"}}'\nkubectl -n argocd rollout restart deploy/argocd-repo-server\nkubectl apply -f argocd/app-of-apps.yaml\nargocd app list\nargocd app wait orders-api-dev --health --timeout 300"
+          },
+          "check": "`argocd app list` shows `root`, `orders-api-dev` and `orders-api-prod` as Synced and Healthy; `curl http://orders-dev.localtest.me/health` works; the UI shows the tree of Deployment, ReplicaSet, Pods, Service and Ingress under each app."
+        }
+      ]
+    },
+    {
+      "title": "The monitoring stack, the same way",
+      "goal": "Prometheus, Alertmanager and Grafana installed and upgraded by Argo CD from a chart reference in git, scraping the app through its ServiceMonitor.",
+      "steps": [
+        {
+          "text": "Add a multi-source Application for kube-prometheus-stack: the chart from the community repository, the values from your config repository.",
+          "code": {
+            "lang": "yaml",
+            "code": "# argocd/applications/monitoring.yaml\napiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: monitoring\n  namespace: argocd\nspec:\n  project: zero-to-prod\n  sources:\n    - repoURL: https://prometheus-community.github.io/helm-charts\n      chart: kube-prometheus-stack\n      targetRevision: 67.9.0\n      helm:\n        releaseName: monitoring\n        valueFiles: [$values/platform/monitoring/values.yaml]\n    - repoURL: https://github.com/YOUR_GITHUB_USER/zero-to-prod-config\n      targetRevision: main\n      ref: values\n  destination: {server: https://kubernetes.default.svc, namespace: monitoring}\n  syncPolicy:\n    automated: {prune: true, selfHeal: true}\n    syncOptions: [CreateNamespace=true, ServerSideApply=true]\n\n# platform/monitoring/values.yaml\ngrafana:\n  adminPassword: change-me-in-a-secret      # lab only; use a SecretRef or an external secrets operator for real\n  ingress:\n    enabled: true\n    ingressClassName: nginx\n    hosts: [grafana.localtest.me]\nprometheus:\n  prometheusSpec:\n    serviceMonitorSelectorNilUsesHelmValues: false     # scrape ServiceMonitors from every namespace\n    retention: 7d\nalertmanager:\n  enabled: true"
+          },
+          "note": "`ServerSideApply=true` avoids the annotation-size limit that the stack's large CRDs otherwise hit. Pin the chart version and bump it via pull requests like any dependency."
+        },
+        {
+          "text": "Commit, let the root app pick it up, and wait for the stack to become healthy. Then enable the ServiceMonitor in both overlays' values and confirm Prometheus scrapes the app.",
+          "code": {
+            "lang": "bash",
+            "code": "git add . && git commit -m \"feat: kube-prometheus-stack via Argo CD\" && git push\nargocd app wait monitoring --health --timeout 600\n# now set metrics.serviceMonitor: true in apps/orders-api/{dev,prod} values and push\nargocd app wait orders-api-dev --sync"
+          },
+          "check": "http://grafana.localtest.me logs in; Prometheus (port-forward `kubectl -n monitoring port-forward svc/monitoring-kube-prometheus-prometheus 9090`) shows `orders-dev/orders-api` and `orders-prod/orders-api` targets as UP."
+        },
+        {
+          "text": "Add the SLO dashboard from the SRE project as a ConfigMap with the `grafana_dashboard: \"1\"` label in `platform/monitoring/`, and the burn-rate rules as a `PrometheusRule` resource. Both are just files in git now; Argo CD applies them and the operator loads them.",
+          "code": {
+            "lang": "yaml",
+            "code": "# platform/monitoring/orders-slo-rules.yaml\napiVersion: monitoring.coreos.com/v1\nkind: PrometheusRule\nmetadata:\n  name: orders-api-slo\n  namespace: monitoring\n  labels: {release: monitoring}\nspec:\n  groups:\n    - name: orders_slo\n      rules:\n        - record: sli:availability_error_ratio:rate5m\n          expr: |\n            sum(rate(http_requests_total{namespace=\"orders-prod\", status=~\"5..\"}[5m]))\n            / sum(rate(http_requests_total{namespace=\"orders-prod\"}[5m]))\n        - alert: OrdersApiAvailabilityFastBurn\n          expr: sli:availability_error_ratio:rate5m > 0.0144\n          for: 2m\n          labels: {severity: page}\n          annotations: {summary: \"orders-api (prod) burning availability budget fast\"}"
+          },
+          "note": "Reference the platform directory from an Application (`platform-monitoring-extras`, path `platform/monitoring`, excluding `values.yaml`) so these manifests sync. The full rule set from the SLO project drops in unchanged apart from the namespace selector."
+        }
+      ]
+    },
+    {
+      "title": "The release flow, drift and rollback",
+      "goal": "CI publishes the chart and the image, then opens a pull request in the config repo that bumps the dev digest; a second pull request promotes to prod; and you see Argo CD revert drift and roll back a bad release.",
+      "steps": [
+        {
+          "text": "Protect the config repository's `main` branch the same way the app repo is protected: pull requests only, and a required review for anything touching `apps/orders-api/prod/`. A CODEOWNERS file makes the prod directory require a named reviewer.",
+          "code": {
+            "lang": "bash",
+            "code": "printf 'apps/orders-api/prod/ @YOUR_GITHUB_USER\\nargocd/ @YOUR_GITHUB_USER\\n' > CODEOWNERS\ngit add CODEOWNERS && git commit -m \"chore: code owners for prod and argocd\" && git push\ngh api -X PUT \"repos/{owner}/zero-to-prod-config/branches/main/protection\" --input - <<'JSON'\n{\"required_status_checks\": null, \"enforce_admins\": false,\n \"required_pull_request_reviews\": {\"require_code_owner_reviews\": true, \"required_approving_review_count\": 1},\n \"restrictions\": null, \"allow_force_pushes\": false, \"allow_deletions\": false}\nJSON"
+          },
+          "note": "Working alone, you can approve your own bot's dev bumps but GitHub will not let you approve your own prod pull requests; that is the point of the rule. For a solo lab, drop `required_approving_review_count` to 0 for dev-only changes if it gets in the way."
+        },
+        {
+          "text": "In the app repository's `release.yml`, after the image is pushed: package and push the chart to GHCR as an OCI artifact, then update the dev overlay's digest in the config repo through a pull request. A fine-grained token for the config repo lives in the app repo's secrets as `CONFIG_REPO_TOKEN`.",
+          "code": {
+            "lang": "yaml",
+            "code": "  promote-dev:\n    needs: build\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - name: Publish the chart as an OCI artifact\n        run: |\n          echo \"${{ secrets.GITHUB_TOKEN }}\" | helm registry login ghcr.io -u \"${{ github.actor }}\" --password-stdin\n          helm package chart --version \"0.1.${{ github.run_number }}\" --app-version \"${{ needs.build.outputs.tag }}\"\n          helm push orders-api-0.1.${{ github.run_number }}.tgz oci://ghcr.io/${{ github.repository_owner }}/charts\n      - name: Bump the dev digest in the config repo\n        env:\n          GH_TOKEN: ${{ secrets.CONFIG_REPO_TOKEN }}\n          DIGEST: ${{ needs.build.outputs.digest }}\n        run: |\n          gh repo clone ${{ github.repository_owner }}/zero-to-prod-config cfg\n          cd cfg && git switch -c \"bump/dev-${DIGEST:7:12}\"\n          sed -i \"s#digest: sha256:.*#digest: ${DIGEST}#\" apps/orders-api/dev/kustomization.yaml\n          sed -i \"s#version: 0.1.*#version: 0.1.${{ github.run_number }}#\" apps/orders-api/base/kustomization.yaml\n          git -c user.name=release-bot -c user.email=bot@users.noreply.github.com commit -am \"dev: ${{ github.sha }} (${DIGEST:7:12})\"\n          git push -u origin HEAD\n          gh pr create --fill --body \"Image ${DIGEST} from ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}\""
+          },
+          "note": "`docker/build-push-action` exposes `outputs.digest`; add it to the `build` job's outputs. The bot opens a pull request rather than pushing to `main` so that the config repo's branch protection applies to machines too. For dev you may auto-merge it; for prod a human merges."
+        },
+        {
+          "text": "Make a small code change in the app, merge it, and follow the chain: the image is built, the chart is pushed, a bump pull request appears in the config repo. Merge it and watch Argo CD sync dev.",
+          "code": {
+            "lang": "bash",
+            "code": "cd ../zero-to-prod && git switch -c feat/greeting-k8s\nsed -i.bak 's/hello from zero-to-prod/hello from gitops/' app/main.py && rm app/main.py.bak\ngit commit -am \"feat: gitops greeting\" && git push -u origin HEAD && gh pr create --fill && gh pr merge --squash --delete-branch\ngh run watch\ncd ../zero-to-prod-config && gh pr list && gh pr merge --squash --delete-branch $(gh pr list --json number --jq '.[0].number')\nargocd app wait orders-api-dev --sync --health\ncurl -s http://orders-dev.localtest.me/"
+          },
+          "check": "The response changes in dev only. Prod still serves the old digest — the point of separate overlays."
+        },
+        {
+          "text": "Promote to prod as a git operation: copy the digest from dev to prod in a pull request that a human merges.",
+          "code": {
+            "lang": "bash",
+            "code": "git switch -c promote/prod\nDIG=$(grep -o 'sha256:[0-9a-f]*' apps/orders-api/dev/kustomization.yaml)\nsed -i \"s#digest: sha256:.*#digest: ${DIG}#\" apps/orders-api/prod/kustomization.yaml\ngit commit -am \"prod: promote ${DIG:7:12}\" && git push -u origin HEAD && gh pr create --fill\n# a reviewer merges; then:\nargocd app wait orders-api-prod --sync --health && curl -s http://orders.localtest.me/"
+          },
+          "check": "Prod now serves the new greeting. The config repo's history is the deployment log: who promoted what, when, and from which app commit."
+        },
+        {
+          "text": "Drift: change the cluster by hand and watch Argo CD put it back.",
+          "code": {
+            "lang": "bash",
+            "code": "kubectl -n orders-prod scale deploy/orders-api --replicas=5\nsleep 20 && kubectl -n orders-prod get deploy orders-api\nargocd app history orders-api-prod | tail -3"
+          },
+          "check": "Replicas return to the value in git within a few seconds (self-heal); the UI briefly showed OutOfSync. Manual changes to production are now impossible to keep, which is the feature."
+        },
+        {
+          "text": "Rollback: ship a bad release (make `/health` return 500 in a branch, merge, promote), watch prod's health degrade in Argo CD, then revert the promotion commit.",
+          "code": {
+            "lang": "bash",
+            "code": "# after promoting the bad digest:\nargocd app get orders-api-prod | grep -E 'Health|Sync'          # Degraded: readiness fails, rollout stuck\ngit revert --no-edit HEAD && git push\nargocd app wait orders-api-prod --sync --health\ncurl -s http://orders.localtest.me/health"
+          },
+          "check": "Health returns to Healthy and the previous digest is running. `argocd app rollback` exists too, but the git revert is the GitOps answer because the repository stays the truth."
+        },
+        {
+          "text": "Write the README for the config repo: the promotion flow, who may merge prod, how to roll back, how to add a new app (a directory plus an Application file), and the one rule — nobody runs `kubectl apply` against this cluster. Then delete the kind cluster when you are done.",
+          "code": {
+            "lang": "bash",
+            "code": "kind delete cluster --name gitops"
+          },
+          "note": "Rebuilding is `kind create cluster`, the ingress install, the Argo CD install, and `kubectl apply -f argocd/app-of-apps.yaml`: everything else comes back from git. That is the recoverability test."
+        }
+      ]
+    }
+  ],
+  "troubleshooting": [
+    {
+      "symptom": "Argo CD shows `rpc error: ... helm chart inflation` or ignores helmCharts",
+      "fix": "Kustomize's Helm support is off by default in Argo CD; patch `argocd-cm` with `kustomize.buildOptions: --enable-helm` and restart `argocd-repo-server`."
+    },
+    {
+      "symptom": "The kube-prometheus-stack Application fails with `metadata.annotations: Too long`",
+      "fix": "Enable `ServerSideApply=true` in the Application's sync options (the CRDs exceed the client-side apply annotation limit)."
+    },
+    {
+      "symptom": "Prometheus does not scrape the app although the ServiceMonitor exists",
+      "fix": "Set `serviceMonitorSelectorNilUsesHelmValues: false` in the stack's values, or label the ServiceMonitor with `release: monitoring`. Check `kubectl -n monitoring get servicemonitors -A` and the Prometheus UI's Service Discovery page."
+    },
+    {
+      "symptom": "`orders.localtest.me` does not resolve",
+      "fix": "Some corporate DNS setups block wildcard public DNS to localhost. Add `127.0.0.1 orders.localtest.me argocd.localtest.me grafana.localtest.me` to `/etc/hosts` instead."
+    },
+    {
+      "symptom": "The bump pull request is not created",
+      "fix": "The `CONFIG_REPO_TOKEN` must be a fine-grained token with Contents and Pull requests write on the config repo; `gh` also needs `GH_TOKEN` set in the step's env, as shown."
+    },
+    {
+      "symptom": "Argo CD reports OutOfSync forever on a resource it did not create",
+      "fix": "Mutating webhooks and defaulted fields cause diffs; add an `ignoreDifferences` entry for the field, or `RespectIgnoreDifferences=true` in sync options. Check the diff in the UI to see what changes."
+    },
+    {
+      "symptom": "The prod Application pruned something it should not have",
+      "fix": "Prod was configured with `prune: false` for this reason; if you enabled it, a resource removed from git is deleted from the cluster. Restore the file in git; that is the recovery path."
+    }
+  ],
+  "next": [
+    "Add an ApplicationSet that generates one Application per directory under `apps/`, so a new service is only a directory.",
+    "Gate prod promotion on the SLO: the **Progressive delivery** project in the SRE track adds Argo Rollouts with canary analysis against the Prometheus metrics you already scrape.",
+    "Replace the plain-text Grafana password with the External Secrets Operator reading from a secrets manager, and sign the chart and the config commits (the supply chain project).",
+    "Point the same config repo at a real cluster (EKS from the **Terraform an AWS environment** project) by adding a second destination; the overlays already separate environments.",
+    "Enable Argo CD notifications so a failed sync or a Degraded app posts to a channel with the diff."
+  ]
+}
