@@ -1,0 +1,253 @@
+{
+  "id": "kit-devops",
+  "role": "DevOps Engineer",
+  "tracks": ["devops"],
+  "summary": "What a DevOps interview actually probes: not whether you can name tools, but whether you understand why a change is safe to ship, what happens when it is not, and how you would build the path from a developer's commit to production. These questions are the ones that come up round after round, with model answers that show the reasoning interviewers are listening for — and a take-home task that mirrors what real teams ask.",
+  "rounds": [
+    {"name": "Recruiter / phone screen", "what": "A friendly filter: your background, the tools you have actually used, why you are looking. Keep answers concrete — 'I built X with Y and it did Z' beats a list of technologies.", "tip": "Have a 60-second story about a pipeline or deploy you own. It anchors every later round."},
+    {"name": "Technical screen", "what": "Live or take-home: write or debug a CI pipeline, a Dockerfile, or a small script. They watch how you work, not just the result — narrate your reasoning.", "tip": "Think out loud, check your assumptions, and say what you would test."},
+    {"name": "Systems design", "what": "Design a deployment pipeline or an environment: 'how would you ship this service to production safely?' There is no single right answer; they want trade-offs named and justified.", "tip": "Start from requirements and constraints, not from a diagram. Ask what 'safe' and 'scale' mean here."},
+    {"name": "Troubleshooting / incident", "what": "A scenario — 'the deploy went out and errors spiked' — where they watch your diagnostic instinct: what do you look at first, how do you narrow it down, when do you roll back.", "tip": "Verbalise a hypothesis, then the observation that would confirm or kill it. That loop is the skill."},
+    {"name": "Behavioural", "what": "Ownership, collaboration, how you handle a failed change or a disagreement. DevOps is a culture question as much as a technical one.", "tip": "Use real incidents. 'We had an outage, here is what I did and what we changed' lands better than a hypothetical."}
+  ],
+  "sections": [
+    {
+      "title": "CI/CD and delivery",
+      "intro": "The core of the job: getting a change from a commit to production safely and quickly. Interviewers want to hear that you understand the difference between fast and reckless.",
+      "questions": [
+        {
+          "q": "Walk me through what happens from a developer pushing a commit to that change running in production.",
+          "tests": "Whether you have a complete mental model of a delivery pipeline, not just isolated tools.",
+          "answer": "A good answer follows the change end to end and names the gates: a **pull request** triggers **CI** — lint, unit tests, a build — on the branch; a passing PR that a reviewer approves merges to `main`; the merge triggers a **release pipeline** that builds an immutable artifact (a container image tagged by commit SHA, not `latest`), pushes it to a registry, and deploys it to a **staging** environment where integration or smoke tests run; then it promotes to **production**, ideally progressively (a canary or rolling update behind health checks) so a bad change affects a fraction of traffic first, with an automatic rollback if health degrades. Throughout: the artifact is built once and promoted unchanged across environments, config differs by environment not by rebuild, and every step is in version control. The phrase to land is 'built once, promoted many times' — rebuilding per environment is a classic anti-pattern because staging and prod then run different bits.",
+          "followups": [
+            "Where would you put a manual approval, and why there and not elsewhere?",
+            "How do you make the deploy reversible?",
+            "What is the difference between continuous delivery and continuous deployment?"
+          ]
+        },
+        {
+          "q": "Your pipeline takes 40 minutes and developers are batching changes to avoid it. How do you speed it up?",
+          "tests": "Whether you treat pipeline speed as a first-class problem — slow CI directly harms delivery.",
+          "answer": "First measure: find which stages dominate, because you optimise the long pole, not everything. Common wins in order of impact: **cache dependencies** (package installs, Docker layers) so they are not rebuilt every run; **parallelise** independent stages (lint, unit tests, and the build do not depend on each other); **run only what changed** where the repo allows it (test selection, affected-package builds in a monorepo); **shard** a large test suite across runners; and move slow, less-critical checks (full integration, security scans) off the blocking path — run them on a schedule or post-merge and gate merges on the fast subset. The framing interviewers want: a slow pipeline is not an inconvenience, it changes behaviour — people batch changes, which makes each deploy bigger and riskier, the opposite of what CI is for.",
+          "followups": [
+            "How do you keep test caching from hiding a real failure?",
+            "When is it worth running some tests only nightly?"
+          ]
+        },
+        {
+          "q": "How do you handle secrets in a CI/CD pipeline?",
+          "tests": "Security instinct — secrets are the most common serious mistake in pipelines.",
+          "answer": "Never in the repository, never in the image, never echoed to logs. Store them in the platform's secret store (GitHub Actions secrets, a cloud secret manager like AWS Secrets Manager or HashiCorp Vault) and inject them at runtime as environment variables or mounted files, scoped to the minimum jobs that need them. Prefer **short-lived credentials over stored ones**: OIDC federation lets a workflow assume a cloud role with a token that lives minutes, so there is no long-lived key to leak — this is the answer that signals current practice. Restrict who can trigger workflows with access to secrets (fork PRs must not get them), rotate anything long-lived, and scan the repo and history for leaked secrets. If asked about a leak: rotate first, then investigate — the credential is compromised the moment it is exposed, even if deleted later.",
+          "followups": [
+            "Why is OIDC federation better than a stored access key?",
+            "How would you prevent a fork's pull request from stealing your secrets?"
+          ]
+        },
+        {
+          "q": "What is the difference between blue-green, canary, and rolling deployments?",
+          "tests": "Whether you know the release strategies and, more importantly, when each fits.",
+          "answer": "**Rolling** replaces instances a few at a time; simple, no extra infrastructure, but the new version serves real traffic immediately and rollback means rolling back. **Blue-green** runs two full environments and switches all traffic at once by flipping a router; instant rollback (flip back), but you pay for double capacity and the switch is all-or-nothing. **Canary** sends a small percentage of traffic to the new version, watches metrics (error rate, latency), and increases the share only if it stays healthy — the safest for catching problems that only show under real traffic, but it needs good metrics and automation to be worth it. The judgement interviewers want: canary for anything user-facing and risky, blue-green when you need instant rollback and can afford the capacity, rolling for low-risk internal services. Name the requirement each imposes — canary is only as good as the metrics you compare against.",
+          "followups": [
+            "What metrics would you compare a canary against its baseline on?",
+            "How does a database schema change complicate blue-green?"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Containers and Kubernetes",
+      "intro": "Almost every DevOps role touches containers, and most touch Kubernetes. Expect questions that separate people who have operated it from people who have only read about it.",
+      "questions": [
+        {
+          "q": "What is the difference between a container and a virtual machine?",
+          "tests": "Foundational understanding — a warm-up, but a vague answer here is a bad sign.",
+          "answer": "A VM virtualises hardware: a hypervisor runs a full guest OS with its own kernel, so it is heavy (gigabytes, boots in tens of seconds) but strongly isolated. A container virtualises the OS: it shares the host kernel and isolates processes using kernel features (namespaces for what a process can see, cgroups for what it can use), so it is light (megabytes, starts in milliseconds) but the isolation is weaker because the kernel is shared. The practical consequence: containers give you density and fast start-up, which is why they suit microservices and CI; VMs give you stronger isolation and the ability to run a different kernel, which is why untrusted multi-tenant workloads sometimes still use them (or use a sandbox like gVisor or Firecracker that adds VM-grade isolation to a container).",
+          "followups": [
+            "What kernel features actually provide container isolation?",
+            "When would you still choose a VM over a container?"
+          ]
+        },
+        {
+          "q": "A pod is stuck in CrashLoopBackOff. Walk me through diagnosing it.",
+          "tests": "Real operational experience — this is the single most common Kubernetes symptom.",
+          "answer": "CrashLoopBackOff means the container keeps exiting and Kubernetes keeps restarting it with growing back-off, so the container is starting and then dying. Diagnose in order: `kubectl describe pod` for the events and the last state's exit code and reason (OOMKilled, an image-pull error, a failed liveness probe); `kubectl logs <pod> --previous` for the crashed container's own output, which usually names the cause — a missing env var, a config it cannot read, a dependency it cannot reach, a port already in use. Common causes and their tells: exit code 137 is OOMKilled (raise the memory limit or fix the leak); an application error in the logs is a config or dependency problem; a liveness probe killing a healthy-but-slow app needs the probe's timing loosened. The reasoning interviewers want: read the events and the previous logs before touching anything — the answer is almost always there, and changing config blindly just resets the loop.",
+          "followups": [
+            "How do you tell an OOMKill from an application crash?",
+            "How can a misconfigured liveness probe cause this on a healthy app?"
+          ]
+        },
+        {
+          "q": "What are resource requests and limits, and what happens if you get them wrong?",
+          "tests": "Whether you understand scheduling and the failure modes that cause the most production Kubernetes pain.",
+          "answer": "A **request** is what the scheduler reserves — it uses requests to decide which node a pod fits on. A **limit** is the ceiling the container is allowed at runtime. Get them wrong and specific things break: **no requests** means the scheduler cannot pack nodes sensibly and pods land anywhere, risking contention; **requests too high** wastes capacity and money because nodes look full when they are idle; **memory limit too low** gets the container OOMKilled the moment it exceeds it (memory is not compressible); **CPU limit too low** throttles the container — it is not killed but it gets slow, which is a nastier bug because it looks like a performance problem, not a config one. Good practice: set requests from observed usage, set memory limit close to the request (so a pod that grows is killed rather than starving its neighbours), and be cautious with CPU limits because throttling is easy to cause and hard to notice.",
+          "followups": [
+            "Why is exceeding a memory limit fatal but exceeding a CPU limit not?",
+            "What is the risk of setting no limits at all?"
+          ]
+        },
+        {
+          "q": "How would you expose a service running in Kubernetes to the internet?",
+          "tests": "Whether you know the networking primitives and their trade-offs, not just 'use a LoadBalancer'.",
+          "answer": "A **Service** of type ClusterIP gives stable internal networking; to reach it from outside you have options. A **LoadBalancer** service provisions a cloud load balancer per service — simple but one LB (and cost) per service, and only L4. An **Ingress** (with an ingress controller like nginx) puts one load balancer in front and routes by host and path to many services, does TLS termination, and is the usual answer for HTTP — you pay for one LB and get L7 routing. The newer **Gateway API** is the successor to Ingress with a cleaner model for more complex routing. Name the trade-off: LoadBalancer-per-service is simple but does not scale in cost or count; an Ingress/Gateway with one controller is how real clusters expose many HTTP services. Mention that the service still needs the pods to be healthy (readiness probes) or the LB sends traffic to pods that are not ready.",
+          "followups": [
+            "What is the difference between a readiness and a liveness probe?",
+            "Why might you choose Gateway API over Ingress today?"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Infrastructure as code",
+      "intro": "IaC is where DevOps meets real infrastructure. Interviewers probe whether you understand state, change safety, and how not to create a mess that only you can maintain.",
+      "questions": [
+        {
+          "q": "What is Terraform state, and why does it matter?",
+          "tests": "Whether you understand the single most consequential concept in Terraform.",
+          "answer": "State is Terraform's record of the real resources it manages and their attributes — the mapping between your configuration and what actually exists. It matters because Terraform plans by comparing three things: your config, the state, and the real world; the state is how it knows a resource it created still exists and what its current attributes are. The consequences: **state must be shared** (a remote backend like S3), not on one laptop, or two people plan against different pictures; **state must be locked** during an apply, or two concurrent applies corrupt it; **state contains secrets** (a generated password ends up in it), so the backend must be encrypted and access-controlled. The failure interviewers listen for you to avoid: never edit state by hand casually, and never commit a local `terraform.tfstate` to git. If asked about drift: state lets Terraform detect that something was changed outside Terraform, which a plan will show as a diff.",
+          "followups": [
+            "How do you handle state for a team so two people do not clobber each other?",
+            "A resource was changed manually in the console — what does Terraform do next plan?"
+          ]
+        },
+        {
+          "q": "How do you manage multiple environments — dev, staging, prod — in Terraform?",
+          "tests": "Whether you can structure IaC so environments are consistent but isolated, the everyday reality of the job.",
+          "answer": "The goal is: the same infrastructure code, different values per environment, isolated state so a dev apply cannot touch prod. Two common structures: **directory-per-environment** (an `envs/dev`, `envs/prod`, each with its own backend state and a `.tfvars` file, all calling the same shared modules) — explicit, easy to reason about, my usual default; or **workspaces**, one config with a workspace per environment — less boilerplate but easier to run against the wrong environment by accident. Either way the principle is the same: shared **modules** hold the reusable definitions, and the only per-environment differences are variable values (region, instance sizes, replica counts, retention). Prod should differ from dev in hardening and scale, expressed as variables, not as forked code that drifts. Mention a separate state backend per environment and, ideally, separate cloud accounts for blast-radius isolation.",
+          "followups": [
+            "What are the risks of Terraform workspaces for environments?",
+            "How do you keep dev and prod from drifting apart?"
+          ]
+        },
+        {
+          "q": "Terraform vs Ansible — when would you use each?",
+          "tests": "Whether you understand the provisioning-versus-configuration distinction, not just tool preference.",
+          "answer": "They solve different problems and are often used together. **Terraform** is declarative provisioning — it creates and manages cloud resources (networks, instances, databases, load balancers) and tracks them in state; you describe the desired infrastructure and it makes reality match. **Ansible** is configuration management and orchestration — it configures what runs *on* machines (install packages, write config, run commands), procedurally, and is agentless over SSH. The clean division: Terraform builds the boxes and the network; Ansible (or increasingly, a container image built in CI, or cloud-init) configures what is inside them. Ansible can provision cloud resources and Terraform can run a provisioner, but each is weaker at the other's job — Terraform's provisioners are a last resort, and Ansible has no real state model for infrastructure. The modern pattern often replaces Ansible with immutable images: bake the config into the artifact rather than configuring a running box.",
+          "followups": [
+            "Why are Terraform provisioners considered a last resort?",
+            "What does 'immutable infrastructure' mean and why is it preferred?"
+          ]
+        },
+        {
+          "q": "How do you review a Terraform pull request safely before it changes production?",
+          "tests": "Whether you know that the plan, not the diff, is the reviewable artifact — a real-world workflow question.",
+          "answer": "The code diff tells you what someone intended; the **plan** tells you what will actually happen, and they are not the same — a small variable change can destroy and recreate a database. So the workflow is: CI runs `terraform plan` on the pull request and posts the plan as a comment, the reviewer reads the *plan* (what will be created, changed, and especially destroyed), and only a merge of the reviewed change triggers `apply`. What I look for in a plan review: any `destroy` or `replace` (forces-replacement) on a stateful resource is a red flag that needs justifying; changes outside the intended scope suggest a bad variable; and the plan should match the PR's stated intent. Guardrails around it: `apply` runs from CI with OIDC not a person's laptop, state is locked so two applies cannot race, and prod applies can require a second approval. The phrase to land: 'review the plan, not just the diff' — Terraform's danger is in what the change implies, which only the plan shows.",
+          "followups": [
+            "What in a plan would make you block the merge?",
+            "How do you stop two engineers applying at the same time?"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Systems design and judgement",
+      "intro": "The round with no single right answer. They want to hear requirements first, trade-offs named, and a design that matches the actual constraints rather than the most complex option.",
+      "questions": [
+        {
+          "q": "Design a deployment pipeline for a team of 20 engineers shipping a web service several times a day.",
+          "tests": "Whether you can design a whole delivery system and justify each choice against requirements.",
+          "answer": "Start by clarifying: what is 'safe', what is the rollback tolerance, monorepo or many repos, what environments exist. Then design from the commit outward: **trunk-based development** with short-lived branches so changes are small and merge often (large batches are the enemy of safe frequent deploys); **CI on every PR** — lint, unit tests, build — fast enough that people do not batch around it; **branch protection** requiring the checks and a review; on merge, a **release pipeline** that builds one immutable artifact, deploys to staging, runs integration/smoke tests, then **progressively** to production (canary with automated metric checks and rollback). Cross-cutting: config separated from artifact, secrets from a secret store via OIDC, every deploy observable (who shipped what, linked to the commit), and a one-command rollback. The senior signal is talking about the *humans*: fast feedback so 20 people are not blocked on each other, and small changes so a bad one is easy to find and revert.",
+          "followups": [
+            "Where do database migrations fit, and how do you deploy them safely?",
+            "How do you handle a change that must go out to all environments at once versus one that should not?"
+          ]
+        },
+        {
+          "q": "How would you design deployments so that a schema change to a database does not cause downtime?",
+          "tests": "A senior topic — the interaction between code deploys and stateful data is where naive pipelines break.",
+          "answer": "The key idea is that the schema change and the code change must be decoupled so that old and new code both work against the database during the rollout — the **expand/contract** (or parallel-change) pattern. To add a column: first **expand** — add the column as nullable/with a default in one deploy, so old code ignores it and new code can start writing it; deploy the code that writes and reads it; then, once everything is on the new code, **contract** — make it non-nullable or drop the old column in a later deploy. To rename a column you never rename in place; you add the new one, dual-write, backfill, switch reads, then drop the old one. The rule that makes it safe: never ship a schema change and the code that requires it in the same release, because during a rolling deploy both versions run at once. Destructive changes (dropping a column) come last, after nothing uses it. Mention that this is what makes blue-green and canary safe for stateful services.",
+          "followups": [
+            "Why can't you rename a column in a single deploy under a rolling update?",
+            "How do you backfill a new column for millions of existing rows without locking the table?"
+          ]
+        },
+        {
+          "q": "A service needs to scale to handle 10x its current traffic. Where do you start?",
+          "tests": "Whether you reach for measurement and bottleneck analysis rather than reflexively adding infrastructure.",
+          "answer": "Measure before scaling — 10x traffic does not mean 10x of everything, and the bottleneck is rarely where you guess. Find the actual constraint: is it CPU on the app tier, the database, a downstream dependency, or connection limits? Then scale the right thing. For a stateless app tier, **horizontal scaling** behind a load balancer with autoscaling on the real bottleneck metric is the usual answer — but only if the tier below it can take the load. The database is the common wall: scale reads with **replicas and caching** (most read-heavy services are saved by a cache), scale writes with partitioning if truly needed, and add connection pooling before anything else because connection exhaustion masquerades as a scaling problem. Name the trade-offs: caching adds staleness, replicas add replication lag, autoscaling needs headroom for cold starts. The judgement signal is refusing to answer 'add more servers' until you know what is actually saturated — and load-testing to find out rather than guessing.",
+          "followups": [
+            "How would you load-test to find the real bottleneck?",
+            "Why does connection pooling matter before you scale the app tier?"
+          ]
+        },
+        {
+          "q": "How would you design monitoring and alerting for a new service so the on-call is not drowning in noise?",
+          "tests": "Whether you understand that alert quality, not alert quantity, is what makes on-call sustainable.",
+          "answer": "Alert on **symptoms users feel, not on causes** — a page should mean 'something is wrong that a human must act on now', which for a service is usually its SLOs: error rate and latency against a target, plus 'is it up at all'. Cause-level metrics (CPU, memory, queue depth) belong on dashboards and in tickets, not on the pager, because high CPU is only a problem if it is hurting users, and paging on it produces alerts nobody can act on. Concretely: define an **SLO** (say 99.9% of requests succeed under 300 ms over 30 days), alert on the **error budget burn rate** so a fast burn pages and a slow burn opens a ticket, and make every page link to a runbook. The anti-pattern to name: a wall of threshold alerts on every metric, which trains people to ignore the pager — alert fatigue is itself a reliability risk because the real page gets lost in the noise. Fewer, meaningful, actionable alerts beat comprehensive ones.",
+          "followups": [
+            "What is the difference between a symptom-based and a cause-based alert?",
+            "Why is alert fatigue a reliability problem, not just an annoyance?"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Troubleshooting and on-call",
+      "intro": "The scenario round. They give you a symptom and watch your diagnostic loop: hypothesis, the observation that tests it, narrow, repeat. Structure beats knowing the answer.",
+      "questions": [
+        {
+          "q": "You deploy a change and error rates spike immediately. What do you do?",
+          "tests": "Incident instinct — do you stop the bleeding first or investigate first?",
+          "answer": "Mitigate first, investigate second — with a spike immediately after a deploy, the deploy is the overwhelming suspect, so **roll back** and confirm the errors clear before doing anything else. Users do not care why it broke; they care that it stops. Once traffic is healthy on the previous version, then investigate at leisure: compare what changed (the diff, the config, any migration), reproduce in staging, and read the errors the deploy produced. The framing interviewers want: the goal during an incident is recovery, not root cause; a fast rollback that restores service and lets you debug calmly beats staying down while you diagnose in production. Two caveats to mention: a rollback is unsafe if the change included a non-reversible migration (which is why you decouple those), and if the errors do not clear after rollback, the deploy was a coincidence and you widen the search.",
+          "followups": [
+            "What if the change included a database migration you cannot roll back?",
+            "The errors do not clear after you roll back — now what?"
+          ]
+        },
+        {
+          "q": "Users report the site is slow, but all your dashboards look green. How do you investigate?",
+          "tests": "Whether you understand the gap between averages and real user experience — a mark of maturity.",
+          "answer": "Green dashboards with slow users almost always means you are looking at averages, and averages hide tail latency — a p50 can be fine while p99 is terrible, and the users complaining are in the tail. Look at **percentiles, not means** (p95, p99), and segment: by endpoint, region, customer, or device, because the slowness is probably concentrated somewhere the aggregate washes out. Other classic causes of 'green but slow': the metric is measured server-side but the pain is client-side (DNS, CDN, the network, a heavy frontend); a dependency is slow but its calls are not on the dashboard; or the alert thresholds are set on averages and never fire. The instinct interviewers reward: distrust the average, find the affected segment, and measure closer to the user. Mention that this is exactly why SLOs are defined on percentiles of real user-facing latency, not on server CPU.",
+          "followups": [
+            "Why are averages misleading for latency specifically?",
+            "How would distributed tracing help here?"
+          ]
+        },
+        {
+          "q": "A nightly batch job started failing intermittently — succeeds some nights, fails others. How do you approach it?",
+          "tests": "Debugging non-determinism, which is harder than a consistent failure and reveals systematic thinking.",
+          "answer": "Intermittent means something varies between runs, so the job is to find the variable. Gather the data first: correlate the failures — same time, same input size, same day of week, a specific record? Read the errors from failed runs versus successful ones; the difference is the clue. Common causes of intermittent batch failures: a **resource limit** hit only when the input is large (memory, disk, a timeout); a **race or ordering** dependency on another job that sometimes finishes late; **shared-resource contention** (a database lock, an API rate limit) that only bites under load; or **data-dependent** bugs triggered by particular records that are not in every run. The method interviewers want: do not guess, correlate — collect enough runs to see what the failures share and what the successes do not. Then make it reproducible (feed a failing night's input to a test run), because an intermittent bug you can reproduce on demand is already half fixed.",
+          "followups": [
+            "How would you make an intermittent failure reproducible on demand?",
+            "What would point you at a resource limit versus a data-dependent bug?"
+          ]
+        },
+        {
+          "q": "One node in your Kubernetes cluster is NotReady and pods on it are stuck. What is your process?",
+          "tests": "Cluster-level operational judgement — a node problem is different from a pod problem and reveals depth.",
+          "answer": "A NotReady node means the kubelet has stopped reporting healthy, so first separate 'the node is sick' from 'the workloads need to move'. Protect the workloads first: `kubectl cordon` the node so nothing new schedules there, and if the pods have not already been rescheduled, `kubectl drain` it to evict them onto healthy nodes (respecting PodDisruptionBudgets). Then diagnose the node: `kubectl describe node` for the conditions and events (MemoryPressure, DiskPressure, a kubelet that lost contact), and if you can reach it, the kubelet and container-runtime logs and basic health — disk full, out of memory, the kubelet crashed, or the node lost network to the control plane. Common causes: disk pressure from image or log buildup, the kubelet or container runtime dying, or a network partition. Resolution is usually to fix the underlying cause or, in a cloud autoscaling group, terminate the node and let a fresh one replace it — cattle, not pets. The judgement signal: rescue the pods (cordon/drain) before you spend time debugging the node, because the users care about the workloads, not the box.",
+          "followups": [
+            "What is the difference between cordon and drain?",
+            "How do PodDisruptionBudgets affect a drain?"
+          ]
+        }
+      ]
+    }
+  ],
+  "task": {
+    "title": "Take-home: ship a service to production",
+    "brief": "The most common DevOps take-home is some version of: 'here is a small app; give us a pipeline that builds, tests and deploys it, with the infrastructure as code, and write up your decisions.' The ThavionAI **Zero to production** and **Terraform an AWS environment** projects build exactly this — do them, then treat your repository as the submission. What follows is what reviewers look for, so you can self-assess.",
+    "checklist": [
+      "The artifact is built once and promoted — an immutable image tagged by commit SHA, not rebuilt per environment.",
+      "CI runs on every change (lint, tests, build) and the pipeline is fast enough that you would not batch around it.",
+      "Secrets come from a secret store or OIDC federation — never committed, never baked into the image, never logged.",
+      "Infrastructure is Terraform with remote, locked state, structured so dev and prod share code and differ only in variables.",
+      "The deploy is reversible — a documented, ideally one-command rollback — and the pipeline deploys progressively or behind health checks.",
+      "There is a README that explains the decisions and the trade-offs, and a `terraform destroy` (or teardown) so the reviewer can run and remove it.",
+      "Observability is present — the service exposes health and metrics, and you can point at how you would know a deploy went bad."
+    ]
+  },
+  "standout": [
+    "Bring evidence, not adjectives: 'here is a repository where I built this pipeline' beats any description. The projects on this site are exactly that evidence — link them.",
+    "Name trade-offs unprompted. Every design choice costs something; a candidate who says 'I chose X, which costs me Y, because Z' sounds senior. One who presents X as free sounds junior.",
+    "Talk about the humans. DevOps exists to let a team ship safely and often; answers that mention feedback speed, small changes, and blameless response signal you understand the point, not just the tools.",
+    "In troubleshooting rounds, verbalise the loop — hypothesis, the observation that would confirm it, then narrow. Interviewers are grading the method, and they cannot see it if you debug silently.",
+    "Admit the limits of what you built. 'This works but does not handle X; here is what I would do next' shows judgement and honesty, which reviewers trust more than a claim of completeness."
+  ],
+  "resources": [
+    {"label": "DevOps / SRE / Cloud track", "href": "../../education.html#devops", "note": "the 20 lessons behind every answer here — CI/CD, containers, Kubernetes, Terraform, observability"},
+    {"label": "Project: Zero to production", "href": "../projects/proj-devops-zero-to-prod.html", "note": "the pipeline this kit's take-home describes — build it and submit it"},
+    {"label": "Project: Terraform an AWS environment", "href": "../projects/proj-devops-aws-platform.html", "note": "the infrastructure-as-code evidence for the IaC questions"},
+    {"label": "Project: GitOps with Argo CD", "href": "../projects/proj-devops-gitops.html", "note": "for the Kubernetes and progressive-delivery answers"},
+    {"label": "AWS Solutions Architect lab", "href": "../projects/proj-cert-aws-lab.html", "note": "the reference architecture behind the systems-design and scaling questions"}
+  ]
+}
