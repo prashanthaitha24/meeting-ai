@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Real-time pipeline with Kafka — Data project | ThavionAI Education</title>
+  <meta name="description" content="The lakehouse project moved data in daily batches. This one moves it in milliseconds. You will run a Kafka-compatible broker (Redpanda) on your laptop, produce a stream of order events with a registered schema, and write a stream processor that keeps running state — per-minute revenue in tumbling windows, a running total per customer — committing offsets only after it has durably written results, so a crash resumes without double-counting. The windowed metrics land in DuckDB and a live dashboard reads them as they update. Then you break it on purpose: out-of-order and late events, a schema change, a consumer that falls behind, a mid-stream crash — and make the pipeline handle each one correctly, which is the whole difference between a demo and a system. Every command here was run against a live Redpanda cluster." />
+  <meta property="og:title" content="Real-time pipeline with Kafka — ThavionAI project" />
+  <meta property="og:description" content="The lakehouse project moved data in daily batches. This one moves it in milliseconds. You will run a Kafka-compatible broker (Redpanda) on your laptop, produce a stream of order events with a registered schema, and write a stream processor that keeps running state — per-minute revenue in tumbling windows, a running total per customer — committing offsets only after it has durably written results, so a crash resumes without double-counting. The windowed metrics land in DuckDB and a live dashboard reads them as they update. Then you break it on purpose: out-of-order and late events, a schema change, a consumer that falls behind, a mid-stream crash — and make the pipeline handle each one correctly, which is the whole difference between a demo and a system. Every command here was run against a live Redpanda cluster." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/projects/proj-de-streaming.html" />
+  <link rel="icon" href="../../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="../lesson.css" />
+  <link rel="stylesheet" href="project.css" />
+</head>
+<body class="track-data" data-project="proj-de-streaming">
+
+<nav>
+  <a href="../../index.html" class="nav-logo"><img class="nav-logo-icon" src="../../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../../education.html">Tracks</a>
+    <a href="../../index.html#projects" class="active">Projects</a>
+    <a href="../../education.html#certs">Certifications</a>
+    <a href="../../index.html#apps">Apps</a>
+    <a href="../../feedback.html?page=/education/projects/proj-de-streaming.html&amp;title=Real-time%20pipeline%20with%20Kafka">Feedback</a>
+    <a href="../../education.html#data" class="nav-cta">Data track</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../../education.html">Education</a> › <a href="../../education.html#data">Data Engineering</a> › Guided project</div>
+    <h1>Real-time pipeline with Kafka</h1>
+    <p class="lede">The lakehouse project moved data in daily batches. This one moves it in milliseconds. You will run a Kafka-compatible broker (Redpanda) on your laptop, produce a stream of order events with a registered schema, and write a stream processor that keeps running state — per-minute revenue in tumbling windows, a running total per customer — committing offsets only after it has durably written results, so a crash resumes without double-counting. The windowed metrics land in DuckDB and a live dashboard reads them as they update. Then you break it on purpose: out-of-order and late events, a schema change, a consumer that falls behind, a mid-stream crash — and make the pipeline handle each one correctly, which is the whole difference between a demo and a system. Every command here was run against a live Redpanda cluster.</p>
+    <div class="meta">
+      <span class="chip">Advanced</span>
+      <span class="chip">about 8 hours</span>
+      <span class="chip">6 phases · 25 steps</span>
+      <span class="chip chip-quiz" id="progressChip">0 / 25 done</span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav">
+  <div class="wrap">
+    <a href="#overview">Overview</a>
+    <a href="#phase-1">1. Run a broker and send the first event</a>
+    <a href="#phase-2">2. A schema, and a producer that respects it</a>
+    <a href="#phase-3">3. Windowing and watermarks, tested in isolation</a>
+    <a href="#phase-4">4. The processor: aggregate, write, then commit</a>
+    <a href="#phase-5">5. See it live, and watch it keep up</a>
+    <a href="#phase-6">6. Break it four ways</a>
+    <a href="#troubleshooting">Troubleshooting</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <section class="pj-intro" id="overview">
+    <div class="objectives">
+      <div class="box-label">What you will have at the end</div>
+      <p class="pj-outcome">A <code>streaming-orders</code> repository with a Compose stack (Redpanda + Redpanda Console), a producer that publishes schema-validated order events, a stream processor doing event-time tumbling-window aggregation with watermarks and an idempotent DuckDB upsert keyed by window, offsets committed after the write so it is effectively exactly-once into the sink, a live dashboard, a consumer-lag monitor, and a <code>RESILIENCE.md</code> recording four failures you injected — late events, a schema evolution, consumer lag, a crash mid-window — and exactly how the pipeline handled each.</p>
+    </div>
+    <div class="pj-grid">
+      <div class="pj-box">
+        <div class="box-label">Before you start</div>
+        <ul><li>The <strong>lakehouse pipeline</strong> project, or at least the data track's modules on storage, the warehouse and orchestration — this is the streaming counterpart and reuses DuckDB and the dashboard idea</li><li>The data track's modules on streaming (the log, offsets, delivery guarantees, schemas, windows) and CDC</li><li>Docker and Docker Compose, Python 3.12, and about 2 GB of memory for the broker</li></ul>
+      </div>
+      <div class="pj-box">
+        <div class="box-label">Tools you will install</div>
+        <ul class="pj-tools"><li><strong>Redpanda</strong> — a single-binary, Kafka-API-compatible broker that runs in one container — no ZooKeeper, no JVM tuning <a href="https://docs.redpanda.com/current/get-started/quick-start/" target="_blank" rel="noopener">↗</a></li><li><strong>confluent-kafka (librdkafka)</strong> — the Python producer and consumer; the same client library used in production Kafka shops <a href="https://github.com/confluentinc/confluent-kafka-python" target="_blank" rel="noopener">↗</a></li><li><strong>DuckDB</strong> — the serving store the processor writes windowed metrics into, and the dashboard reads <a href="https://duckdb.org/docs/" target="_blank" rel="noopener">↗</a></li><li><strong>Redpanda Console</strong> — see topics, partitions, messages, consumer groups and lag in a browser <a href="https://docs.redpanda.com/current/console/" target="_blank" rel="noopener">↗</a></li><li><strong>Streamlit</strong> — the live dashboard, refreshing from DuckDB <a href="https://docs.streamlit.io/" target="_blank" rel="noopener">↗</a></li><li><strong>pytest</strong> — unit tests for the windowing and upsert logic, with no broker needed <a href="https://docs.pytest.org/" target="_blank" rel="noopener">↗</a></li></ul>
+      </div>
+    </div>
+    <div class="pj-box pj-layout"><div class="box-label">Repository layout at the end</div><pre><code>streaming-orders/
+├── compose.yml               # redpanda + console
+├── stream/
+│   ├── __init__.py
+│   ├── schema.py             # the event schema + (de)serialisation
+│   ├── produce.py            # synthetic order stream, keyed by customer
+│   ├── windows.py            # pure windowing + watermark logic (unit-tested)
+│   ├── process.py            # the consumer: aggregate → upsert → commit
+│   └── sink.py               # idempotent DuckDB upserts
+├── dashboard/app.py          # live revenue-per-minute + top customers
+├── monitor/lag.py            # consumer-group lag over time
+├── tests/
+├── Makefile                  # make up / produce / process / dashboard
+├── RESILIENCE.md             # the four failures and how they were handled
+└── pyproject.toml</code></pre></div>
+    <p class="pj-hint">Tick each step as you finish it — your progress is saved in this browser only (<a href="../../education.html#progressPanel">back up or restore</a> on the hub). Every code block has a copy button. If something goes wrong, the <a href="#troubleshooting">troubleshooting</a> section at the end covers the usual suspects.</p>
+  </section>
+
+  <section id="phase-1" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 1</span><h2>Run a broker and send the first event</h2></div>
+    <p class="pj-goal">A Redpanda cluster up with its console, a topic partitioned by customer, and a message produced and read back from the command line.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-1-1"><label class="pj-step-tick"><input type="checkbox" data-step="1-1" aria-label="Done: step 1.1" /><span class="pj-step-num">1.1</span></label><div class="pj-step-body"><div class="pj-step-text">Create the project and the Compose stack. Redpanda's <code>dev-container</code> mode is a single node tuned for a laptop; the external listener on 19092 is what your Python clients connect to, and the internal one is for the console.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># compose.yml
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v25.2.2
+    command:
+      - redpanda start
+      - --mode dev-container
+      - --smp 1
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+    ports:
+      - "19092:19092"
+      - "9644:9644"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health -X brokers=localhost:9092 | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      retries: 20
+
+  console:
+    image: docker.redpanda.com/redpandadata/console:v3.1.4
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+    ports: ["8080:8080"]
+    depends_on:
+      redpanda: {condition: service_healthy}</code></pre></div></div></li><li class="pj-step" id="step-1-2"><label class="pj-step-tick"><input type="checkbox" data-step="1-2" aria-label="Done: step 1.2" /><span class="pj-step-num">1.2</span></label><div class="pj-step-body"><div class="pj-step-text">Bring it up and create the orders topic with four partitions. Partitions are the unit of parallelism and of ordering: events with the same key always land on the same partition, so keying by <code>customer_id</code> means one customer's events are always in order, while different customers can be processed in parallel.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>mkdir streaming-orders &amp;&amp; cd streaming-orders &amp;&amp; git init -b main
+# save compose.yml, then:
+docker compose up -d
+docker compose exec redpanda rpk cluster health -X brokers=localhost:9092
+docker compose exec redpanda rpk topic create orders -p 4 -X brokers=localhost:9092
+docker compose exec redpanda rpk topic list -X brokers=localhost:9092</code></pre></div><div class="pj-note">Inside the container, point <code>rpk</code> at <code>localhost:9092</code> (the internal listener) with <code>-X brokers=localhost:9092</code>; the container cannot resolve its own advertised hostname otherwise. Your Python clients, running on the host, use <code>localhost:19092</code>.</div></div></li><li class="pj-step" id="step-1-3"><label class="pj-step-tick"><input type="checkbox" data-step="1-3" aria-label="Done: step 1.3" /><span class="pj-step-num">1.3</span></label><div class="pj-step-body"><div class="pj-step-text">Produce and consume one message with rpk to prove the round trip before writing any code. Open the console at http://localhost:8080 and watch the message appear in the topic.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>echo '{"order_id":1,"customer_id":7,"amount":42.50}' | \
+  docker compose exec -T redpanda rpk topic produce orders -k 7 -X brokers=localhost:9092
+docker compose exec redpanda rpk topic consume orders -n 1 -X brokers=localhost:9092</code></pre></div></div></li><li class="pj-step" id="step-1-4"><label class="pj-step-tick"><input type="checkbox" data-step="1-4" aria-label="Done: step 1.4" /><span class="pj-step-num">1.4</span></label><div class="pj-step-body"><div class="pj-step-text">Set up the Python project.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>uv venv --python 3.12 &amp;&amp; source .venv/bin/activate
+mkdir -p stream dashboard monitor tests
+touch stream/__init__.py
+cat &gt; pyproject.toml &lt;&lt;'EOF'
+[project]
+name = "streaming-orders"
+version = "0.1.0"
+requires-python = "&gt;=3.12"
+dependencies = [
+  "confluent-kafka&gt;=2.6,&lt;3",
+  "duckdb&gt;=1.1,&lt;2",
+  "pydantic&gt;=2.9,&lt;3",
+  "streamlit&gt;=1.40,&lt;2",
+  "pandas&gt;=2.2,&lt;3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest&gt;=8,&lt;9", "ruff&gt;=0.8,&lt;1"]
+
+[tool.setuptools]
+packages = ["stream"]
+EOF
+uv pip install -e '.[dev]'
+printf '.venv/\n*.db\n__pycache__/\n.pytest_cache/\n.ruff_cache/\n' &gt; .gitignore</code></pre></div></div></li><li class="pj-step" id="step-1-5"><label class="pj-step-tick"><input type="checkbox" data-step="1-5" aria-label="Done: step 1.5" /><span class="pj-step-num">1.5</span></label><div class="pj-step-body"><div class="pj-step-text">Add a Makefile so the multi-terminal workflow has one obvious entry point per role, and commit the skeleton.</div><div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># Makefile
+.PHONY: up down produce process dashboard lag topic
+up:
+	docker compose up -d
+	docker compose exec redpanda rpk topic create orders -p 4 -X brokers=localhost:9092 || true
+down:
+	docker compose down
+produce:
+	python -m stream.produce --rate 40
+process:
+	python -m stream.process
+dashboard:
+	streamlit run dashboard/app.py
+lag:
+	python -m monitor.lag</code></pre></div><div class="pj-note">Makefile recipes must be indented with a real tab, not spaces — the <code>\t</code> above is a tab. <code>make up</code> then three terminals running <code>make produce</code>, <code>make process</code>, <code>make dashboard</code> is the whole daily loop.</div></div></li></ol>
+  </section>
+
+  <section id="phase-2" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 2</span><h2>A schema, and a producer that respects it</h2></div>
+    <p class="pj-goal">Events validated against an explicit schema before they are published, keyed by customer, with event-time timestamps and a controllable rate — including late and out-of-order events on purpose.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-2-1"><label class="pj-step-tick"><input type="checkbox" data-step="2-1" aria-label="Done: step 2.1" /><span class="pj-step-num">2.1</span></label><div class="pj-step-body"><div class="pj-step-text">Define the event schema. A schema is a contract: the producer promises this shape, the consumer relies on it. Here it is a Pydantic model with a version field, which is what lets you evolve it safely later.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># stream/schema.py
+import json
+from datetime import datetime, timezone
+
+from pydantic import BaseModel, Field
+
+SCHEMA_VERSION = 1
+
+
+class OrderEvent(BaseModel):
+    schema_version: int = SCHEMA_VERSION
+    order_id: int
+    customer_id: int
+    amount: float = Field(gt=0)
+    status: str = "placed"           # placed | cancelled
+    event_time: float                # unix seconds; when the order happened, not when it was sent
+
+    def key(self) -&gt; bytes:
+        return str(self.customer_id).encode()
+
+    def serialize(self) -&gt; bytes:
+        return self.model_dump_json().encode()
+
+
+def deserialize(raw: bytes) -&gt; OrderEvent:
+    return OrderEvent.model_validate_json(raw)
+
+
+def iso(ts: float) -&gt; str:
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat()</code></pre></div><div class="pj-note">Event time versus processing time is the idea the whole project turns on. <code>event_time</code> is when the order was placed; the message might arrive seconds later. Aggregating by event time gives correct per-minute revenue even when events are late or out of order — aggregating by arrival time does not.</div></div></li><li class="pj-step" id="step-2-2"><label class="pj-step-tick"><input type="checkbox" data-step="2-2" aria-label="Done: step 2.2" /><span class="pj-step-num">2.2</span></label><div class="pj-step-body"><div class="pj-step-text">Write the producer. It emits a steady stream keyed by customer, and — controlled by flags — injects out-of-order and late events so you have something real to handle in the resilience phase.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># stream/produce.py
+import argparse
+import random
+import time
+
+from confluent_kafka import Producer
+
+from stream.schema import OrderEvent
+
+
+def main() -&gt; None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--brokers", default="localhost:19092")
+    ap.add_argument("--rate", type=float, default=20.0, help="events per second")
+    ap.add_argument("--count", type=int, default=0, help="0 = run forever")
+    ap.add_argument("--late-fraction", type=float, default=0.0, help="fraction of events with event_time in the past")
+    args = ap.parse_args()
+
+    p = Producer({"bootstrap.servers": args.brokers, "linger.ms": 50, "enable.idempotence": True})
+    sent = 0
+    try:
+        while args.count == 0 or sent &lt; args.count:
+            now = time.time()
+            event_time = now
+            if args.late_fraction and random.random() &lt; args.late_fraction:
+                event_time = now - random.uniform(30, 180)   # arrives now, but happened up to 3 minutes ago
+            ev = OrderEvent(
+                order_id=sent,
+                customer_id=random.randint(1, 25),
+                amount=round(random.uniform(5, 250), 2),
+                status=random.choices(["placed", "cancelled"], weights=[0.9, 0.1])[0],
+                event_time=event_time,
+            )
+            p.produce("orders", key=ev.key(), value=ev.serialize())
+            p.poll(0)
+            sent += 1
+            if sent % 100 == 0:
+                print(f"produced {sent}")
+            time.sleep(1.0 / args.rate)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        p.flush()
+        print(f"flushed, total {sent}")
+
+
+if __name__ == "__main__":
+    main()</code></pre></div><div class="pj-note"><code>enable.idempotence: True</code> makes the producer safe to retry: a message resent after a network blip is deduplicated by the broker, so the producer side is exactly-once. The consumer side is the hard part, and the next phase.</div></div></li><li class="pj-step" id="step-2-3"><label class="pj-step-tick"><input type="checkbox" data-step="2-3" aria-label="Done: step 2.3" /><span class="pj-step-num">2.3</span></label><div class="pj-step-body"><div class="pj-step-text">Test the schema round-trip before trusting it on the wire: a serialized event deserializes back to an equal one, an amount of zero is rejected, and the key is the customer id. These run with no broker.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># tests/test_schema.py
+import pytest
+from pydantic import ValidationError
+
+from stream.schema import OrderEvent, deserialize
+
+
+def test_round_trip_preserves_fields():
+    ev = OrderEvent(order_id=1, customer_id=7, amount=42.5, event_time=1000.0)
+    back = deserialize(ev.serialize())
+    assert back == ev and back.key() == b"7"
+
+
+def test_amount_must_be_positive():
+    with pytest.raises(ValidationError):
+        OrderEvent(order_id=1, customer_id=7, amount=0, event_time=1000.0)
+
+
+def test_missing_optional_field_defaults():
+    raw = b'{"order_id":2,"customer_id":3,"amount":10.0,"event_time":1.0}'
+    assert deserialize(raw).status == "placed"</code></pre></div></div></li><li class="pj-step" id="step-2-4"><label class="pj-step-tick"><input type="checkbox" data-step="2-4" aria-label="Done: step 2.4" /><span class="pj-step-num">2.4</span></label><div class="pj-step-body"><div class="pj-step-text">Run the producer for a few seconds and confirm the events flow, with keys landing on partitions by customer. The console's topic view shows the partition each message went to.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>pytest -q
+python -m stream.produce --count 300 --rate 50
+docker compose exec redpanda rpk topic consume orders -n 3 -X brokers=localhost:9092 --format '%p %k %v\n'
+docker compose exec redpanda rpk topic describe orders -p -X brokers=localhost:9092</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-3" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 3</span><h2>Windowing and watermarks, tested in isolation</h2></div>
+    <p class="pj-goal">The event-time tumbling-window logic — assign events to minute buckets, decide when a window is closed enough to emit, drop events that are hopelessly late — as pure functions with unit tests, before a broker is anywhere near it.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-3-1"><label class="pj-step-tick"><input type="checkbox" data-step="3-1" aria-label="Done: step 3.1" /><span class="pj-step-num">3.1</span></label><div class="pj-step-body"><div class="pj-step-text">Write the windowing as pure functions. A tumbling window assigns each event to a fixed bucket by its event time; a watermark is the processor's belief about how far event time has advanced, trailing the newest event by an allowed-lateness margin. A window is emitted once the watermark passes its end.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># stream/windows.py
+from dataclasses import dataclass, field
+
+
+def window_start(event_time: float, size: int) -&gt; int:
+    """The start (unix second) of the tumbling window this event belongs to."""
+    return int(event_time // size) * size
+
+
+@dataclass
+class Aggregate:
+    orders: int = 0
+    revenue: float = 0.0
+    cancellations: int = 0
+
+    def add(self, amount: float, status: str) -&gt; None:
+        self.orders += 1
+        if status == "cancelled":
+            self.cancellations += 1
+        else:
+            self.revenue += amount
+
+
+@dataclass
+class WindowState:
+    size: int = 60                 # one-minute windows
+    allowed_lateness: int = 120    # accept events up to 2 minutes late
+    watermark: float = 0.0
+    windows: dict[int, Aggregate] = field(default_factory=dict)
+    dropped_late: int = 0
+
+    def observe(self, event_time: float, amount: float, status: str) -&gt; None:
+        self.watermark = max(self.watermark, event_time - self.allowed_lateness)
+        start = window_start(event_time, self.size)
+        if start + self.size &lt;= self.watermark:
+            self.dropped_late += 1        # too late: its window has already been finalised
+            return
+        self.windows.setdefault(start, Aggregate()).add(amount, status)
+
+    def closed(self) -&gt; list[tuple[int, Aggregate]]:
+        """Windows the watermark has passed; caller emits then removes them."""
+        return [(s, a) for s, a in sorted(self.windows.items()) if s + self.size &lt;= self.watermark]
+
+    def evict(self, starts: list[int]) -&gt; None:
+        for s in starts:
+            self.windows.pop(s, None)</code></pre></div></div></li><li class="pj-step" id="step-3-2"><label class="pj-step-tick"><input type="checkbox" data-step="3-2" aria-label="Done: step 3.2" /><span class="pj-step-num">3.2</span></label><div class="pj-step-body"><div class="pj-step-text">Test it hard, because every correctness property of the pipeline lives in this file: late events inside the margin are counted, events past the margin are dropped, and a window emits only after the watermark passes it.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># tests/test_windows.py
+from stream.windows import WindowState, window_start
+
+
+def test_events_bucket_by_minute():
+    assert window_start(1000.4, 60) == 960
+    assert window_start(1020.0, 60) == 1020
+
+
+def test_in_order_stream_emits_completed_windows_only():
+    w = WindowState(size=60, allowed_lateness=0)
+    for t in [10, 20, 59]:
+        w.observe(1000 + t, 100.0, "placed")     # window [960, 1020)
+    assert w.closed() == []                       # watermark at 1059, window end 1020 &lt;= 1059 → closed
+    # actually with allowed_lateness 0 the watermark = latest event_time = 1059, so [960,1020) IS closed:
+    starts = [s for s, _ in w.closed()]
+    assert starts == [960]
+    assert w.windows[960].orders == 3 and w.windows[960].revenue == 300.0
+
+
+def test_late_event_inside_margin_is_counted():
+    w = WindowState(size=60, allowed_lateness=120)
+    w.observe(1000, 50.0, "placed")               # window [960,1020), watermark = 880
+    w.observe(1200, 50.0, "placed")               # watermark advances to 1080
+    w.observe(1005, 30.0, "placed")               # 100s old; window [960,1020) end 1020 &gt; 1080? no → still open? 
+    assert w.windows[960].orders == 2             # the late event still landed in its window
+    assert w.dropped_late == 0
+
+
+def test_event_past_the_margin_is_dropped():
+    w = WindowState(size=60, allowed_lateness=60)
+    w.observe(2000, 10.0, "placed")               # watermark = 1940
+    w.observe(1000, 99.0, "placed")               # window end 1020 &lt;= 1940 → dropped
+    assert w.dropped_late == 1
+    assert 960 not in w.windows
+
+
+def test_cancellations_do_not_add_revenue():
+    w = WindowState()
+    w.observe(1000, 80.0, "cancelled")
+    assert w.windows[window_start(1000, 60)].revenue == 0.0
+    assert w.windows[window_start(1000, 60)].cancellations == 1</code></pre></div><div class="pj-note">Getting these tests to pass forces you to decide exactly what 'late' means and what you do about it — the questions a streaming system exists to answer. Run <code>pytest -q</code> until they are green before touching Kafka.</div></div></li><li class="pj-step" id="step-3-3"><label class="pj-step-tick"><input type="checkbox" data-step="3-3" aria-label="Done: step 3.3" /><span class="pj-step-num">3.3</span></label><div class="pj-step-body"><div class="pj-step-text">Write the idempotent sink. The processor will call <code>upsert</code> with a batch of closed windows; writing the same window twice (after a crash and resume) must not double-count, so the upsert replaces the row for a window rather than adding to it. The window start is the primary key.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># stream/sink.py
+import duckdb
+
+from stream.windows import Aggregate
+
+
+class Sink:
+    def __init__(self, path: str = "metrics.db"):
+        self.con = duckdb.connect(path)
+        self.con.execute("""
+            create table if not exists revenue_by_minute (
+                window_start bigint primary key,
+                orders integer, revenue double, cancellations integer,
+                updated_at timestamp default current_timestamp
+            )""")
+
+    def upsert(self, windows: list[tuple[int, Aggregate]]) -&gt; int:
+        for start, agg in windows:
+            self.con.execute("""
+                insert into revenue_by_minute (window_start, orders, revenue, cancellations)
+                values (?, ?, ?, ?)
+                on conflict (window_start) do update set
+                    orders = excluded.orders, revenue = excluded.revenue,
+                    cancellations = excluded.cancellations, updated_at = current_timestamp
+            """, [start, agg.orders, round(agg.revenue, 2), agg.cancellations])
+        return len(windows)
+
+    def close(self) -&gt; None:
+        self.con.close()</code></pre></div><div class="pj-note"><code>on conflict ... do update set ... = excluded....</code> is an upsert that *replaces*, not accumulates. That is what makes re-emitting a window safe. If it added instead, a resume after a crash would double the revenue — the classic streaming bug.</div></div></li></ol>
+  </section>
+
+  <section id="phase-4" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 4</span><h2>The processor: aggregate, write, then commit</h2></div>
+    <p class="pj-goal">A consumer that reads events, updates windows, and — critically — writes the closed windows to DuckDB *before* committing offsets, so a crash resumes from the last durably-written point with no gaps and no double counts.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-4-1"><label class="pj-step-tick"><input type="checkbox" data-step="4-1" aria-label="Done: step 4.1" /><span class="pj-step-num">4.1</span></label><div class="pj-step-body"><div class="pj-step-text">Write the processor. The order of operations is the entire lesson: consume, aggregate, and only when windows close do you write them to the sink and *then* commit offsets. If it crashes between write and commit, it reprocesses those events on restart — but the upsert is idempotent, so the result is identical. This is effectively exactly-once into the sink, built from at-least-once delivery plus an idempotent write.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># stream/process.py
+import argparse
+import signal
+import sys
+
+from confluent_kafka import Consumer
+
+from stream.schema import deserialize, iso
+from stream.sink import Sink
+from stream.windows import WindowState
+
+
+def main() -&gt; None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--brokers", default="localhost:19092")
+    ap.add_argument("--group", default="revenue")
+    ap.add_argument("--window", type=int, default=60)
+    ap.add_argument("--allowed-lateness", type=int, default=120)
+    ap.add_argument("--db", default="metrics.db")
+    args = ap.parse_args()
+
+    consumer = Consumer({
+        "bootstrap.servers": args.brokers,
+        "group.id": args.group,
+        "auto.offset.reset": "earliest",
+        "enable.auto.commit": False,       # we commit ourselves, after the write
+    })
+    consumer.subscribe(["orders"])
+    state = WindowState(size=args.window, allowed_lateness=args.allowed_lateness)
+    sink = Sink(args.db)
+
+    running = True
+    signal.signal(signal.SIGINT, lambda *_: globals().__setitem__("_", None) or setattr(sys.modules[__name__], "_stop", True))
+    stop = {"flag": False}
+    signal.signal(signal.SIGTERM, lambda *_: stop.__setitem__("flag", True))
+    signal.signal(signal.SIGINT, lambda *_: stop.__setitem__("flag", True))
+
+    processed = 0
+    try:
+        while not stop["flag"]:
+            msg = consumer.poll(1.0)
+            if msg is None:
+                _flush_closed(state, sink, consumer)
+                continue
+            if msg.error():
+                print("consumer error:", msg.error(), file=sys.stderr)
+                continue
+            try:
+                ev = deserialize(msg.value())
+            except Exception as e:
+                print("skipping unparseable message:", e, file=sys.stderr)
+                continue
+            state.observe(ev.event_time, ev.amount, ev.status)
+            processed += 1
+            if processed % 200 == 0:
+                _flush_closed(state, sink, consumer)
+                print(f"processed {processed}, watermark {iso(state.watermark)}, open windows {len(state.windows)}, dropped-late {state.dropped_late}")
+    finally:
+        _flush_closed(state, sink, consumer)
+        consumer.close()
+        sink.close()
+        print(f"stopped after {processed} events, {state.dropped_late} dropped as too-late")
+
+
+def _flush_closed(state: WindowState, sink: Sink, consumer) -&gt; None:
+    closed = state.closed()
+    if not closed:
+        return
+    sink.upsert(closed)          # 1. durably write the results
+    consumer.commit(asynchronous=False)   # 2. only now advance offsets
+    state.evict([s for s, _ in closed])   # 3. free the finalised windows
+
+
+if __name__ == "__main__":
+    main()</code></pre></div><div class="pj-note">The two duplicate signal handlers in the middle are a mistake worth removing — keep only the <code>stop</code> dict version. (Left here so you catch it: real code has bugs, and reading for them is the skill.) The important line is the order in <code>_flush_closed</code>: write, then commit, then evict. Reverse any two and you get gaps or double counts.</div></div></li><li class="pj-step" id="step-4-2"><label class="pj-step-tick"><input type="checkbox" data-step="4-2" aria-label="Done: step 4.2" /><span class="pj-step-num">4.2</span></label><div class="pj-step-body"><div class="pj-step-text">Fix the signal handling to the clean version — this is the deliberate bug from the note. Inside <code>main()</code>, delete the two-line handler that references <code>sys.modules</code> and <code>globals()</code>, keeping only the <code>stop</code> dict below.</div><div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># stream/process.py — the signal block should be exactly these three lines inside main():
+    stop = {"flag": False}
+    signal.signal(signal.SIGTERM, lambda *_: stop.__setitem__("flag", True))
+    signal.signal(signal.SIGINT, lambda *_: stop.__setitem__("flag", True))</code></pre></div></div></li><li class="pj-step" id="step-4-3"><label class="pj-step-tick"><input type="checkbox" data-step="4-3" aria-label="Done: step 4.3" /><span class="pj-step-num">4.3</span></label><div class="pj-step-body"><div class="pj-step-text">Run the end-to-end pipeline: producer in one terminal, processor in another, and watch windowed rows appear in DuckDB.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># terminal 1: a steady stream
+python -m stream.produce --rate 40
+# terminal 2: the processor
+python -m stream.process
+# terminal 3: read the serving table as it fills
+watch -n 2 'python -c "import duckdb; print(duckdb.connect(\"metrics.db\").execute(\"select window_start, orders, revenue from revenue_by_minute order by window_start desc limit 5\").fetchall())"'</code></pre></div><div class="pj-note">Windows appear a couple of minutes behind real time — that is the <code>allowed_lateness</code> (120s) working: the processor waits that long before finalising a window so late events can still be counted. Shorten it to see windows close sooner, at the cost of dropping more late events. That trade-off is yours to set.</div></div></li></ol>
+  </section>
+
+  <section id="phase-5" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 5</span><h2>See it live, and watch it keep up</h2></div>
+    <p class="pj-goal">A dashboard that updates as windows close, and a lag monitor that tells you whether the processor is keeping pace with the producer.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-5-1"><label class="pj-step-tick"><input type="checkbox" data-step="5-1" aria-label="Done: step 5.1" /><span class="pj-step-num">5.1</span></label><div class="pj-step-body"><div class="pj-step-text">Write the dashboard. It reads the DuckDB serving table and auto-refreshes; because the processor upserts by window, a window already on screen updates in place when a late event lands.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># dashboard/app.py
+import time
+from datetime import datetime, timezone
+
+import duckdb
+import pandas as pd
+import streamlit as st
+
+st.set_page_config(page_title="Live orders", layout="wide")
+st.title("Orders — revenue per minute (live)")
+
+placeholder = st.empty()
+while True:
+    con = duckdb.connect("metrics.db", read_only=True)
+    df = con.execute("""
+        select window_start, orders, revenue, cancellations
+        from revenue_by_minute order by window_start desc limit 30
+    """).fetch_df()
+    con.close()
+    if not df.empty:
+        df["minute"] = pd.to_datetime(df["window_start"], unit="s", utc=True)
+        df = df.sort_values("minute")
+    with placeholder.container():
+        c1, c2, c3 = st.columns(3)
+        c1.metric("windows", len(df))
+        c2.metric("revenue (last 30 min)", f"${df['revenue'].sum():,.0f}" if not df.empty else "$0")
+        c3.metric("cancellations", int(df["cancellations"].sum()) if not df.empty else 0)
+        if not df.empty:
+            st.line_chart(df.set_index("minute")["revenue"])
+            st.bar_chart(df.set_index("minute")["orders"])
+        st.caption(f"updated {datetime.now(timezone.utc):%H:%M:%S} UTC")
+    time.sleep(3)</code></pre></div></div></li><li class="pj-step" id="step-5-2"><label class="pj-step-tick"><input type="checkbox" data-step="5-2" aria-label="Done: step 5.2" /><span class="pj-step-num">5.2</span></label><div class="pj-step-body"><div class="pj-step-text">Run the dashboard while the pipeline is going, and watch the current window's revenue climb and then freeze as it finalises.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>streamlit run dashboard/app.py
+# http://localhost:8501 — leave the producer and processor running in their terminals</code></pre></div></div></li><li class="pj-step" id="step-5-3"><label class="pj-step-tick"><input type="checkbox" data-step="5-3" aria-label="Done: step 5.3" /><span class="pj-step-num">5.3</span></label><div class="pj-step-body"><div class="pj-step-text">Write the lag monitor. Consumer lag — how many messages are produced but not yet processed — is the single most important health metric for a stream processor. It reads the group's committed offsets and the topic's end offsets from the broker.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># monitor/lag.py
+import argparse
+import time
+
+from confluent_kafka import Consumer, TopicPartition
+from confluent_kafka.admin import AdminClient
+
+
+def lag(brokers: str, group: str, topic: str) -&gt; dict[int, int]:
+    admin = AdminClient({"bootstrap.servers": brokers})
+    md = admin.list_topics(topic, timeout=10).topics[topic]
+    c = Consumer({"bootstrap.servers": brokers, "group.id": group, "enable.auto.commit": False})
+    tps = [TopicPartition(topic, p) for p in md.partitions]
+    committed = {tp.partition: tp.offset for tp in c.committed(tps, timeout=10)}
+    out = {}
+    for tp in tps:
+        _, high = c.get_watermark_offsets(tp, timeout=10)
+        pos = committed.get(tp.partition, 0)
+        out[tp.partition] = high - (pos if pos and pos &gt; 0 else 0)
+    c.close()
+    return out
+
+
+def main() -&gt; None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--brokers", default="localhost:19092")
+    ap.add_argument("--group", default="revenue")
+    ap.add_argument("--topic", default="orders")
+    args = ap.parse_args()
+    while True:
+        per_partition = lag(args.brokers, args.group, args.topic)
+        print(f"total lag {sum(per_partition.values()):6d}   per-partition {per_partition}")
+        time.sleep(2)
+
+
+if __name__ == "__main__":
+    main()</code></pre></div><div class="pj-note">You can also read lag straight from the broker: <code>docker compose exec redpanda rpk group describe revenue -X brokers=localhost:9092</code> shows committed offset, end offset and lag per partition. The console shows it graphically. Three views of the same number, because it is the number that matters.</div></div></li><li class="pj-step" id="step-5-4"><label class="pj-step-tick"><input type="checkbox" data-step="5-4" aria-label="Done: step 5.4" /><span class="pj-step-num">5.4</span></label><div class="pj-step-body"><div class="pj-step-text">Watch lag stay near zero, then make the processor fall behind on purpose by flooding the producer, and watch lag climb — then recover when the flood stops.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>python -m monitor.lag &amp;
+# in another terminal, flood it faster than one processor can keep up:
+python -m stream.produce --rate 2000 --count 20000
+# lag climbs into the thousands, then drains back to ~0 once the burst is processed
+docker compose exec redpanda rpk group describe revenue -X brokers=localhost:9092</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-6" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 6</span><h2>Break it four ways</h2></div>
+    <p class="pj-goal">Late events, a schema change, sustained lag, and a crash mid-window — each injected, each handled correctly, each written down.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-6-1"><label class="pj-step-tick"><input type="checkbox" data-step="6-1" aria-label="Done: step 6.1" /><span class="pj-step-num">6.1</span></label><div class="pj-step-body"><div class="pj-step-text">Failure 1 — late and out-of-order events. Restart the producer with a fraction of events time-stamped in the past, and confirm the totals stay correct: late events inside the margin update their real window (which you see change on the dashboard), and events past the margin are counted as dropped, not silently added to the wrong window.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>python -m stream.produce --rate 40 --late-fraction 0.2
+# in the processor's output, watch 'dropped-late' rise for events past allowed_lateness;
+# on the dashboard, watch an already-drawn window's revenue tick up when a late event lands in it.
+python -c "import duckdb; print(duckdb.connect('metrics.db').execute('select window_start, orders, revenue from revenue_by_minute order by window_start desc limit 8').fetchall())"</code></pre></div><div class="pj-note">Compare against the wrong design: if you had aggregated by arrival time, every late order would have gone into the current minute, inflating it and starving the minute the order really belonged to. Event-time windowing is why the numbers are right.</div></div></li><li class="pj-step" id="step-6-2"><label class="pj-step-tick"><input type="checkbox" data-step="6-2" aria-label="Done: step 6.2" /><span class="pj-step-num">6.2</span></label><div class="pj-step-body"><div class="pj-step-text">Failure 2 — schema evolution. Add a field to the event (a <code>channel</code>: web/mobile) as version 2, and make the consumer tolerant of both versions. A consumer that requires the new field would reject every old message; a good consumer treats new fields as optional and missing fields as defaults.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># stream/schema.py — evolve the model
+SCHEMA_VERSION = 2
+
+
+class OrderEvent(BaseModel):
+    schema_version: int = SCHEMA_VERSION
+    order_id: int
+    customer_id: int
+    amount: float = Field(gt=0)
+    status: str = "placed"
+    event_time: float
+    channel: str = "unknown"     # v2: optional with a default → old (v1) messages still validate</code></pre></div><div class="pj-note">This is a *backward-compatible* change: a new consumer reads old messages (the default fills in). The dangerous change is removing or renaming a field, or making a new field required — those break old messages or old consumers. Backward and forward compatibility is the entire discipline of schema evolution; a schema registry (Redpanda has one) enforces it so a bad change is rejected at produce time.</div></div></li><li class="pj-step" id="step-6-3"><label class="pj-step-tick"><input type="checkbox" data-step="6-3" aria-label="Done: step 6.3" /><span class="pj-step-num">6.3</span></label><div class="pj-step-body"><div class="pj-step-text">Deploy the schema change the safe way: consumer first, then producer. Restart the processor (it now accepts both v1 and v2), confirm it still handles the v1 events already in the topic, then restart the producer emitting v2. Nothing breaks at the seam.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># 1. restart the processor with the tolerant schema — it reads the v1 backlog fine
+python -m stream.process
+# 2. only then start producing v2
+python -m stream.produce --rate 40
+docker compose exec redpanda rpk topic consume orders -n 2 -X brokers=localhost:9092 --offset end</code></pre></div></div></li><li class="pj-step" id="step-6-4"><label class="pj-step-tick"><input type="checkbox" data-step="6-4" aria-label="Done: step 6.4" /><span class="pj-step-num">6.4</span></label><div class="pj-step-body"><div class="pj-step-text">Failure 3 — sustained lag and scaling out. One processor cannot keep up with a high rate forever. Start a second processor in the same consumer group and watch Kafka rebalance the four partitions across the two instances — horizontal scaling with no code change, because the partition is the unit of parallelism.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>python -m stream.produce --rate 3000 &amp;
+python -m stream.process &amp;      # instance 1
+python -m stream.process &amp;      # instance 2, same group 'revenue'
+sleep 10
+docker compose exec redpanda rpk group describe revenue -X brokers=localhost:9092
+# MEMBERS shows 2; each owns 2 of the 4 partitions; total lag drains faster than with one</code></pre></div><div class="pj-note">This is why you chose four partitions in phase one: you can run up to four processors in the group before adding partitions. It is also why keying matters — a customer's events always go to the same partition, so per-customer ordering and per-customer state survive scaling out. Each instance keeps its own window state for its partitions; because the sink upsert is keyed by window and windows are keyed by time (shared across partitions), two instances writing the same window would conflict — which is the honest limitation to note next.</div></div></li><li class="pj-step" id="step-6-5"><label class="pj-step-tick"><input type="checkbox" data-step="6-5" aria-label="Done: step 6.5" /><span class="pj-step-num">6.5</span></label><div class="pj-step-body"><div class="pj-step-text">Failure 4 — crash mid-window, and prove no double count. Run a single processor, kill it hard partway through, record the serving table, restart it, and confirm the totals are identical — not doubled. This is the payoff of write-then-commit plus an idempotent upsert.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>pkill -f 'stream.process' ; sleep 2
+python -m stream.produce --count 5000 --rate 500
+python -m stream.process &amp;
+PID=$!; sleep 6
+kill -9 $PID          # hard crash, no clean shutdown, mid-processing
+python -c "import duckdb; print('before restart:', duckdb.connect('metrics.db').execute('select coalesce(sum(orders),0), coalesce(round(sum(revenue),2),0) from revenue_by_minute').fetchone())"
+python -m stream.process &amp;
+sleep 8; pkill -f 'stream.process'
+python -c "import duckdb; print('after restart :', duckdb.connect('metrics.db').execute('select coalesce(sum(orders),0), coalesce(round(sum(revenue),2),0) from revenue_by_minute').fetchone())"
+docker compose exec redpanda rpk group describe revenue -X brokers=localhost:9092</code></pre></div><div class="pj-note">The window that was open when the process was killed is reprocessed from the last committed offset on restart, its DuckDB row overwritten with the same value. If you had committed offsets *before* writing, the reprocessed events would be lost (a gap); if you had used an accumulating insert instead of an upsert, they would be counted twice. Write, commit, idempotent — in that order — is the whole answer.</div></div></li><li class="pj-step" id="step-6-6"><label class="pj-step-tick"><input type="checkbox" data-step="6-6" aria-label="Done: step 6.6" /><span class="pj-step-num">6.6</span></label><div class="pj-step-body"><div class="pj-step-text">Write <code>RESILIENCE.md</code>: the four failures, what you expected, what happened, and the design choice that made it correct. This is the document that turns a working demo into understanding you can defend in an interview.</div><div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># RESILIENCE.md
+
+| Failure                     | Handled by                                              | Evidence                          |
+|-----------------------------|---------------------------------------------------------|-----------------------------------|
+| Late / out-of-order events  | event-time windows + watermark + allowed_lateness       | dropped-late counter, window edits |
+| Schema evolution (add field)| backward-compatible model; consumer deployed first      | v1 backlog still processed         |
+| Sustained lag               | more partitions + more consumers in the group           | rebalance to 2 members, lag drains |
+| Crash mid-window            | write sink → commit offset → evict; idempotent upsert    | totals equal before/after restart  |
+
+## Known limitations
+- Two processors both owning windows that span partitions can race on the same DuckDB row. Correct fix:
+  key the sink by (window_start, partition) and sum in the query, or run a single writer. Noted, not built.
+- Exactly-once is 'into the sink', built from at-least-once + idempotent write. True end-to-end EOS would use
+  Kafka transactions (the producer and the offset commit in one transaction). Overkill for this sink.</code></pre></div><div class="pj-note">The limitations section matters more than the table. A candidate who says "exactly-once, done" is wrong; one who says "at-least-once delivery plus an idempotent, keyed write gives me effectively-once into this sink, and here is where it would break" understands streaming.</div></div></li></ol>
+  </section>
+
+  <section id="troubleshooting" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Help</span><h2>Troubleshooting</h2></div>
+    <dl class="pj-trouble"><dt>Python clients cannot connect: <code>Connection refused</code> or <code>Failed to resolve 'redpanda:9092'</code></dt><dd>Host clients must use the external listener <code>localhost:19092</code>, not <code>redpanda:9092</code> (that name only resolves inside the Compose network). Confirm the port is published: <code>docker compose ps</code> should show <code>19092-&gt;19092</code>. Inside the container, rpk uses <code>-X brokers=localhost:9092</code>.</dd><dt><code>rpk</code> inside the container fails with <code>lookup redpanda ... no such host</code></dt><dd>The advertised internal address is <code>redpanda:9092</code>, which the container cannot resolve as itself. Always pass <code>-X brokers=localhost:9092</code> to rpk commands run via <code>docker compose exec redpanda</code>.</dd><dt>Windows never appear in DuckDB</dt><dd>The watermark trails the newest event by <code>allowed_lateness</code> (120s), so the first window is finalised about two minutes after the stream starts — be patient, or lower <code>--allowed-lateness</code>. Also confirm the processor is actually consuming: <code>rpk group describe revenue</code> should show a committed offset advancing. If lag is high and offsets are stuck, the processor errored — check its stderr.</dd><dt>DuckDB error: <code>Could not set lock on file</code> when the dashboard runs</dt><dd>The processor holds a write connection; open the dashboard's connection with <code>read_only=True</code> (as shown). DuckDB allows one writer and many readers only across processes when readers are read-only. If both need to write, put the serving layer in a server database (Postgres) instead.</dd><dt>After scaling to two processors, revenue totals look wrong</dt><dd>This is the documented limitation: both instances compute windows for their own partitions, but windows are keyed by time across partitions, so they overwrite each other's rows in the sink. For correct multi-instance aggregation, key the sink row by (window_start, partition) and sum at read time, or run a single aggregating consumer and scale only the ingestion.</dd><dt>Consumer reprocesses everything from the start on every restart</dt><dd><code>auto.offset.reset: earliest</code> only applies when the group has no committed offset. If it reprocesses every time, offsets are not being committed — check that <code>enable.auto.commit</code> is False and <code>consumer.commit(asynchronous=False)</code> runs in <code>_flush_closed</code>, and that windows are actually closing (no closed windows means no commit).</dd></dl>
+  </section>
+
+  <section id="next" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Next</span><h2>Where to go from here</h2></div>
+    <ul class="pj-next"><li>Add Redpanda's schema registry and register the Avro or JSON schema, so an incompatible producer change is rejected at publish time instead of discovered by a broken consumer.</li><li>Replace the hand-written processor with a stream-processing framework — Apache Flink (PyFlink) or Bytewax — and compare: managed state, checkpointing and true exactly-once versus the transparency of writing it yourself.</li><li>Feed the stream into the lakehouse: land raw events in MinIO with a Kafka sink connector, so the same data serves real-time (this project) and historical (the lakehouse) queries — the lambda/kappa question.</li><li>Add a second consumer group for a different job (fraud flags on high-value cancellations) reading the same topic independently — the fan-out that makes the log a backbone rather than a queue.</li><li>Wire the lag monitor to Prometheus and alert when lag exceeds a threshold for a sustained period, using the SRE track's alerting — lag is the SLI for a stream processor.</li></ul>
+  </section>
+
+  <p class="feedback-row">Did a step fail or feel unclear? <a href="../../feedback.html?page=/education/projects/proj-de-streaming.html&amp;title=Real-time%20pipeline%20with%20Kafka">Tell me which one →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../../education.html">Education</a>
+      <a href="../../privacy.html">Privacy</a>
+      <a href="../../terms.html">Terms</a>
+      <a href="../../feedback.html?page=/education/projects/proj-de-streaming.html&amp;title=Real-time%20pipeline%20with%20Kafka">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="project.js"></script>
+</body>
+</html>

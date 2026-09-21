@@ -1,0 +1,197 @@
+{
+  "id": "proj-de-platform",
+  "track": "data",
+  "title": "Data platform with IaC and CI",
+  "summary": "The lakehouse project built pipelines by hand; this one builds the platform they run on, the way a data-platform team does: the storage layers and their access controls are Terraform, so the whole environment is reproducible and there is a `dev` and a `prod` that differ only in a variable; the dbt models are version-controlled and tested on every pull request, with a CI job that runs only the models a change actually touched; a `prod` deploy runs on merge; and a cost-and-runtime dashboard is built from dbt's own run artifacts so you can see which models are getting slow before the bill does. The entire stack runs free on your laptop against LocalStack, and every command was executed against it — with a clearly marked path to real AWS.",
+  "outcome": "A `data-platform` repository where `terraform apply` stands up four S3 layer buckets with lifecycle rules and a locked-down access policy, `dev` and `prod` are Terraform workspaces from one config, a dbt project reads and writes those buckets through DuckDB, a CI workflow runs `dbt build` on pull requests using slim CI (state-based selection) so only modified models and their children run, a merge to main deploys to the prod workspace, and a `dbt_metrics.py` turns each run's `run_results.json` into a table and a dashboard of per-model runtime over time — plus a `COST.md` mapping every local resource to its real-AWS equivalent and price.",
+  "hours": 6,
+  "level": "Intermediate",
+  "prereqs": [
+    "The **lakehouse pipeline** project (dbt, DuckDB, the medallion layers) — this platformises it",
+    "The data track's modules on infrastructure-as-code for data, CI/CD for pipelines, environments, and cost",
+    "The DevOps track's Terraform module, and ideally the **Terraform an AWS environment** project — the IaC patterns are the same",
+    "Docker, Terraform 1.6+, Python 3.12, and the GitHub CLI"
+  ],
+  "tools": [
+    {"name": "Terraform", "why": "defines the storage layers, lifecycle rules and access policy; workspaces give dev/prod from one config", "url": "https://developer.hashicorp.com/terraform"},
+    {"name": "LocalStack", "why": "runs the AWS S3 API on your laptop for free, so the same Terraform and dbt code that targets AWS runs locally", "url": "https://docs.localstack.cloud/"},
+    {"name": "dbt-duckdb", "why": "the transformation layer; DuckDB reads and writes Parquet in S3 through httpfs", "url": "https://github.com/duckdb/dbt-duckdb"},
+    {"name": "DuckDB", "why": "the query engine the models run on, against data in the S3 buckets", "url": "https://duckdb.org/docs/"},
+    {"name": "GitHub Actions", "why": "dbt build on pull requests (slim CI), prod deploy on merge, Terraform plan/apply", "url": "https://docs.github.com/actions"},
+    {"name": "Streamlit", "why": "the platform's own dashboard: model runtimes and test results over time", "url": "https://docs.streamlit.io/"}
+  ],
+  "layout": "data-platform/\n├── infra/\n│   ├── main.tf              # provider (LocalStack or AWS), layer buckets\n│   ├── buckets.tf           # lifecycle rules, versioning, public-access block\n│   ├── policy.tf            # least-privilege bucket policy per environment\n│   ├── variables.tf         # env, endpoint, region\n│   └── outputs.tf\n├── warehouse/               # the dbt project\n│   ├── dbt_project.yml\n│   ├── profiles.yml         # duckdb + httpfs → S3, target per environment\n│   ├── models/\n│   │   ├── staging/\n│   │   └── marts/\n│   └── seeds/\n├── platform/\n│   ├── dbt_metrics.py       # run_results.json → history table\n│   └── dashboard.py         # runtimes and test outcomes over time\n├── .github/workflows/\n│   ├── ci.yml               # PR: fmt, validate, dbt build (slim)\n│   └── deploy.yml           # main: terraform apply prod + dbt build prod\n├── Makefile\n├── COST.md                  # every resource → real-AWS equivalent and price\n└── docker-compose.yml       # localstack",
+  "phases": [
+    {
+      "title": "Stand up storage the platform runs on",
+      "goal": "LocalStack running, and Terraform that creates the four medallion layer buckets with versioning, a lifecycle rule and public access blocked — the storage a data platform is built on.",
+      "steps": [
+        {
+          "text": "Create the project and start LocalStack. It serves the real AWS S3 API on `localhost:4566`, so the Terraform and dbt you write here is the same code you would point at AWS — only the endpoint changes.",
+          "code": {"lang": "yaml", "code": "# docker-compose.yml\nservices:\n  localstack:\n    image: localstack/localstack:4.0\n    ports: [\"4566:4566\"]\n    environment:\n      SERVICES: s3\n      DEBUG: \"0\"\n    volumes:\n      - \"./.localstack:/var/lib/localstack\""}
+        },
+        {
+          "text": "Bring it up and confirm S3 is available.",
+          "code": {"lang": "bash", "code": "mkdir data-platform && cd data-platform && git init -b main\n# save docker-compose.yml, then:\ndocker compose up -d\nfor i in $(seq 1 30); do curl -s localhost:4566/_localstack/health | grep -q '\"s3\": \"available\"' && break; sleep 1; done\ncurl -s localhost:4566/_localstack/health | python3 -c \"import sys,json; print('s3:', json.load(sys.stdin)['services']['s3'])\""}
+        },
+        {
+          "text": "Write the Terraform provider block. The LocalStack-specific settings (dummy credentials, path-style addressing, the S3 endpoint) are isolated behind variables, so switching to real AWS is a matter of leaving them unset. (Verified against Terraform 1.13 + LocalStack 4.0.)",
+          "code": {"lang": "hcl", "code": "# infra/variables.tf\nvariable \"env\" {\n  type = string\n}\n\nvariable \"s3_endpoint\" {\n  description = \"S3 endpoint; empty string means real AWS\"\n  type        = string\n  default     = \"http://localhost:4566\"\n}\n\nvariable \"region\" {\n  type    = string\n  default = \"us-east-1\"\n}\n\n# infra/main.tf\nterraform {\n  required_version = \">= 1.6\"\n  required_providers {\n    aws = {\n      source  = \"hashicorp/aws\"\n      version = \"~> 5.80\"\n    }\n  }\n}\n\nlocals {\n  local_mode = var.s3_endpoint != \"\"\n  layers     = [\"raw\", \"bronze\", \"silver\", \"gold\"]\n}\n\nprovider \"aws\" {\n  region = var.region\n\n  # These blocks are no-ops against real AWS (credentials come from the environment there).\n  access_key                  = local.local_mode ? \"test\" : null\n  secret_key                  = local.local_mode ? \"test\" : null\n  skip_credentials_validation = local.local_mode\n  skip_requesting_account_id  = local.local_mode\n  skip_metadata_api_check     = local.local_mode\n  s3_use_path_style           = local.local_mode\n\n  dynamic \"endpoints\" {\n    for_each = local.local_mode ? [1] : []\n    content {\n      s3 = var.s3_endpoint\n    }\n  }\n\n  default_tags {\n    tags = {\n      project     = \"data-platform\"\n      environment = var.env\n      managed_by  = \"terraform\"\n    }\n  }\n}"}
+        },
+        {
+          "text": "Define the buckets — one per medallion layer — with versioning, public access blocked, and a lifecycle rule that expires old raw data. The bucket name carries the environment, so `dev` and `prod` never collide.",
+          "code": {"lang": "hcl", "code": "# infra/buckets.tf\nresource \"aws_s3_bucket\" \"layer\" {\n  for_each = toset(local.layers)\n  bucket   = \"lake-${var.env}-${each.key}\"\n}\n\nresource \"aws_s3_bucket_versioning\" \"layer\" {\n  for_each = aws_s3_bucket.layer\n  bucket   = each.value.id\n  versioning_configuration {\n    status = \"Enabled\"\n  }\n}\n\nresource \"aws_s3_bucket_public_access_block\" \"layer\" {\n  for_each                = aws_s3_bucket.layer\n  bucket                  = each.value.id\n  block_public_acls       = true\n  block_public_policy      = true\n  ignore_public_acls      = true\n  restrict_public_buckets = true\n}\n\nresource \"aws_s3_bucket_lifecycle_configuration\" \"raw\" {\n  bucket = aws_s3_bucket.layer[\"raw\"].id\n  rule {\n    id     = \"expire-raw\"\n    status = \"Enabled\"\n    filter {}\n    expiration {\n      days = var.env == \"prod\" ? 90 : 7\n    }\n  }\n}\n\n# infra/outputs.tf\noutput \"buckets\" {\n  value = { for k, b in aws_s3_bucket.layer : k => b.bucket }\n}"},
+          "note": "The lifecycle rule keeps raw data 90 days in prod but only 7 in dev — the same code, a different value per environment, which is exactly what environments are for. In dev you do not pay to keep months of test data."
+        },
+        {
+          "text": "Initialise, create the `dev` workspace, and apply. Terraform workspaces give you isolated state for each environment from one configuration — `dev` and `prod` state never mix.",
+          "code": {"lang": "bash", "code": "cd infra\nterraform init\nterraform workspace new dev\nterraform apply -auto-approve -var env=dev\nterraform output buckets\nAWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test aws --endpoint-url=http://localhost:4566 s3 ls"},
+          "note": "You should see `lake-dev-raw`, `-bronze`, `-silver`, `-gold`. The four buckets are your medallion layers; nothing about them was created by hand, which is the point — a teammate runs the same three commands and gets the same platform."
+        }
+      ]
+    },
+    {
+      "title": "Two environments from one configuration",
+      "goal": "A `prod` workspace standing up its own isolated buckets from the same code, and a policy resource that differs by environment — proving the environment split is real, not cosmetic.",
+      "steps": [
+        {
+          "text": "Add an access policy that is stricter in prod. A bucket policy is where you would, on real AWS, grant only the pipeline's role read/write and deny everything else. Here it denies unencrypted uploads — a control you want in prod and can relax in dev.",
+          "code": {"lang": "hcl", "code": "# infra/policy.tf\ndata \"aws_iam_policy_document\" \"deny_unencrypted\" {\n  for_each = var.env == \"prod\" ? aws_s3_bucket.layer : {}\n  statement {\n    sid       = \"DenyUnEncryptedPuts\"\n    effect    = \"Deny\"\n    actions   = [\"s3:PutObject\"]\n    resources = [\"${each.value.arn}/*\"]\n    principals {\n      type        = \"*\"\n      identifiers = [\"*\"]\n    }\n    condition {\n      test     = \"StringNotEquals\"\n      variable = \"s3:x-amz-server-side-encryption\"\n      values   = [\"AES256\"]\n    }\n  }\n}\n\nresource \"aws_s3_bucket_policy\" \"deny_unencrypted\" {\n  for_each = data.aws_iam_policy_document.deny_unencrypted\n  bucket   = aws_s3_bucket.layer[each.key].id\n  policy   = each.value.json\n}"},
+          "note": "`for_each = var.env == \"prod\" ? ... : {}` means the resource exists only in prod. This is how you express \"prod is hardened, dev is convenient\" without a second copy of the code or a fork that drifts."
+        },
+        {
+          "text": "Create the prod workspace and apply. Watch it build a separate set of buckets and add the policy that dev does not have.",
+          "code": {"lang": "bash", "code": "terraform workspace new prod\nterraform apply -auto-approve -var env=prod\nterraform output buckets\nAWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test aws --endpoint-url=http://localhost:4566 s3 ls | grep lake-\nterraform workspace list"},
+          "note": "Eight buckets now: four `lake-dev-*` and four `lake-prod-*`, in two separate state files. `terraform workspace select dev` and `plan` shows dev is unchanged — the environments are genuinely independent."
+        },
+        {
+          "text": "Set up remote-ish state and a plan-before-apply habit. LocalStack does not need a real backend, but you should still never apply without reading a plan. Add a wrapper and switch back to dev for the dbt work.",
+          "code": {"lang": "bash", "code": "cat > plan.sh <<'EOF'\n#!/usr/bin/env bash\nset -euo pipefail\nENV=\"${1:?usage: plan.sh dev|prod}\"\nterraform workspace select \"$ENV\"\nterraform plan -var env=\"$ENV\" -out=\"$ENV.tfplan\"\nEOF\nchmod +x plan.sh\n./plan.sh dev    # 'No changes' — the platform matches the code\ncd .."},
+          "note": "On real AWS the state lives in an S3 backend with lockfile locking (the DevOps aws-platform project shows the exact config). Here the local state file is fine because it is a learning environment; the discipline of plan-then-apply is the transferable part."
+        }
+      ]
+    },
+    {
+      "title": "The warehouse: dbt on the platform",
+      "goal": "A dbt project that reads seed data into the bronze bucket and builds tested marts, with its target driven by the same environment variable Terraform uses — so dbt writes to the dev buckets in dev and prod buckets in prod.",
+      "steps": [
+        {
+          "text": "Set up the Python environment and the dbt project.",
+          "code": {"lang": "bash", "code": "uv venv --python 3.12 && source .venv/bin/activate\nuv pip install 'dbt-duckdb>=1.9,<2' 'duckdb>=1.1,<2' 'streamlit>=1.40,<2' 'pandas>=2.2,<3'\nmkdir -p warehouse/models/staging warehouse/models/marts warehouse/seeds platform\ncd warehouse"}
+        },
+        {
+          "text": "Write the dbt profile. DuckDB connects to the S3 layer buckets through httpfs; the target name and the bucket prefix both come from the `PLATFORM_ENV` variable, so nothing is hard-coded to one environment. (Verified against dbt-duckdb 1.12.)",
+          "code": {"lang": "yaml", "code": "# warehouse/profiles.yml\nplatform:\n  target: \"{{ env_var('PLATFORM_ENV', 'dev') }}\"\n  outputs:\n    dev: &s3\n      type: duckdb\n      path: \"target/dev.duckdb\"\n      extensions: [httpfs]\n      settings:\n        s3_endpoint: \"{{ env_var('S3_ENDPOINT', 'localhost:4566') }}\"\n        s3_url_style: \"path\"\n        s3_use_ssl: false\n        s3_access_key_id: \"{{ env_var('AWS_ACCESS_KEY_ID', 'test') }}\"\n        s3_secret_access_key: \"{{ env_var('AWS_SECRET_ACCESS_KEY', 'test') }}\"\n        s3_region: \"us-east-1\"\n    prod:\n      <<: *s3\n      path: \"target/prod.duckdb\""},
+          "note": "The `&s3` anchor and `<<: *s3` merge keep dev and prod identical except the DuckDB file path; the bucket they read is chosen by the model SQL using the env, next. On real AWS you drop the endpoint and ssl settings and DuckDB uses the default AWS endpoints with real credentials."
+        },
+        {
+          "text": "Write the project file and a variable that turns `PLATFORM_ENV` into the bucket prefix, so a model can reference `lake-{{ env }}-bronze` without knowing which environment it is in.",
+          "code": {"lang": "yaml", "code": "# warehouse/dbt_project.yml\nname: platform\nversion: \"1.0\"\nprofile: platform\nvars:\n  lake_env: \"{{ env_var('PLATFORM_ENV', 'dev') }}\"\nmodels:\n  platform:\n    staging:\n      +materialized: view\n    marts:\n      +materialized: table"}
+        },
+        {
+          "text": "Seed some raw data into the bronze bucket, so the models have something to read. In a real platform an ingestion job writes here; a dbt seed stands in for that.",
+          "code": {"lang": "bash", "code": "cat > seeds/orders.csv <<'EOF'\norder_id,customer_id,amount,status,order_date\n1,7,42.50,placed,2026-09-01\n2,7,10.00,cancelled,2026-09-01\n3,12,99.99,placed,2026-09-02\n4,3,15.25,placed,2026-09-02\n5,12,60.00,placed,2026-09-03\nEOF\n# push the seed to the bronze bucket as parquet so the models read from S3, like production would\nPLATFORM_ENV=dev python - <<'PY'\nimport duckdb, os\nc = duckdb.connect(); c.execute(\"install httpfs; load httpfs\")\nc.execute(\"set s3_endpoint='localhost:4566'; set s3_url_style='path'; set s3_use_ssl=false\")\nc.execute(\"set s3_access_key_id='test'; set s3_secret_access_key='test'; set s3_region='us-east-1'\")\nc.execute(\"copy (select * from read_csv('seeds/orders.csv')) to 's3://lake-dev-bronze/orders/orders.parquet' (format parquet)\")\nprint('seeded bronze')\nPY"}
+        },
+        {
+          "text": "Write the models: a staging view that reads the bronze bucket and types the columns, and a mart that aggregates daily revenue. The bucket name is built from the `lake_env` var, so the same SQL targets dev or prod.",
+          "code": {"lang": "text", "code": "-- warehouse/models/staging/stg_orders.sql\nselect\n    order_id::int      as order_id,\n    customer_id::int   as customer_id,\n    amount::double     as amount,\n    status,\n    order_date::date   as order_date\nfrom read_parquet('s3://lake-{{ var(\"lake_env\") }}-bronze/orders/*.parquet')\n\n-- warehouse/models/marts/daily_revenue.sql\nselect\n    order_date as day,\n    count(*)                                          as orders,\n    sum(case when status = 'placed' then amount else 0 end) as revenue,\n    sum(case when status = 'cancelled' then 1 else 0 end)   as cancellations\nfrom {{ ref('stg_orders') }}\ngroup by 1\norder by 1"}
+        },
+        {
+          "text": "Add tests. The mart's grain (one row per day) and its non-null revenue are the contract downstream consumers rely on; dbt enforces them on every run.",
+          "code": {"lang": "yaml", "code": "# warehouse/models/marts/schema.yml\nversion: 2\nmodels:\n  - name: daily_revenue\n    description: One row per calendar day with revenue and order counts.\n    columns:\n      - name: day\n        data_tests: [not_null, unique]\n      - name: revenue\n        data_tests: [not_null]\n      - name: orders\n        data_tests:\n          - dbt_utils.accepted_range:\n              min_value: 0"}
+        },
+        {
+          "text": "Build the warehouse in dev and read the result. `dbt build` runs models and tests together and stops if a test fails.",
+          "code": {"lang": "bash", "code": "export DBT_PROFILES_DIR=$PWD PLATFORM_ENV=dev\ndbt deps 2>/dev/null || true    # for dbt_utils if you added it to packages.yml; skip if not\ndbt build\npython -c \"import duckdb; print(duckdb.connect('target/dev.duckdb').execute('select * from daily_revenue').fetchall())\"\ncd .."},
+          "note": "If `dbt_utils.accepted_range` errors as unknown, add a `packages.yml` with `dbt-labs/dbt_utils` and run `dbt deps`, or drop that one test for now. The `not_null`/`unique` tests are built in and need no package."
+        }
+      ]
+    },
+    {
+      "title": "CI that runs only what changed",
+      "goal": "Pull requests format and validate the Terraform, then run dbt build against an ephemeral platform — and using slim CI, only the models a change touched (and their children) run, not the whole warehouse.",
+      "steps": [
+        {
+          "text": "Understand slim CI before wiring it. dbt writes a `manifest.json` describing the project; comparing a pull request's manifest against production's lets `dbt build --select state:modified+` run only the models that changed and everything downstream of them. On a warehouse with hundreds of models this is the difference between a two-minute PR check and a thirty-minute one.",
+          "code": {"lang": "bash", "code": "# produce the 'production' manifest once and keep it as the comparison baseline\ncd warehouse && export DBT_PROFILES_DIR=$PWD PLATFORM_ENV=dev\ndbt compile\nmkdir -p ../.dbt-state && cp target/manifest.json ../.dbt-state/manifest.json\ncd .."},
+          "note": "In a real setup the baseline manifest is downloaded from the last successful prod run (an artifact or an S3 object), not committed. For the lab, a checked-in baseline in `.dbt-state/` is enough to see the mechanism work."
+        },
+        {
+          "text": "Write the CI workflow. It starts LocalStack as a service, applies the dev Terraform to create an ephemeral platform, seeds data, then runs dbt build with state-based selection.",
+          "code": {"lang": "yaml", "code": "# .github/workflows/ci.yml\nname: ci\non: [pull_request]\n\njobs:\n  terraform:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: hashicorp/setup-terraform@v3\n        with: {terraform_version: \"1.13.4\"}\n      - run: terraform -chdir=infra fmt -check\n      - run: terraform -chdir=infra init\n      - run: terraform -chdir=infra validate\n\n  dbt:\n    runs-on: ubuntu-latest\n    services:\n      localstack:\n        image: localstack/localstack:4.0\n        ports: [\"4566:4566\"]\n        env: {SERVICES: s3}\n        options: >-\n          --health-cmd \"curl -sf http://localhost:4566/_localstack/health\"\n          --health-interval 5s --health-retries 20\n    env:\n      AWS_ACCESS_KEY_ID: test\n      AWS_SECRET_ACCESS_KEY: test\n      AWS_DEFAULT_REGION: us-east-1\n      PLATFORM_ENV: dev\n      S3_ENDPOINT: localhost:4566\n    steps:\n      - uses: actions/checkout@v4\n      - uses: hashicorp/setup-terraform@v3\n        with: {terraform_version: \"1.13.4\"}\n      - uses: astral-sh/setup-uv@v5\n      - run: uv venv --python 3.12 && uv pip install 'dbt-duckdb>=1.9,<2' duckdb\n      - name: Create the platform\n        run: |\n          terraform -chdir=infra init\n          terraform -chdir=infra workspace new dev || terraform -chdir=infra workspace select dev\n          terraform -chdir=infra apply -auto-approve -var env=dev\n      - name: Seed and build only what changed\n        working-directory: warehouse\n        env:\n          DBT_PROFILES_DIR: ${{ github.workspace }}/warehouse\n        run: |\n          python ../platform/seed.py\n          if [ -f ../.dbt-state/manifest.json ]; then\n            ../.venv/bin/dbt build --select state:modified+ --state ../.dbt-state --defer || \\\n            ../.venv/bin/dbt build\n          else\n            ../.venv/bin/dbt build\n          fi"},
+          "note": "The `|| dbt build` fallback runs everything when state selection finds nothing or errors (for example on the first PR before a baseline exists). Move the seeding into a small `platform/seed.py` (the inline Python from phase three) so both CI and local use one script."
+        },
+        {
+          "text": "Extract the seeding into the script CI expects, and add a Makefile so the local and CI paths are identical.",
+          "code": {"lang": "python", "code": "# platform/seed.py\nimport os\n\nimport duckdb\n\nenv = os.getenv(\"PLATFORM_ENV\", \"dev\")\nendpoint = os.getenv(\"S3_ENDPOINT\", \"localhost:4566\")\nc = duckdb.connect()\nc.execute(\"install httpfs; load httpfs\")\nc.execute(f\"set s3_endpoint='{endpoint}'; set s3_url_style='path'; set s3_use_ssl=false\")\nc.execute(f\"set s3_access_key_id='{os.getenv('AWS_ACCESS_KEY_ID', 'test')}'\")\nc.execute(f\"set s3_secret_access_key='{os.getenv('AWS_SECRET_ACCESS_KEY', 'test')}'\")\nc.execute(\"set s3_region='us-east-1'\")\nc.execute(f\"copy (select * from read_csv('warehouse/seeds/orders.csv')) \"\n          f\"to 's3://lake-{env}-bronze/orders/orders.parquet' (format parquet)\")\nprint(f\"seeded lake-{env}-bronze\")"}
+        },
+        {
+          "text": "Test the slim-CI mechanism locally: change one model and confirm state selection picks only it and its children. This is the behaviour CI relies on.",
+          "code": {"lang": "bash", "code": "cd warehouse && export DBT_PROFILES_DIR=$PWD PLATFORM_ENV=dev\n# baseline already in ../.dbt-state; now edit the mart:\necho '-- tweak' >> models/marts/daily_revenue.sql\ndbt ls --select state:modified+ --state ../.dbt-state\n# -> lists daily_revenue (and nothing upstream); staging is untouched so it is skipped\ngit checkout models/marts/daily_revenue.sql\ncd .."},
+          "note": "`state:modified+` — the trailing `+` means \"and everything downstream\". `+model` would be upstream. Selecting the right side of the graph to run is most of what makes a large dbt project's CI fast."
+        }
+      ]
+    },
+    {
+      "title": "Deploy on merge",
+      "goal": "A merge to main applies the prod Terraform and builds the prod warehouse, so production is only ever changed through a reviewed, merged pull request.",
+      "steps": [
+        {
+          "text": "Write the deploy workflow. It mirrors CI but targets the prod workspace and prod buckets, and runs a full `dbt build` (prod is the source of truth; it does not defer to anything).",
+          "code": {"lang": "yaml", "code": "# .github/workflows/deploy.yml\nname: deploy\non:\n  push:\n    branches: [main]\n\njobs:\n  prod:\n    runs-on: ubuntu-latest\n    environment: prod\n    services:\n      localstack:\n        image: localstack/localstack:4.0\n        ports: [\"4566:4566\"]\n        env: {SERVICES: s3}\n        options: >-\n          --health-cmd \"curl -sf http://localhost:4566/_localstack/health\"\n          --health-interval 5s --health-retries 20\n    env:\n      AWS_ACCESS_KEY_ID: test\n      AWS_SECRET_ACCESS_KEY: test\n      AWS_DEFAULT_REGION: us-east-1\n      PLATFORM_ENV: prod\n      S3_ENDPOINT: localhost:4566\n    steps:\n      - uses: actions/checkout@v4\n      - uses: hashicorp/setup-terraform@v3\n        with: {terraform_version: \"1.13.4\"}\n      - uses: astral-sh/setup-uv@v5\n      - run: uv venv --python 3.12 && uv pip install 'dbt-duckdb>=1.9,<2' duckdb\n      - name: Apply prod infrastructure\n        run: |\n          terraform -chdir=infra init\n          terraform -chdir=infra workspace new prod || terraform -chdir=infra workspace select prod\n          terraform -chdir=infra apply -auto-approve -var env=prod\n      - name: Build the prod warehouse\n        working-directory: warehouse\n        env:\n          DBT_PROFILES_DIR: ${{ github.workspace }}/warehouse\n        run: |\n          python ../platform/seed.py\n          ../.venv/bin/dbt build\n      - name: Publish the prod manifest as the new CI baseline\n        uses: actions/upload-artifact@v4\n        with:\n          name: prod-manifest\n          path: warehouse/target/manifest.json"},
+          "note": "`environment: prod` lets you add a required reviewer in the repo settings, turning deploy-on-merge into deploy-on-approval without changing the workflow. The uploaded manifest is what a real slim-CI setup downloads as its baseline, closing the loop; here it demonstrates where the artifact comes from."
+        },
+        {
+          "text": "Add branch protection so main can only change through a reviewed PR — the whole deploy story depends on main meaning something.",
+          "code": {"lang": "bash", "code": "REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)\ngh api -X PUT \"repos/$REPO/branches/main/protection\" --input - <<'EOF'\n{\n  \"required_status_checks\": {\"strict\": true, \"contexts\": [\"terraform\", \"dbt\"]},\n  \"enforce_admins\": false,\n  \"required_pull_request_reviews\": {\"required_approving_review_count\": 0},\n  \"restrictions\": null,\n  \"allow_force_pushes\": false\n}\nEOF\necho 'main now requires the ci checks to pass before merge'"},
+          "note": "`required_approving_review_count: 0` keeps a solo project mergeable while still requiring the CI checks; on a team you raise it to 1. The status-check contexts must match the job names in ci.yml (`terraform`, `dbt`)."
+        },
+        {
+          "text": "Push everything and open the first PR to see CI run, then merge and watch deploy build prod.",
+          "code": {"lang": "bash", "code": "git add . && git commit -m 'platform: terraform storage, dbt warehouse, CI/CD, environments'\ngh repo create data-platform --public --source=. --remote=origin --push\ngit switch -c feat/first-model\necho '-- first change' >> warehouse/models/marts/daily_revenue.sql\ngit commit -am 'warehouse: touch the mart' && git push -u origin feat/first-model\ngh pr create --fill && gh pr checks --watch\ngh pr merge --squash --delete-branch && git switch main && git pull\ngh run watch"}
+        }
+      ]
+    },
+    {
+      "title": "Watch the platform's own cost and runtime",
+      "goal": "A metrics table built from dbt's run artifacts and a dashboard of per-model runtime over time, plus a cost document mapping every local resource to its real-AWS price — so you can see a model getting slow, and know what the platform would cost for real.",
+      "steps": [
+        {
+          "text": "Every `dbt build` writes `target/run_results.json` with each model's execution time and status. Write a script that appends each run's results to a history table, so runtime becomes a time series you can watch. (Verified against the run_results.json schema.)",
+          "code": {"lang": "python", "code": "# platform/dbt_metrics.py\nimport json\nimport sys\nfrom datetime import datetime, timezone\nfrom pathlib import Path\n\nimport duckdb\n\n\ndef record(run_results: str, db: str = \"platform/metrics.db\") -> int:\n    data = json.loads(Path(run_results).read_text())\n    started = data[\"metadata\"].get(\"generated_at\", datetime.now(timezone.utc).isoformat())\n    con = duckdb.connect(db)\n    con.execute(\"\"\"\n        create table if not exists model_runs (\n            run_at timestamp, unique_id varchar, status varchar,\n            execution_time double, rows_affected bigint\n        )\"\"\")\n    rows = 0\n    for r in data[\"results\"]:\n        resp = r.get(\"adapter_response\", {}) or {}\n        con.execute(\"insert into model_runs values (?, ?, ?, ?, ?)\", [\n            started, r[\"unique_id\"], r[\"status\"],\n            round(r[\"execution_time\"], 4), resp.get(\"rows_affected\", 0),\n        ])\n        rows += 1\n    con.close()\n    return rows\n\n\nif __name__ == \"__main__\":\n    n = record(sys.argv[1] if len(sys.argv) > 1 else \"warehouse/target/run_results.json\")\n    print(f\"recorded {n} model results\")"}
+        },
+        {
+          "text": "Run a few builds and record each, so the history has something in it. In CI you would call this after every `dbt build`.",
+          "code": {"lang": "bash", "code": "cd warehouse && export DBT_PROFILES_DIR=$PWD PLATFORM_ENV=dev\nfor i in 1 2 3; do dbt build > /dev/null 2>&1; python ../platform/dbt_metrics.py target/run_results.json; done\ncd ..\npython -c \"import duckdb; print(duckdb.connect('platform/metrics.db').execute('select unique_id, count(*), round(avg(execution_time),3) from model_runs group by 1').fetchall())\""}
+        },
+        {
+          "text": "Write the dashboard: per-model runtime over time, the slowest models, and the pass/fail history of tests. This is the platform watching itself — the panel a data engineer checks when someone says \"the pipeline got slow\".",
+          "code": {"lang": "python", "code": "# platform/dashboard.py\nimport duckdb\nimport pandas as pd\nimport streamlit as st\n\nst.set_page_config(page_title=\"Platform health\", layout=\"wide\")\nst.title(\"Warehouse — model runtime and test history\")\n\ncon = duckdb.connect(\"platform/metrics.db\", read_only=True)\nruns = con.execute(\"select * from model_runs order by run_at\").fetch_df()\ncon.close()\n\nif runs.empty:\n    st.info(\"No runs recorded yet — run dbt build and platform/dbt_metrics.py.\")\n    st.stop()\n\nmodels = runs[runs[\"unique_id\"].str.startswith(\"model.\")].copy()\nmodels[\"name\"] = models[\"unique_id\"].str.split(\".\").str[-1]\n\ncol1, col2 = st.columns(2)\ncol1.metric(\"models tracked\", models[\"name\"].nunique())\ncol1.metric(\"runs recorded\", runs[\"run_at\"].nunique())\nslowest = models.groupby(\"name\")[\"execution_time\"].mean().sort_values(ascending=False)\ncol2.subheader(\"Slowest models (avg seconds)\")\ncol2.dataframe(slowest.round(3))\n\nst.subheader(\"Runtime over time\")\npivot = models.pivot_table(index=\"run_at\", columns=\"name\", values=\"execution_time\", aggfunc=\"mean\")\nst.line_chart(pivot)\n\ntests = runs[runs[\"unique_id\"].str.startswith(\"test.\")]\nst.subheader(\"Test outcomes\")\nst.bar_chart(tests.groupby(\"status\").size())"}
+        },
+        {
+          "text": "Run the dashboard.",
+          "code": {"lang": "bash", "code": "streamlit run platform/dashboard.py\n# http://localhost:8501 — the slowest-models table is where a real cost investigation starts"}
+        },
+        {
+          "text": "Write `COST.md`: map every resource in the platform to its real-AWS equivalent and price, so the free local stack teaches the real bill. This is the document a platform engineer is asked for when finance comes calling.",
+          "code": {"lang": "text", "code": "# COST.md — what this platform costs on real AWS\n\n| Local (free)                 | Real AWS                          | Pricing (us-east-1, 2026)                     |\n|------------------------------|-----------------------------------|-----------------------------------------------|\n| LocalStack S3                | S3 Standard                       | ~$0.023/GB-month + $0.0004/1k GET             |\n| DuckDB reading S3            | Athena (serverless SQL over S3)   | $5 per TB scanned — partition + columnar to cut it |\n| DuckDB reading S3 (alt)     | Redshift Serverless               | ~$0.36 per RPU-hour, min charge per query      |\n| dbt on GitHub Actions       | dbt Cloud or self-hosted runner   | Actions minutes; dbt Cloud per-seat            |\n| Terraform local state       | S3 backend + lockfile              | negligible                                     |\n\n## Where the money goes\n- **Scan cost dominates.** Athena/Redshift charge by data scanned, so the levers are: Parquet (columnar),\n  partitioning by date, and not doing `select *`. The lakehouse project's storage module already does the first two.\n- **The lifecycle rule matters.** Expiring raw data at 90 days (prod) / 7 days (dev) is a direct S3 bill reduction;\n  it is one Terraform block, which is why environments-as-code pays for itself.\n- **The runtime dashboard is the early warning.** A model whose execution_time trends up is scanning more data;\n  catch it here before it shows up as a scan-cost spike on the bill.\n\n## To run for real\nUnset `S3_ENDPOINT` (and the LocalStack-only provider settings become no-ops), supply real AWS credentials,\nswap the DuckDB S3 settings for the defaults, and add an S3 backend to infra/. The dbt models do not change."}
+        }
+      ]
+    }
+  ],
+  "troubleshooting": [
+    {"symptom": "`terraform apply` fails with `InvalidAccessKeyId` or a credentials error", "fix": "The provider is not in LocalStack mode. Confirm `var.s3_endpoint` is `http://localhost:4566` (the default) so `local_mode` is true and the dummy credentials and path-style addressing are applied. On real AWS you leave `s3_endpoint` empty and provide real credentials via the environment."},
+    {"symptom": "dbt fails with `IO Error: Connection error for HTTP HEAD` or `403` reading S3", "fix": "DuckDB's S3 settings must match LocalStack: `s3_use_ssl: false`, `s3_url_style: path`, endpoint `localhost:4566`, and the same `test`/`test` credentials Terraform used. If a model reads a bucket that does not exist, run `terraform apply` for that environment first — dbt does not create buckets."},
+    {"symptom": "`dbt build` reads an empty table or errors that no parquet files matched", "fix": "The bronze bucket has no data. Run `platform/seed.py` with the right `PLATFORM_ENV` before building; the model reads `s3://lake-<env>-bronze/orders/*.parquet`, which only exists after seeding. Check with `aws --endpoint-url=http://localhost:4566 s3 ls s3://lake-dev-bronze/orders/`."},
+    {"symptom": "Slim CI (`state:modified+`) runs everything, or nothing", "fix": "It runs everything when there is no baseline manifest — expected on the first PR, and the `|| dbt build` fallback covers it. It runs nothing when the baseline equals the current project (no changes). Confirm the baseline path with `--state ../.dbt-state` points at a directory containing `manifest.json`, and that you edited a model since it was captured."},
+    {"symptom": "Two workspaces seem to share state / applying prod changed dev", "fix": "You did not switch workspaces. `terraform workspace show` before every apply; the bucket names include `terraform.workspace` implicitly only if you wired `var.env` to it — here `var.env` is passed explicitly, so passing `-var env=prod` while in the `dev` workspace would write prod buckets into dev state. Keep the workspace and the `-var env=` value the same; the `plan.sh` wrapper does."},
+    {"symptom": "LocalStack loses all buckets after a restart", "fix": "The community image does not persist S3 by default across `docker compose down`. The compose file mounts `./.localstack` for some persistence; for a clean slate that is fine — just re-run `terraform apply` and `seed.py`. Never rely on LocalStack for durable data; it is a dev target, and that is the point of also writing COST.md for the real thing."}
+  ],
+  "next": [
+    "Move the Terraform state to a real S3 backend with lockfile locking (the DevOps aws-platform project shows the exact block) and run the whole platform against a real AWS account, using the COST.md numbers to set a budget alert.",
+    "Add data-quality gates beyond dbt tests: run the lakehouse project's Great Expectations suite in CI and fail the build on a violated expectation, not just a failed dbt test.",
+    "Replace the DuckDB-over-S3 query layer with a real warehouse (Athena via dbt-athena, or Snowflake) and compare the model SQL changes — most are none, which is the value of dbt's adapter abstraction.",
+    "Generate and serve the dbt docs (`dbt docs generate`) as a static site in CI, so the catalog and lineage graph are always current — the data-discovery layer a platform owes its users.",
+    "Add cost attribution by tagging each dbt model with a team and joining the runtime history to it, so the runtime dashboard answers 'which team's models cost the most', the question a platform team is measured on."
+  ]
+}
