@@ -1,0 +1,363 @@
+{
+  "id": "proj-ai-rag-assistant",
+  "track": "ai",
+  "title": "Ship a RAG assistant over your own docs",
+  "summary": "Build an assistant that answers questions from a folder of Markdown you own — your runbooks, SLO documents and READMEs from the other projects are a perfect corpus — and cites where every answer came from. You will write the indexer (heading-aware chunks, local embeddings, a persistent vector store), the retrieval and grounding logic, an HTTP API with streaming, a golden evaluation set with retrieval and answer-quality scores that gate pull requests, request tracing that shows exactly what the model saw, and a container that deploys anywhere. The point is not the chatbot; it is knowing, with numbers, whether it is right.",
+  "outcome": "A public `docs-assistant` repository: `index.py` builds a Chroma collection from any docs folder in under a minute on a laptop; `POST /ask` streams a grounded answer with numbered citations and returns a trace id; `evals/run.py` reports hit@5, MRR, faithfulness and correctness over a 20-question golden set and fails CI below a threshold you chose; every request writes a trace with the retrieved chunks, tokens and cost; a Docker image on GHCR runs the whole thing with one environment variable, and one hybrid-search improvement you measured — not guessed — moved the numbers.",
+  "hours": 8,
+  "level": "Intermediate",
+  "prereqs": [
+    "The AI track's modules on Python for AI, LLM fundamentals, prompting, RAG, evals and LLM observability",
+    "Python 3.12, Git, Docker, and an Anthropic API key with a few dollars of credit (the whole project, including evals, costs well under $5)",
+    "A folder of Markdown you know well — the `slo/`, `incidents/` and README files from the DevOps and SRE projects work, or any project's docs"
+  ],
+  "tools": [
+    {
+      "name": "Anthropic Python SDK",
+      "why": "answer generation and the LLM-as-judge grader; one client, streaming and non-streaming",
+      "url": "https://github.com/anthropics/anthropic-sdk-python"
+    },
+    {
+      "name": "sentence-transformers (bge-small-en-v1.5)",
+      "why": "embeddings computed locally: free, fast on CPU, and reproducible",
+      "url": "https://www.sbert.net/"
+    },
+    {
+      "name": "Chroma",
+      "why": "an embedded vector store that persists to a folder; no server to run",
+      "url": "https://docs.trychroma.com/"
+    },
+    {
+      "name": "FastAPI + uvicorn",
+      "why": "the API, with server-sent events for streaming",
+      "url": "https://fastapi.tiangolo.com/"
+    },
+    {
+      "name": "rank-bm25",
+      "why": "keyword retrieval to fuse with vectors in the improvement phase",
+      "url": "https://github.com/dorianbrown/rank_bm25"
+    },
+    {
+      "name": "pytest",
+      "why": "unit tests with a fake model so CI never spends money on tests",
+      "url": "https://docs.pytest.org/"
+    }
+  ],
+  "layout": "docs-assistant/\n├── assistant/\n│   ├── __init__.py\n│   ├── config.py          # settings from env: model, paths, k\n│   ├── chunking.py        # markdown → heading-aware chunks\n│   ├── store.py           # embeddings + Chroma collection\n│   ├── retrieve.py        # vector, BM25 and fused retrieval\n│   ├── answer.py          # prompt assembly, Claude call, citation parsing\n│   ├── tracing.py         # per-request JSONL traces\n│   └── api.py             # FastAPI app: /ask, /ask/stream, /health, /metrics\n├── index.py               # CLI: build or refresh the index\n├── evals/\n│   ├── golden.jsonl       # 20+ questions with expected sources and answers\n│   ├── run.py             # retrieval + answer metrics, writes a report\n│   └── judge.py           # LLM-as-judge prompts\n├── tests/\n├── docs/                  # the corpus (or a symlink / git submodule)\n├── traces/                # git-ignored\n├── .github/workflows/ci.yml\n├── Dockerfile\n├── compose.yml\n├── pyproject.toml\n└── README.md",
+  "phases": [
+    {
+      "title": "Set up the project and the corpus",
+      "goal": "A repository with pinned dependencies, the API key loaded from the environment, and a docs folder you can ask real questions about.",
+      "steps": [
+        {
+          "text": "Create the repository and a virtual environment. `uv` is used here because it resolves and installs in seconds; plain `python -m venv` and `pip` work identically.",
+          "code": {
+            "lang": "bash",
+            "code": "mkdir docs-assistant && cd docs-assistant && git init -b main\ncurl -LsSf https://astral.sh/uv/install.sh | sh    # skip if you have uv\nuv venv --python 3.12 && source .venv/bin/activate\nmkdir -p assistant evals tests docs traces .github/workflows\ntouch assistant/__init__.py"
+          }
+        },
+        {
+          "text": "Declare the dependencies in `pyproject.toml` with upper bounds, and install. The embedding model downloads on first use (about 130 MB).",
+          "code": {
+            "lang": "toml",
+            "code": "[project]\nname = \"docs-assistant\"\nversion = \"0.1.0\"\nrequires-python = \">=3.12\"\ndependencies = [\n  \"anthropic>=1.0,<2\",\n  \"chromadb>=1.0,<2\",\n  \"sentence-transformers>=3.3,<4\",\n  \"fastapi>=0.115,<1\",\n  \"uvicorn[standard]>=0.34,<1\",\n  \"pydantic>=2.9,<3\",\n  \"rank-bm25>=0.2,<1\",\n  \"prometheus-fastapi-instrumentator>=7,<8\",\n  \"python-dotenv>=1.0,<2\",\n]\n\n[project.optional-dependencies]\ndev = [\"pytest>=8,<9\", \"httpx>=0.27,<1\", \"ruff>=0.8,<1\"]\n\n[tool.ruff]\nline-length = 100\n\n[tool.setuptools]\npackages = [\"assistant\"]"
+          }
+        },
+        {
+          "text": "Install, then put the API key in a git-ignored `.env`. Nothing else in the project is secret.",
+          "code": {
+            "lang": "bash",
+            "code": "uv pip install -e '.[dev]'\nprintf 'ANTHROPIC_API_KEY=sk-ant-...\\n' > .env\nprintf '.venv/\\n.env\\ntraces/\\n.chroma/\\n__pycache__/\\n.pytest_cache/\\n.ruff_cache/\\nevals/report*.json\\n' > .gitignore\npython -c \"import anthropic; print(anthropic.Anthropic().models.list().data[0].id)\""
+          },
+          "note": "The last line proves the key works by listing models. If you get an authentication error, the key is wrong or the `.env` was not loaded — `export $(cat .env)` for a one-off check."
+        },
+        {
+          "text": "Bring in the corpus. Copy Markdown from projects you did (or any docs you know well) into `docs/`; a few dozen files is plenty. The questions you ask later must be answerable from these files, so pick documents with real content, not stubs.",
+          "code": {
+            "lang": "bash",
+            "code": "cp ../zero-to-prod/slo/*.md ../zero-to-prod/README.md docs/ 2>/dev/null || true\ncp -r ../zero-to-prod/incidents docs/ 2>/dev/null || true\ncp ../aws-platform/README.md docs/aws-platform.md 2>/dev/null || true\nfind docs -name '*.md' | wc -l\nwc -w $(find docs -name '*.md') | tail -1"
+          },
+          "note": "No docs of your own yet? `git clone --depth 1 https://github.com/prometheus/docs prom-docs && cp -r prom-docs/content/docs docs/prometheus` gives a real, well-structured corpus."
+        },
+        {
+          "text": "Write `assistant/config.py` so every tunable lives in one place and can be overridden by the environment — the evals will sweep some of these.",
+          "code": {
+            "lang": "python",
+            "code": "# assistant/config.py\nimport os\nfrom dataclasses import dataclass, field\nfrom pathlib import Path\n\nfrom dotenv import load_dotenv\n\nload_dotenv()\n\n\n@dataclass(frozen=True)\nclass Settings:\n    docs_dir: Path = field(default_factory=lambda: Path(os.getenv(\"DOCS_DIR\", \"docs\")))\n    chroma_dir: Path = field(default_factory=lambda: Path(os.getenv(\"CHROMA_DIR\", \".chroma\")))\n    traces_dir: Path = field(default_factory=lambda: Path(os.getenv(\"TRACES_DIR\", \"traces\")))\n    collection: str = os.getenv(\"COLLECTION\", \"docs\")\n    embedding_model: str = os.getenv(\"EMBEDDING_MODEL\", \"BAAI/bge-small-en-v1.5\")\n    llm_model: str = os.getenv(\"LLM_MODEL\", \"claude-opus-5\")\n    judge_model: str = os.getenv(\"JUDGE_MODEL\", \"claude-opus-5\")\n    chunk_words: int = int(os.getenv(\"CHUNK_WORDS\", \"300\"))\n    chunk_overlap: int = int(os.getenv(\"CHUNK_OVERLAP\", \"40\"))\n    top_k: int = int(os.getenv(\"TOP_K\", \"5\"))\n    retrieval: str = os.getenv(\"RETRIEVAL\", \"vector\")  # vector | bm25 | hybrid\n    max_tokens: int = int(os.getenv(\"MAX_TOKENS\", \"1024\"))\n\n\nsettings = Settings()"
+          },
+          "note": "`claude-opus-5` gives the best answers and the most trustworthy judge. If you want cheaper eval loops while iterating, set `LLM_MODEL=claude-sonnet-5`; keep the judge on Opus so the grader is stronger than the graded."
+        }
+      ]
+    },
+    {
+      "title": "Index: load, chunk, embed, store",
+      "goal": "Every Markdown file becomes heading-aware chunks with metadata, embedded locally and stored in a persistent Chroma collection that can be rebuilt or refreshed with one command.",
+      "steps": [
+        {
+          "text": "Write the chunker. Splitting on headings keeps each chunk about one topic, and carrying the heading path into the chunk text gives the embedding (and the model) the context a bare paragraph lacks. Long sections are further split by word count with overlap.",
+          "code": {
+            "lang": "python",
+            "code": "# assistant/chunking.py\nimport hashlib\nimport re\nfrom dataclasses import dataclass\nfrom pathlib import Path\n\nHEADING = re.compile(r\"^(#{1,6})\\s+(.*)$\", re.MULTILINE)\n\n\n@dataclass\nclass Chunk:\n    id: str\n    text: str\n    path: str\n    heading: str\n    position: int\n\n\ndef _sections(markdown: str):\n    \"\"\"Yield (heading_path, body) pairs, one per heading, keeping the hierarchy.\"\"\"\n    stack: list[str] = []\n    matches = list(HEADING.finditer(markdown))\n    if not matches or matches[0].start() > 0:\n        yield \"\", markdown[: matches[0].start() if matches else len(markdown)]\n    for i, m in enumerate(matches):\n        level = len(m.group(1))\n        stack = stack[: level - 1] + [m.group(2).strip()]\n        end = matches[i + 1].start() if i + 1 < len(matches) else len(markdown)\n        body = markdown[m.end() : end].strip()\n        if body:\n            yield \" > \".join(stack), body\n\n\ndef _windows(words: list[str], size: int, overlap: int):\n    step = max(1, size - overlap)\n    for start in range(0, max(1, len(words) - overlap), step):\n        yield words[start : start + size]\n        if start + size >= len(words):\n            break\n\n\ndef chunk_file(path: Path, root: Path, size: int = 300, overlap: int = 40) -> list[Chunk]:\n    rel = str(path.relative_to(root))\n    title = path.stem.replace(\"-\", \" \").replace(\"_\", \" \")\n    chunks: list[Chunk] = []\n    for heading, body in _sections(path.read_text(encoding=\"utf-8\", errors=\"replace\")):\n        words = body.split()\n        for window in _windows(words, size, overlap):\n            text = f\"{title} — {heading}\\n\\n{' '.join(window)}\" if heading else f\"{title}\\n\\n{' '.join(window)}\"\n            cid = hashlib.sha1(f\"{rel}|{heading}|{text}\".encode()).hexdigest()[:16]\n            chunks.append(Chunk(cid, text, rel, heading, len(chunks)))\n    return chunks\n\n\ndef chunk_dir(root: Path, size: int = 300, overlap: int = 40) -> list[Chunk]:\n    out: list[Chunk] = []\n    for p in sorted(root.rglob(\"*.md\")):\n        out.extend(chunk_file(p, root, size, overlap))\n    return out"
+          }
+        },
+        {
+          "text": "Test the chunker before anything downstream depends on it. Fixtures are tiny Markdown strings, so the tests run in milliseconds and never touch the network.",
+          "code": {
+            "lang": "python",
+            "code": "# tests/test_chunking.py\nfrom pathlib import Path\n\nfrom assistant.chunking import chunk_dir, chunk_file\n\nDOC = \"\"\"# Runbook\\n\\nIntro line.\\n\\n## Symptoms\\n\\nLatency is high. \"\"\" + \"word \" * 700 + \"\"\"\\n\\n## Fix\\n\\nRestart it.\\n\"\"\"\n\n\ndef test_chunks_carry_heading_path(tmp_path: Path):\n    (tmp_path / \"runbook.md\").write_text(DOC)\n    chunks = chunk_file(tmp_path / \"runbook.md\", tmp_path, size=300, overlap=40)\n    headings = {c.heading for c in chunks}\n    assert \"Runbook > Symptoms\" in headings and \"Runbook > Fix\" in headings\n    assert all(c.text.startswith(\"runbook — \") for c in chunks if c.heading)\n\n\ndef test_long_sections_are_windowed_with_overlap(tmp_path: Path):\n    (tmp_path / \"runbook.md\").write_text(DOC)\n    symptoms = [c for c in chunk_file(tmp_path / \"runbook.md\", tmp_path, 300, 40) if c.heading.endswith(\"Symptoms\")]\n    assert len(symptoms) >= 3\n    assert len(set(c.id for c in symptoms)) == len(symptoms)\n\n\ndef test_chunk_dir_is_deterministic(tmp_path: Path):\n    (tmp_path / \"a.md\").write_text(\"# A\\n\\nalpha\\n\")\n    (tmp_path / \"b.md\").write_text(\"# B\\n\\nbeta\\n\")\n    assert [c.id for c in chunk_dir(tmp_path)] == [c.id for c in chunk_dir(tmp_path)]"
+          }
+        },
+        {
+          "text": "Write the store: one embedding model loaded once, one Chroma collection with cosine distance, and an `upsert` keyed by chunk id so re-indexing unchanged files is a no-op. bge models expect a query prefix for retrieval, so the store owns that detail.",
+          "code": {
+            "lang": "python",
+            "code": "# assistant/store.py\nfrom functools import lru_cache\n\nimport chromadb\nfrom sentence_transformers import SentenceTransformer\n\nfrom assistant.chunking import Chunk\nfrom assistant.config import settings\n\nQUERY_PREFIX = \"Represent this sentence for searching relevant passages: \"\n\n\n@lru_cache(maxsize=1)\ndef embedder() -> SentenceTransformer:\n    return SentenceTransformer(settings.embedding_model)\n\n\ndef embed_texts(texts: list[str]) -> list[list[float]]:\n    return embedder().encode(texts, normalize_embeddings=True, batch_size=32).tolist()\n\n\ndef embed_query(q: str) -> list[float]:\n    return embedder().encode([QUERY_PREFIX + q], normalize_embeddings=True)[0].tolist()\n\n\n@lru_cache(maxsize=1)\ndef collection():\n    client = chromadb.PersistentClient(path=str(settings.chroma_dir))\n    return client.get_or_create_collection(settings.collection, metadata={\"hnsw:space\": \"cosine\"})\n\n\ndef upsert(chunks: list[Chunk]) -> int:\n    col = collection()\n    existing = set(col.get(ids=[c.id for c in chunks], include=[])[\"ids\"]) if chunks else set()\n    new = [c for c in chunks if c.id not in existing]\n    for i in range(0, len(new), 64):\n        batch = new[i : i + 64]\n        col.upsert(\n            ids=[c.id for c in batch],\n            documents=[c.text for c in batch],\n            embeddings=embed_texts([c.text for c in batch]),\n            metadatas=[{\"path\": c.path, \"heading\": c.heading, \"position\": c.position} for c in batch],\n        )\n    return len(new)\n\n\ndef reset() -> None:\n    chromadb.PersistentClient(path=str(settings.chroma_dir)).delete_collection(settings.collection)\n    collection.cache_clear()\n\n\ndef prune(keep_ids: set[str]) -> int:\n    col = collection()\n    all_ids = col.get(include=[])[\"ids\"]\n    stale = [i for i in all_ids if i not in keep_ids]\n    if stale:\n        col.delete(ids=stale)\n    return len(stale)\n\n\ndef all_documents() -> tuple[list[str], list[str], list[dict]]:\n    got = collection().get(include=[\"documents\", \"metadatas\"])\n    return got[\"ids\"], got[\"documents\"], got[\"metadatas\"]"
+          },
+          "note": "Chunk ids are content hashes, so an edited paragraph gets a new id, the old one is pruned, and untouched chunks are skipped. That is incremental indexing in fifteen lines."
+        },
+        {
+          "text": "Write the CLI and build the index. Timing and counts are printed because you will change the chunk size later and want to see the effect.",
+          "code": {
+            "lang": "python",
+            "code": "# index.py\nimport argparse\nimport time\nfrom pathlib import Path\n\nfrom assistant.chunking import chunk_dir\nfrom assistant.config import settings\nfrom assistant.store import collection, prune, reset, upsert\n\n\ndef main() -> None:\n    ap = argparse.ArgumentParser(description=\"Build or refresh the docs index\")\n    ap.add_argument(\"--docs\", default=str(settings.docs_dir))\n    ap.add_argument(\"--rebuild\", action=\"store_true\", help=\"delete the collection first\")\n    args = ap.parse_args()\n\n    t0 = time.perf_counter()\n    if args.rebuild:\n        reset()\n    chunks = chunk_dir(Path(args.docs), settings.chunk_words, settings.chunk_overlap)\n    added = upsert(chunks)\n    removed = prune({c.id for c in chunks})\n    files = len({c.path for c in chunks})\n    print(f\"{files} files, {len(chunks)} chunks, {added} added, {removed} removed, \"\n          f\"{collection().count()} in collection, {time.perf_counter() - t0:.1f}s\")\n\n\nif __name__ == \"__main__\":\n    main()"
+          }
+        },
+        {
+          "text": "Run it twice: the second run should add nothing. Then poke at the collection to see what a chunk looks like — this is what the model will be given.",
+          "code": {
+            "lang": "bash",
+            "code": "python index.py\npython index.py           # ... 0 added, 0 removed\npython - <<'EOF'\nfrom assistant.store import collection, embed_query\ncol = collection()\nr = col.query(query_embeddings=[embed_query(\"what do I do when the error budget burns too fast\")], n_results=3, include=[\"documents\", \"metadatas\", \"distances\"])\nfor doc, meta, dist in zip(r[\"documents\"][0], r[\"metadatas\"][0], r[\"distances\"][0]):\n    print(f\"{dist:.3f}  {meta['path']}  |  {meta['heading']}\\n    {doc[:160]}...\\n\")\nEOF"
+          },
+          "note": "Ask three or four questions you know the answer to and check the right chunk is in the top three. If it is not, the problem is upstream of any prompt and no prompt will fix it."
+        }
+      ]
+    },
+    {
+      "title": "Retrieve, ground, answer, cite",
+      "goal": "A question goes in; a grounded answer with numbered citations to real chunks comes out, and the model is told to say so when the docs do not contain the answer.",
+      "steps": [
+        {
+          "text": "Write the retriever with a single interface the API and the evals will share. Vector search now; the other strategies fill in during the improvement phase.",
+          "code": {
+            "lang": "python",
+            "code": "# assistant/retrieve.py\nfrom dataclasses import dataclass\n\nfrom assistant.config import settings\nfrom assistant.store import collection, embed_query\n\n\n@dataclass\nclass Hit:\n    id: str\n    text: str\n    path: str\n    heading: str\n    score: float\n\n\ndef vector_search(question: str, k: int) -> list[Hit]:\n    r = collection().query(\n        query_embeddings=[embed_query(question)], n_results=k,\n        include=[\"documents\", \"metadatas\", \"distances\"],\n    )\n    return [\n        Hit(i, d, m[\"path\"], m[\"heading\"], 1.0 - dist)\n        for i, d, m, dist in zip(r[\"ids\"][0], r[\"documents\"][0], r[\"metadatas\"][0], r[\"distances\"][0])\n    ]\n\n\ndef retrieve(question: str, k: int | None = None, strategy: str | None = None) -> list[Hit]:\n    k = k or settings.top_k\n    strategy = strategy or settings.retrieval\n    if strategy == \"vector\":\n        return vector_search(question, k)\n    raise ValueError(f\"unknown retrieval strategy: {strategy}\")"
+          }
+        },
+        {
+          "text": "Write the answerer. The system prompt is the contract: answer only from the numbered sources, cite them inline as `[n]`, and refuse cleanly when they do not cover the question. The sources go in the user turn so the stable system prompt can be cached across requests.",
+          "code": {
+            "lang": "python",
+            "code": "# assistant/answer.py\nimport re\nfrom dataclasses import dataclass, field\n\nimport anthropic\n\nfrom assistant.config import settings\nfrom assistant.retrieve import Hit, retrieve\n\nSYSTEM = \"\"\"You answer questions about a set of internal documents.\n\nRules:\n- Use ONLY the numbered sources provided. Do not use outside knowledge.\n- Cite every claim with the source number in square brackets, like [2]. Cite at most three sources per sentence.\n- If the sources do not contain the answer, reply exactly: \"I couldn't find this in the docs.\" and, if useful, say what the closest source covers.\n- Be concise: a short paragraph or a list of steps. Quote commands verbatim from the sources.\"\"\"\n\nCITATION = re.compile(r\"\\[(\\d+)\\]\")\n\n\n@dataclass\nclass Answer:\n    text: str\n    hits: list[Hit]\n    cited: list[int] = field(default_factory=list)\n    input_tokens: int = 0\n    output_tokens: int = 0\n    model: str = \"\"\n\n\ndef format_sources(hits: list[Hit]) -> str:\n    return \"\\n\\n\".join(f\"[{i}] {h.path} — {h.heading}\\n{h.text}\" for i, h in enumerate(hits, start=1))\n\n\ndef build_user_message(question: str, hits: list[Hit]) -> str:\n    return f\"Sources:\\n\\n{format_sources(hits)}\\n\\nQuestion: {question}\"\n\n\ndef parse_citations(text: str, n: int) -> list[int]:\n    return sorted({int(m) for m in CITATION.findall(text) if 1 <= int(m) <= n})\n\n\n_client: anthropic.Anthropic | None = None\n\n\ndef client() -> anthropic.Anthropic:\n    global _client\n    if _client is None:\n        _client = anthropic.Anthropic()\n    return _client\n\n\ndef answer(question: str, k: int | None = None, strategy: str | None = None) -> Answer:\n    hits = retrieve(question, k, strategy)\n    if not hits:\n        return Answer(\"I couldn't find this in the docs.\", [], model=settings.llm_model)\n    resp = client().messages.create(\n        model=settings.llm_model,\n        max_tokens=settings.max_tokens,\n        system=[{\"type\": \"text\", \"text\": SYSTEM, \"cache_control\": {\"type\": \"ephemeral\"}}],\n        messages=[{\"role\": \"user\", \"content\": build_user_message(question, hits)}],\n    )\n    text = \"\".join(b.text for b in resp.content if b.type == \"text\").strip()\n    return Answer(\n        text=text, hits=hits, cited=parse_citations(text, len(hits)),\n        input_tokens=resp.usage.input_tokens, output_tokens=resp.usage.output_tokens,\n        model=resp.model,\n    )\n\n\ndef answer_stream(question: str, k: int | None = None, strategy: str | None = None):\n    \"\"\"Yield (event, payload): ('sources', hits) first, then ('delta', text)..., then ('done', Answer).\"\"\"\n    hits = retrieve(question, k, strategy)\n    yield \"sources\", hits\n    if not hits:\n        yield \"done\", Answer(\"I couldn't find this in the docs.\", [], model=settings.llm_model)\n        return\n    with client().messages.stream(\n        model=settings.llm_model,\n        max_tokens=settings.max_tokens,\n        system=[{\"type\": \"text\", \"text\": SYSTEM, \"cache_control\": {\"type\": \"ephemeral\"}}],\n        messages=[{\"role\": \"user\", \"content\": build_user_message(question, hits)}],\n    ) as stream:\n        for delta in stream.text_stream:\n            yield \"delta\", delta\n        final = stream.get_final_message()\n    text = \"\".join(b.text for b in final.content if b.type == \"text\").strip()\n    yield \"done\", Answer(text, hits, parse_citations(text, len(hits)),\n                         final.usage.input_tokens, final.usage.output_tokens, final.model)"
+          },
+          "note": "`cache_control` on the system block means repeated requests pay a fraction of the input price for that prefix. The sources change per request, so they sit after it — order matters for caching."
+        },
+        {
+          "text": "Test the prompt assembly and citation parsing without the network. A fake client stands in for Anthropic so the test suite is free and deterministic.",
+          "code": {
+            "lang": "python",
+            "code": "# tests/test_answer.py\nfrom types import SimpleNamespace\n\nimport pytest\n\nfrom assistant import answer as mod\nfrom assistant.retrieve import Hit\n\nHITS = [Hit(\"a\", \"Restart with `systemctl restart app`.\", \"runbook.md\", \"Runbook > Fix\", 0.9),\n        Hit(\"b\", \"Latency alert fires above 400 ms.\", \"slo.md\", \"SLO > Latency\", 0.8)]\n\n\nclass FakeMessages:\n    def __init__(self, text):\n        self.text = text\n        self.calls = []\n\n    def create(self, **kw):\n        self.calls.append(kw)\n        return SimpleNamespace(content=[SimpleNamespace(type=\"text\", text=self.text)],\n                               usage=SimpleNamespace(input_tokens=100, output_tokens=20), model=\"fake\")\n\n\n@pytest.fixture\ndef fake(monkeypatch):\n    fm = FakeMessages(\"Restart it [1]. The alert threshold is 400 ms [2][7].\")\n    monkeypatch.setattr(mod, \"_client\", SimpleNamespace(messages=fm))\n    monkeypatch.setattr(mod, \"retrieve\", lambda q, k=None, s=None: HITS)\n    return fm\n\n\ndef test_sources_are_numbered_and_question_last():\n    msg = mod.build_user_message(\"how do I fix it?\", HITS)\n    assert msg.index(\"[1] runbook.md\") < msg.index(\"[2] slo.md\") < msg.index(\"Question: how do I fix it?\")\n\n\ndef test_answer_parses_only_valid_citations(fake):\n    a = mod.answer(\"how do I fix it?\")\n    assert a.cited == [1, 2]            # [7] is out of range and dropped\n    assert a.input_tokens == 100 and a.model == \"fake\"\n    assert fake.calls[0][\"system\"][0][\"cache_control\"] == {\"type\": \"ephemeral\"}\n\n\ndef test_no_hits_short_circuits(monkeypatch):\n    monkeypatch.setattr(mod, \"retrieve\", lambda q, k=None, s=None: [])\n    a = mod.answer(\"anything\")\n    assert a.text.startswith(\"I couldn't find\") and a.hits == []"
+          }
+        },
+        {
+          "text": "Ask it something for real from the command line, and something the docs cannot answer. Read the whole output: the citations must point at chunks that actually support the sentence.",
+          "code": {
+            "lang": "bash",
+            "code": "python - <<'EOF'\nfrom assistant.answer import answer\nfor q in [\"What burn rate pages the on-call, and over which windows?\", \"What is the capital of France?\"]:\n    a = answer(q)\n    print(\"Q:\", q)\n    print(a.text)\n    for i in a.cited:\n        h = a.hits[i - 1]\n        print(f\"  [{i}] {h.path} — {h.heading}\")\n    print(f\"  tokens in/out: {a.input_tokens}/{a.output_tokens}\\n\")\nEOF"
+          },
+          "note": "The second question must come back as \"I couldn't find this in the docs.\" If the model answers it anyway, the refusal rule is being ignored — tighten the wording before building anything else on top."
+        },
+        {
+          "text": "Commit the core and run the suite.",
+          "code": {
+            "lang": "bash",
+            "code": "ruff check . && pytest -q\ngit add . && git commit -m \"feat: chunking, local embeddings, Chroma index, grounded answers with citations\"\ngh repo create docs-assistant --public --source=. --remote=origin --push"
+          }
+        }
+      ]
+    },
+    {
+      "title": "Put it behind an API with tracing",
+      "goal": "`POST /ask` returns a structured answer, `POST /ask/stream` streams tokens as server-sent events, every request writes a trace you can replay, and `/metrics` exposes request counts and latency for Prometheus.",
+      "steps": [
+        {
+          "text": "Write the tracer first: one JSON line per request with the question, retrieval hits and scores, the citations, tokens, an estimated cost and timings. This is the record you will open when someone says \"it gave a wrong answer yesterday\".",
+          "code": {
+            "lang": "python",
+            "code": "# assistant/tracing.py\nimport json\nimport time\nimport uuid\nfrom datetime import datetime, timezone\n\nfrom assistant.config import settings\n\n# USD per million tokens; keep current with the pricing page\nPRICES = {\"claude-opus-5\": (5.0, 25.0), \"claude-sonnet-5\": (3.0, 15.0)}\n\n\ndef estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float:\n    base = next((v for k, v in PRICES.items() if model.startswith(k)), (0.0, 0.0))\n    return round((tokens_in * base[0] + tokens_out * base[1]) / 1_000_000, 6)\n\n\nclass Trace:\n    def __init__(self, question: str, strategy: str, k: int):\n        self.id = uuid.uuid4().hex[:12]\n        self.t0 = time.perf_counter()\n        self.data: dict = {\n            \"trace_id\": self.id, \"ts\": datetime.now(timezone.utc).isoformat(),\n            \"question\": question, \"strategy\": strategy, \"k\": k, \"timings_ms\": {},\n        }\n\n    def mark(self, name: str) -> None:\n        self.data[\"timings_ms\"][name] = round((time.perf_counter() - self.t0) * 1000, 1)\n\n    def finish(self, answer) -> dict:\n        self.mark(\"total\")\n        self.data.update({\n            \"hits\": [{\"id\": h.id, \"path\": h.path, \"heading\": h.heading, \"score\": round(h.score, 4)} for h in answer.hits],\n            \"answer\": answer.text, \"cited\": answer.cited, \"model\": answer.model,\n            \"tokens\": {\"in\": answer.input_tokens, \"out\": answer.output_tokens},\n            \"cost_usd\": estimate_cost(answer.model, answer.input_tokens, answer.output_tokens),\n        })\n        settings.traces_dir.mkdir(parents=True, exist_ok=True)\n        with open(settings.traces_dir / f\"{datetime.now(timezone.utc):%Y-%m-%d}.jsonl\", \"a\") as f:\n            f.write(json.dumps(self.data) + \"\\n\")\n        return self.data"
+          }
+        },
+        {
+          "text": "Write the API. Pydantic models define the contract; the streaming endpoint sends the sources first (so a UI can render them immediately), then text deltas, then a final event with the trace id.",
+          "code": {
+            "lang": "python",
+            "code": "# assistant/api.py\nimport json\n\nfrom fastapi import FastAPI\nfrom fastapi.responses import StreamingResponse\nfrom prometheus_fastapi_instrumentator import Instrumentator\nfrom pydantic import BaseModel, Field\n\nfrom assistant import answer as core\nfrom assistant.config import settings\nfrom assistant.tracing import Trace\n\napp = FastAPI(title=\"docs-assistant\")\nInstrumentator().instrument(app).expose(app, endpoint=\"/metrics\")\n\n\nclass AskRequest(BaseModel):\n    question: str = Field(min_length=3, max_length=2000)\n    k: int | None = Field(default=None, ge=1, le=20)\n    strategy: str | None = None\n\n\nclass Source(BaseModel):\n    n: int\n    path: str\n    heading: str\n    score: float\n\n\nclass AskResponse(BaseModel):\n    trace_id: str\n    answer: str\n    sources: list[Source]\n    cited: list[int]\n    model: str\n    tokens_in: int\n    tokens_out: int\n\n\n@app.get(\"/health\")\ndef health():\n    return {\"status\": \"ok\", \"model\": settings.llm_model, \"retrieval\": settings.retrieval}\n\n\n@app.post(\"/ask\", response_model=AskResponse)\ndef ask(req: AskRequest):\n    trace = Trace(req.question, req.strategy or settings.retrieval, req.k or settings.top_k)\n    a = core.answer(req.question, req.k, req.strategy)\n    trace.finish(a)\n    return AskResponse(\n        trace_id=trace.id, answer=a.text, cited=a.cited, model=a.model,\n        tokens_in=a.input_tokens, tokens_out=a.output_tokens,\n        sources=[Source(n=i, path=h.path, heading=h.heading, score=round(h.score, 4)) for i, h in enumerate(a.hits, 1)],\n    )\n\n\n@app.post(\"/ask/stream\")\ndef ask_stream(req: AskRequest):\n    trace = Trace(req.question, req.strategy or settings.retrieval, req.k or settings.top_k)\n\n    def events():\n        for kind, payload in core.answer_stream(req.question, req.k, req.strategy):\n            if kind == \"sources\":\n                trace.mark(\"retrieval\")\n                data = [{\"n\": i, \"path\": h.path, \"heading\": h.heading} for i, h in enumerate(payload, 1)]\n                yield f\"event: sources\\ndata: {json.dumps(data)}\\n\\n\"\n            elif kind == \"delta\":\n                yield f\"event: delta\\ndata: {json.dumps(payload)}\\n\\n\"\n            else:\n                trace.finish(payload)\n                yield f\"event: done\\ndata: {json.dumps({'trace_id': trace.id, 'cited': payload.cited})}\\n\\n\"\n\n    return StreamingResponse(events(), media_type=\"text/event-stream\",\n                             headers={\"Cache-Control\": \"no-cache\", \"X-Accel-Buffering\": \"no\"})"
+          }
+        },
+        {
+          "text": "Test the API with the same fake model, then run it for real and stream an answer with curl.",
+          "code": {
+            "lang": "python",
+            "code": "# tests/test_api.py\nfrom types import SimpleNamespace\n\nfrom fastapi.testclient import TestClient\n\nfrom assistant import answer as core\nfrom assistant.api import app\nfrom assistant.retrieve import Hit\n\n\ndef test_ask_returns_sources_and_trace(monkeypatch, tmp_path):\n    from assistant import tracing\n    monkeypatch.setattr(tracing, \"settings\", SimpleNamespace(traces_dir=tmp_path))\n    hits = [Hit(\"a\", \"text\", \"runbook.md\", \"Runbook > Fix\", 0.9)]\n    monkeypatch.setattr(core, \"answer\", lambda q, k=None, s=None: core.Answer(\"Do X [1].\", hits, [1], 10, 5, \"fake\"))\n    r = TestClient(app).post(\"/ask\", json={\"question\": \"how do I fix it?\"})\n    assert r.status_code == 200\n    body = r.json()\n    assert body[\"cited\"] == [1] and body[\"sources\"][0][\"path\"] == \"runbook.md\" and len(body[\"trace_id\"]) == 12\n    assert list(tmp_path.glob(\"*.jsonl\"))\n\n\ndef test_ask_rejects_short_question():\n    assert TestClient(app).post(\"/ask\", json={\"question\": \"hi\"}).status_code == 422"
+          },
+          "note": "The tracer's `settings` is swapped for a stand-in that only has `traces_dir`, so tests never write into `traces/`. `Settings` is frozen, which is exactly why the module reference is patched rather than the attribute."
+        },
+        {
+          "text": "Run the server and try both endpoints. Then open the trace the request wrote.",
+          "code": {
+            "lang": "bash",
+            "code": "uvicorn assistant.api:app --port 8000 &\nsleep 3\ncurl -s localhost:8000/ask -H 'content-type: application/json' \\\n  -d '{\"question\":\"How do I acknowledge a page and where is the runbook?\"}' | python3 -m json.tool\ncurl -sN localhost:8000/ask/stream -H 'content-type: application/json' \\\n  -d '{\"question\":\"What are the severity levels?\"}'\ntail -1 traces/$(date -u +%F).jsonl | python3 -m json.tool | head -40\ncurl -s localhost:8000/metrics | grep http_request_duration_seconds_count\nkill %1"
+          }
+        }
+      ]
+    },
+    {
+      "title": "Evals: know whether it is right",
+      "goal": "A golden set of questions with known sources and answers, retrieval metrics (hit@k, MRR) that cost nothing, answer metrics (faithfulness, correctness) graded by a stronger model, and a report you can compare between commits.",
+      "steps": [
+        {
+          "text": "Write the golden set: at least twenty questions, each with the file that answers it and a reference answer written by you from the docs. Include three or four questions the docs do *not* answer, with `\"expected_answer\": null`, so refusals are measured too.",
+          "code": {
+            "lang": "text",
+            "code": "# evals/golden.jsonl — one JSON object per line, e.g.\n{\"id\": \"q01\", \"question\": \"Which burn rates page and over which windows?\", \"expected_paths\": [\"SLO.md\"], \"expected_answer\": \"14.4x over 1h/5m and 6x over 6h/30m page; 3x over 1d/2h and 1x over 3d/6h open tickets.\"}\n{\"id\": \"q02\", \"question\": \"What is the first thing the incident commander does after declaring?\", \"expected_paths\": [\"incidents/PROCESS.md\", \"incidents/roles/commander.md\"], \"expected_answer\": \"Assigns roles (investigator, comms, scribe) and posts the first status update within 10 minutes.\"}\n{\"id\": \"q18\", \"question\": \"How do I reset the Grafana admin password?\", \"expected_paths\": [], \"expected_answer\": null}"
+          },
+          "note": "Writing the reference answers is the slowest part of the whole project and the most valuable: it forces you to read the docs the way the assistant will. Keep questions phrased the way a colleague would ask, not the way the document is worded."
+        },
+        {
+          "text": "Write the judge. Two rubrics, each returning a single integer, on the answer and the sources it was shown — faithfulness asks whether every claim is supported by the sources; correctness compares against your reference answer.",
+          "code": {
+            "lang": "python",
+            "code": "# evals/judge.py\nimport re\n\nimport anthropic\n\nfrom assistant.config import settings\n\nFAITHFULNESS = \"\"\"You are grading whether an answer is supported by the sources it cites.\nScore 1 if every factual claim in the answer is supported by the sources, 0 otherwise.\nAn answer of \"I couldn't find this in the docs.\" is always supported (score 1).\n\nSources:\n{sources}\n\nAnswer:\n{answer}\n\nReply with only the digit 0 or 1.\"\"\"\n\nCORRECTNESS = \"\"\"You are grading an answer against a reference written by a domain expert.\nScore 2 if the answer conveys the same facts as the reference (wording may differ),\n1 if it is partially correct or incomplete, 0 if it is wrong or answers a different question.\nIf the reference is \"NONE\", the correct behaviour is to say the docs do not contain the answer: score 2 for that, 0 for anything else.\n\nQuestion: {question}\nReference: {reference}\nAnswer: {answer}\n\nReply with only the digit 0, 1 or 2.\"\"\"\n\n_client = anthropic.Anthropic()\n\n\ndef _score(prompt: str, valid: str) -> int:\n    r = _client.messages.create(model=settings.judge_model, max_tokens=5,\n                                messages=[{\"role\": \"user\", \"content\": prompt}])\n    text = \"\".join(b.text for b in r.content if b.type == \"text\")\n    m = re.search(f\"[{valid}]\", text)\n    return int(m.group(0)) if m else 0\n\n\ndef faithfulness(answer: str, sources: str) -> int:\n    return _score(FAITHFULNESS.format(sources=sources, answer=answer), \"01\")\n\n\ndef correctness(question: str, reference: str | None, answer: str) -> int:\n    return _score(CORRECTNESS.format(question=question, reference=reference or \"NONE\", answer=answer), \"012\")"
+          }
+        },
+        {
+          "text": "Write the runner. Retrieval metrics run over every question for free; the answer metrics call the model, so `--retrieval-only` exists for quick loops. The report is JSON with a summary and every per-question row, so a regression can be traced to one question.",
+          "code": {
+            "lang": "python",
+            "code": "# evals/run.py\nimport argparse\nimport json\nimport statistics\nimport sys\nfrom pathlib import Path\n\nfrom assistant.answer import answer, format_sources\nfrom assistant.config import settings\nfrom assistant.retrieve import retrieve\nfrom evals.judge import correctness, faithfulness\n\n\ndef retrieval_metrics(expected: list[str], hits) -> dict:\n    ranks = [i for i, h in enumerate(hits, 1) if any(h.path.endswith(p) for p in expected)]\n    return {\"hit@k\": int(bool(ranks)), \"rr\": 1.0 / ranks[0] if ranks else 0.0}\n\n\ndef main() -> int:\n    ap = argparse.ArgumentParser()\n    ap.add_argument(\"--golden\", default=\"evals/golden.jsonl\")\n    ap.add_argument(\"--retrieval-only\", action=\"store_true\")\n    ap.add_argument(\"--strategy\", default=settings.retrieval)\n    ap.add_argument(\"--k\", type=int, default=settings.top_k)\n    ap.add_argument(\"--out\", default=\"evals/report.json\")\n    ap.add_argument(\"--min-hit\", type=float, default=0.0)\n    ap.add_argument(\"--min-correct\", type=float, default=0.0)\n    args = ap.parse_args()\n\n    rows = []\n    for line in Path(args.golden).read_text().splitlines():\n        if not line.strip():\n            continue\n        q = json.loads(line)\n        row = {\"id\": q[\"id\"], \"question\": q[\"question\"]}\n        if q[\"expected_paths\"]:\n            row.update(retrieval_metrics(q[\"expected_paths\"], retrieve(q[\"question\"], args.k, args.strategy)))\n        if not args.retrieval_only:\n            a = answer(q[\"question\"], args.k, args.strategy)\n            row[\"answer\"] = a.text\n            row[\"faithful\"] = faithfulness(a.text, format_sources(a.hits))\n            row[\"correct\"] = correctness(q[\"question\"], q[\"expected_answer\"], a.text) / 2\n            row[\"tokens_in\"] = a.input_tokens\n        rows.append(row)\n        print(f\"{q['id']}: \" + \" \".join(f\"{k}={v}\" for k, v in row.items() if k in ('hit@k', 'rr', 'faithful', 'correct')))\n\n    def mean(key):\n        vals = [r[key] for r in rows if key in r]\n        return round(statistics.mean(vals), 3) if vals else None\n\n    summary = {\"n\": len(rows), \"strategy\": args.strategy, \"k\": args.k, \"model\": settings.llm_model,\n               \"hit@k\": mean(\"hit@k\"), \"mrr\": mean(\"rr\"), \"faithfulness\": mean(\"faithful\"), \"correctness\": mean(\"correct\")}\n    Path(args.out).write_text(json.dumps({\"summary\": summary, \"rows\": rows}, indent=2))\n    print(json.dumps(summary))\n\n    failed = (summary[\"hit@k\"] is not None and summary[\"hit@k\"] < args.min_hit) or \\\n             (summary[\"correctness\"] is not None and summary[\"correctness\"] < args.min_correct)\n    return 1 if failed else 0\n\n\nif __name__ == \"__main__\":\n    sys.exit(main())"
+          }
+        },
+        {
+          "text": "Run the retrieval-only evals first; they take seconds and cost nothing. Then the full run. Write the numbers down — they are your baseline.",
+          "code": {
+            "lang": "bash",
+            "code": "touch evals/__init__.py\npython -m evals.run --retrieval-only\npython -m evals.run --out evals/report-baseline.json\npython3 -c \"import json; print(json.load(open('evals/report-baseline.json'))['summary'])\""
+          },
+          "note": "Typical first numbers on a small corpus: hit@5 around 0.8, MRR 0.6, faithfulness above 0.9, correctness around 0.7. Whatever yours are, open the rows with `correct` = 0 and read the answer next to the reference — most failures are retrieval misses, not model mistakes."
+        },
+        {
+          "text": "Look at one failure properly, using the trace rather than guessing: was the right chunk retrieved but not cited, retrieved and mis-read, or never retrieved? Each has a different fix.",
+          "code": {
+            "lang": "bash",
+            "code": "python3 - <<'EOF'\nimport json\nrep = json.load(open('evals/report-baseline.json'))\nbad = [r for r in rep['rows'] if r.get('correct', 1) < 1]\nfor r in bad[:5]:\n    print(r['id'], '| hit@k', r.get('hit@k'), '| faithful', r.get('faithful'))\n    print('  Q:', r['question'])\n    print('  A:', r.get('answer', '')[:300].replace('\\n', ' '))\nEOF"
+          }
+        }
+      ]
+    },
+    {
+      "title": "Improve retrieval and prove it with the evals",
+      "goal": "Add keyword search fused with vector search, sweep chunk size and k, and keep whichever configuration the golden set says is best.",
+      "steps": [
+        {
+          "text": "Add BM25 and reciprocal-rank fusion to the retriever. Vectors find paraphrases; BM25 finds exact identifiers, flags and error strings that embeddings blur. Fusing by rank rather than score sidesteps the fact that the two scores are not comparable.",
+          "code": {
+            "lang": "python",
+            "code": "# assistant/retrieve.py — add below vector_search, and extend retrieve()\nfrom functools import lru_cache\n\nfrom rank_bm25 import BM25Okapi\n\nfrom assistant.store import all_documents\n\n\n@lru_cache(maxsize=1)\ndef _bm25():\n    ids, docs, metas = all_documents()\n    return ids, docs, metas, BM25Okapi([d.lower().split() for d in docs])\n\n\ndef bm25_search(question: str, k: int) -> list[Hit]:\n    ids, docs, metas, index = _bm25()\n    scores = index.get_scores(question.lower().split())\n    top = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k]\n    return [Hit(ids[i], docs[i], metas[i][\"path\"], metas[i][\"heading\"], float(scores[i])) for i in top if scores[i] > 0]\n\n\ndef rrf(*rankings: list[Hit], k: int, c: int = 60) -> list[Hit]:\n    fused: dict[str, float] = {}\n    by_id: dict[str, Hit] = {}\n    for ranking in rankings:\n        for rank, hit in enumerate(ranking, 1):\n            fused[hit.id] = fused.get(hit.id, 0.0) + 1.0 / (c + rank)\n            by_id.setdefault(hit.id, hit)\n    return [Hit(i, by_id[i].text, by_id[i].path, by_id[i].heading, s)\n            for i, s in sorted(fused.items(), key=lambda kv: kv[1], reverse=True)[:k]]\n\n\ndef retrieve(question: str, k: int | None = None, strategy: str | None = None) -> list[Hit]:\n    k = k or settings.top_k\n    strategy = strategy or settings.retrieval\n    if strategy == \"vector\":\n        return vector_search(question, k)\n    if strategy == \"bm25\":\n        return bm25_search(question, k)\n    if strategy == \"hybrid\":\n        return rrf(vector_search(question, k * 2), bm25_search(question, k * 2), k=k)\n    raise ValueError(f\"unknown retrieval strategy: {strategy}\")"
+          },
+          "note": "Replace the earlier `retrieve()` with this one. The BM25 index is built from the collection on first use and cached; after re-indexing, restart the process (or call `_bm25.cache_clear()`)."
+        },
+        {
+          "text": "Compare the three strategies on retrieval metrics — free and fast — then run the full evals only for the winner.",
+          "code": {
+            "lang": "bash",
+            "code": "for s in vector bm25 hybrid; do\n  python -m evals.run --retrieval-only --strategy \"$s\" --out \"evals/report-$s.json\" | tail -1\ndone\nfor k in 3 5 8; do\n  python -m evals.run --retrieval-only --strategy hybrid --k \"$k\" --out \"evals/report-hybrid-k$k.json\" | tail -1\ndone"
+          }
+        },
+        {
+          "text": "Try one chunk-size change as well, since it is the other lever that moves retrieval most. Re-index with a different `CHUNK_WORDS`, re-run, and restore whichever was better. Then set the winning defaults in `config.py` (or the environment) and run the full evals once more to get the new baseline.",
+          "code": {
+            "lang": "bash",
+            "code": "CHUNK_WORDS=180 CHUNK_OVERLAP=30 python index.py --rebuild\npython -m evals.run --retrieval-only --strategy hybrid --out evals/report-hybrid-180.json | tail -1\npython index.py --rebuild     # back to the default size if 180 was not better\nRETRIEVAL=hybrid python -m evals.run --out evals/report-hybrid-full.json | tail -1\ngit add assistant/retrieve.py evals && git commit -m \"feat(retrieval): BM25 + RRF hybrid; evals show hit@5 x -> y\""
+          },
+          "note": "Put the actual numbers in the commit message. A retrieval change without a measured delta is a guess; with one it is engineering."
+        }
+      ]
+    },
+    {
+      "title": "CI with an eval gate, a container, and a deploy",
+      "goal": "Pull requests run the unit tests and the retrieval evals; merges to main also run the graded evals against a threshold; the image on GHCR runs anywhere with one environment variable.",
+      "steps": [
+        {
+          "text": "Write the workflow. Unit tests and retrieval evals need no key, so they run on every PR from anyone. The graded evals use the repository secret and run on `main` and on PRs from the repo itself, with thresholds a little under your baseline so noise does not block merges.",
+          "code": {
+            "lang": "yaml",
+            "code": "name: ci\n\non:\n  pull_request:\n  push:\n    branches: [main]\n\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: astral-sh/setup-uv@v5\n      - run: uv venv --python 3.12 && uv pip install -e '.[dev]'\n      - run: .venv/bin/ruff check .\n      - run: .venv/bin/pytest -q\n      - name: Retrieval evals (no API key needed)\n        run: |\n          .venv/bin/python index.py\n          .venv/bin/python -m evals.run --retrieval-only --strategy hybrid --min-hit 0.75\n\n  graded-evals:\n    needs: test\n    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository\n    runs-on: ubuntu-latest\n    env:\n      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}\n      RETRIEVAL: hybrid\n    steps:\n      - uses: actions/checkout@v4\n      - uses: astral-sh/setup-uv@v5\n      - run: uv venv --python 3.12 && uv pip install -e '.[dev]'\n      - run: .venv/bin/python index.py\n      - run: .venv/bin/python -m evals.run --min-correct 0.65 --out evals/report.json\n      - uses: actions/upload-artifact@v4\n        if: always()\n        with:\n          name: eval-report\n          path: evals/report.json\n\n  image:\n    needs: test\n    if: github.event_name == 'push'\n    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n      packages: write\n    steps:\n      - uses: actions/checkout@v4\n      - uses: docker/login-action@v3\n        with:\n          registry: ghcr.io\n          username: ${{ github.actor }}\n          password: ${{ secrets.GITHUB_TOKEN }}\n      - uses: docker/build-push-action@v6\n        with:\n          context: .\n          push: true\n          tags: |\n            ghcr.io/${{ github.repository }}:latest\n            ghcr.io/${{ github.repository }}:${{ github.sha }}"
+          },
+          "note": "`gh secret set ANTHROPIC_API_KEY` before the first push. The graded job costs roughly a few cents per run with twenty questions; the retrieval job is free, which is why it runs everywhere."
+        },
+        {
+          "text": "Write the Dockerfile. The embedding model is downloaded at build time so the container starts in seconds and works without internet access to Hugging Face. The docs are copied in and indexed at build as well, so the image is self-contained; mount a volume over `/app/docs` and re-run `index.py` to change the corpus.",
+          "code": {
+            "lang": "dockerfile",
+            "code": "# syntax=docker/dockerfile:1\nFROM python:3.12-slim AS build\nCOPY --from=ghcr.io/astral-sh/uv:0.5 /uv /bin/uv\nWORKDIR /app\nCOPY pyproject.toml .\nCOPY assistant ./assistant\nCOPY index.py .\nRUN uv venv /venv && VIRTUAL_ENV=/venv uv pip install --no-cache .\nENV PATH=\"/venv/bin:$PATH\" HF_HOME=/models\nRUN python -c \"from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5')\"\nCOPY docs ./docs\nRUN python index.py\n\nFROM python:3.12-slim\nRUN useradd --create-home --uid 10001 app\nWORKDIR /app\nCOPY --from=build /venv /venv\nCOPY --from=build /models /models\nCOPY --from=build /app /app\nRUN chown -R app:app /app\nENV PATH=\"/venv/bin:$PATH\" HF_HOME=/models HF_HUB_OFFLINE=1 PYTHONUNBUFFERED=1 TRACES_DIR=/app/traces\nUSER app\nEXPOSE 8000\nHEALTHCHECK --interval=30s --timeout=3s CMD python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')\"\nCMD [\"uvicorn\", \"assistant.api:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8000\"]"
+          },
+          "note": "The image is about 1.5 GB because of PyTorch; that is the cost of local embeddings. A hosted embedding API makes the image small and the per-request cost non-zero — a trade-off worth knowing, not a mistake."
+        },
+        {
+          "text": "Build and run it locally with Compose, mounting a traces volume so the JSONL survives restarts.",
+          "code": {
+            "lang": "yaml",
+            "code": "# compose.yml\nservices:\n  assistant:\n    build: .\n    image: docs-assistant:dev\n    environment:\n      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}\n      RETRIEVAL: hybrid\n      LLM_MODEL: ${LLM_MODEL:-claude-opus-5}\n    ports: [\"8000:8000\"]\n    volumes:\n      - traces:/app/traces\n    restart: unless-stopped\n\nvolumes:\n  traces:"
+          }
+        },
+        {
+          "text": "Run it, ask through the container, and confirm it starts with the network to Hugging Face blocked (the `HF_HUB_OFFLINE=1` guarantee).",
+          "code": {
+            "lang": "bash",
+            "code": "docker compose up -d --build\ndocker compose logs -f assistant &\nsleep 5; kill %1\ncurl -s localhost:8000/health\ncurl -s localhost:8000/ask -H 'content-type: application/json' -d '{\"question\":\"What are the severity levels?\"}' | python3 -m json.tool | head -20\ndocker compose down"
+          }
+        },
+        {
+          "text": "Push, let CI build the image, and deploy it somewhere real. Two free-tier options: a Hugging Face Docker Space (the same route as the SkillMatch project — add `ANTHROPIC_API_KEY` as a Space secret and set the port to 8000 in the README front matter), or the EC2 host from the zero-to-prod project, where it is one more service in `deploy/compose.yml` using the GHCR image. Either way, write the URL and the eval baseline into the README.",
+          "code": {
+            "lang": "bash",
+            "code": "gh secret set ANTHROPIC_API_KEY < <(grep ANTHROPIC_API_KEY .env | cut -d= -f2)\ngit add . && git commit -m \"ci: tests, eval gate, image; docker: self-contained image with model and index\"\ngit push\ngh run watch\n# On the zero-to-prod host (deploy/compose.yml), add:\n#   assistant:\n#     image: ghcr.io/YOUR_USER/docs-assistant:latest\n#     environment: {ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}, RETRIEVAL: hybrid}\n#     ports: [\"8080:8000\"]\n# then: docker compose pull assistant && docker compose up -d assistant"
+          },
+          "note": "Point Prometheus at `/metrics` on the new service and you have request rate, latency and error ratio for free — the same SLO machinery from the SRE track applies to an LLM service without changes."
+        }
+      ]
+    }
+  ],
+  "troubleshooting": [
+    {
+      "symptom": "`python index.py` is very slow or the first request takes a minute",
+      "fix": "The embedding model downloads on first use (about 130 MB) and PyTorch initialises; both are one-time. If every run is slow, `HF_HOME` may point at a non-persistent directory. On Apple Silicon, `PYTORCH_ENABLE_MPS_FALLBACK=1` avoids occasional errors; CPU is fine for this model size."
+    },
+    {
+      "symptom": "Answers cite `[1]` for everything or make claims the sources do not contain",
+      "fix": "Look at the trace: if the retrieved chunks do not contain the fact, the model is filling gaps — that is a retrieval miss, so improve chunking or switch to hybrid. If they do contain it and the citations are still wrong, shorten the chunks (long chunks dilute) and restate the citation rule as the last line of the system prompt, where instructions are followed most reliably."
+    },
+    {
+      "symptom": "`evals.run` faithfulness is high but correctness is low",
+      "fix": "The assistant is honest but under-informed: it says less than the reference or refuses. Check `hit@k` for those rows — almost always the right chunk was not in the top k. Raise k, use hybrid retrieval, or split the question's target document into smaller sections with headings."
+    },
+    {
+      "symptom": "`RateLimitError` or `overloaded_error` during the graded evals",
+      "fix": "The SDK retries twice by default; for a 20-question run that is usually enough. Add `max_retries=5` on the client in `judge.py`, or run the evals with fewer parallel jobs (they are sequential here). Reduce `JUDGE_MODEL` load by caching judgments per (question, answer) hash if you re-run often."
+    },
+    {
+      "symptom": "The container answers in English even when the docs are in another language, or embeddings score everything similarly",
+      "fix": "`bge-small-en-v1.5` is English-only. For other languages switch `EMBEDDING_MODEL` to a multilingual model such as `BAAI/bge-m3` (larger) and rebuild the index; the rest of the code does not change."
+    },
+    {
+      "symptom": "`chromadb` fails to import or the collection is empty after a rebuild inside Docker",
+      "fix": "Chroma stores the collection in `CHROMA_DIR` (`.chroma` by default). Inside the image that path is `/app/.chroma`, built in the `build` stage; if you mounted a volume over `/app`, it hid the index. Mount only `/app/docs` or `/app/traces`, never the whole app directory."
+    }
+  ],
+  "next": [
+    "Add a reranker (`BAAI/bge-reranker-base` through sentence-transformers' CrossEncoder) over the top 20 hybrid hits and measure whether MRR improves enough to justify the latency.",
+    "Capture user feedback: a `POST /feedback` with the trace id and a thumbs up/down, then a weekly script that turns thumbs-down traces into new golden-set candidates — the loop from the LLM observability module.",
+    "Give it a chat memory: pass the last three turns and rewrite the question with them before retrieval (query rewriting), and add multi-turn cases to the golden set.",
+    "Swap the JSONL tracer for OpenTelemetry spans exported to the Grafana stack from the SRE track, so retrieval and generation latency show up next to your other services.",
+    "Turn the answerer into an MCP server (see the MCP module) so any MCP-capable client can query your docs with the same grounding rules."
+  ]
+}

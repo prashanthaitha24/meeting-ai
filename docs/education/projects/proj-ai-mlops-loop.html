@@ -1,0 +1,901 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Train, register, serve and monitor a model — AI Engineering project | ThavionAI Education</title>
+  <meta name="description" content="Most ML tutorials stop at the notebook. This one starts there and finishes with the loop that keeps a model useful after it ships. You train a bike-demand forecaster on real 2011 rental data, with every run reproducible and recorded in MLflow; register it and promote a champion by comparing it against the previous one on the same holdout; serve it from a container that knows which version it is running; then replay 2012 — a year in which ridership grew by two-thirds — through the service and watch the drift monitor and the delayed-label quality metric catch the model going stale. An alert fires, CI retrains on the newer data, the promotion gate passes, the new image ships, and the error drops. Every step is something you ran, not something you read." />
+  <meta property="og:title" content="Train, register, serve and monitor a model — ThavionAI project" />
+  <meta property="og:description" content="Most ML tutorials stop at the notebook. This one starts there and finishes with the loop that keeps a model useful after it ships. You train a bike-demand forecaster on real 2011 rental data, with every run reproducible and recorded in MLflow; register it and promote a champion by comparing it against the previous one on the same holdout; serve it from a container that knows which version it is running; then replay 2012 — a year in which ridership grew by two-thirds — through the service and watch the drift monitor and the delayed-label quality metric catch the model going stale. An alert fires, CI retrains on the newer data, the promotion gate passes, the new image ships, and the error drops. Every step is something you ran, not something you read." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/projects/proj-ai-mlops-loop.html" />
+  <link rel="icon" href="../../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="../lesson.css" />
+  <link rel="stylesheet" href="project.css" />
+</head>
+<body class="track-ai" data-project="proj-ai-mlops-loop">
+
+<nav>
+  <a href="../../index.html" class="nav-logo"><img class="nav-logo-icon" src="../../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../../education.html">Tracks</a>
+    <a href="../../index.html#projects" class="active">Projects</a>
+    <a href="../../education.html#certs">Certifications</a>
+    <a href="../../index.html#apps">Apps</a>
+    <a href="../../feedback.html?page=/education/projects/proj-ai-mlops-loop.html&amp;title=Train%2C%20register%2C%20serve%20and%20monitor%20a%20model">Feedback</a>
+    <a href="../../education.html#ai" class="nav-cta">AI Engineering track</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../../education.html">Education</a> › <a href="../../education.html#ai">AI Engineering &amp; AIOps</a> › Guided project</div>
+    <h1>Train, register, serve and monitor a model</h1>
+    <p class="lede">Most ML tutorials stop at the notebook. This one starts there and finishes with the loop that keeps a model useful after it ships. You train a bike-demand forecaster on real 2011 rental data, with every run reproducible and recorded in MLflow; register it and promote a champion by comparing it against the previous one on the same holdout; serve it from a container that knows which version it is running; then replay 2012 — a year in which ridership grew by two-thirds — through the service and watch the drift monitor and the delayed-label quality metric catch the model going stale. An alert fires, CI retrains on the newer data, the promotion gate passes, the new image ships, and the error drops. Every step is something you ran, not something you read.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">about 6 hours</span>
+      <span class="chip">7 phases · 30 steps</span>
+      <span class="chip chip-quiz" id="progressChip">0 / 30 done</span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav">
+  <div class="wrap">
+    <a href="#overview">Overview</a>
+    <a href="#phase-1">1. Set up the project, the data and MLflow</a>
+    <a href="#phase-2">2. Reproducible training runs</a>
+    <a href="#phase-3">3. The registry and a promotion gate</a>
+    <a href="#phase-4">4. Serve it, and remember every prediction</a>
+    <a href="#phase-5">5. CI/CD: tests on PR, train-promote-build on main</a>
+    <a href="#phase-6">6. Monitor it through a year of drift</a>
+    <a href="#phase-7">7. Close the loop</a>
+    <a href="#troubleshooting">Troubleshooting</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <section class="pj-intro" id="overview">
+    <div class="objectives">
+      <div class="box-label">What you will have at the end</div>
+      <p class="pj-outcome">A public <code>mlops-loop</code> repository: <code>train.py</code> logs params, data hash, git commit, metrics and a drift reference to MLflow and registers each run; <code>promote.py</code> moves the <code>champion</code> alias only when the candidate beats the current champion on the holdout; a FastAPI service exposes <code>/predict</code>, <code>/labels</code> and <code>/metrics</code> and reports the model version it loaded; a Docker image built by GitHub Actions with the champion baked in; a Grafana dashboard with prediction PSI, per-feature PSI and 7-day MAE from delayed labels; an alert that fired during the 2012 replay; and a retrain that measurably improved Q2 2012 MAE (about 71 → 50 in the reference run).</p>
+    </div>
+    <div class="pj-grid">
+      <div class="pj-box">
+        <div class="box-label">Before you start</div>
+        <ul><li>The AI track's modules on machine learning, MLOps, serving and LLM observability (the drift and monitoring ideas transfer directly)</li><li>Python 3.12, Docker, Git, GitHub CLI; the SRE track's Prometheus + Grafana stack is useful for the dashboard but a fresh Compose file is included</li><li>No GPU and no paid services — the model trains in seconds on a laptop CPU</li></ul>
+      </div>
+      <div class="pj-box">
+        <div class="box-label">Tools you will install</div>
+        <ul class="pj-tools"><li><strong>MLflow 3</strong> — experiment tracking, the model registry, aliases for promotion <a href="https://mlflow.org/docs/latest/" target="_blank" rel="noopener">↗</a></li><li><strong>scikit-learn</strong> — a gradient-boosted regressor is enough; the point is the loop, not the model <a href="https://scikit-learn.org/stable/" target="_blank" rel="noopener">↗</a></li><li><strong>pandas</strong> — feature building from the hourly CSV <a href="https://pandas.pydata.org/" target="_blank" rel="noopener">↗</a></li><li><strong>FastAPI + prometheus-client</strong> — the serving API and the drift/quality gauges Prometheus scrapes <a href="https://prometheus.github.io/client_python/" target="_blank" rel="noopener">↗</a></li><li><strong>Prometheus + Grafana</strong> — dashboards and the alert that closes the loop <a href="https://grafana.com/docs/grafana/latest/" target="_blank" rel="noopener">↗</a></li><li><strong>GitHub Actions</strong> — tests on PR, train + promote + build on main, retrain on demand <a href="https://docs.github.com/actions" target="_blank" rel="noopener">↗</a></li></ul>
+      </div>
+    </div>
+    <div class="pj-box pj-layout"><div class="box-label">Repository layout at the end</div><pre><code>mlops-loop/
+├── bike/
+│   ├── __init__.py
+│   ├── data.py          # download with checksum, load, split by date
+│   ├── features.py      # the ONE feature pipeline: training and serving import it
+│   ├── drift.py         # PSI and reference histograms
+│   └── serve.py         # FastAPI: /predict, /labels, /health, /metrics
+├── train.py             # reproducible training run → MLflow + registry
+├── promote.py           # champion alias, only if better on the holdout
+├── bake.py              # download the champion into ./model for the image
+├── replay.py            # send 2012 through the service, labels one day late
+├── deploy/
+│   ├── compose.yml      # service + prometheus + grafana
+│   ├── prometheus.yml
+│   ├── alerts.yml
+│   └── grafana/         # provisioned datasource + dashboard
+├── tests/
+├── .github/workflows/
+│   ├── ci.yml           # tests + smoke train on PR
+│   └── train.yml        # train, promote, build image on main / on demand
+├── Dockerfile
+├── pyproject.toml
+└── README.md</code></pre></div>
+    <p class="pj-hint">Tick each step as you finish it — your progress is saved in this browser only (<a href="../../education.html#progressPanel">back up or restore</a> on the hub). Every code block has a copy button. If something goes wrong, the <a href="#troubleshooting">troubleshooting</a> section at the end covers the usual suspects.</p>
+  </section>
+
+  <section id="phase-1" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 1</span><h2>Set up the project, the data and MLflow</h2></div>
+    <p class="pj-goal">Pinned dependencies, the dataset downloaded and verified by checksum, an MLflow server with a SQLite backend running locally, and a feature pipeline that both training and serving will import.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-1-1"><label class="pj-step-tick"><input type="checkbox" data-step="1-1" aria-label="Done: step 1.1" /><span class="pj-step-num">1.1</span></label><div class="pj-step-body"><div class="pj-step-text">Create the repository and install the dependencies.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>mkdir mlops-loop &amp;&amp; cd mlops-loop &amp;&amp; git init -b main
+uv venv --python 3.12 &amp;&amp; source .venv/bin/activate
+mkdir -p bike tests deploy/grafana/provisioning/datasources deploy/grafana/provisioning/dashboards deploy/grafana/dashboards .github/workflows data
+touch bike/__init__.py
+cat &gt; pyproject.toml &lt;&lt;'EOF'
+[project]
+name = "mlops-loop"
+version = "0.1.0"
+requires-python = "&gt;=3.12"
+dependencies = [
+  "mlflow&gt;=3.1,&lt;4",
+  "scikit-learn&gt;=1.5,&lt;2",
+  "pandas&gt;=2.2,&lt;3",
+  "numpy&gt;=2,&lt;3",
+  "fastapi&gt;=0.115,&lt;1",
+  "uvicorn&gt;=0.34,&lt;1",
+  "prometheus-client&gt;=0.21,&lt;1",
+  "httpx&gt;=0.27,&lt;1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest&gt;=8,&lt;9", "ruff&gt;=0.8,&lt;1"]
+
+[tool.setuptools]
+packages = ["bike"]
+EOF
+uv pip install -e '.[dev]'
+printf '.venv/\ndata/\nmlruns/\nmlflow.db\nmodel/\npredictions.db\n__pycache__/\n.pytest_cache/\n.ruff_cache/\n' &gt; .gitignore</code></pre></div></div></li><li class="pj-step" id="step-1-2"><label class="pj-step-tick"><input type="checkbox" data-step="1-2" aria-label="Done: step 1.2" /><span class="pj-step-num">1.2</span></label><div class="pj-step-body"><div class="pj-step-text">Write the data module. The dataset is the UCI bike-sharing set: 17,379 hourly rows for 2011–2012 in Washington DC. The download is verified by SHA-256 so the data hash logged with each run means something.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># bike/data.py
+import hashlib
+import io
+import zipfile
+from pathlib import Path
+
+import httpx
+import pandas as pd
+
+URL = "https://archive.ics.uci.edu/static/public/275/bike+sharing+dataset.zip"
+SHA256 = "b70182d0d0508e9abbb79306ce5c0cec34869000f8220175ac83d11dbe845401"
+DATA = Path("data/hour.csv")
+
+
+def download() -&gt; Path:
+    if DATA.exists():
+        return DATA
+    raw = httpx.get(URL, timeout=60, follow_redirects=True).content
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != SHA256:
+        raise RuntimeError(f"checksum mismatch: {digest}")
+    DATA.parent.mkdir(exist_ok=True)
+    with zipfile.ZipFile(io.BytesIO(raw)) as z:
+        DATA.write_bytes(z.read("hour.csv"))
+    return DATA
+
+
+def data_hash() -&gt; str:
+    return hashlib.sha256(DATA.read_bytes()).hexdigest()[:16]
+
+
+def load() -&gt; pd.DataFrame:
+    df = pd.read_csv(download(), parse_dates=["dteday"])
+    df["ts"] = df["dteday"] + pd.to_timedelta(df["hr"], unit="h")
+    return df.sort_values("ts").reset_index(drop=True)</code></pre></div></div></li><li class="pj-step" id="step-1-3"><label class="pj-step-tick"><input type="checkbox" data-step="1-3" aria-label="Done: step 1.3" /><span class="pj-step-num">1.3</span></label><div class="pj-step-body"><div class="pj-step-text">Write the feature pipeline — the single most important file for consistency. It builds the model inputs from raw rows, including <code>level</code>: yesterday's trailing 28-day daily ridership. That feature is what lets a tree model follow a growing city; without it, a model trained on 2011 cannot predict 2012's volume no matter how often you retrain. Training and serving both import this function, so there is no way for them to disagree.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># bike/features.py
+import pandas as pd
+
+FEATURES = ["hr", "weekday", "workingday", "holiday", "weathersit", "temp", "atemp", "hum", "windspeed", "season", "level"]
+CATEGORICAL = ["hr", "weekday", "weathersit", "season"]
+TARGET = "cnt"
+NUMERIC = [f for f in FEATURES if f not in CATEGORICAL]
+
+
+def daily_level(df: pd.DataFrame) -&gt; pd.Series:
+    """Trailing 28-day mean of daily totals, shifted one day: what was known yesterday."""
+    daily = df.groupby("dteday")[TARGET].sum().sort_index()
+    return daily.rolling(28, min_periods=7).mean().shift(1)
+
+
+def add_level(df: pd.DataFrame, level: pd.Series | None = None) -&gt; pd.DataFrame:
+    level = daily_level(df) if level is None else level
+    out = df.copy()
+    out["level"] = out["dteday"].map(level)
+    return out.dropna(subset=["level"])
+
+
+def to_matrix(df: pd.DataFrame) -&gt; pd.DataFrame:
+    x = df[FEATURES].copy()
+    for c in CATEGORICAL:
+        x[c] = x[c].astype("category")
+    return x</code></pre></div></div></li><li class="pj-step" id="step-1-4"><label class="pj-step-tick"><input type="checkbox" data-step="1-4" aria-label="Done: step 1.4" /><span class="pj-step-num">1.4</span></label><div class="pj-step-body"><div class="pj-step-text">Test that the level feature never sees the future — a leak here would make every offline metric a lie — then start MLflow.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># tests/test_features.py
+import pandas as pd
+
+from bike.features import FEATURES, add_level, daily_level, to_matrix
+
+
+def make(days=40):
+    rows = []
+    for d in range(days):
+        for h in range(24):
+            rows.append({"dteday": pd.Timestamp("2011-01-01") + pd.Timedelta(days=d), "hr": h, "weekday": d % 7,
+                         "workingday": 1, "holiday": 0, "weathersit": 1, "temp": 0.5, "atemp": 0.5, "hum": 0.5,
+                         "windspeed": 0.1, "season": 1, "cnt": 100 + d})
+    return pd.DataFrame(rows)
+
+
+def test_level_is_shifted_and_uses_only_past_days():
+    df = make()
+    level = daily_level(df)
+    day10 = pd.Timestamp("2011-01-11")
+    past = df[df.dteday &lt; day10].groupby("dteday").cnt.sum()
+    assert abs(level[day10] - past.tail(28).mean()) &lt; 1e-9
+    assert pd.isna(level.iloc[0])          # nothing known before day one
+
+
+def test_matrix_has_expected_columns_and_dtypes():
+    x = to_matrix(add_level(make()))
+    assert list(x.columns) == FEATURES
+    assert str(x["hr"].dtype) == "category" and x["temp"].dtype.kind == "f"</code></pre></div><div class="pj-note">Start the tracking server in a second terminal and leave it running: <code>mlflow server --backend-store-uri sqlite:///mlflow.db --artifacts-destination ./mlruns --port 5000</code>. Then <code>export MLFLOW_TRACKING_URI=http://localhost:5000</code> in the first.</div></div></li></ol>
+  </section>
+
+  <section id="phase-2" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 2</span><h2>Reproducible training runs</h2></div>
+    <p class="pj-goal">One command trains a model on data up to a chosen date, evaluates it on the following two months, logs everything needed to reproduce it, saves a drift reference, and registers the model.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-2-1"><label class="pj-step-tick"><input type="checkbox" data-step="2-1" aria-label="Done: step 2.1" /><span class="pj-step-num">2.1</span></label><div class="pj-step-body"><div class="pj-step-text">Write the drift helpers first, because training must save the reference they compare against: quantile bin edges from the training data for each numeric feature and for the predictions, and a PSI function used identically offline and online.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># bike/drift.py
+import numpy as np
+
+
+def edges(values, bins: int = 10) -&gt; list[float]:
+    q = np.quantile(np.asarray(values, dtype=float), np.linspace(0, 1, bins + 1))
+    q[0], q[-1] = -np.inf, np.inf
+    return [float(v) for v in q]
+
+
+def histogram(values, bin_edges: list[float]) -&gt; list[float]:
+    counts, _ = np.histogram(np.asarray(values, dtype=float), bins=np.asarray(bin_edges))
+    total = max(1, counts.sum())
+    return [float(c) / total for c in counts]
+
+
+def psi(reference: list[float], current: list[float], eps: float = 1e-4) -&gt; float:
+    """Population stability index between two binned distributions. &lt;0.1 stable, 0.1-0.25 shifting, &gt;0.25 drifted."""
+    r = np.clip(np.asarray(reference), eps, None)
+    c = np.clip(np.asarray(current), eps, None)
+    return float(np.sum((c - r) * np.log(c / r)))
+
+
+def build_reference(x, predictions, numeric: list[str]) -&gt; dict:
+    ref = {"prediction": {"edges": edges(predictions)}}
+    ref["prediction"]["hist"] = histogram(predictions, ref["prediction"]["edges"])
+    for col in numeric:
+        e = edges(x[col])
+        ref[col] = {"edges": e, "hist": histogram(x[col], e)}
+    return ref</code></pre></div></div></li><li class="pj-step" id="step-2-2"><label class="pj-step-tick"><input type="checkbox" data-step="2-2" aria-label="Done: step 2.2" /><span class="pj-step-num">2.2</span></label><div class="pj-step-body"><div class="pj-step-text">Write <code>train.py</code>. Everything that could change the result is either a logged parameter (seed, hyperparameters, <code>--until</code> cut-off, git commit, data hash) or derived from one. The target is log-transformed because hourly counts are skewed; the metric is reported back in real units. A naive baseline (same hour last week) is logged too, so "the model is better than nothing" is a number.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># train.py
+import argparse
+import subprocess
+
+import mlflow
+import numpy as np
+import pandas as pd
+from mlflow import MlflowClient
+from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.metrics import mean_absolute_error
+
+from bike.data import data_hash, load
+from bike.drift import build_reference
+from bike.features import CATEGORICAL, FEATURES, NUMERIC, TARGET, add_level, to_matrix
+
+MODEL_NAME = "bike-demand"
+
+
+def split(df: pd.DataFrame, until: str, holdout_days: int = 61):
+    cutoff = pd.Timestamp(until)
+    train = df[df.dteday &lt;= cutoff - pd.Timedelta(days=holdout_days)]
+    val = df[(df.dteday &gt; cutoff - pd.Timedelta(days=holdout_days)) &amp; (df.dteday &lt;= cutoff)]
+    return train, val
+
+
+def naive_baseline(val: pd.DataFrame, history: pd.DataFrame) -&gt; float:
+    both = pd.concat([history, val]).set_index("ts")[TARGET]
+    last_week = both.shift(24 * 7).reindex(val["ts"]).fillna(both.mean())
+    return float(mean_absolute_error(val[TARGET], last_week))
+
+
+def main() -&gt; None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--until", default="2011-12-31", help="last date of data to use (holdout = last 61 days)")
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--max-iter", type=int, default=400)
+    ap.add_argument("--learning-rate", type=float, default=0.08)
+    ap.add_argument("--max-depth", type=int, default=8)
+    args = ap.parse_args()
+
+    df = add_level(load())
+    train, val = split(df, args.until)
+    x_train, x_val = to_matrix(train), to_matrix(val)
+
+    mlflow.set_experiment(MODEL_NAME)
+    with mlflow.start_run(run_name=f"until-{args.until}") as run:
+        mlflow.log_params({
+            "until": args.until, "seed": args.seed, "max_iter": args.max_iter,
+            "learning_rate": args.learning_rate, "max_depth": args.max_depth,
+            "features": ",".join(FEATURES), "train_rows": len(train), "val_rows": len(val),
+            "data_hash": data_hash(),
+            "git_commit": subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip() or "unknown",
+        })
+        model = HistGradientBoostingRegressor(
+            max_iter=args.max_iter, learning_rate=args.learning_rate, max_depth=args.max_depth,
+            random_state=args.seed, categorical_features=[FEATURES.index(c) for c in CATEGORICAL],
+        )
+        model.fit(x_train, np.log1p(train[TARGET]))
+        pred_val = np.expm1(model.predict(x_val))
+        mae = float(mean_absolute_error(val[TARGET], pred_val))
+        mlflow.log_metrics({
+            "val_mae": mae,
+            "val_mae_naive": naive_baseline(val, train),
+            "val_mean_cnt": float(val[TARGET].mean()),
+            "train_mae": float(mean_absolute_error(train[TARGET], np.expm1(model.predict(x_train)))),
+        })
+        reference = build_reference(x_train, np.expm1(model.predict(x_train)), NUMERIC)
+        mlflow.log_dict(reference, "reference.json")
+        info = mlflow.sklearn.log_model(
+            sk_model=model, name="model", input_example=x_train.head(5), registered_model_name=MODEL_NAME,
+        )
+        MlflowClient().set_model_version_tag(MODEL_NAME, info.registered_model_version, "until", args.until)
+        print(f"run {run.info.run_id} → {MODEL_NAME} v{info.registered_model_version}: val_mae={mae:.1f} "
+              f"(naive {mlflow.get_run(run.info.run_id).data.metrics['val_mae_naive']:.1f})")
+
+
+if __name__ == "__main__":
+    main()</code></pre></div></div></li><li class="pj-step" id="step-2-3"><label class="pj-step-tick"><input type="checkbox" data-step="2-3" aria-label="Done: step 2.3" /><span class="pj-step-num">2.3</span></label><div class="pj-step-body"><div class="pj-step-text">Train the first model on 2011 and look at the run in the MLflow UI. Then run it again with the same arguments and confirm the metric is identical to the decimal — that is what reproducible means.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>export MLFLOW_TRACKING_URI=http://localhost:5000
+git add . &amp;&amp; git commit -qm "feat: data, features, drift reference, training"
+python train.py --until 2011-12-31
+python train.py --until 2011-12-31
+open http://localhost:5000     # Experiments → bike-demand: two runs, same val_mae</code></pre></div><div class="pj-note">Reference numbers from this exact setup: val_mae about 32 on Nov–Dec 2011 (mean hourly count 130), naive baseline about 60. Yours should match closely; a different pandas or scikit-learn version can move the last digit.</div></div></li><li class="pj-step" id="step-2-4"><label class="pj-step-tick"><input type="checkbox" data-step="2-4" aria-label="Done: step 2.4" /><span class="pj-step-num">2.4</span></label><div class="pj-step-body"><div class="pj-step-text">Train a worse variant on purpose so the promotion gate has something to reject, then a differently-tuned one. Three versions now sit in the registry, none of them the champion yet.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>python train.py --until 2011-12-31 --max-iter 20          # underfit: worse val_mae
+python train.py --until 2011-12-31 --learning-rate 0.05 --max-iter 600
+mlflow models search 2&gt;/dev/null || python -c "from mlflow import MlflowClient; [print(v.version, v.tags, v.run_id[:8]) for v in MlflowClient().search_model_versions(\"name='bike-demand'\")]"</code></pre></div></div></li><li class="pj-step" id="step-2-5"><label class="pj-step-tick"><input type="checkbox" data-step="2-5" aria-label="Done: step 2.5" /><span class="pj-step-num">2.5</span></label><div class="pj-step-body"><div class="pj-step-text">Add a training smoke test that runs on a small slice so CI can exercise the whole path in under a minute without registering anything.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># tests/test_train.py
+import numpy as np
+from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.metrics import mean_absolute_error
+
+from bike.features import CATEGORICAL, FEATURES, TARGET, add_level, to_matrix
+from tests.test_features import make
+
+
+def test_model_beats_mean_on_synthetic_data():
+    df = add_level(make(days=60))
+    df[TARGET] = (df["hr"] * 10 + df["level"] / 100).astype(float)   # learnable signal
+    train, val = df[df.dteday &lt; "2011-02-15"], df[df.dteday &gt;= "2011-02-15"]
+    model = HistGradientBoostingRegressor(max_iter=100, random_state=0,
+                                          categorical_features=[FEATURES.index(c) for c in CATEGORICAL])
+    model.fit(to_matrix(train), np.log1p(train[TARGET]))
+    mae = mean_absolute_error(val[TARGET], np.expm1(model.predict(to_matrix(val))))
+    baseline = mean_absolute_error(val[TARGET], np.full(len(val), train[TARGET].mean()))
+    assert mae &lt; baseline / 3</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-3" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 3</span><h2>The registry and a promotion gate</h2></div>
+    <p class="pj-goal">A <code>champion</code> alias that only moves when a candidate is measurably better on the same holdout, with the decision recorded on the model version.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-3-1"><label class="pj-step-tick"><input type="checkbox" data-step="3-1" aria-label="Done: step 3.1" /><span class="pj-step-num">3.1</span></label><div class="pj-step-body"><div class="pj-step-text">Write <code>promote.py</code>. It reads the candidate's and the current champion's <code>val_mae</code> from their runs, refuses if the holdout windows differ (an unfair comparison), and moves the alias only on improvement beyond a small margin. The old champion becomes <code>previous</code>, which is your one-command rollback.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># promote.py
+import argparse
+import sys
+
+import mlflow
+from mlflow import MlflowClient
+
+MODEL_NAME = "bike-demand"
+
+
+def metrics_for(client: MlflowClient, version: str) -&gt; tuple[float, str]:
+    mv = client.get_model_version(MODEL_NAME, version)
+    run = mlflow.get_run(mv.run_id)
+    return run.data.metrics["val_mae"], run.data.params["until"]
+
+
+def main() -&gt; int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("version", help="candidate model version number")
+    ap.add_argument("--min-improvement", type=float, default=0.02, help="relative MAE improvement required")
+    ap.add_argument("--allow-different-holdout", action="store_true")
+    args = ap.parse_args()
+    client = MlflowClient()
+
+    cand_mae, cand_until = metrics_for(client, args.version)
+    try:
+        champ = client.get_model_version_by_alias(MODEL_NAME, "champion")
+    except mlflow.exceptions.MlflowException:
+        champ = None
+
+    if champ is not None:
+        champ_mae, champ_until = metrics_for(client, champ.version)
+        if champ_until != cand_until and not args.allow_different_holdout:
+            print(f"refusing: candidate holdout ends {cand_until}, champion's ends {champ_until}; "
+                  f"retrain the champion's config with --until {cand_until} or pass --allow-different-holdout")
+            return 2
+        improvement = (champ_mae - cand_mae) / champ_mae
+        print(f"champion v{champ.version} val_mae={champ_mae:.2f}  candidate v{args.version} val_mae={cand_mae:.2f}  improvement={improvement:+.1%}")
+        if improvement &lt; args.min_improvement:
+            client.set_model_version_tag(MODEL_NAME, args.version, "promotion", f"rejected vs v{champ.version}")
+            return 1
+        client.set_registered_model_alias(MODEL_NAME, "previous", champ.version)
+    else:
+        print(f"no champion yet; candidate v{args.version} val_mae={cand_mae:.2f}")
+
+    client.set_registered_model_alias(MODEL_NAME, "champion", args.version)
+    client.set_model_version_tag(MODEL_NAME, args.version, "promotion", "champion")
+    print(f"champion → v{args.version}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())</code></pre></div></div></li><li class="pj-step" id="step-3-2"><label class="pj-step-tick"><input type="checkbox" data-step="3-2" aria-label="Done: step 3.2" /><span class="pj-step-num">3.2</span></label><div class="pj-step-body"><div class="pj-step-text">Promote version 1, then try the underfit version 3 (rejected, exit 1), then version 4 (promoted only if it beat v1 by 2 %). Look at the aliases in the UI.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>python promote.py 1
+python promote.py 3; echo "exit $?"
+python promote.py 4; echo "exit $?"
+python -c "from mlflow import MlflowClient; c=MlflowClient(); print({a: c.get_model_version_by_alias('bike-demand', a).version for a in ('champion','previous') if True})" 2&gt;/dev/null || true</code></pre></div><div class="pj-note">If v4 was not better by 2 %, the champion stays at v1 and that is the correct outcome. The gate is the product here, not the promotion.</div></div></li><li class="pj-step" id="step-3-3"><label class="pj-step-tick"><input type="checkbox" data-step="3-3" aria-label="Done: step 3.3" /><span class="pj-step-num">3.3</span></label><div class="pj-step-body"><div class="pj-step-text">Write <code>bake.py</code>: it downloads the champion (or any alias) and its run's <code>reference.json</code> into <code>./model/</code>, plus a <code>VERSION</code> file. The Docker image will contain exactly this folder, so a running container can always say which registry version it is.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># bake.py
+import argparse
+import json
+import shutil
+from pathlib import Path
+
+import mlflow
+from mlflow import MlflowClient
+
+MODEL_NAME = "bike-demand"
+
+
+def main() -&gt; None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--alias", default="champion")
+    ap.add_argument("--dst", default="model")
+    args = ap.parse_args()
+    dst = Path(args.dst)
+    shutil.rmtree(dst, ignore_errors=True)
+    dst.mkdir(parents=True)
+
+    mv = MlflowClient().get_model_version_by_alias(MODEL_NAME, args.alias)
+    mlflow.artifacts.download_artifacts(artifact_uri=f"models:/{MODEL_NAME}@{args.alias}", dst_path=str(dst / "model"))
+    mlflow.artifacts.download_artifacts(artifact_uri=f"runs:/{mv.run_id}/reference.json", dst_path=str(dst))
+    run = mlflow.get_run(mv.run_id)
+    (dst / "VERSION").write_text(json.dumps({
+        "name": MODEL_NAME, "version": mv.version, "alias": args.alias, "run_id": mv.run_id,
+        "val_mae": run.data.metrics["val_mae"], "until": run.data.params["until"],
+        "git_commit": run.data.params.get("git_commit"),
+    }, indent=2))
+    print((dst / "VERSION").read_text())
+
+
+if __name__ == "__main__":
+    main()</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-4" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 4</span><h2>Serve it, and remember every prediction</h2></div>
+    <p class="pj-goal">A FastAPI service that loads the baked model, predicts for batches of hourly rows, stores each prediction so a label can be attached later, and exposes version, drift and quality metrics for Prometheus.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-4-1"><label class="pj-step-tick"><input type="checkbox" data-step="4-1" aria-label="Done: step 4.1" /><span class="pj-step-num">4.1</span></label><div class="pj-step-body"><div class="pj-step-text">Write the service. Three ideas carry it: the feature code is imported, not re-implemented; every prediction is stored with its id so <code>/labels</code> can join actuals to it a day later; and the gauges are recomputed from a rolling window of the last seven days *of the data's clock* (<code>ts</code>), so a replay at 1,000× speed still produces meaningful windows.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># bike/serve.py
+import json
+import os
+import sqlite3
+from collections import deque
+from pathlib import Path
+
+import mlflow.sklearn
+import numpy as np
+import pandas as pd
+from fastapi import FastAPI, HTTPException
+from prometheus_client import Counter, Gauge, Info, make_asgi_app
+from pydantic import BaseModel, Field
+
+from bike.drift import histogram, psi
+from bike.features import FEATURES, NUMERIC, to_matrix
+
+MODEL_DIR = Path(os.getenv("MODEL_DIR", "model"))
+DB = os.getenv("PREDICTIONS_DB", "predictions.db")
+WINDOW_HOURS = 24 * 7
+
+app = FastAPI(title="bike-demand")
+app.mount("/metrics", make_asgi_app())
+
+model = mlflow.sklearn.load_model(str(MODEL_DIR / "model"))
+reference = json.loads((MODEL_DIR / "reference.json").read_text())
+version = json.loads((MODEL_DIR / "VERSION").read_text())
+
+MODEL_INFO = Info("model", "Loaded model")
+MODEL_INFO.info({k: str(v) for k, v in version.items()})
+PREDICTIONS = Counter("model_predictions_total", "Predictions served")
+PSI = Gauge("model_psi", "PSI vs training reference over the last 7 data-days", ["signal"])
+MAE_7D = Gauge("model_mae_7d", "MAE over labelled predictions in the last 7 data-days")
+LABELLED_7D = Gauge("model_labelled_7d", "Labelled predictions in the last 7 data-days")
+VAL_MAE = Gauge("model_val_mae", "Holdout MAE of the loaded model at training time")
+VAL_MAE.set(version["val_mae"])
+
+window: deque[dict] = deque(maxlen=WINDOW_HOURS)
+
+
+def db() -&gt; sqlite3.Connection:
+    con = sqlite3.connect(DB)
+    con.execute("create table if not exists predictions (id text primary key, ts text, prediction real, actual real)")
+    return con
+
+
+class Row(BaseModel):
+    id: str
+    ts: str
+    hr: int = Field(ge=0, le=23)
+    weekday: int = Field(ge=0, le=6)
+    workingday: int
+    holiday: int
+    weathersit: int = Field(ge=1, le=4)
+    temp: float
+    atemp: float
+    hum: float
+    windspeed: float
+    season: int = Field(ge=1, le=4)
+    level: float = Field(gt=0)
+
+
+class Label(BaseModel):
+    id: str
+    actual: float
+
+
+def refresh_gauges() -&gt; None:
+    if len(window) &lt; 24:
+        return
+    frame = pd.DataFrame(window)
+    PSI.labels("prediction").set(psi(reference["prediction"]["hist"], histogram(frame["prediction"], reference["prediction"]["edges"])))
+    for col in NUMERIC:
+        PSI.labels(col).set(psi(reference[col]["hist"], histogram(frame[col], reference[col]["edges"])))
+    latest = pd.Timestamp(frame["ts"].max())
+    since = (latest - pd.Timedelta(days=7)).isoformat()
+    rows = db().execute("select prediction, actual from predictions where actual is not null and ts &gt;= ?", (since,)).fetchall()
+    LABELLED_7D.set(len(rows))
+    if rows:
+        MAE_7D.set(float(np.mean([abs(p - a) for p, a in rows])))
+
+
+@app.post("/predict")
+def predict(rows: list[Row]):
+    if not 1 &lt;= len(rows) &lt;= 1000:
+        raise HTTPException(422, "send 1-1000 rows")
+    frame = pd.DataFrame([r.model_dump() for r in rows])
+    preds = np.expm1(model.predict(to_matrix(frame))).clip(min=0)
+    con = db()
+    con.executemany("insert or replace into predictions (id, ts, prediction) values (?, ?, ?)",
+                    [(r.id, r.ts, float(p)) for r, p in zip(rows, preds)])
+    con.commit()
+    for r, p in zip(rows, preds):
+        window.append({**{f: getattr(r, f) for f in FEATURES}, "ts": r.ts, "prediction": float(p)})
+    PREDICTIONS.inc(len(rows))
+    refresh_gauges()
+    return {"model_version": version["version"], "predictions": [{"id": r.id, "cnt": round(float(p), 1)} for r, p in zip(rows, preds)]}
+
+
+@app.post("/labels")
+def labels(items: list[Label]):
+    con = db()
+    n = sum(con.execute("update predictions set actual = ? where id = ?", (it.actual, it.id)).rowcount for it in items)
+    con.commit()
+    refresh_gauges()
+    return {"matched": n}
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "model": version}</code></pre></div></div></li><li class="pj-step" id="step-4-2"><label class="pj-step-tick"><input type="checkbox" data-step="4-2" aria-label="Done: step 4.2" /><span class="pj-step-num">4.2</span></label><div class="pj-step-body"><div class="pj-step-text">Test the service against a tiny model baked by the test itself — no MLflow server needed.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># tests/test_serve.py
+import importlib
+import json
+
+import mlflow.sklearn
+import numpy as np
+from fastapi.testclient import TestClient
+from sklearn.ensemble import HistGradientBoostingRegressor
+
+from bike.drift import build_reference
+from bike.features import CATEGORICAL, FEATURES, NUMERIC, add_level, to_matrix
+from tests.test_features import make
+
+
+def bake_tiny_model(tmp_path):
+    df = add_level(make(days=45))
+    x = to_matrix(df)
+    model = HistGradientBoostingRegressor(max_iter=30, random_state=0,
+                                          categorical_features=[FEATURES.index(c) for c in CATEGORICAL]).fit(x, np.log1p(df["cnt"]))
+    mlflow.sklearn.save_model(model, str(tmp_path / "model"))
+    (tmp_path / "reference.json").write_text(json.dumps(build_reference(x, np.expm1(model.predict(x)), NUMERIC)))
+    (tmp_path / "VERSION").write_text(json.dumps({"name": "bike-demand", "version": "0", "val_mae": 10.0}))
+    return df
+
+
+def test_predict_then_label_updates_mae(tmp_path, monkeypatch):
+    df = bake_tiny_model(tmp_path)
+    monkeypatch.setenv("MODEL_DIR", str(tmp_path))
+    monkeypatch.setenv("PREDICTIONS_DB", str(tmp_path / "p.db"))
+    serve = importlib.reload(importlib.import_module("bike.serve"))
+    client = TestClient(serve.app)
+
+    rows = [{"id": str(i), "ts": r.dteday.isoformat(), **{f: (int(r[f]) if f in CATEGORICAL or f in ("workingday", "holiday") else float(r[f])) for f in FEATURES}}
+            for i, r in df.tail(48).reset_index().iterrows()]
+    out = client.post("/predict", json=rows).json()
+    assert len(out["predictions"]) == 48 and out["model_version"] == "0"
+
+    labels = [{"id": str(i), "actual": float(c)} for i, c in enumerate(df.tail(48)["cnt"])]
+    assert client.post("/labels", json=labels).json()["matched"] == 48
+    metrics = client.get("/metrics").text
+    assert "model_mae_7d" in metrics and 'model_psi{signal="prediction"}' in metrics
+    assert client.post("/predict", json=[]).status_code == 422</code></pre></div></div></li><li class="pj-step" id="step-4-3"><label class="pj-step-tick"><input type="checkbox" data-step="4-3" aria-label="Done: step 4.3" /><span class="pj-step-num">4.3</span></label><div class="pj-step-body"><div class="pj-step-text">Bake the champion and run the service locally; check that <code>/health</code> names the registry version and that a prediction comes back.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>pytest -q
+python bake.py
+uvicorn bike.serve:app --port 8000 &amp;
+sleep 3
+curl -s localhost:8000/health | python3 -m json.tool
+curl -s localhost:8000/predict -H 'content-type: application/json' -d '[{"id":"x1","ts":"2012-01-01T08:00:00","hr":8,"weekday":0,"workingday":0,"holiday":0,"weathersit":1,"temp":0.3,"atemp":0.3,"hum":0.6,"windspeed":0.2,"season":1,"level":2300}]'
+kill %1</code></pre></div></div></li><li class="pj-step" id="step-4-4"><label class="pj-step-tick"><input type="checkbox" data-step="4-4" aria-label="Done: step 4.4" /><span class="pj-step-num">4.4</span></label><div class="pj-step-body"><div class="pj-step-text">Write the Dockerfile. The <code>model/</code> folder produced by <code>bake.py</code> is copied in; the image never talks to MLflow. The version label is stamped from <code>VERSION</code> at build time so <code>docker inspect</code> can answer "which model is this?".</div><div class="code"><div class="code-head"><span>dockerfile</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># syntax=docker/dockerfile:1
+FROM python:3.12-slim AS build
+COPY --from=ghcr.io/astral-sh/uv:0.5 /uv /bin/uv
+WORKDIR /app
+COPY pyproject.toml .
+COPY bike ./bike
+RUN uv venv /venv &amp;&amp; VIRTUAL_ENV=/venv uv pip install --no-cache .
+
+FROM python:3.12-slim
+ARG MODEL_VERSION=unknown
+LABEL org.opencontainers.image.title="bike-demand" model.version="${MODEL_VERSION}"
+RUN useradd --create-home --uid 10001 app
+WORKDIR /app
+COPY --from=build /venv /venv
+COPY bike ./bike
+COPY model ./model
+RUN mkdir -p /data &amp;&amp; chown app:app /data
+ENV PATH="/venv/bin:$PATH" PYTHONUNBUFFERED=1 MODEL_DIR=/app/model PREDICTIONS_DB=/data/predictions.db
+USER app
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=3s CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"
+CMD ["uvicorn", "bike.serve:app", "--host", "0.0.0.0", "--port", "8000"]</code></pre></div></div></li><li class="pj-step" id="step-4-5"><label class="pj-step-tick"><input type="checkbox" data-step="4-5" aria-label="Done: step 4.5" /><span class="pj-step-num">4.5</span></label><div class="pj-step-body"><div class="pj-step-text">Build with the version from the baked <code>VERSION</code> file, run it, and commit.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>V=$(python3 -c "import json; print(json.load(open('model/VERSION'))['version'])")
+docker build --build-arg MODEL_VERSION="$V" -t bike-demand:v"$V" .
+docker run -d --rm -p 8000:8000 --name bike bike-demand:v"$V"
+sleep 3 &amp;&amp; curl -s localhost:8000/health &amp;&amp; docker inspect bike --format '{{index .Config.Labels "model.version"}}'
+docker stop bike
+git add . &amp;&amp; git commit -m "feat: promotion gate, bake, serving with drift and quality gauges, image" &amp;&amp; git push</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-5" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 5</span><h2>CI/CD: tests on PR, train-promote-build on main</h2></div>
+    <p class="pj-goal">Pull requests run the tests and a smoke training; pushes to main (and a manual trigger with a <code>--until</code> date) train against a shared MLflow, run the promotion gate, and build and push the image only when the champion changed.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-5-1"><label class="pj-step-tick"><input type="checkbox" data-step="5-1" aria-label="Done: step 5.1" /><span class="pj-step-num">5.1</span></label><div class="pj-step-body"><div class="pj-step-text">CI needs an MLflow server it can reach. A free DagsHub repository provides a hosted MLflow tracking server and registry; alternatively point <code>MLFLOW_TRACKING_URI</code> at any server you run. Set the two secrets, then make your laptop use the same server so the registry is one place.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># DagsHub: create a repo named mlops-loop, then Settings → Tokens
+gh secret set MLFLOW_TRACKING_URI --body "https://dagshub.com/YOUR_USER/mlops-loop.mlflow"
+gh secret set MLFLOW_TRACKING_USERNAME --body "YOUR_USER"
+gh secret set MLFLOW_TRACKING_PASSWORD --body "YOUR_DAGSHUB_TOKEN"
+# locally, same target:
+export MLFLOW_TRACKING_URI=https://dagshub.com/YOUR_USER/mlops-loop.mlflow MLFLOW_TRACKING_USERNAME=YOUR_USER MLFLOW_TRACKING_PASSWORD=YOUR_DAGSHUB_TOKEN
+python train.py --until 2011-12-31 &amp;&amp; python promote.py 1</code></pre></div><div class="pj-note">Keeping the local SQLite server is fine for learning; the workflow below simply will not be able to register. The shared server is what makes "CI retrains and promotes" real.</div></div></li><li class="pj-step" id="step-5-2"><label class="pj-step-tick"><input type="checkbox" data-step="5-2" aria-label="Done: step 5.2" /><span class="pj-step-num">5.2</span></label><div class="pj-step-body"><div class="pj-step-text">The PR workflow: lint, tests, and a smoke training that uses only three months and never registers — it just proves the path runs.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># .github/workflows/ci.yml
+name: ci
+on:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv venv --python 3.12 &amp;&amp; uv pip install -e '.[dev]'
+      - run: .venv/bin/ruff check .
+      - run: .venv/bin/pytest -q
+      - name: Smoke training (local file store, no registry)
+        env:
+          MLFLOW_TRACKING_URI: file:./mlruns-ci
+        run: |
+          .venv/bin/python -c "from bike.data import download; download()"
+          .venv/bin/python train.py --until 2011-04-30 --max-iter 50 || exit 1</code></pre></div></div></li><li class="pj-step" id="step-5-3"><label class="pj-step-tick"><input type="checkbox" data-step="5-3" aria-label="Done: step 5.3" /><span class="pj-step-num">5.3</span></label><div class="pj-step-body"><div class="pj-step-text">The train workflow: on push to main or on demand with an <code>until</code> input, train, promote, and — only if the gate passed — bake, build and push the image tagged with the model version. The gate's exit code is the branch point.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># .github/workflows/train.yml
+name: train
+on:
+  push:
+    branches: [main]
+    paths: ["bike/**", "train.py", "promote.py", "bake.py", "pyproject.toml"]
+  workflow_dispatch:
+    inputs:
+      until:
+        description: "Last date of training data (YYYY-MM-DD)"
+        default: "2011-12-31"
+
+env:
+  MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+  MLFLOW_TRACKING_USERNAME: ${{ secrets.MLFLOW_TRACKING_USERNAME }}
+  MLFLOW_TRACKING_PASSWORD: ${{ secrets.MLFLOW_TRACKING_PASSWORD }}
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      promoted: ${{ steps.gate.outputs.promoted }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv venv --python 3.12 &amp;&amp; uv pip install -e .
+      - id: train
+        run: |
+          UNTIL="${{ github.event.inputs.until || '2011-12-31' }}"
+          .venv/bin/python train.py --until "$UNTIL" | tee train.log
+          echo "version=$(grep -o 'v[0-9]*:' train.log | tr -d 'v:')" &gt;&gt; "$GITHUB_OUTPUT"
+      - id: gate
+        run: |
+          if .venv/bin/python promote.py "${{ steps.train.outputs.version }}" --allow-different-holdout; then
+            echo "promoted=true" &gt;&gt; "$GITHUB_OUTPUT"
+          else
+            echo "promoted=false" &gt;&gt; "$GITHUB_OUTPUT"
+          fi
+      - if: steps.gate.outputs.promoted == 'true'
+        run: .venv/bin/python bake.py
+      - if: steps.gate.outputs.promoted == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - if: steps.gate.outputs.promoted == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: MODEL_VERSION=${{ steps.train.outputs.version }}
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:v${{ steps.train.outputs.version }}</code></pre></div><div class="pj-note"><code>--allow-different-holdout</code> is set in CI because a retrain with a later <code>--until</code> necessarily has a different holdout; the comparison is then "is the new model better on *its* recent holdout than the old one was on *its* holdout", which is the honest question when time has moved on. Locally, without the flag, <code>promote.py</code> protects you from comparing apples to oranges by accident.</div></div></li><li class="pj-step" id="step-5-4"><label class="pj-step-tick"><input type="checkbox" data-step="5-4" aria-label="Done: step 5.4" /><span class="pj-step-num">5.4</span></label><div class="pj-step-body"><div class="pj-step-text">Push, open a PR with a trivial change to see <code>ci</code> run, merge, and watch <code>train</code> train, gate, and (on the first run) promote and push the image.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>git add .github &amp;&amp; git commit -m "ci: tests + smoke train on PR; train-promote-build on main" &amp;&amp; git push
+git switch -c ci/first-run &amp;&amp; printf '\n' &gt;&gt; README.md &amp;&amp; git commit -am "chore: trigger ci" &amp;&amp; git push -u origin ci/first-run
+gh pr create --fill &amp;&amp; gh pr checks --watch &amp;&amp; gh pr merge --squash --delete-branch
+git switch main &amp;&amp; git pull &amp;&amp; gh run watch
+gh api "/user/packages/container/mlops-loop/versions" -q '.[].metadata.container.tags'</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-6" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 6</span><h2>Monitor it through a year of drift</h2></div>
+    <p class="pj-goal">The 2012 data replays through the service at high speed with labels arriving one day late; Prometheus scrapes the gauges; a Grafana dashboard shows the feature drift, the prediction drift and the MAE rising; and an alert fires when quality degrades.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-6-1"><label class="pj-step-tick"><input type="checkbox" data-step="6-1" aria-label="Done: step 6.1" /><span class="pj-step-num">6.1</span></label><div class="pj-step-body"><div class="pj-step-text">Write the replay client. It walks 2012 hour by hour, computes <code>level</code> from the actuals it has already *released* (so it is exactly what production would know), sends each day's 24 rows to <code>/predict</code>, and sends the previous day's labels — the one-day delay of real ground truth.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># replay.py
+import argparse
+import time
+
+import httpx
+import pandas as pd
+
+from bike.data import load
+from bike.features import FEATURES, TARGET, add_level, daily_level
+
+
+def main() -&gt; None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--url", default="http://localhost:8000")
+    ap.add_argument("--start", default="2012-01-01")
+    ap.add_argument("--end", default="2012-12-31")
+    ap.add_argument("--seconds-per-day", type=float, default=1.0)
+    args = ap.parse_args()
+
+    df = load()
+    level = daily_level(df)               # uses only days before each date, so no leakage into the replay
+    df = add_level(df, level)
+    days = df[(df.dteday &gt;= args.start) &amp; (df.dteday &lt;= args.end)].groupby("dteday")
+    previous = None
+    with httpx.Client(base_url=args.url, timeout=30) as c:
+        for day, rows in days:
+            payload = [{"id": str(r.instant), "ts": r.ts.isoformat(),
+                        **{f: (float(r[f]) if f in ("temp", "atemp", "hum", "windspeed", "level") else int(r[f])) for f in FEATURES}}
+                       for r in rows.itertuples()]
+            out = c.post("/predict", json=payload).json()
+            if previous is not None:
+                c.post("/labels", json=[{"id": str(r.instant), "actual": float(getattr(r, TARGET))} for r in previous.itertuples()])
+            mae = (pd.Series([p["cnt"] for p in out["predictions"]]) - rows[TARGET].to_numpy()).abs().mean()
+            print(f"{day.date()}  rows={len(rows)}  day-MAE={mae:5.1f}  model=v{out['model_version']}")
+            previous = rows
+            time.sleep(args.seconds_per_day)
+
+
+if __name__ == "__main__":
+    main()</code></pre></div><div class="pj-note">One second per day means 2012 takes six minutes. Prometheus's 15-second scrape sees roughly every second week, which is enough for the dashboard; use <code>--seconds-per-day 3</code> if you want smoother lines.</div></div></li><li class="pj-step" id="step-6-2"><label class="pj-step-tick"><input type="checkbox" data-step="6-2" aria-label="Done: step 6.2" /><span class="pj-step-num">6.2</span></label><div class="pj-step-body"><div class="pj-step-text">Write the monitoring stack: the service from the image, Prometheus scraping it, Grafana provisioned. If you already run the SRE track's stack, add the scrape job there instead.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># deploy/compose.yml
+services:
+  model:
+    image: ${MODEL_IMAGE:-bike-demand:v1}
+    ports: ["8000:8000"]
+    volumes: ["predictions:/data"]
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports: ["9090:9090"]
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3000:3000"]
+
+volumes:
+  predictions:
+
+# deploy/prometheus.yml
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+rule_files: [/etc/prometheus/alerts.yml]
+scrape_configs:
+  - job_name: model
+    static_configs:
+      - targets: ["model:8000"]</code></pre></div><div class="pj-note">Copy the Grafana provisioning files from the SLO project (datasource pointing at <code>http://prometheus:9090</code>, and a dashboards provider reading <code>/var/lib/grafana/dashboards</code>).</div></div></li><li class="pj-step" id="step-6-3"><label class="pj-step-tick"><input type="checkbox" data-step="6-3" aria-label="Done: step 6.3" /><span class="pj-step-num">6.3</span></label><div class="pj-step-body"><div class="pj-step-text">Write the alert rules. Quality is the alert that matters — MAE over the last seven data-days more than 1.6× what the model achieved on its holdout, with at least 100 labelled rows so a quiet day cannot trigger it. Drift is a warning: it tells you *why* before quality tells you *that*.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># deploy/alerts.yml
+groups:
+  - name: model
+    rules:
+      - alert: ModelQualityDegraded
+        expr: model_mae_7d &gt; 1.6 * model_val_mae and model_labelled_7d &gt;= 100
+        for: 30s
+        labels: {severity: page}
+        annotations:
+          summary: "7-day MAE {{ $value | printf \"%.0f\" }} vs holdout MAE — retrain"
+      - alert: FeatureDrift
+        expr: max without (instance) (model_psi{signal!="prediction"}) &gt; 0.25
+        for: 1m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Feature {{ $labels.signal }} PSI {{ $value | printf \"%.2f\" }} vs training reference"
+      - alert: PredictionDrift
+        expr: model_psi{signal="prediction"} &gt; 0.25
+        for: 1m
+        labels: {severity: ticket}
+        annotations:
+          summary: "Prediction distribution PSI {{ $value | printf \"%.2f\" }}"</code></pre></div></div></li><li class="pj-step" id="step-6-4"><label class="pj-step-tick"><input type="checkbox" data-step="6-4" aria-label="Done: step 6.4" /><span class="pj-step-num">6.4</span></label><div class="pj-step-body"><div class="pj-step-text">Build the dashboard in Grafana with these panels, then export it to <code>deploy/grafana/dashboards/model.json</code>: the loaded version as a stat from <code>model_info</code>; PSI per feature (<code>model_psi</code>, one line per <code>signal</code>); MAE vs holdout (<code>model_mae_7d</code> and <code>model_val_mae</code> on one panel); labelled count; predictions per minute.</div><div class="code"><div class="code-head"><span>promql</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># Version stat panel (show the 'version' label)
+model_info
+
+# Drift, one line per signal
+model_psi
+
+# Quality: rolling MAE against what the model achieved offline
+model_mae_7d
+model_val_mae
+1.6 * model_val_mae
+
+# Throughput
+rate(model_predictions_total[1m]) * 60</code></pre></div></div></li><li class="pj-step" id="step-6-5"><label class="pj-step-tick"><input type="checkbox" data-step="6-5" aria-label="Done: step 6.5" /><span class="pj-step-num">6.5</span></label><div class="pj-step-body"><div class="pj-step-text">Start the stack with the v1 image and replay the year. Watch the dashboard: <code>level</code> drifts off the chart within weeks (PSI in the single digits — 2012 volumes are outside anything the model saw), prediction PSI climbs through spring, and the MAE line crosses the alert threshold around April–May. In the reference run, Q1 MAE was about 43, Q2 about 71 against a holdout MAE of 32.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>cd deploy &amp;&amp; MODEL_IMAGE=bike-demand:v1 docker compose up -d &amp;&amp; cd ..
+python replay.py --seconds-per-day 2
+# meanwhile: http://localhost:3000 (dashboard), http://localhost:9090/alerts (ModelQualityDegraded should fire in Q2)</code></pre></div><div class="pj-note">Notice which signal moved first. The <code>level</code> feature drifted in January; quality only degraded in April. Feature drift is an early warning; label-based quality is the truth — and it arrives late, which is why both exist.</div></div></li></ol>
+  </section>
+
+  <section id="phase-7" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 7</span><h2>Close the loop</h2></div>
+    <p class="pj-goal">The alert leads to a retrain on data through the end of Q1 2012, the gate promotes it, the new image ships, and the replay of Q2 shows the error falling — then write down what you would automate next.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-7-1"><label class="pj-step-tick"><input type="checkbox" data-step="7-1" aria-label="Done: step 7.1" /><span class="pj-step-num">7.1</span></label><div class="pj-step-body"><div class="pj-step-text">Retrain with the data the model would have had at the end of March 2012, through the workflow so the whole path is exercised. The gate compares the candidate's holdout MAE (Feb–Mar 2012) with the champion's (Nov–Dec 2011); both are "the most recent two months the model had".</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>gh workflow run train -f until=2012-03-31
+gh run watch
+python -c "from mlflow import MlflowClient; c=MlflowClient(); v=c.get_model_version_by_alias('bike-demand','champion'); print('champion', v.version, v.tags)"</code></pre></div><div class="pj-note">Running locally instead: <code>python train.py --until 2012-03-31 &amp;&amp; python promote.py &lt;version&gt; --allow-different-holdout &amp;&amp; python bake.py &amp;&amp; docker build --build-arg MODEL_VERSION=&lt;version&gt; -t bike-demand:v&lt;version&gt; .</code></div></div></li><li class="pj-step" id="step-7-2"><label class="pj-step-tick"><input type="checkbox" data-step="7-2" aria-label="Done: step 7.2" /><span class="pj-step-num">7.2</span></label><div class="pj-step-body"><div class="pj-step-text">Deploy the new image and replay Q2 again. The <code>predictions</code> volume keeps the old predictions, so the first week of MAE still reflects v1 — watch it fall as new labelled predictions replace them.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>V=$(python -c "from mlflow import MlflowClient; print(MlflowClient().get_model_version_by_alias('bike-demand','champion').version)")
+docker pull "ghcr.io/$(gh api user -q .login)/mlops-loop:v$V" 2&gt;/dev/null &amp;&amp; IMG="ghcr.io/$(gh api user -q .login)/mlops-loop:v$V" || IMG="bike-demand:v$V"
+cd deploy &amp;&amp; MODEL_IMAGE="$IMG" docker compose up -d model &amp;&amp; cd ..
+curl -s localhost:8000/health | python3 -c "import sys,json; print(json.load(sys.stdin)['model'])"
+python replay.py --start 2012-04-01 --end 2012-06-30 --seconds-per-day 2</code></pre></div><div class="pj-note">Reference numbers: Q2 2012 MAE about 71 with the 2011 model, about 50 after retraining through March. The alert clears once the 7-day window is dominated by the new model's predictions.</div></div></li><li class="pj-step" id="step-7-3"><label class="pj-step-tick"><input type="checkbox" data-step="7-3" aria-label="Done: step 7.3" /><span class="pj-step-num">7.3</span></label><div class="pj-step-body"><div class="pj-step-text">Write the README as a runbook for the loop: how to train, what the gate checks, how to bake and ship, what each alert means and what to do (retrain with <code>--until</code> = today, check the diff in the registry, deploy). Then commit the dashboard and the alert rules.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>git add deploy README.md
+git commit -m "monitoring: prometheus + grafana stack, drift and quality alerts, replay client; README runbook"
+git push</code></pre></div></div></li><li class="pj-step" id="step-7-4"><label class="pj-step-tick"><input type="checkbox" data-step="7-4" aria-label="Done: step 7.4" /><span class="pj-step-num">7.4</span></label><div class="pj-step-body"><div class="pj-step-text">Finish with the honest list of what is still manual: the alert does not trigger the workflow, the deploy is a <code>docker compose up</code>, and there is no shadow evaluation before promotion. Each is a <code>next</code> item below; write in the README which one you would do first and why.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># Optional: let the alert start the retrain. Alertmanager → a webhook that runs:
+#   gh workflow run train -f until=$(date +%F)
+# The on-call copilot project shows how to receive Alertmanager webhooks safely.</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="troubleshooting" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Help</span><h2>Troubleshooting</h2></div>
+    <dl class="pj-trouble"><dt><code>train.py</code> fails with <code>RESOURCE_DOES_NOT_EXIST</code> or cannot register the model</dt><dd>The tracking URI points at a file store (<code>mlruns/</code>), which has no registry. Start <code>mlflow server --backend-store-uri sqlite:///mlflow.db --artifacts-destination ./mlruns</code> and set <code>MLFLOW_TRACKING_URI=http://localhost:5000</code>, or use the hosted server from the CI phase.</dd><dt><code>promote.py</code> says <code>refusing: candidate holdout ends … champion's ends …</code></dt><dd>That is the gate doing its job: the two models were evaluated on different windows. For a retrain that legitimately moves time forward, pass <code>--allow-different-holdout</code>; for a hyperparameter experiment, retrain with the same <code>--until</code> so the comparison is fair.</dd><dt>The service starts but <code>/predict</code> returns 500 with a category error</dt><dd>The categorical columns must have the same categories the model saw. <code>to_matrix</code> casts to <code>category</code> from the values present in the batch; if a batch contains a <code>weathersit</code> value of 4 that never appeared in training, scikit-learn rejects it. Add the full category lists to <code>features.py</code> (<code>pd.Categorical(values, categories=[...])</code>) so encoding is fixed, not inferred.</dd><dt><code>model_mae_7d</code> never appears in <code>/metrics</code></dt><dd>The gauge is only set once at least one labelled row is in the last 7 data-days. Confirm <code>/labels</code> returns <code>matched &gt; 0</code> — ids must match the ids used in <code>/predict</code> exactly (strings). In the replay, labels are sent for the previous day, so the gauge appears on day two.</dd><dt>PSI for <code>temp</code> is high even in January, before anything went wrong</dt><dd>The reference is the whole training period; comparing one winter week to a full year's temperatures always looks like drift. That is seasonality, not a bug. Options: a seasonal reference (same month last year), or alert only on prediction PSI and on quality, and treat feature PSI as a diagnostic — which is what the alert rules here do with <code>severity: ticket</code>.</dd><dt>The image build fails with <code>model/: not found</code></dt><dd><code>bake.py</code> has not been run in this checkout, or it ran against a different tracking server. Run it right before <code>docker build</code>; in CI it is a step of the same job for exactly this reason.</dd></dl>
+  </section>
+
+  <section id="next" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Next</span><h2>Where to go from here</h2></div>
+    <ul class="pj-next"><li>Wire the <code>ModelQualityDegraded</code> alert to a webhook that runs <code>gh workflow run train -f until=&lt;today&gt;</code> — the on-call copilot project's receiver is a safe template — and make the deploy a Git change the GitOps project's Argo CD applies.</li><li>Add shadow evaluation: before promotion, replay the champion's last 30 days of stored predictions through the candidate and compare MAE on real labels, not just the offline holdout.</li><li>Log the replay's per-day MAE back to MLflow as a time series on the deployed version, so the registry page shows how a model aged.</li><li>Swap the tabular model for a text classifier with the same loop — the serving, drift (embedding PSI) and label-delay mechanics are identical, which is the point of building the loop once.</li><li>Add a data-quality gate in <code>train.py</code> (row counts, null rates, value ranges against the previous run) so a broken upstream extract cannot become a promoted model.</li></ul>
+  </section>
+
+  <p class="feedback-row">Did a step fail or feel unclear? <a href="../../feedback.html?page=/education/projects/proj-ai-mlops-loop.html&amp;title=Train%2C%20register%2C%20serve%20and%20monitor%20a%20model">Tell me which one →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../../education.html">Education</a>
+      <a href="../../privacy.html">Privacy</a>
+      <a href="../../terms.html">Terms</a>
+      <a href="../../feedback.html?page=/education/projects/proj-ai-mlops-loop.html&amp;title=Train%2C%20register%2C%20serve%20and%20monitor%20a%20model">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="project.js"></script>
+</body>
+</html>
