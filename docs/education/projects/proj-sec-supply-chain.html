@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Signed and attested builds — Security project | ThavionAI Education</title>
+  <meta name="description" content="Answer three questions about the container you are about to run in production: what is inside it, who built it, and can I prove both? You will generate an SBOM on every build and scan it against vulnerability databases, sign the image keylessly with Sigstore so there is no private key to leak, attach SLSA build provenance that ties the image to a commit and a workflow run, harden the build pipeline itself against the attacks that make all of this necessary, and then put a verification gate in front of the deploy that refuses anything unsigned. You finish by attacking your own pipeline — a tampered image, a backdoored dependency, a workflow run from the wrong branch — and watching each attempt fail at a specific control you can name." />
+  <meta property="og:title" content="Signed and attested builds — ThavionAI project" />
+  <meta property="og:description" content="Answer three questions about the container you are about to run in production: what is inside it, who built it, and can I prove both? You will generate an SBOM on every build and scan it against vulnerability databases, sign the image keylessly with Sigstore so there is no private key to leak, attach SLSA build provenance that ties the image to a commit and a workflow run, harden the build pipeline itself against the attacks that make all of this necessary, and then put a verification gate in front of the deploy that refuses anything unsigned. You finish by attacking your own pipeline — a tampered image, a backdoored dependency, a workflow run from the wrong branch — and watching each attempt fail at a specific control you can name." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/projects/proj-sec-supply-chain.html" />
+  <link rel="icon" href="../../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="../lesson.css" />
+  <link rel="stylesheet" href="project.css" />
+</head>
+<body class="track-security" data-project="proj-sec-supply-chain">
+
+<nav>
+  <a href="../../index.html" class="nav-logo"><img class="nav-logo-icon" src="../../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../../education.html">Tracks</a>
+    <a href="../../index.html#projects" class="active">Projects</a>
+    <a href="../../education.html#certs">Certifications</a>
+    <a href="../../index.html#apps">Apps</a>
+    <a href="../../feedback.html?page=/education/projects/proj-sec-supply-chain.html&amp;title=Signed%20and%20attested%20builds">Feedback</a>
+    <a href="../../education.html#security" class="nav-cta">Security track</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../../education.html">Education</a> › <a href="../../education.html#security">Cybersecurity</a> › Guided project</div>
+    <h1>Signed and attested builds</h1>
+    <p class="lede">Answer three questions about the container you are about to run in production: what is inside it, who built it, and can I prove both? You will generate an SBOM on every build and scan it against vulnerability databases, sign the image keylessly with Sigstore so there is no private key to leak, attach SLSA build provenance that ties the image to a commit and a workflow run, harden the build pipeline itself against the attacks that make all of this necessary, and then put a verification gate in front of the deploy that refuses anything unsigned. You finish by attacking your own pipeline — a tampered image, a backdoored dependency, a workflow run from the wrong branch — and watching each attempt fail at a specific control you can name.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">about 5 hours</span>
+      <span class="chip">7 phases · 35 steps</span>
+      <span class="chip chip-quiz" id="progressChip">0 / 35 done</span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav">
+  <div class="wrap">
+    <a href="#overview">Overview</a>
+    <a href="#phase-1">1. Know what you ship</a>
+    <a href="#phase-2">2. Sign the image, keylessly</a>
+    <a href="#phase-3">3. Provenance: prove which build made it</a>
+    <a href="#phase-4">4. Harden the build itself</a>
+    <a href="#phase-5">5. The gate: refuse what you cannot verify</a>
+    <a href="#phase-6">6. Attack your own pipeline</a>
+    <a href="#phase-7">7. Optional: let the cluster enforce it</a>
+    <a href="#troubleshooting">Troubleshooting</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <section class="pj-intro" id="overview">
+    <div class="objectives">
+      <div class="box-label">What you will have at the end</div>
+      <p class="pj-outcome">The zero-to-production repository builds images that carry a CycloneDX SBOM attestation, a Sigstore keyless signature and GitHub-issued SLSA v1 provenance, all verifiable by anyone with <code>cosign verify</code> and <code>gh attestation verify</code>; a <code>verify-image.sh</code> gate that the deploy runs first and that refuses an image whose signature, provenance repository or workflow identity does not match; every third-party action pinned to a commit SHA with least-privilege tokens; an OSV scan that fails the build on a fixable critical; and a <code>security/SUPPLY-CHAIN.md</code> recording four attacks you ran against your own pipeline and which control stopped each one.</p>
+    </div>
+    <div class="pj-grid">
+      <div class="pj-box">
+        <div class="box-label">Before you start</div>
+        <ul><li>The <strong>zero-to-prod</strong> project: the repository, the GHCR image, and the release workflow that builds it</li><li>The security track's modules on the software supply chain, containers and DevSecOps</li><li>Docker, the GitHub CLI (<code>gh</code> 2.60+ for <code>gh attestation</code>), and a GHCR package you own</li><li>Optional: the <strong>GitOps with Argo CD</strong> project, if you want the Kubernetes admission-control path at the end</li></ul>
+      </div>
+      <div class="pj-box">
+        <div class="box-label">Tools you will install</div>
+        <ul class="pj-tools"><li><strong>Syft</strong> — generates the SBOM from the image — every package, version and licence that ends up in the layers <a href="https://github.com/anchore/syft" target="_blank" rel="noopener">↗</a></li><li><strong>Cosign (Sigstore)</strong> — keyless signing and attestation using a short-lived certificate tied to the workflow's OIDC identity <a href="https://docs.sigstore.dev/cosign/signing/overview/" target="_blank" rel="noopener">↗</a></li><li><strong>GitHub artifact attestations</strong> — SLSA v1 build provenance issued by GitHub, verified with <code>gh attestation verify</code> <a href="https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations" target="_blank" rel="noopener">↗</a></li><li><strong>OSV-Scanner</strong> — scans the SBOM against the OSV database; knows which findings have fixes <a href="https://google.github.io/osv-scanner/" target="_blank" rel="noopener">↗</a></li><li><strong>Trivy</strong> — a second opinion on image CVEs and a familiar name in interviews; used for the fail-on-fixable gate <a href="https://trivy.dev/" target="_blank" rel="noopener">↗</a></li><li><strong>Kyverno</strong> — optional final phase: the cluster refuses images that are not signed by your workflow <a href="https://kyverno.io/docs/policy-types/cluster-policy/verify-images/" target="_blank" rel="noopener">↗</a></li></ul>
+      </div>
+    </div>
+    <div class="pj-box pj-layout"><div class="box-label">Repository layout at the end</div><pre><code>zero-to-prod/
+├── .github/workflows/
+│   ├── release.yml            # build → SBOM → sign → attest → provenance
+│   └── supply-chain.yml       # dependency review, OSV scan, pinned-action check
+├── security/
+│   ├── SUPPLY-CHAIN.md        # what is produced, how to verify, the four attacks
+│   ├── verify-image.sh        # the deploy gate: signature + provenance + identity
+│   └── policy/
+│       ├── kyverno-verify-images.yaml   # optional cluster enforcement
+│       └── allowed-identities.env       # repo, workflow ref, issuer
+├── deploy/
+│   └── pull-and-run.sh        # calls verify-image.sh before docker compose up
+└── .github/dependabot.yml</code></pre></div>
+    <p class="pj-hint">Tick each step as you finish it — your progress is saved in this browser only (<a href="../../education.html#progressPanel">back up or restore</a> on the hub). Every code block has a copy button. If something goes wrong, the <a href="#troubleshooting">troubleshooting</a> section at the end covers the usual suspects.</p>
+  </section>
+
+  <section id="phase-1" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 1</span><h2>Know what you ship</h2></div>
+    <p class="pj-goal">Dependencies pinned and watched, an SBOM generated from the built image on every run, and a vulnerability scan that fails the build only on things you can actually fix.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-1-1"><label class="pj-step-tick"><input type="checkbox" data-step="1-1" aria-label="Done: step 1.1" /><span class="pj-step-num">1.1</span></label><div class="pj-step-body"><div class="pj-step-text">Start in the zero-to-prod repository on a branch, and look at what you are currently shipping. <code>docker history</code> shows the layers; the image has dozens of OS packages you never chose, which is exactly why an SBOM matters.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>cd zero-to-prod &amp;&amp; git switch -c feat/supply-chain
+docker pull ghcr.io/$(gh api user -q .login)/zero-to-prod:latest
+docker history --no-trunc ghcr.io/$(gh api user -q .login)/zero-to-prod:latest | head -12</code></pre></div></div></li><li class="pj-step" id="step-1-2"><label class="pj-step-tick"><input type="checkbox" data-step="1-2" aria-label="Done: step 1.2" /><span class="pj-step-num">1.2</span></label><div class="pj-step-body"><div class="pj-step-text">Install Syft and generate an SBOM locally in CycloneDX JSON. Count the components: the Python packages you declared are a small fraction of the total.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>brew install syft   # or: curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+IMAGE=ghcr.io/$(gh api user -q .login)/zero-to-prod:latest
+syft "$IMAGE" -o cyclonedx-json &gt; sbom.cdx.json
+python3 -c "import json; d=json.load(open('sbom.cdx.json')); c=d['components']; print(len(c), 'components'); \
+import collections; print(collections.Counter(x.get('type','?') for x in c)); \
+print([x['name'] for x in c if x.get('purl','').startswith('pkg:pypi')][:10])"</code></pre></div><div class="pj-note">Typical result for the FastAPI image: 100–150 components, of which a dozen are PyPI packages and the rest are Debian packages from the base image. If someone asks "are you affected by CVE-2026-xxxx in libexpat?", this file is the answer.</div></div></li><li class="pj-step" id="step-1-3"><label class="pj-step-tick"><input type="checkbox" data-step="1-3" aria-label="Done: step 1.3" /><span class="pj-step-num">1.3</span></label><div class="pj-step-body"><div class="pj-step-text">Scan the SBOM with OSV-Scanner. Scanning the SBOM rather than the image means the scan is reproducible — the same file always gives the same answer, which matters when you are arguing about whether a build regressed.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>brew install osv-scanner   # or download from the releases page
+osv-scanner scan source --sbom sbom.cdx.json --format table | head -30
+osv-scanner scan source --sbom sbom.cdx.json --format json &gt; osv.json
+python3 -c "import json; d=json.load(open('osv.json')); \
+print(sum(len(p.get('vulnerabilities',[])) for r in d.get('results',[]) for p in r.get('packages',[])), 'vulns')"</code></pre></div></div></li><li class="pj-step" id="step-1-4"><label class="pj-step-tick"><input type="checkbox" data-step="1-4" aria-label="Done: step 1.4" /><span class="pj-step-num">1.4</span></label><div class="pj-step-body"><div class="pj-step-text">Pin the Python dependencies with hashes so a compromised or re-uploaded package cannot change under you. <code>uv</code> writes a lock file with hashes; <code>pip install --require-hashes</code> refuses anything that does not match.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>uv pip compile pyproject.toml --generate-hashes -o requirements.lock
+head -12 requirements.lock
+# In the Dockerfile, replace the install line with the locked one:
+#   COPY requirements.lock .
+#   RUN python -m venv /venv &amp;&amp; /venv/bin/pip install --require-hashes --no-deps -r requirements.lock</code></pre></div><div class="pj-note"><code>--no-deps</code> is deliberate: the lock file already lists the full closure, so pip must not resolve anything itself. If the build fails with "hashes are required", one dependency is missing from the lock — regenerate it rather than dropping the flag.</div></div></li><li class="pj-step" id="step-1-5"><label class="pj-step-tick"><input type="checkbox" data-step="1-5" aria-label="Done: step 1.5" /><span class="pj-step-num">1.5</span></label><div class="pj-step-body"><div class="pj-step-text">Turn on Dependabot for both the Python dependencies and the GitHub Actions, so the pins you just made do not rot.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># .github/dependabot.yml
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule: {interval: weekly}
+    open-pull-requests-limit: 5
+    groups:
+      python-minor:
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule: {interval: weekly}
+  - package-ecosystem: docker
+    directory: "/"
+    schedule: {interval: weekly}</code></pre></div></div></li><li class="pj-step" id="step-1-6"><label class="pj-step-tick"><input type="checkbox" data-step="1-6" aria-label="Done: step 1.6" /><span class="pj-step-num">1.6</span></label><div class="pj-step-body"><div class="pj-step-text">Add the supply-chain workflow: dependency review on pull requests (it blocks a PR that introduces a known-vulnerable package), and an OSV scan of the repository's lock file.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># .github/workflows/supply-chain.yml
+name: supply-chain
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * 1"        # Monday morning: new CVEs land against old code
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: always
+
+  osv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google/osv-scanner-action/osv-scanner-action@v2.6.0
+        with:
+          scan-args: |-
+            --lockfile=requirements.lock
+            --format=table</code></pre></div></div></li><li class="pj-step" id="step-1-7"><label class="pj-step-tick"><input type="checkbox" data-step="1-7" aria-label="Done: step 1.7" /><span class="pj-step-num">1.7</span></label><div class="pj-step-body"><div class="pj-step-text">Commit and open the pull request. Watch dependency review comment on it, then merge.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>git add .github Dockerfile requirements.lock pyproject.toml
+git commit -m "supply-chain: hash-pinned deps, dependabot, dependency review and OSV scanning"
+git push -u origin feat/supply-chain
+gh pr create --fill &amp;&amp; gh pr checks --watch
+gh pr merge --squash --delete-branch &amp;&amp; git switch main &amp;&amp; git pull</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-2" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 2</span><h2>Sign the image, keylessly</h2></div>
+    <p class="pj-goal">Every image pushed to GHCR carries a Sigstore signature made with a short-lived certificate bound to the workflow's OIDC identity — no key material anywhere — and an SBOM attestation attached to the same digest.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-2-1"><label class="pj-step-tick"><input type="checkbox" data-step="2-1" aria-label="Done: step 2.1" /><span class="pj-step-num">2.1</span></label><div class="pj-step-body"><div class="pj-step-text">Understand what keyless means before you use it. Cosign asks Fulcio for a certificate valid for about ten minutes, proving the holder of a particular OIDC identity — here <code>repo:you/zero-to-prod:ref:refs/heads/main</code> — signed this digest; the signature and certificate go into the Rekor transparency log. Nothing to store, nothing to leak, and a public record that the signature existed at a point in time.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>brew install cosign   # v3.x
+cosign version
+# Look at a signature someone else made, to see the shape of the thing:
+cosign verify ghcr.io/sigstore/cosign/cosign:v3.1.3 \
+  --certificate-identity-regexp 'https://github.com/sigstore/cosign/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  -o text 2&gt;&amp;1 | head -20</code></pre></div></div></li><li class="pj-step" id="step-2-2"><label class="pj-step-tick"><input type="checkbox" data-step="2-2" aria-label="Done: step 2.2" /><span class="pj-step-num">2.2</span></label><div class="pj-step-body"><div class="pj-step-text">In <code>release.yml</code>, capture the image digest from the build step — everything after this point signs the *digest*, never the tag. A tag can be moved; a digest is the content.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># .github/workflows/release.yml — the build job, with pinned actions
+permissions:
+  contents: read
+  packages: write
+  id-token: write          # required for keyless signing and for provenance
+  attestations: write      # required for GitHub artifact attestations
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      image: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+      - id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false          # GitHub's attestation below replaces BuildKit's
+          sbom: false                # we attach our own with cosign</code></pre></div></div></li><li class="pj-step" id="step-2-3"><label class="pj-step-tick"><input type="checkbox" data-step="2-3" aria-label="Done: step 2.3" /><span class="pj-step-num">2.3</span></label><div class="pj-step-body"><div class="pj-step-text">Add the signing job. It signs the digest, generates the SBOM from the pushed image, and attaches the SBOM as a CycloneDX attestation on the same digest. <code>--yes</code> skips the interactive confirmation, which is required in CI.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>  sign:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+    steps:
+      - uses: sigstore/cosign-installer@v4
+        with:
+          cosign-release: v3.1.3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Sign the image digest
+        run: cosign sign --yes "$IMAGE"
+      - name: Generate the SBOM from the pushed image
+        uses: anchore/sbom-action@v0.24.2
+        with:
+          image: ${{ env.IMAGE }}
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+          upload-artifact: false
+      - name: Attach the SBOM as an attestation
+        run: cosign attest --yes --type cyclonedx --predicate sbom.cdx.json "$IMAGE"
+      - name: Fail on fixable critical vulnerabilities
+        uses: aquasecurity/trivy-action@0.29.0
+        with:
+          image-ref: ${{ env.IMAGE }}
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table</code></pre></div><div class="pj-note"><code>ignore-unfixed: true</code> is the difference between a gate people respect and one they disable. A critical with no available fix is a decision for a human and a record in the risk register, not a build failure at 2 a.m.</div></div></li><li class="pj-step" id="step-2-4"><label class="pj-step-tick"><input type="checkbox" data-step="2-4" aria-label="Done: step 2.4" /><span class="pj-step-num">2.4</span></label><div class="pj-step-body"><div class="pj-step-text">Push, watch the workflow, then verify the signature from your laptop as any consumer would. Note that verification needs no credentials at all.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>git switch -c feat/sign-images &amp;&amp; git add .github &amp;&amp; git commit -m "release: keyless signing and SBOM attestation"
+git push -u origin feat/sign-images &amp;&amp; gh pr create --fill &amp;&amp; gh pr merge --squash --delete-branch
+git switch main &amp;&amp; git pull &amp;&amp; gh run watch
+REPO=$(gh api user -q .login)/zero-to-prod
+DIGEST=$(cosign triangulate --type digest ghcr.io/$REPO:latest 2&gt;/dev/null || docker buildx imagetools inspect ghcr.io/$REPO:latest --format '{{.Manifest.Digest}}')
+cosign verify "ghcr.io/$REPO@$DIGEST" \
+  --certificate-identity-regexp "^https://github.com/$REPO/.github/workflows/release.yml@refs/heads/main$" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com -o text | head -25</code></pre></div></div></li><li class="pj-step" id="step-2-5"><label class="pj-step-tick"><input type="checkbox" data-step="2-5" aria-label="Done: step 2.5" /><span class="pj-step-num">2.5</span></label><div class="pj-step-body"><div class="pj-step-text">Pull the SBOM back out of the registry and confirm it describes the image you are holding. This is the workflow an auditor or a downstream consumer actually performs.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>cosign verify-attestation "ghcr.io/$REPO@$DIGEST" --type cyclonedx \
+  --certificate-identity-regexp "^https://github.com/$REPO/.github/workflows/release.yml@refs/heads/main$" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  | jq -r '.payload' | base64 -d | jq '.predicate.components | length'
+# And find one package by name:
+cosign verify-attestation "ghcr.io/$REPO@$DIGEST" --type cyclonedx \
+  --certificate-identity-regexp "^https://github.com/$REPO/.*" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  | jq -r '.payload' | base64 -d | jq -r '.predicate.components[] | select(.name=="fastapi") | .version'</code></pre></div><div class="pj-note"><code>jq</code> is doing the work here because an attestation is a signed DSSE envelope wrapping a base64 in-toto statement. Seeing the layers once makes the rest of the ecosystem legible.</div></div></li></ol>
+  </section>
+
+  <section id="phase-3" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 3</span><h2>Provenance: prove which build made it</h2></div>
+    <p class="pj-goal">GitHub issues SLSA v1 provenance for the image digest, tying it to the repository, the commit, the workflow file and the run — and you verify it with one command.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-3-1"><label class="pj-step-tick"><input type="checkbox" data-step="3-1" aria-label="Done: step 3.1" /><span class="pj-step-num">3.1</span></label><div class="pj-step-body"><div class="pj-step-text">A signature says "a workflow in this repo signed this". Provenance says "*this* commit, built by *this* workflow file, in *this* run, from *these* inputs". Add the attestation step to the build job, right after the push.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true</code></pre></div><div class="pj-note"><code>push-to-registry: true</code> stores the attestation next to the image in GHCR, so anyone who can pull the image can verify it. Without it the attestation lives only in the GitHub API, which is fine inside your organisation but useless to a downstream consumer.</div></div></li><li class="pj-step" id="step-3-2"><label class="pj-step-tick"><input type="checkbox" data-step="3-2" aria-label="Done: step 3.2" /><span class="pj-step-num">3.2</span></label><div class="pj-step-body"><div class="pj-step-text">Merge, then verify the provenance with the GitHub CLI. Read the output: it names the workflow, the commit and the run.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>git switch -c feat/provenance &amp;&amp; git add .github &amp;&amp; git commit -m "release: SLSA build provenance"
+git push -u origin feat/provenance &amp;&amp; gh pr create --fill &amp;&amp; gh pr merge --squash --delete-branch
+git switch main &amp;&amp; git pull &amp;&amp; gh run watch
+gh attestation verify "oci://ghcr.io/$REPO:latest" --repo "$REPO" --format json \
+  | jq -r '.[0].verificationResult.statement.predicate.buildDefinition.externalParameters,
+           .[0].verificationResult.statement.predicate.runDetails.builder.id'</code></pre></div></div></li><li class="pj-step" id="step-3-3"><label class="pj-step-tick"><input type="checkbox" data-step="3-3" aria-label="Done: step 3.3" /><span class="pj-step-num">3.3</span></label><div class="pj-step-body"><div class="pj-step-text">Now tighten it: verify not just that *some* workflow in the repo built it, but that the release workflow on <code>main</code> did. This is the assertion your deploy gate will make.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>gh attestation verify "oci://ghcr.io/$REPO:latest" \
+  --repo "$REPO" \
+  --signer-workflow "$REPO/.github/workflows/release.yml" \
+  --source-ref refs/heads/main
+echo "exit: $?"
+# The same assertion, deliberately wrong, must fail:
+gh attestation verify "oci://ghcr.io/$REPO:latest" --repo "$REPO" \
+  --signer-workflow "$REPO/.github/workflows/nonexistent.yml"; echo "exit: $?"</code></pre></div></div></li><li class="pj-step" id="step-3-4"><label class="pj-step-tick"><input type="checkbox" data-step="3-4" aria-label="Done: step 3.4" /><span class="pj-step-num">3.4</span></label><div class="pj-step-body"><div class="pj-step-text">Record what the image now carries. A short table in <code>security/SUPPLY-CHAIN.md</code> that a colleague can follow is worth more than a diagram.</div><div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># security/SUPPLY-CHAIN.md
+
+## What every image carries
+| Artefact        | Produced by                          | Verify with                                  |
+|-----------------|--------------------------------------|----------------------------------------------|
+| Signature       | `cosign sign` (keyless, GH OIDC)     | `cosign verify --certificate-identity-regexp …` |
+| SBOM (CycloneDX)| `syft` → `cosign attest --type cyclonedx` | `cosign verify-attestation --type cyclonedx` |
+| SLSA provenance | `actions/attest-build-provenance@v4` | `gh attestation verify oci://… --repo … --signer-workflow …` |
+
+## Identity we trust
+issuer:   https://token.actions.githubusercontent.com
+identity: https://github.com/&lt;owner&gt;/zero-to-prod/.github/workflows/release.yml@refs/heads/main
+
+Anything signed by a different workflow, a different ref, or a different repository is not ours,
+even if it is in our registry.</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-4" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 4</span><h2>Harden the build itself</h2></div>
+    <p class="pj-goal">The pipeline that produces all this evidence cannot itself be the weak link: actions pinned by commit SHA, minimal token permissions, protected branches, and no path by which a fork's pull request can run privileged code.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-4-1"><label class="pj-step-tick"><input type="checkbox" data-step="4-1" aria-label="Done: step 4.1" /><span class="pj-step-num">4.1</span></label><div class="pj-step-body"><div class="pj-step-text">Pin every third-party action to a commit SHA. A tag is mutable: <code>@v4</code> today and <code>@v4</code> tomorrow can be different code, and that is precisely how several real compromises were delivered. Resolve each tag to its SHA and rewrite the workflows.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>git switch -c feat/pin-actions
+pin() { sha=$(gh api "repos/$1/commits/$2" -q .sha); echo "$1@$sha # $2"; }
+for a in "sigstore/cosign-installer v4.1.2" "anchore/sbom-action v0.24.2" \
+         "aquasecurity/trivy-action 0.29.0" "google/osv-scanner-action v2.6.0" \
+         "docker/build-push-action v6" "docker/login-action v3" "docker/metadata-action v5"; do
+  pin $a
+done</code></pre></div><div class="pj-note"><code>actions/*</code> and <code>github/*</code> are published by GitHub itself and are usually accepted at the tag; everything else gets a SHA with the tag in a trailing comment so Dependabot can still propose updates. Decide your own line and write it in SUPPLY-CHAIN.md.</div></div></li><li class="pj-step" id="step-4-2"><label class="pj-step-tick"><input type="checkbox" data-step="4-2" aria-label="Done: step 4.2" /><span class="pj-step-num">4.2</span></label><div class="pj-step-body"><div class="pj-step-text">Edit the workflows to use the pinned references, then add a CI check that fails if an unpinned third-party action appears again.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># .github/workflows/supply-chain.yml — add this job
+  pinned-actions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Third-party actions must be pinned to a SHA
+        run: |
+          bad=$(grep -rhoE 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[^ ]+' .github/workflows \
+                | grep -vE '@[0-9a-f]{40}' \
+                | grep -vE 'uses: (actions|github)/' || true)
+          if [ -n "$bad" ]; then
+            echo "unpinned third-party actions:"; echo "$bad"; exit 1
+          fi
+          echo "all third-party actions are pinned"</code></pre></div></div></li><li class="pj-step" id="step-4-3"><label class="pj-step-tick"><input type="checkbox" data-step="4-3" aria-label="Done: step 4.3" /><span class="pj-step-num">4.3</span></label><div class="pj-step-body"><div class="pj-step-text">Check the token permissions of every job. The default is often far more than a job needs; each workflow should declare a read-only default at the top and widen it per job.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>grep -n -A4 '^permissions:\|^  permissions:' .github/workflows/*.yml
+# Rules of thumb:
+#   default at the top of every file:  permissions: {contents: read}
+#   build/push to GHCR:                packages: write
+#   keyless signing / provenance:      id-token: write, attestations: write
+#   posting a PR comment:              pull-requests: write  (only on that job)</code></pre></div></div></li><li class="pj-step" id="step-4-4"><label class="pj-step-tick"><input type="checkbox" data-step="4-4" aria-label="Done: step 4.4" /><span class="pj-step-num">4.4</span></label><div class="pj-step-body"><div class="pj-step-text">Close the fork-PR hole. <code>pull_request_target</code> runs with the base repository's secrets and a writable token — combined with checking out the PR's code it is a full repository compromise. Confirm you have none, and require approval for first-time contributors' workflow runs.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>grep -rn 'pull_request_target' .github/workflows/ &amp;&amp; echo 'REVIEW THESE' || echo 'none — good'
+gh api -X PUT "repos/$REPO/actions/permissions/workflow" \
+  -f default_workflow_permissions=read -F can_approve_pull_request_reviews=false
+gh api "repos/$REPO/actions/permissions/workflow"
+# In the web UI: Settings → Actions → General → "Require approval for all external contributors"</code></pre></div></div></li><li class="pj-step" id="step-4-5"><label class="pj-step-tick"><input type="checkbox" data-step="4-5" aria-label="Done: step 4.5" /><span class="pj-step-num">4.5</span></label><div class="pj-step-body"><div class="pj-step-text">Protect the branch that the signing identity is bound to. The whole scheme rests on <code>refs/heads/main</code> meaning something: if anyone can push to main, anyone can produce a legitimately-signed backdoored image.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>gh api -X PUT "repos/$REPO/branches/main/protection" --input - &lt;&lt;'EOF'
+{
+  "required_status_checks": {"strict": true, "contexts": ["test", "pinned-actions"]},
+  "enforce_admins": true,
+  "required_pull_request_reviews": {"required_approving_review_count": 1},
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false
+}
+EOF
+gh api "repos/$REPO/branches/main/protection" -q '{checks: .required_status_checks.contexts, force: .allow_force_pushes.enabled}'</code></pre></div><div class="pj-note">On a solo project the review requirement means you cannot merge your own PR, which is annoying — set <code>required_approving_review_count</code> to 0 and keep the status checks, or add a second account. Write down which you chose and why; that sentence is the security review.</div></div></li><li class="pj-step" id="step-4-6"><label class="pj-step-tick"><input type="checkbox" data-step="4-6" aria-label="Done: step 4.6" /><span class="pj-step-num">4.6</span></label><div class="pj-step-body"><div class="pj-step-text">Merge the hardening and confirm the new check runs.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>git add .github &amp;&amp; git commit -m "supply-chain: pin actions to SHAs, least-privilege tokens, pinned-actions check"
+git push -u origin feat/pin-actions &amp;&amp; gh pr create --fill &amp;&amp; gh pr checks --watch
+gh pr merge --squash --delete-branch &amp;&amp; git switch main &amp;&amp; git pull</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-5" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 5</span><h2>The gate: refuse what you cannot verify</h2></div>
+    <p class="pj-goal">Deployment verifies the signature, the provenance and the identity before anything runs, and fails closed.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-5-1"><label class="pj-step-tick"><input type="checkbox" data-step="5-1" aria-label="Done: step 5.1" /><span class="pj-step-num">5.1</span></label><div class="pj-step-body"><div class="pj-step-text">Write the gate as a script, so it works identically on your laptop, on the EC2 host and in CI. It takes a full image reference, resolves it to a digest, and makes three assertions.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># security/verify-image.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+IMAGE="${1:?usage: verify-image.sh ghcr.io/owner/repo:tag}"
+: "${EXPECTED_REPO:?set EXPECTED_REPO=owner/repo}"
+WORKFLOW="${EXPECTED_WORKFLOW:-.github/workflows/release.yml}"
+REF="${EXPECTED_REF:-refs/heads/main}"
+ISSUER="https://token.actions.githubusercontent.com"
+IDENTITY="^https://github.com/${EXPECTED_REPO}/${WORKFLOW}@${REF}$"
+
+DIGEST=$(docker buildx imagetools inspect "$IMAGE" --format '{{.Manifest.Digest}}')
+REF_BY_DIGEST="${IMAGE%%:*}@${DIGEST}"
+echo "verifying ${REF_BY_DIGEST}"
+
+echo "1/3 signature"
+cosign verify "$REF_BY_DIGEST" \
+  --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER" &gt; /dev/null
+
+echo "2/3 SBOM attestation"
+cosign verify-attestation "$REF_BY_DIGEST" --type cyclonedx \
+  --certificate-identity-regexp "$IDENTITY" --certificate-oidc-issuer "$ISSUER" &gt; /dev/null
+
+echo "3/3 build provenance"
+gh attestation verify "oci://${REF_BY_DIGEST}" \
+  --repo "$EXPECTED_REPO" --signer-workflow "${EXPECTED_REPO}/${WORKFLOW}" --source-ref "$REF" &gt; /dev/null
+
+echo "OK ${REF_BY_DIGEST}"
+echo "$DIGEST"</code></pre></div></div></li><li class="pj-step" id="step-5-2"><label class="pj-step-tick"><input type="checkbox" data-step="5-2" aria-label="Done: step 5.2" /><span class="pj-step-num">5.2</span></label><div class="pj-step-body"><div class="pj-step-text">Make the deploy use it. Nothing pulls and runs without passing the gate first, and the gate's output — the digest — is what actually gets run, so a tag cannot be swapped between verification and use.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># deploy/pull-and-run.sh
+#!/usr/bin/env bash
+set -euo pipefail
+export EXPECTED_REPO="${EXPECTED_REPO:?}"
+IMAGE="ghcr.io/${EXPECTED_REPO}:${1:-latest}"
+
+DIGEST=$(../security/verify-image.sh "$IMAGE" | tail -1)
+export APP_IMAGE="ghcr.io/${EXPECTED_REPO}@${DIGEST}"
+echo "deploying $APP_IMAGE"
+docker compose pull app
+docker compose up -d app
+docker compose ps app</code></pre></div></div></li><li class="pj-step" id="step-5-3"><label class="pj-step-tick"><input type="checkbox" data-step="5-3" aria-label="Done: step 5.3" /><span class="pj-step-num">5.3</span></label><div class="pj-step-body"><div class="pj-step-text">Test the gate against the real image — it should pass — and then against something it must refuse: a public image nobody signed with your identity.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>chmod +x security/verify-image.sh deploy/pull-and-run.sh
+export EXPECTED_REPO=$(gh api user -q .login)/zero-to-prod
+security/verify-image.sh "ghcr.io/$EXPECTED_REPO:latest"
+security/verify-image.sh ghcr.io/sigstore/cosign/cosign:v3.1.3 || echo "refused, as it should be (exit $?)"</code></pre></div></div></li><li class="pj-step" id="step-5-4"><label class="pj-step-tick"><input type="checkbox" data-step="5-4" aria-label="Done: step 5.4" /><span class="pj-step-num">5.4</span></label><div class="pj-step-body"><div class="pj-step-text">Add the gate to the deploy job in CI too, before the SSM command that restarts the service on the EC2 host. The job that deploys is a different job from the one that builds, so it verifies rather than trusts.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>  deploy:
+    needs: [build, sign]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      EXPECTED_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: sigstore/cosign-installer@v4
+        with: {cosign-release: v3.1.3}
+      - name: Verify before deploying
+        run: ./security/verify-image.sh "ghcr.io/${{ github.repository }}@${{ needs.build.outputs.digest }}"
+      # ... existing aws-actions/configure-aws-credentials + SSM send-command steps ...</code></pre></div><div class="pj-note"><code>verify-image.sh</code> resolves a digest reference to itself, so passing <code>image@sha256:…</code> works unchanged.</div></div></li></ol>
+  </section>
+
+  <section id="phase-6" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 6</span><h2>Attack your own pipeline</h2></div>
+    <p class="pj-goal">Four attacks, four refusals, each traced to a named control — and one deliberate gap you write down instead of pretending it does not exist.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-6-1"><label class="pj-step-tick"><input type="checkbox" data-step="6-1" aria-label="Done: step 6.1" /><span class="pj-step-num">6.1</span></label><div class="pj-step-body"><div class="pj-step-text">Attack 1 — tamper with the image. Build a modified image, push it under a new tag in your own registry, and try to deploy it. It is *your* registry and *your* repository, and the gate still refuses, because nothing signed that digest.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>printf '\n# backdoor marker\nRUN echo "pwned" &gt; /tmp/marker\n' &gt;&gt; Dockerfile.evil.tmp
+cat Dockerfile Dockerfile.evil.tmp &gt; Dockerfile.evil &amp;&amp; rm Dockerfile.evil.tmp
+docker build -f Dockerfile.evil -t "ghcr.io/$EXPECTED_REPO:evil" .
+docker push "ghcr.io/$EXPECTED_REPO:evil"
+security/verify-image.sh "ghcr.io/$EXPECTED_REPO:evil" || echo "REFUSED at step 1 (no signature for this digest)"
+docker rm -f $(docker create "ghcr.io/$EXPECTED_REPO:evil") &gt;/dev/null 2&gt;&amp;1 || true
+rm Dockerfile.evil</code></pre></div></div></li><li class="pj-step" id="step-6-2"><label class="pj-step-tick"><input type="checkbox" data-step="6-2" aria-label="Done: step 6.2" /><span class="pj-step-num">6.2</span></label><div class="pj-step-body"><div class="pj-step-text">Attack 2 — move the tag. Retag the evil image as <code>latest</code> in the registry, the classic "the tag you deploy is not the image you reviewed" move. The gate resolves <code>latest</code> to its *current* digest, finds no signature for it, and refuses. Then restore the tag.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>GOOD=$(docker buildx imagetools inspect "ghcr.io/$EXPECTED_REPO:latest" --format '{{.Manifest.Digest}}')
+echo "good digest: $GOOD"
+docker buildx imagetools create -t "ghcr.io/$EXPECTED_REPO:latest" "ghcr.io/$EXPECTED_REPO:evil"
+security/verify-image.sh "ghcr.io/$EXPECTED_REPO:latest" || echo "REFUSED (tag moved to an unsigned digest)"
+docker buildx imagetools create -t "ghcr.io/$EXPECTED_REPO:latest" "ghcr.io/$EXPECTED_REPO@$GOOD"
+security/verify-image.sh "ghcr.io/$EXPECTED_REPO:latest" &amp;&amp; echo "restored"</code></pre></div><div class="pj-note">This is the attack that pinning by digest prevents entirely, which is why <code>pull-and-run.sh</code> deploys the digest the gate returned rather than the tag it was given.</div></div></li><li class="pj-step" id="step-6-3"><label class="pj-step-tick"><input type="checkbox" data-step="6-3" aria-label="Done: step 6.3" /><span class="pj-step-num">6.3</span></label><div class="pj-step-body"><div class="pj-step-text">Attack 3 — build from a branch. Push a branch that changes the app and let the release workflow run on it (temporarily allow it, if your workflow is main-only). The image is signed — by an identity ending <code>@refs/heads/attack</code> — and the gate refuses it because the ref does not match.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>git switch -c attack/side-door
+sed -i.bak 's/hello from the pipeline/hello from the side door/' app/main.py &amp;&amp; rm app/main.py.bak
+git commit -am "attack: build from a non-main branch" &amp;&amp; git push -u origin attack/side-door
+gh workflow run release.yml --ref attack/side-door 2&gt;/dev/null || echo "workflow is main-only — that is control #1 working"
+# If it did run, verify the resulting image:
+security/verify-image.sh "ghcr.io/$EXPECTED_REPO:sha-$(git rev-parse --short HEAD)" || echo "REFUSED (identity ref is not refs/heads/main)"
+git switch main &amp;&amp; git push origin --delete attack/side-door &amp;&amp; git branch -D attack/side-door</code></pre></div></div></li><li class="pj-step" id="step-6-4"><label class="pj-step-tick"><input type="checkbox" data-step="6-4" aria-label="Done: step 6.4" /><span class="pj-step-num">6.4</span></label><div class="pj-step-body"><div class="pj-step-text">Attack 4 — a dependency with a known vulnerability. Add an old, known-vulnerable package version and open a pull request; dependency review blocks it before a human even looks.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>git switch -c attack/bad-dep
+# A version with published advisories; any old release of a scanned ecosystem works:
+sed -i.bak 's/^dependencies = \[/dependencies = [\n  "requests==2.19.1",/' pyproject.toml &amp;&amp; rm pyproject.toml.bak
+uv pip compile pyproject.toml --generate-hashes -o requirements.lock
+git commit -am "attack: pull in a known-vulnerable dependency" &amp;&amp; git push -u origin attack/bad-dep
+gh pr create --fill &amp;&amp; gh pr checks --watch || echo "BLOCKED by dependency review / OSV"
+gh pr close --delete-branch &amp;&amp; git switch main</code></pre></div></div></li><li class="pj-step" id="step-6-5"><label class="pj-step-tick"><input type="checkbox" data-step="6-5" aria-label="Done: step 6.5" /><span class="pj-step-num">6.5</span></label><div class="pj-step-body"><div class="pj-step-text">Write up all four in <code>security/SUPPLY-CHAIN.md</code>, with the control that stopped each one and the evidence (a run URL, a command output). Then add the honest gap: the build runs on GitHub-hosted runners you do not control, and provenance proves *which workflow* built the image, not that the runner was uncompromised. Name what you would do about it (hardened runners, SLSA level 3 builders, reproducible builds) and why you are not doing it today.</div><div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>## Attacks run against this pipeline (2026-09-21)
+
+| # | Attack                                   | Stopped by                                  | Evidence                    |
+|---|------------------------------------------|---------------------------------------------|-----------------------------|
+| 1 | Tampered image pushed to our registry     | `cosign verify` — no signature for digest    | verify-image.sh output       |
+| 2 | `latest` retagged to the tampered image   | gate resolves the tag, then verifies digest  | verify-image.sh output       |
+| 3 | Image built from a non-main branch        | identity regexp pins `@refs/heads/main`      | run #…, gate output          |
+| 4 | Known-vulnerable dependency in a PR       | dependency review (fail-on-severity: high)   | PR #…                        |
+
+## Known gaps
+- **Runner trust.** Provenance attests which workflow ran, not that the runner was clean. Mitigation if the
+  threat model warranted it: a hardened or self-hosted runner with egress policy, or a SLSA L3 builder.
+- **Base image.** We pin `python:3.12-slim` by tag, not by digest; a rebuilt base changes our image silently.
+  Fix: pin the base by digest and let Dependabot propose the bumps. (Next PR.)
+- **Secrets in the build.** None today. If one is ever added, the SBOM and provenance do not detect leakage —
+  that is what the secret scanning in the secure-service project covers.</code></pre></div></div></li><li class="pj-step" id="step-6-6"><label class="pj-step-tick"><input type="checkbox" data-step="6-6" aria-label="Done: step 6.6" /><span class="pj-step-num">6.6</span></label><div class="pj-step-body"><div class="pj-step-text">Close the base-image gap you just wrote down, because it takes two minutes and makes the point that a gap list is a to-do list.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>git switch -c fix/pin-base-image
+BASE=$(docker buildx imagetools inspect python:3.12-slim --format '{{.Manifest.Digest}}')
+sed -i.bak "s#FROM python:3.12-slim#FROM python:3.12-slim@$BASE#g" Dockerfile &amp;&amp; rm Dockerfile.bak
+grep '^FROM' Dockerfile
+git commit -am "security: pin the base image by digest" &amp;&amp; git push -u origin fix/pin-base-image
+gh pr create --fill &amp;&amp; gh pr merge --squash --delete-branch &amp;&amp; git switch main &amp;&amp; git pull</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-7" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 7</span><h2>Optional: let the cluster enforce it</h2></div>
+    <p class="pj-goal">On the GitOps cluster, admission control refuses any image that is not signed by your workflow — so the gate is not something a deploy script can skip.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-7-1"><label class="pj-step-tick"><input type="checkbox" data-step="7-1" aria-label="Done: step 7.1" /><span class="pj-step-num">7.1</span></label><div class="pj-step-body"><div class="pj-step-text">Install Kyverno as another Argo CD application, the same way the GitOps project installs everything else.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>cd ../zero-to-prod-config &amp;&amp; git switch -c feat/kyverno
+mkdir -p platform/kyverno
+cat &gt; platform/kyverno/kustomization.yaml &lt;&lt;'EOF'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: kyverno
+resources:
+  - https://github.com/kyverno/kyverno/releases/download/v1.19.1/install.yaml
+EOF
+# plus argocd/applications/kyverno.yaml, modelled on the argo-rollouts one</code></pre></div></div></li><li class="pj-step" id="step-7-2"><label class="pj-step-tick"><input type="checkbox" data-step="7-2" aria-label="Done: step 7.2" /><span class="pj-step-num">7.2</span></label><div class="pj-step-body"><div class="pj-step-text">Write the policy. It requires a keyless Sigstore signature from your release workflow on every image in the <code>orders-*</code> namespaces, and mutates the image reference to its digest so the admitted pod runs exactly what was verified.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># platform/kyverno/verify-images.yaml
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-orders-api-images
+spec:
+  validationFailureAction: Enforce
+  background: false
+  webhookTimeoutSeconds: 30
+  rules:
+    - name: signed-by-our-release-workflow
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [orders-dev, orders-prod]
+      verifyImages:
+        - imageReferences:
+            - "ghcr.io/YOUR_GITHUB_USER/zero-to-prod*"
+          mutateDigest: true
+          required: true
+          attestors:
+            - count: 1
+              entries:
+                - keyless:
+                    subject: "https://github.com/YOUR_GITHUB_USER/zero-to-prod/.github/workflows/release.yml@refs/heads/main"
+                    issuer: "https://token.actions.githubusercontent.com"
+                    rekor:
+                      url: https://rekor.sigstore.dev</code></pre></div></div></li><li class="pj-step" id="step-7-3"><label class="pj-step-tick"><input type="checkbox" data-step="7-3" aria-label="Done: step 7.3" /><span class="pj-step-num">7.3</span></label><div class="pj-step-body"><div class="pj-step-text">Merge, wait for Argo CD to sync, then prove it: an unsigned image is rejected at admission with the policy's message, and the signed one is admitted with its tag rewritten to a digest.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>git add platform/kyverno argocd/applications/kyverno.yaml
+git commit -m "platform: kyverno image verification for orders namespaces"
+git push -u origin feat/kyverno &amp;&amp; gh pr create --fill &amp;&amp; gh pr merge --squash --delete-branch
+git switch main &amp;&amp; git pull &amp;&amp; argocd app wait kyverno --sync --health --timeout 300
+kubectl -n orders-dev run unsigned --image=nginx:alpine --restart=Never || echo "REFUSED by admission control"
+kubectl -n orders-dev get pod -l app.kubernetes.io/instance=orders-api -o jsonpath='{.items[0].spec.containers[0].image}{"\n"}'</code></pre></div><div class="pj-note">The last command should print an image ending in <code>@sha256:…</code> — Kyverno's <code>mutateDigest</code> rewrote the tag at admission. Now "what is running" and "what was verified" are the same string.</div></div></li></ol>
+  </section>
+
+  <section id="troubleshooting" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Help</span><h2>Troubleshooting</h2></div>
+    <dl class="pj-trouble"><dt><code>cosign sign</code> fails in CI with <code>getting key from Fulcio: no identity token</code></dt><dd>The job is missing <code>id-token: write</code> in its <code>permissions</code> block, or the permissions are set at workflow level but overridden at job level. Both the signing job and any job running <code>actions/attest-build-provenance</code> need it.</dd><dt><code>cosign verify</code> says <code>no matching signatures</code> for an image you know was signed</dt><dd>Almost always the identity regexp. Print what is actually there: <code>cosign verify &lt;image&gt; --certificate-identity-regexp '.*' --certificate-oidc-issuer https://token.actions.githubusercontent.com -o text</code> and read the <code>Subject</code> line, then build your regexp from it. A <code>.</code> in a workflow path is a regex wildcard — anchor with <code>^…$</code> and remember the ref suffix.</dd><dt><code>gh attestation verify</code> reports <code>no attestations found</code></dt><dd>Either the attestation was not pushed to the registry (<code>push-to-registry: true</code>) and you are verifying <code>oci://</code>, or you are verifying a tag whose digest has changed since the build. Verify by digest. Note also that attestations are per-digest: a multi-architecture image's index digest and its per-platform digests are different subjects.</dd><dt>Trivy fails the build on a critical you cannot fix</dt><dd>Check that <code>ignore-unfixed: true</code> is set. If the CVE does have a fix, the fix is to rebuild on a newer base image — <code>docker pull python:3.12-slim</code> and re-pin the digest. If you must ship anyway, add a dated, justified entry to <code>.trivyignore</code> with an expiry, and review it; a permanent ignore is a permanent hole.</dd><dt><code>pip install --require-hashes</code> fails with "In --require-hashes mode, all requirements must have their versions pinned"</dt><dd>A transitive dependency is missing from the lock file, usually because <code>uv pip compile</code> was run against a different Python version or platform than the image uses. Compile inside the same base image: <code>docker run --rm -v "$PWD:/w" -w /w python:3.12-slim sh -c 'pip install uv &amp;&amp; uv pip compile pyproject.toml --generate-hashes -o requirements.lock'</code>.</dd><dt>Kyverno rejects every image, including the signed one, with a timeout</dt><dd>The cluster cannot reach Rekor or Fulcio; in a <code>kind</code> cluster behind a proxy this is common. Check the Kyverno pod logs, and confirm egress works: <code>kubectl -n kyverno exec deploy/kyverno-admission-controller -- wget -qO- https://rekor.sigstore.dev/api/v1/log | head -c 100</code>.</dd></dl>
+  </section>
+
+  <section id="next" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Next</span><h2>Where to go from here</h2></div>
+    <ul class="pj-next"><li>Pin the base image with Dependabot's Docker ecosystem so digest bumps arrive as reviewable pull requests instead of manual edits.</li><li>Publish the SBOM to a Dependency-Track server so you can answer "which of our images contain package X at version Y?" across every release, not one at a time.</li><li>Add a VEX document (<code>openvex</code>) alongside the SBOM stating which CVEs do not affect your service and why, and attach it as a second attestation — this is how mature teams stop drowning in unexploitable findings.</li><li>Reach SLSA Build Level 3 by moving the build to a hardened builder, then compare what changes in the provenance predicate.</li><li>Make the build reproducible: <code>SOURCE_DATE_EPOCH</code>, sorted file ordering, no timestamps in layers — then have two runs produce the same digest and verify that claim in CI.</li></ul>
+  </section>
+
+  <p class="feedback-row">Did a step fail or feel unclear? <a href="../../feedback.html?page=/education/projects/proj-sec-supply-chain.html&amp;title=Signed%20and%20attested%20builds">Tell me which one →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../../education.html">Education</a>
+      <a href="../../privacy.html">Privacy</a>
+      <a href="../../terms.html">Terms</a>
+      <a href="../../feedback.html?page=/education/projects/proj-sec-supply-chain.html&amp;title=Signed%20and%20attested%20builds">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="project.js"></script>
+</body>
+</html>

@@ -1,0 +1,233 @@
+{
+  "id": "proj-sec-supply-chain",
+  "track": "security",
+  "title": "Signed and attested builds",
+  "summary": "Answer three questions about the container you are about to run in production: what is inside it, who built it, and can I prove both? You will generate an SBOM on every build and scan it against vulnerability databases, sign the image keylessly with Sigstore so there is no private key to leak, attach SLSA build provenance that ties the image to a commit and a workflow run, harden the build pipeline itself against the attacks that make all of this necessary, and then put a verification gate in front of the deploy that refuses anything unsigned. You finish by attacking your own pipeline — a tampered image, a backdoored dependency, a workflow run from the wrong branch — and watching each attempt fail at a specific control you can name.",
+  "outcome": "The zero-to-production repository builds images that carry a CycloneDX SBOM attestation, a Sigstore keyless signature and GitHub-issued SLSA v1 provenance, all verifiable by anyone with `cosign verify` and `gh attestation verify`; a `verify-image.sh` gate that the deploy runs first and that refuses an image whose signature, provenance repository or workflow identity does not match; every third-party action pinned to a commit SHA with least-privilege tokens; an OSV scan that fails the build on a fixable critical; and a `security/SUPPLY-CHAIN.md` recording four attacks you ran against your own pipeline and which control stopped each one.",
+  "hours": 5,
+  "level": "Intermediate",
+  "prereqs": [
+    "The **zero-to-prod** project: the repository, the GHCR image, and the release workflow that builds it",
+    "The security track's modules on the software supply chain, containers and DevSecOps",
+    "Docker, the GitHub CLI (`gh` 2.60+ for `gh attestation`), and a GHCR package you own",
+    "Optional: the **GitOps with Argo CD** project, if you want the Kubernetes admission-control path at the end"
+  ],
+  "tools": [
+    {"name": "Syft", "why": "generates the SBOM from the image — every package, version and licence that ends up in the layers", "url": "https://github.com/anchore/syft"},
+    {"name": "Cosign (Sigstore)", "why": "keyless signing and attestation using a short-lived certificate tied to the workflow's OIDC identity", "url": "https://docs.sigstore.dev/cosign/signing/overview/"},
+    {"name": "GitHub artifact attestations", "why": "SLSA v1 build provenance issued by GitHub, verified with `gh attestation verify`", "url": "https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations"},
+    {"name": "OSV-Scanner", "why": "scans the SBOM against the OSV database; knows which findings have fixes", "url": "https://google.github.io/osv-scanner/"},
+    {"name": "Trivy", "why": "a second opinion on image CVEs and a familiar name in interviews; used for the fail-on-fixable gate", "url": "https://trivy.dev/"},
+    {"name": "Kyverno", "why": "optional final phase: the cluster refuses images that are not signed by your workflow", "url": "https://kyverno.io/docs/policy-types/cluster-policy/verify-images/"}
+  ],
+  "layout": "zero-to-prod/\n├── .github/workflows/\n│   ├── release.yml            # build → SBOM → sign → attest → provenance\n│   └── supply-chain.yml       # dependency review, OSV scan, pinned-action check\n├── security/\n│   ├── SUPPLY-CHAIN.md        # what is produced, how to verify, the four attacks\n│   ├── verify-image.sh        # the deploy gate: signature + provenance + identity\n│   └── policy/\n│       ├── kyverno-verify-images.yaml   # optional cluster enforcement\n│       └── allowed-identities.env       # repo, workflow ref, issuer\n├── deploy/\n│   └── pull-and-run.sh        # calls verify-image.sh before docker compose up\n└── .github/dependabot.yml",
+  "phases": [
+    {
+      "title": "Know what you ship",
+      "goal": "Dependencies pinned and watched, an SBOM generated from the built image on every run, and a vulnerability scan that fails the build only on things you can actually fix.",
+      "steps": [
+        {
+          "text": "Start in the zero-to-prod repository on a branch, and look at what you are currently shipping. `docker history` shows the layers; the image has dozens of OS packages you never chose, which is exactly why an SBOM matters.",
+          "code": {"lang": "bash", "code": "cd zero-to-prod && git switch -c feat/supply-chain\ndocker pull ghcr.io/$(gh api user -q .login)/zero-to-prod:latest\ndocker history --no-trunc ghcr.io/$(gh api user -q .login)/zero-to-prod:latest | head -12"}
+        },
+        {
+          "text": "Install Syft and generate an SBOM locally in CycloneDX JSON. Count the components: the Python packages you declared are a small fraction of the total.",
+          "code": {"lang": "bash", "code": "brew install syft   # or: curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin\nIMAGE=ghcr.io/$(gh api user -q .login)/zero-to-prod:latest\nsyft \"$IMAGE\" -o cyclonedx-json > sbom.cdx.json\npython3 -c \"import json; d=json.load(open('sbom.cdx.json')); c=d['components']; print(len(c), 'components'); \\\nimport collections; print(collections.Counter(x.get('type','?') for x in c)); \\\nprint([x['name'] for x in c if x.get('purl','').startswith('pkg:pypi')][:10])\""},
+          "note": "Typical result for the FastAPI image: 100–150 components, of which a dozen are PyPI packages and the rest are Debian packages from the base image. If someone asks \"are you affected by CVE-2026-xxxx in libexpat?\", this file is the answer."
+        },
+        {
+          "text": "Scan the SBOM with OSV-Scanner. Scanning the SBOM rather than the image means the scan is reproducible — the same file always gives the same answer, which matters when you are arguing about whether a build regressed.",
+          "code": {"lang": "bash", "code": "brew install osv-scanner   # or download from the releases page\nosv-scanner scan source --sbom sbom.cdx.json --format table | head -30\nosv-scanner scan source --sbom sbom.cdx.json --format json > osv.json\npython3 -c \"import json; d=json.load(open('osv.json')); \\\nprint(sum(len(p.get('vulnerabilities',[])) for r in d.get('results',[]) for p in r.get('packages',[])), 'vulns')\""}
+        },
+        {
+          "text": "Pin the Python dependencies with hashes so a compromised or re-uploaded package cannot change under you. `uv` writes a lock file with hashes; `pip install --require-hashes` refuses anything that does not match.",
+          "code": {"lang": "bash", "code": "uv pip compile pyproject.toml --generate-hashes -o requirements.lock\nhead -12 requirements.lock\n# In the Dockerfile, replace the install line with the locked one:\n#   COPY requirements.lock .\n#   RUN python -m venv /venv && /venv/bin/pip install --require-hashes --no-deps -r requirements.lock"},
+          "note": "`--no-deps` is deliberate: the lock file already lists the full closure, so pip must not resolve anything itself. If the build fails with \"hashes are required\", one dependency is missing from the lock — regenerate it rather than dropping the flag."
+        },
+        {
+          "text": "Turn on Dependabot for both the Python dependencies and the GitHub Actions, so the pins you just made do not rot.",
+          "code": {"lang": "yaml", "code": "# .github/dependabot.yml\nversion: 2\nupdates:\n  - package-ecosystem: pip\n    directory: \"/\"\n    schedule: {interval: weekly}\n    open-pull-requests-limit: 5\n    groups:\n      python-minor:\n        update-types: [minor, patch]\n  - package-ecosystem: github-actions\n    directory: \"/\"\n    schedule: {interval: weekly}\n  - package-ecosystem: docker\n    directory: \"/\"\n    schedule: {interval: weekly}"}
+        },
+        {
+          "text": "Add the supply-chain workflow: dependency review on pull requests (it blocks a PR that introduces a known-vulnerable package), and an OSV scan of the repository's lock file.",
+          "code": {"lang": "yaml", "code": "# .github/workflows/supply-chain.yml\nname: supply-chain\n\non:\n  pull_request:\n  push:\n    branches: [main]\n  schedule:\n    - cron: \"17 6 * * 1\"        # Monday morning: new CVEs land against old code\n\npermissions:\n  contents: read\n\njobs:\n  dependency-review:\n    if: github.event_name == 'pull_request'\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/dependency-review-action@v4\n        with:\n          fail-on-severity: high\n          comment-summary-in-pr: always\n\n  osv:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: google/osv-scanner-action/osv-scanner-action@v2.6.0\n        with:\n          scan-args: |-\n            --lockfile=requirements.lock\n            --format=table"}
+        },
+        {
+          "text": "Commit and open the pull request. Watch dependency review comment on it, then merge.",
+          "code": {"lang": "bash", "code": "git add .github Dockerfile requirements.lock pyproject.toml\ngit commit -m \"supply-chain: hash-pinned deps, dependabot, dependency review and OSV scanning\"\ngit push -u origin feat/supply-chain\ngh pr create --fill && gh pr checks --watch\ngh pr merge --squash --delete-branch && git switch main && git pull"}
+        }
+      ]
+    },
+    {
+      "title": "Sign the image, keylessly",
+      "goal": "Every image pushed to GHCR carries a Sigstore signature made with a short-lived certificate bound to the workflow's OIDC identity — no key material anywhere — and an SBOM attestation attached to the same digest.",
+      "steps": [
+        {
+          "text": "Understand what keyless means before you use it. Cosign asks Fulcio for a certificate valid for about ten minutes, proving the holder of a particular OIDC identity — here `repo:you/zero-to-prod:ref:refs/heads/main` — signed this digest; the signature and certificate go into the Rekor transparency log. Nothing to store, nothing to leak, and a public record that the signature existed at a point in time.",
+          "code": {"lang": "bash", "code": "brew install cosign   # v3.x\ncosign version\n# Look at a signature someone else made, to see the shape of the thing:\ncosign verify ghcr.io/sigstore/cosign/cosign:v3.1.3 \\\n  --certificate-identity-regexp 'https://github.com/sigstore/cosign/.*' \\\n  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\\n  -o text 2>&1 | head -20"}
+        },
+        {
+          "text": "In `release.yml`, capture the image digest from the build step — everything after this point signs the *digest*, never the tag. A tag can be moved; a digest is the content.",
+          "code": {"lang": "yaml", "code": "# .github/workflows/release.yml — the build job, with pinned actions\npermissions:\n  contents: read\n  packages: write\n  id-token: write          # required for keyless signing and for provenance\n  attestations: write      # required for GitHub artifact attestations\n\njobs:\n  build:\n    runs-on: ubuntu-latest\n    outputs:\n      digest: ${{ steps.push.outputs.digest }}\n      image: ghcr.io/${{ github.repository }}\n    steps:\n      - uses: actions/checkout@v4\n      - uses: docker/login-action@v3\n        with:\n          registry: ghcr.io\n          username: ${{ github.actor }}\n          password: ${{ secrets.GITHUB_TOKEN }}\n      - id: meta\n        uses: docker/metadata-action@v5\n        with:\n          images: ghcr.io/${{ github.repository }}\n          tags: |\n            type=sha\n            type=raw,value=latest,enable={{is_default_branch}}\n      - id: push\n        uses: docker/build-push-action@v6\n        with:\n          context: .\n          push: true\n          tags: ${{ steps.meta.outputs.tags }}\n          labels: ${{ steps.meta.outputs.labels }}\n          provenance: false          # GitHub's attestation below replaces BuildKit's\n          sbom: false                # we attach our own with cosign"}
+        },
+        {
+          "text": "Add the signing job. It signs the digest, generates the SBOM from the pushed image, and attaches the SBOM as a CycloneDX attestation on the same digest. `--yes` skips the interactive confirmation, which is required in CI.",
+          "code": {"lang": "yaml", "code": "  sign:\n    needs: build\n    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n      packages: write\n      id-token: write\n    env:\n      IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}\n    steps:\n      - uses: sigstore/cosign-installer@v4\n        with:\n          cosign-release: v3.1.3\n      - uses: docker/login-action@v3\n        with:\n          registry: ghcr.io\n          username: ${{ github.actor }}\n          password: ${{ secrets.GITHUB_TOKEN }}\n      - name: Sign the image digest\n        run: cosign sign --yes \"$IMAGE\"\n      - name: Generate the SBOM from the pushed image\n        uses: anchore/sbom-action@v0.24.2\n        with:\n          image: ${{ env.IMAGE }}\n          format: cyclonedx-json\n          output-file: sbom.cdx.json\n          upload-artifact: false\n      - name: Attach the SBOM as an attestation\n        run: cosign attest --yes --type cyclonedx --predicate sbom.cdx.json \"$IMAGE\"\n      - name: Fail on fixable critical vulnerabilities\n        uses: aquasecurity/trivy-action@0.29.0\n        with:\n          image-ref: ${{ env.IMAGE }}\n          severity: CRITICAL\n          ignore-unfixed: true\n          exit-code: \"1\"\n          format: table"},
+          "note": "`ignore-unfixed: true` is the difference between a gate people respect and one they disable. A critical with no available fix is a decision for a human and a record in the risk register, not a build failure at 2 a.m."
+        },
+        {
+          "text": "Push, watch the workflow, then verify the signature from your laptop as any consumer would. Note that verification needs no credentials at all.",
+          "code": {"lang": "bash", "code": "git switch -c feat/sign-images && git add .github && git commit -m \"release: keyless signing and SBOM attestation\"\ngit push -u origin feat/sign-images && gh pr create --fill && gh pr merge --squash --delete-branch\ngit switch main && git pull && gh run watch\nREPO=$(gh api user -q .login)/zero-to-prod\nDIGEST=$(cosign triangulate --type digest ghcr.io/$REPO:latest 2>/dev/null || docker buildx imagetools inspect ghcr.io/$REPO:latest --format '{{.Manifest.Digest}}')\ncosign verify \"ghcr.io/$REPO@$DIGEST\" \\\n  --certificate-identity-regexp \"^https://github.com/$REPO/.github/workflows/release.yml@refs/heads/main$\" \\\n  --certificate-oidc-issuer https://token.actions.githubusercontent.com -o text | head -25"}
+        },
+        {
+          "text": "Pull the SBOM back out of the registry and confirm it describes the image you are holding. This is the workflow an auditor or a downstream consumer actually performs.",
+          "code": {"lang": "bash", "code": "cosign verify-attestation \"ghcr.io/$REPO@$DIGEST\" --type cyclonedx \\\n  --certificate-identity-regexp \"^https://github.com/$REPO/.github/workflows/release.yml@refs/heads/main$\" \\\n  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\\n  | jq -r '.payload' | base64 -d | jq '.predicate.components | length'\n# And find one package by name:\ncosign verify-attestation \"ghcr.io/$REPO@$DIGEST\" --type cyclonedx \\\n  --certificate-identity-regexp \"^https://github.com/$REPO/.*\" \\\n  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\\n  | jq -r '.payload' | base64 -d | jq -r '.predicate.components[] | select(.name==\"fastapi\") | .version'"},
+          "note": "`jq` is doing the work here because an attestation is a signed DSSE envelope wrapping a base64 in-toto statement. Seeing the layers once makes the rest of the ecosystem legible."
+        }
+      ]
+    },
+    {
+      "title": "Provenance: prove which build made it",
+      "goal": "GitHub issues SLSA v1 provenance for the image digest, tying it to the repository, the commit, the workflow file and the run — and you verify it with one command.",
+      "steps": [
+        {
+          "text": "A signature says \"a workflow in this repo signed this\". Provenance says \"*this* commit, built by *this* workflow file, in *this* run, from *these* inputs\". Add the attestation step to the build job, right after the push.",
+          "code": {"lang": "yaml", "code": "      - name: Attest build provenance\n        uses: actions/attest-build-provenance@v4\n        with:\n          subject-name: ghcr.io/${{ github.repository }}\n          subject-digest: ${{ steps.push.outputs.digest }}\n          push-to-registry: true"},
+          "note": "`push-to-registry: true` stores the attestation next to the image in GHCR, so anyone who can pull the image can verify it. Without it the attestation lives only in the GitHub API, which is fine inside your organisation but useless to a downstream consumer."
+        },
+        {
+          "text": "Merge, then verify the provenance with the GitHub CLI. Read the output: it names the workflow, the commit and the run.",
+          "code": {"lang": "bash", "code": "git switch -c feat/provenance && git add .github && git commit -m \"release: SLSA build provenance\"\ngit push -u origin feat/provenance && gh pr create --fill && gh pr merge --squash --delete-branch\ngit switch main && git pull && gh run watch\ngh attestation verify \"oci://ghcr.io/$REPO:latest\" --repo \"$REPO\" --format json \\\n  | jq -r '.[0].verificationResult.statement.predicate.buildDefinition.externalParameters,\n           .[0].verificationResult.statement.predicate.runDetails.builder.id'"}
+        },
+        {
+          "text": "Now tighten it: verify not just that *some* workflow in the repo built it, but that the release workflow on `main` did. This is the assertion your deploy gate will make.",
+          "code": {"lang": "bash", "code": "gh attestation verify \"oci://ghcr.io/$REPO:latest\" \\\n  --repo \"$REPO\" \\\n  --signer-workflow \"$REPO/.github/workflows/release.yml\" \\\n  --source-ref refs/heads/main\necho \"exit: $?\"\n# The same assertion, deliberately wrong, must fail:\ngh attestation verify \"oci://ghcr.io/$REPO:latest\" --repo \"$REPO\" \\\n  --signer-workflow \"$REPO/.github/workflows/nonexistent.yml\"; echo \"exit: $?\""}
+        },
+        {
+          "text": "Record what the image now carries. A short table in `security/SUPPLY-CHAIN.md` that a colleague can follow is worth more than a diagram.",
+          "code": {"lang": "text", "code": "# security/SUPPLY-CHAIN.md\n\n## What every image carries\n| Artefact        | Produced by                          | Verify with                                  |\n|-----------------|--------------------------------------|----------------------------------------------|\n| Signature       | `cosign sign` (keyless, GH OIDC)     | `cosign verify --certificate-identity-regexp …` |\n| SBOM (CycloneDX)| `syft` → `cosign attest --type cyclonedx` | `cosign verify-attestation --type cyclonedx` |\n| SLSA provenance | `actions/attest-build-provenance@v4` | `gh attestation verify oci://… --repo … --signer-workflow …` |\n\n## Identity we trust\nissuer:   https://token.actions.githubusercontent.com\nidentity: https://github.com/<owner>/zero-to-prod/.github/workflows/release.yml@refs/heads/main\n\nAnything signed by a different workflow, a different ref, or a different repository is not ours,\neven if it is in our registry."}
+        }
+      ]
+    },
+    {
+      "title": "Harden the build itself",
+      "goal": "The pipeline that produces all this evidence cannot itself be the weak link: actions pinned by commit SHA, minimal token permissions, protected branches, and no path by which a fork's pull request can run privileged code.",
+      "steps": [
+        {
+          "text": "Pin every third-party action to a commit SHA. A tag is mutable: `@v4` today and `@v4` tomorrow can be different code, and that is precisely how several real compromises were delivered. Resolve each tag to its SHA and rewrite the workflows.",
+          "code": {"lang": "bash", "code": "git switch -c feat/pin-actions\npin() { sha=$(gh api \"repos/$1/commits/$2\" -q .sha); echo \"$1@$sha # $2\"; }\nfor a in \"sigstore/cosign-installer v4.1.2\" \"anchore/sbom-action v0.24.2\" \\\n         \"aquasecurity/trivy-action 0.29.0\" \"google/osv-scanner-action v2.6.0\" \\\n         \"docker/build-push-action v6\" \"docker/login-action v3\" \"docker/metadata-action v5\"; do\n  pin $a\ndone"},
+          "note": "`actions/*` and `github/*` are published by GitHub itself and are usually accepted at the tag; everything else gets a SHA with the tag in a trailing comment so Dependabot can still propose updates. Decide your own line and write it in SUPPLY-CHAIN.md."
+        },
+        {
+          "text": "Edit the workflows to use the pinned references, then add a CI check that fails if an unpinned third-party action appears again.",
+          "code": {"lang": "yaml", "code": "# .github/workflows/supply-chain.yml — add this job\n  pinned-actions:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - name: Third-party actions must be pinned to a SHA\n        run: |\n          bad=$(grep -rhoE 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[^ ]+' .github/workflows \\\n                | grep -vE '@[0-9a-f]{40}' \\\n                | grep -vE 'uses: (actions|github)/' || true)\n          if [ -n \"$bad\" ]; then\n            echo \"unpinned third-party actions:\"; echo \"$bad\"; exit 1\n          fi\n          echo \"all third-party actions are pinned\""}
+        },
+        {
+          "text": "Check the token permissions of every job. The default is often far more than a job needs; each workflow should declare a read-only default at the top and widen it per job.",
+          "code": {"lang": "bash", "code": "grep -n -A4 '^permissions:\\|^  permissions:' .github/workflows/*.yml\n# Rules of thumb:\n#   default at the top of every file:  permissions: {contents: read}\n#   build/push to GHCR:                packages: write\n#   keyless signing / provenance:      id-token: write, attestations: write\n#   posting a PR comment:              pull-requests: write  (only on that job)"}
+        },
+        {
+          "text": "Close the fork-PR hole. `pull_request_target` runs with the base repository's secrets and a writable token — combined with checking out the PR's code it is a full repository compromise. Confirm you have none, and require approval for first-time contributors' workflow runs.",
+          "code": {"lang": "bash", "code": "grep -rn 'pull_request_target' .github/workflows/ && echo 'REVIEW THESE' || echo 'none — good'\ngh api -X PUT \"repos/$REPO/actions/permissions/workflow\" \\\n  -f default_workflow_permissions=read -F can_approve_pull_request_reviews=false\ngh api \"repos/$REPO/actions/permissions/workflow\"\n# In the web UI: Settings → Actions → General → \"Require approval for all external contributors\""}
+        },
+        {
+          "text": "Protect the branch that the signing identity is bound to. The whole scheme rests on `refs/heads/main` meaning something: if anyone can push to main, anyone can produce a legitimately-signed backdoored image.",
+          "code": {"lang": "bash", "code": "gh api -X PUT \"repos/$REPO/branches/main/protection\" --input - <<'EOF'\n{\n  \"required_status_checks\": {\"strict\": true, \"contexts\": [\"test\", \"pinned-actions\"]},\n  \"enforce_admins\": true,\n  \"required_pull_request_reviews\": {\"required_approving_review_count\": 1},\n  \"restrictions\": null,\n  \"allow_force_pushes\": false,\n  \"allow_deletions\": false\n}\nEOF\ngh api \"repos/$REPO/branches/main/protection\" -q '{checks: .required_status_checks.contexts, force: .allow_force_pushes.enabled}'"},
+          "note": "On a solo project the review requirement means you cannot merge your own PR, which is annoying — set `required_approving_review_count` to 0 and keep the status checks, or add a second account. Write down which you chose and why; that sentence is the security review."
+        },
+        {
+          "text": "Merge the hardening and confirm the new check runs.",
+          "code": {"lang": "bash", "code": "git add .github && git commit -m \"supply-chain: pin actions to SHAs, least-privilege tokens, pinned-actions check\"\ngit push -u origin feat/pin-actions && gh pr create --fill && gh pr checks --watch\ngh pr merge --squash --delete-branch && git switch main && git pull"}
+        }
+      ]
+    },
+    {
+      "title": "The gate: refuse what you cannot verify",
+      "goal": "Deployment verifies the signature, the provenance and the identity before anything runs, and fails closed.",
+      "steps": [
+        {
+          "text": "Write the gate as a script, so it works identically on your laptop, on the EC2 host and in CI. It takes a full image reference, resolves it to a digest, and makes three assertions.",
+          "code": {"lang": "bash", "code": "# security/verify-image.sh\n#!/usr/bin/env bash\nset -euo pipefail\n\nIMAGE=\"${1:?usage: verify-image.sh ghcr.io/owner/repo:tag}\"\n: \"${EXPECTED_REPO:?set EXPECTED_REPO=owner/repo}\"\nWORKFLOW=\"${EXPECTED_WORKFLOW:-.github/workflows/release.yml}\"\nREF=\"${EXPECTED_REF:-refs/heads/main}\"\nISSUER=\"https://token.actions.githubusercontent.com\"\nIDENTITY=\"^https://github.com/${EXPECTED_REPO}/${WORKFLOW}@${REF}$\"\n\nDIGEST=$(docker buildx imagetools inspect \"$IMAGE\" --format '{{.Manifest.Digest}}')\nREF_BY_DIGEST=\"${IMAGE%%:*}@${DIGEST}\"\necho \"verifying ${REF_BY_DIGEST}\"\n\necho \"1/3 signature\"\ncosign verify \"$REF_BY_DIGEST\" \\\n  --certificate-identity-regexp \"$IDENTITY\" --certificate-oidc-issuer \"$ISSUER\" > /dev/null\n\necho \"2/3 SBOM attestation\"\ncosign verify-attestation \"$REF_BY_DIGEST\" --type cyclonedx \\\n  --certificate-identity-regexp \"$IDENTITY\" --certificate-oidc-issuer \"$ISSUER\" > /dev/null\n\necho \"3/3 build provenance\"\ngh attestation verify \"oci://${REF_BY_DIGEST}\" \\\n  --repo \"$EXPECTED_REPO\" --signer-workflow \"${EXPECTED_REPO}/${WORKFLOW}\" --source-ref \"$REF\" > /dev/null\n\necho \"OK ${REF_BY_DIGEST}\"\necho \"$DIGEST\""}
+        },
+        {
+          "text": "Make the deploy use it. Nothing pulls and runs without passing the gate first, and the gate's output — the digest — is what actually gets run, so a tag cannot be swapped between verification and use.",
+          "code": {"lang": "bash", "code": "# deploy/pull-and-run.sh\n#!/usr/bin/env bash\nset -euo pipefail\nexport EXPECTED_REPO=\"${EXPECTED_REPO:?}\"\nIMAGE=\"ghcr.io/${EXPECTED_REPO}:${1:-latest}\"\n\nDIGEST=$(../security/verify-image.sh \"$IMAGE\" | tail -1)\nexport APP_IMAGE=\"ghcr.io/${EXPECTED_REPO}@${DIGEST}\"\necho \"deploying $APP_IMAGE\"\ndocker compose pull app\ndocker compose up -d app\ndocker compose ps app"}
+        },
+        {
+          "text": "Test the gate against the real image — it should pass — and then against something it must refuse: a public image nobody signed with your identity.",
+          "code": {"lang": "bash", "code": "chmod +x security/verify-image.sh deploy/pull-and-run.sh\nexport EXPECTED_REPO=$(gh api user -q .login)/zero-to-prod\nsecurity/verify-image.sh \"ghcr.io/$EXPECTED_REPO:latest\"\nsecurity/verify-image.sh ghcr.io/sigstore/cosign/cosign:v3.1.3 || echo \"refused, as it should be (exit $?)\""}
+        },
+        {
+          "text": "Add the gate to the deploy job in CI too, before the SSM command that restarts the service on the EC2 host. The job that deploys is a different job from the one that builds, so it verifies rather than trusts.",
+          "code": {"lang": "yaml", "code": "  deploy:\n    needs: [build, sign]\n    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n      packages: read\n      id-token: write\n    env:\n      GH_TOKEN: ${{ github.token }}\n      EXPECTED_REPO: ${{ github.repository }}\n    steps:\n      - uses: actions/checkout@v4\n      - uses: sigstore/cosign-installer@v4\n        with: {cosign-release: v3.1.3}\n      - name: Verify before deploying\n        run: ./security/verify-image.sh \"ghcr.io/${{ github.repository }}@${{ needs.build.outputs.digest }}\"\n      # ... existing aws-actions/configure-aws-credentials + SSM send-command steps ..."},
+          "note": "`verify-image.sh` resolves a digest reference to itself, so passing `image@sha256:…` works unchanged."
+        }
+      ]
+    },
+    {
+      "title": "Attack your own pipeline",
+      "goal": "Four attacks, four refusals, each traced to a named control — and one deliberate gap you write down instead of pretending it does not exist.",
+      "steps": [
+        {
+          "text": "Attack 1 — tamper with the image. Build a modified image, push it under a new tag in your own registry, and try to deploy it. It is *your* registry and *your* repository, and the gate still refuses, because nothing signed that digest.",
+          "code": {"lang": "bash", "code": "printf '\\n# backdoor marker\\nRUN echo \"pwned\" > /tmp/marker\\n' >> Dockerfile.evil.tmp\ncat Dockerfile Dockerfile.evil.tmp > Dockerfile.evil && rm Dockerfile.evil.tmp\ndocker build -f Dockerfile.evil -t \"ghcr.io/$EXPECTED_REPO:evil\" .\ndocker push \"ghcr.io/$EXPECTED_REPO:evil\"\nsecurity/verify-image.sh \"ghcr.io/$EXPECTED_REPO:evil\" || echo \"REFUSED at step 1 (no signature for this digest)\"\ndocker rm -f $(docker create \"ghcr.io/$EXPECTED_REPO:evil\") >/dev/null 2>&1 || true\nrm Dockerfile.evil"}
+        },
+        {
+          "text": "Attack 2 — move the tag. Retag the evil image as `latest` in the registry, the classic \"the tag you deploy is not the image you reviewed\" move. The gate resolves `latest` to its *current* digest, finds no signature for it, and refuses. Then restore the tag.",
+          "code": {"lang": "bash", "code": "GOOD=$(docker buildx imagetools inspect \"ghcr.io/$EXPECTED_REPO:latest\" --format '{{.Manifest.Digest}}')\necho \"good digest: $GOOD\"\ndocker buildx imagetools create -t \"ghcr.io/$EXPECTED_REPO:latest\" \"ghcr.io/$EXPECTED_REPO:evil\"\nsecurity/verify-image.sh \"ghcr.io/$EXPECTED_REPO:latest\" || echo \"REFUSED (tag moved to an unsigned digest)\"\ndocker buildx imagetools create -t \"ghcr.io/$EXPECTED_REPO:latest\" \"ghcr.io/$EXPECTED_REPO@$GOOD\"\nsecurity/verify-image.sh \"ghcr.io/$EXPECTED_REPO:latest\" && echo \"restored\""},
+          "note": "This is the attack that pinning by digest prevents entirely, which is why `pull-and-run.sh` deploys the digest the gate returned rather than the tag it was given."
+        },
+        {
+          "text": "Attack 3 — build from a branch. Push a branch that changes the app and let the release workflow run on it (temporarily allow it, if your workflow is main-only). The image is signed — by an identity ending `@refs/heads/attack` — and the gate refuses it because the ref does not match.",
+          "code": {"lang": "bash", "code": "git switch -c attack/side-door\nsed -i.bak 's/hello from the pipeline/hello from the side door/' app/main.py && rm app/main.py.bak\ngit commit -am \"attack: build from a non-main branch\" && git push -u origin attack/side-door\ngh workflow run release.yml --ref attack/side-door 2>/dev/null || echo \"workflow is main-only — that is control #1 working\"\n# If it did run, verify the resulting image:\nsecurity/verify-image.sh \"ghcr.io/$EXPECTED_REPO:sha-$(git rev-parse --short HEAD)\" || echo \"REFUSED (identity ref is not refs/heads/main)\"\ngit switch main && git push origin --delete attack/side-door && git branch -D attack/side-door"}
+        },
+        {
+          "text": "Attack 4 — a dependency with a known vulnerability. Add an old, known-vulnerable package version and open a pull request; dependency review blocks it before a human even looks.",
+          "code": {"lang": "bash", "code": "git switch -c attack/bad-dep\n# A version with published advisories; any old release of a scanned ecosystem works:\nsed -i.bak 's/^dependencies = \\[/dependencies = [\\n  \"requests==2.19.1\",/' pyproject.toml && rm pyproject.toml.bak\nuv pip compile pyproject.toml --generate-hashes -o requirements.lock\ngit commit -am \"attack: pull in a known-vulnerable dependency\" && git push -u origin attack/bad-dep\ngh pr create --fill && gh pr checks --watch || echo \"BLOCKED by dependency review / OSV\"\ngh pr close --delete-branch && git switch main"}
+        },
+        {
+          "text": "Write up all four in `security/SUPPLY-CHAIN.md`, with the control that stopped each one and the evidence (a run URL, a command output). Then add the honest gap: the build runs on GitHub-hosted runners you do not control, and provenance proves *which workflow* built the image, not that the runner was uncompromised. Name what you would do about it (hardened runners, SLSA level 3 builders, reproducible builds) and why you are not doing it today.",
+          "code": {"lang": "text", "code": "## Attacks run against this pipeline (2026-09-21)\n\n| # | Attack                                   | Stopped by                                  | Evidence                    |\n|---|------------------------------------------|---------------------------------------------|-----------------------------|\n| 1 | Tampered image pushed to our registry     | `cosign verify` — no signature for digest    | verify-image.sh output       |\n| 2 | `latest` retagged to the tampered image   | gate resolves the tag, then verifies digest  | verify-image.sh output       |\n| 3 | Image built from a non-main branch        | identity regexp pins `@refs/heads/main`      | run #…, gate output          |\n| 4 | Known-vulnerable dependency in a PR       | dependency review (fail-on-severity: high)   | PR #…                        |\n\n## Known gaps\n- **Runner trust.** Provenance attests which workflow ran, not that the runner was clean. Mitigation if the\n  threat model warranted it: a hardened or self-hosted runner with egress policy, or a SLSA L3 builder.\n- **Base image.** We pin `python:3.12-slim` by tag, not by digest; a rebuilt base changes our image silently.\n  Fix: pin the base by digest and let Dependabot propose the bumps. (Next PR.)\n- **Secrets in the build.** None today. If one is ever added, the SBOM and provenance do not detect leakage —\n  that is what the secret scanning in the secure-service project covers."}
+        },
+        {
+          "text": "Close the base-image gap you just wrote down, because it takes two minutes and makes the point that a gap list is a to-do list.",
+          "code": {"lang": "bash", "code": "git switch -c fix/pin-base-image\nBASE=$(docker buildx imagetools inspect python:3.12-slim --format '{{.Manifest.Digest}}')\nsed -i.bak \"s#FROM python:3.12-slim#FROM python:3.12-slim@$BASE#g\" Dockerfile && rm Dockerfile.bak\ngrep '^FROM' Dockerfile\ngit commit -am \"security: pin the base image by digest\" && git push -u origin fix/pin-base-image\ngh pr create --fill && gh pr merge --squash --delete-branch && git switch main && git pull"}
+        }
+      ]
+    },
+    {
+      "title": "Optional: let the cluster enforce it",
+      "goal": "On the GitOps cluster, admission control refuses any image that is not signed by your workflow — so the gate is not something a deploy script can skip.",
+      "steps": [
+        {
+          "text": "Install Kyverno as another Argo CD application, the same way the GitOps project installs everything else.",
+          "code": {"lang": "bash", "code": "cd ../zero-to-prod-config && git switch -c feat/kyverno\nmkdir -p platform/kyverno\ncat > platform/kyverno/kustomization.yaml <<'EOF'\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nnamespace: kyverno\nresources:\n  - https://github.com/kyverno/kyverno/releases/download/v1.19.1/install.yaml\nEOF\n# plus argocd/applications/kyverno.yaml, modelled on the argo-rollouts one"}
+        },
+        {
+          "text": "Write the policy. It requires a keyless Sigstore signature from your release workflow on every image in the `orders-*` namespaces, and mutates the image reference to its digest so the admitted pod runs exactly what was verified.",
+          "code": {"lang": "yaml", "code": "# platform/kyverno/verify-images.yaml\napiVersion: kyverno.io/v1\nkind: ClusterPolicy\nmetadata:\n  name: verify-orders-api-images\nspec:\n  validationFailureAction: Enforce\n  background: false\n  webhookTimeoutSeconds: 30\n  rules:\n    - name: signed-by-our-release-workflow\n      match:\n        any:\n          - resources:\n              kinds: [Pod]\n              namespaces: [orders-dev, orders-prod]\n      verifyImages:\n        - imageReferences:\n            - \"ghcr.io/YOUR_GITHUB_USER/zero-to-prod*\"\n          mutateDigest: true\n          required: true\n          attestors:\n            - count: 1\n              entries:\n                - keyless:\n                    subject: \"https://github.com/YOUR_GITHUB_USER/zero-to-prod/.github/workflows/release.yml@refs/heads/main\"\n                    issuer: \"https://token.actions.githubusercontent.com\"\n                    rekor:\n                      url: https://rekor.sigstore.dev"}
+        },
+        {
+          "text": "Merge, wait for Argo CD to sync, then prove it: an unsigned image is rejected at admission with the policy's message, and the signed one is admitted with its tag rewritten to a digest.",
+          "code": {"lang": "bash", "code": "git add platform/kyverno argocd/applications/kyverno.yaml\ngit commit -m \"platform: kyverno image verification for orders namespaces\"\ngit push -u origin feat/kyverno && gh pr create --fill && gh pr merge --squash --delete-branch\ngit switch main && git pull && argocd app wait kyverno --sync --health --timeout 300\nkubectl -n orders-dev run unsigned --image=nginx:alpine --restart=Never || echo \"REFUSED by admission control\"\nkubectl -n orders-dev get pod -l app.kubernetes.io/instance=orders-api -o jsonpath='{.items[0].spec.containers[0].image}{\"\\n\"}'"},
+          "note": "The last command should print an image ending in `@sha256:…` — Kyverno's `mutateDigest` rewrote the tag at admission. Now \"what is running\" and \"what was verified\" are the same string."
+        }
+      ]
+    }
+  ],
+  "troubleshooting": [
+    {"symptom": "`cosign sign` fails in CI with `getting key from Fulcio: no identity token`", "fix": "The job is missing `id-token: write` in its `permissions` block, or the permissions are set at workflow level but overridden at job level. Both the signing job and any job running `actions/attest-build-provenance` need it."},
+    {"symptom": "`cosign verify` says `no matching signatures` for an image you know was signed", "fix": "Almost always the identity regexp. Print what is actually there: `cosign verify <image> --certificate-identity-regexp '.*' --certificate-oidc-issuer https://token.actions.githubusercontent.com -o text` and read the `Subject` line, then build your regexp from it. A `.` in a workflow path is a regex wildcard — anchor with `^…$` and remember the ref suffix."},
+    {"symptom": "`gh attestation verify` reports `no attestations found`", "fix": "Either the attestation was not pushed to the registry (`push-to-registry: true`) and you are verifying `oci://`, or you are verifying a tag whose digest has changed since the build. Verify by digest. Note also that attestations are per-digest: a multi-architecture image's index digest and its per-platform digests are different subjects."},
+    {"symptom": "Trivy fails the build on a critical you cannot fix", "fix": "Check that `ignore-unfixed: true` is set. If the CVE does have a fix, the fix is to rebuild on a newer base image — `docker pull python:3.12-slim` and re-pin the digest. If you must ship anyway, add a dated, justified entry to `.trivyignore` with an expiry, and review it; a permanent ignore is a permanent hole."},
+    {"symptom": "`pip install --require-hashes` fails with \"In --require-hashes mode, all requirements must have their versions pinned\"", "fix": "A transitive dependency is missing from the lock file, usually because `uv pip compile` was run against a different Python version or platform than the image uses. Compile inside the same base image: `docker run --rm -v \"$PWD:/w\" -w /w python:3.12-slim sh -c 'pip install uv && uv pip compile pyproject.toml --generate-hashes -o requirements.lock'`."},
+    {"symptom": "Kyverno rejects every image, including the signed one, with a timeout", "fix": "The cluster cannot reach Rekor or Fulcio; in a `kind` cluster behind a proxy this is common. Check the Kyverno pod logs, and confirm egress works: `kubectl -n kyverno exec deploy/kyverno-admission-controller -- wget -qO- https://rekor.sigstore.dev/api/v1/log | head -c 100`."}
+  ],
+  "next": [
+    "Pin the base image with Dependabot's Docker ecosystem so digest bumps arrive as reviewable pull requests instead of manual edits.",
+    "Publish the SBOM to a Dependency-Track server so you can answer \"which of our images contain package X at version Y?\" across every release, not one at a time.",
+    "Add a VEX document (`openvex`) alongside the SBOM stating which CVEs do not affect your service and why, and attach it as a second attestation — this is how mature teams stop drowning in unexploitable findings.",
+    "Reach SLSA Build Level 3 by moving the build to a hardened builder, then compare what changes in the provenance predicate.",
+    "Make the build reproducible: `SOURCE_DATE_EPOCH`, sorted file ordering, no timestamps in layers — then have two runs produce the same digest and verify that claim in CI."
+  ]
+}

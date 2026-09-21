@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Build a detection lab — Security project | ThavionAI Education</title>
+  <meta name="description" content="Stand up a small SIEM on your laptop and use it the way a blue team does: ship real auth, sudo and web-app logs from a target host into Grafana Loki through Alloy, write detections as Sigma rules that convert to LogQL and run as Loki alert rules, route them to Alertmanager with MITRE ATT&amp;CK labels, then attack the host yourself — SSH brute force, a sensitive-file read, a new backdoor account, a web login-bruteforce — and watch each detection fire. You will measure what you miss, tune the noisy rules, and finish with a short incident from a real alert: triage, timeline, containment and a postmortem. Everything here was validated against a running Loki 3.7 + Alloy 1.19 + sigma-cli stack; the queries are the ones that actually fired." />
+  <meta property="og:title" content="Build a detection lab — ThavionAI project" />
+  <meta property="og:description" content="Stand up a small SIEM on your laptop and use it the way a blue team does: ship real auth, sudo and web-app logs from a target host into Grafana Loki through Alloy, write detections as Sigma rules that convert to LogQL and run as Loki alert rules, route them to Alertmanager with MITRE ATT&amp;CK labels, then attack the host yourself — SSH brute force, a sensitive-file read, a new backdoor account, a web login-bruteforce — and watch each detection fire. You will measure what you miss, tune the noisy rules, and finish with a short incident from a real alert: triage, timeline, containment and a postmortem. Everything here was validated against a running Loki 3.7 + Alloy 1.19 + sigma-cli stack; the queries are the ones that actually fired." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/projects/proj-sec-detection-lab.html" />
+  <link rel="icon" href="../../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="../lesson.css" />
+  <link rel="stylesheet" href="project.css" />
+</head>
+<body class="track-security" data-project="proj-sec-detection-lab">
+
+<nav>
+  <a href="../../index.html" class="nav-logo"><img class="nav-logo-icon" src="../../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../../education.html">Tracks</a>
+    <a href="../../index.html#projects" class="active">Projects</a>
+    <a href="../../education.html#certs">Certifications</a>
+    <a href="../../index.html#apps">Apps</a>
+    <a href="../../feedback.html?page=/education/projects/proj-sec-detection-lab.html&amp;title=Build%20a%20detection%20lab">Feedback</a>
+    <a href="../../education.html#security" class="nav-cta">Security track</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../../education.html">Education</a> › <a href="../../education.html#security">Cybersecurity</a> › Guided project</div>
+    <h1>Build a detection lab</h1>
+    <p class="lede">Stand up a small SIEM on your laptop and use it the way a blue team does: ship real auth, sudo and web-app logs from a target host into Grafana Loki through Alloy, write detections as Sigma rules that convert to LogQL and run as Loki alert rules, route them to Alertmanager with MITRE ATT&amp;CK labels, then attack the host yourself — SSH brute force, a sensitive-file read, a new backdoor account, a web login-bruteforce — and watch each detection fire. You will measure what you miss, tune the noisy rules, and finish with a short incident from a real alert: triage, timeline, containment and a postmortem. Everything here was validated against a running Loki 3.7 + Alloy 1.19 + sigma-cli stack; the queries are the ones that actually fired.</p>
+    <div class="meta">
+      <span class="chip">Advanced</span>
+      <span class="chip">about 8 hours</span>
+      <span class="chip">5 phases · 29 steps</span>
+      <span class="chip chip-quiz" id="progressChip">0 / 29 done</span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav">
+  <div class="wrap">
+    <a href="#overview">Overview</a>
+    <a href="#phase-1">1. Stand up the pipeline</a>
+    <a href="#phase-2">2. Detections as code with Sigma</a>
+    <a href="#phase-3">3. Attack, and watch it fire</a>
+    <a href="#phase-4">4. Measure coverage and tune the noise</a>
+    <a href="#phase-5">5. Run one real incident</a>
+    <a href="#troubleshooting">Troubleshooting</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <section class="pj-intro" id="overview">
+    <div class="objectives">
+      <div class="box-label">What you will have at the end</div>
+      <p class="pj-outcome">A <code>detection-lab</code> repository with a Compose stack (Loki, Alloy, Alertmanager, Grafana, and a target container that generates auth/sudo/web logs), a <code>rules/</code> folder of Sigma detections that a script converts to Loki ruler groups tagged with ATT&amp;CK techniques, a Grafana dashboard of events and firing alerts, an <code>attacks/</code> folder of scripts that each trip a specific detection, a coverage table mapping techniques to rules to "tested: yes", and one written incident from a real alert with a timeline and a postmortem.</p>
+    </div>
+    <div class="pj-grid">
+      <div class="pj-box">
+        <div class="box-label">Before you start</div>
+        <ul><li>The security track's modules on logging and detection, incident response, and Linux hardening</li><li>Docker and Docker Compose, Python 3.12 (for sigma-cli), and about 2 GB of free memory for the stack</li><li>Comfort on the Linux command line; the target is a container you have root in and are meant to attack</li></ul>
+      </div>
+      <div class="pj-box">
+        <div class="box-label">Tools you will install</div>
+        <ul class="pj-tools"><li><strong>Grafana Loki 3.7</strong> — the log store and the alerting engine — LogQL queries, and a built-in ruler that evaluates them on a schedule <a href="https://grafana.com/docs/loki/latest/" target="_blank" rel="noopener">↗</a></li><li><strong>Grafana Alloy 1.19</strong> — the collector: tails files on the target, parses them, adds labels and ships to Loki <a href="https://grafana.com/docs/alloy/latest/" target="_blank" rel="noopener">↗</a></li><li><strong>sigma-cli + pySigma Loki backend</strong> — write detections once in Sigma's vendor-neutral YAML, convert to LogQL and to ruler groups <a href="https://github.com/SigmaHQ/sigma-cli" target="_blank" rel="noopener">↗</a></li><li><strong>Alertmanager</strong> — routes fired alerts by severity, deduplicates, and is where alert fatigue is won or lost <a href="https://prometheus.io/docs/alerting/latest/alertmanager/" target="_blank" rel="noopener">↗</a></li><li><strong>Grafana</strong> — the analyst's screen: log exploration, the events dashboard, and the alert list <a href="https://grafana.com/docs/grafana/latest/" target="_blank" rel="noopener">↗</a></li></ul>
+      </div>
+    </div>
+    <div class="pj-box pj-layout"><div class="box-label">Repository layout at the end</div><pre><code>detection-lab/
+├── compose.yml
+├── loki/
+│   └── loki.yaml                # single-binary Loki with the ruler enabled
+├── alloy/
+│   └── config.alloy             # tail, parse and label the target's logs
+├── alertmanager/
+│   └── alertmanager.yml
+├── target/
+│   ├── Dockerfile               # sshd + a tiny login web app, writes /var/log
+│   └── webapp.py
+├── rules/
+│   ├── sigma/                   # detections in Sigma YAML
+│   ├── loki-pipeline.yml        # maps Sigma logsources to the lab's Loki labels
+│   └── build.py                 # sigma → Loki ruler groups → loki/rules/
+├── loki/rules/fake/             # generated ruler groups (fake = the tenant id)
+├── attacks/                     # one script per detection
+├── grafana/provisioning/        # datasource + dashboard
+├── COVERAGE.md                  # technique → rule → tested
+└── incidents/2026-xx-xx.md</code></pre></div>
+    <p class="pj-hint">Tick each step as you finish it — your progress is saved in this browser only (<a href="../../education.html#progressPanel">back up or restore</a> on the hub). Every code block has a copy button. If something goes wrong, the <a href="#troubleshooting">troubleshooting</a> section at the end covers the usual suspects.</p>
+  </section>
+
+  <section id="phase-1" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 1</span><h2>Stand up the pipeline</h2></div>
+    <p class="pj-goal">A target container producing logs, Alloy shipping them to Loki with useful labels, and a query in Grafana that shows them arriving.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-1-1"><label class="pj-step-tick"><input type="checkbox" data-step="1-1" aria-label="Done: step 1.1" /><span class="pj-step-num">1.1</span></label><div class="pj-step-body"><div class="pj-step-text">Create the repository and the target. The target is a container you will attack: it runs sshd and a minimal web login app, and writes the logs a real host would — <code>/var/log/auth.log</code> for SSH and sudo, and a JSON access log for the app.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>mkdir detection-lab &amp;&amp; cd detection-lab &amp;&amp; git init -b main
+mkdir -p loki/rules alloy alertmanager target rules/sigma attacks grafana/provisioning/datasources grafana/provisioning/dashboards grafana/dashboards incidents</code></pre></div></div></li><li class="pj-step" id="step-1-2"><label class="pj-step-tick"><input type="checkbox" data-step="1-2" aria-label="Done: step 1.2" /><span class="pj-step-num">1.2</span></label><div class="pj-step-body"><div class="pj-step-text">Write the target's web app: it logs every login attempt as one JSON line with the fields a detection needs — timestamp, source IP, username, and outcome. Structured logs are the difference between a detection you can write and a regex you fight.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># target/webapp.py
+import json
+import sys
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import parse_qs, urlparse
+
+USERS = {"admin": "s3cret", "alice": "correct-horse"}
+
+
+def log(event: dict) -&gt; None:
+    event["ts"] = datetime.now(timezone.utc).isoformat()
+    sys.stdout.write(json.dumps(event) + "\n")
+    sys.stdout.flush()
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("content-length", 0))
+        form = parse_qs(self.rfile.read(length).decode())
+        user = form.get("user", [""])[0]
+        ok = USERS.get(user) == form.get("password", [""])[0]
+        src = self.headers.get("x-forwarded-for", self.client_address[0])
+        log({"event": "login", "user": user, "src": src, "outcome": "success" if ok else "failure",
+             "path": urlparse(self.path).path})
+        self.send_response(200 if ok else 401)
+        self.end_headers()
+        self.wfile.write(b"ok" if ok else b"denied")
+
+    def log_message(self, *_):
+        pass
+
+
+if __name__ == "__main__":
+    HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()</code></pre></div></div></li><li class="pj-step" id="step-1-3"><label class="pj-step-tick"><input type="checkbox" data-step="1-3" aria-label="Done: step 1.3" /><span class="pj-step-num">1.3</span></label><div class="pj-step-body"><div class="pj-step-text">Write the target's Dockerfile. It installs sshd, seeds a couple of accounts, and runs both sshd and the web app under a tiny supervisor that also tees the app's stdout into a log file Alloy can tail.</div><div class="code"><div class="code-head"><span>dockerfile</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># target/Dockerfile
+FROM ubuntu:24.04
+RUN apt-get update &amp;&amp; apt-get install -y openssh-server python3 sudo rsyslog &amp;&amp; rm -rf /var/lib/apt/lists/*
+RUN useradd -m -s /bin/bash alice &amp;&amp; echo 'alice:correct-horse' | chpasswd \
+    &amp;&amp; useradd -m -s /bin/bash ubuntu &amp;&amp; echo 'ubuntu:ubuntu' | chpasswd \
+    &amp;&amp; usermod -aG sudo ubuntu \
+    &amp;&amp; mkdir -p /run/sshd /var/log
+COPY webapp.py /opt/webapp.py
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+EXPOSE 22 8080
+CMD ["/entrypoint.sh"]</code></pre></div><div class="pj-note">This is a deliberately soft target for a closed lab on your own machine — weak passwords, password SSH. Never expose it to a network. The point is to generate attack telemetry safely, not to run a service.</div></div></li><li class="pj-step" id="step-1-4"><label class="pj-step-tick"><input type="checkbox" data-step="1-4" aria-label="Done: step 1.4" /><span class="pj-step-num">1.4</span></label><div class="pj-step-body"><div class="pj-step-text">Write the entrypoint that starts rsyslog (so <code>/var/log/auth.log</code> fills), sshd in the foreground's background, and the web app teed to a file.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># target/entrypoint.sh
+#!/bin/bash
+set -e
+service rsyslog start
+/usr/sbin/sshd
+touch /var/log/auth.log
+tail -F /var/log/auth.log &amp;
+python3 /opt/webapp.py 2&gt;&amp;1 | tee -a /var/log/webapp.log</code></pre></div></div></li><li class="pj-step" id="step-1-5"><label class="pj-step-tick"><input type="checkbox" data-step="1-5" aria-label="Done: step 1.5" /><span class="pj-step-num">1.5</span></label><div class="pj-step-body"><div class="pj-step-text">Write the Loki config with the ruler enabled — this is the piece that turns Loki from a log store into a detection engine. It uses the single-binary filesystem setup and points its ruler at Alertmanager. (Verified against Loki 3.7.8.)</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># loki/loki.yaml
+auth_enabled: false
+server:
+  http_listen_port: 3100
+  log_level: warn
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore: {store: inmemory}
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index: {prefix: index_, period: 24h}
+limits_config:
+  retention_period: 168h
+  allow_structured_metadata: true
+ruler:
+  storage:
+    type: local
+    local: {directory: /loki/rules}
+  rule_path: /tmp/loki-rules
+  alertmanager_url: http://alertmanager:9093
+  enable_alertmanager_v2: true
+  enable_api: true
+  ring:
+    kvstore: {store: inmemory}</code></pre></div></div></li><li class="pj-step" id="step-1-6"><label class="pj-step-tick"><input type="checkbox" data-step="1-6" aria-label="Done: step 1.6" /><span class="pj-step-num">1.6</span></label><div class="pj-step-body"><div class="pj-step-text">Write the Alloy collector config. It tails the target's log files, parses the syslog line format to pull out the process name as a label, and ships everything to Loki. The <code>process</code> label is what lets a detection say "sshd events only". (Verified against Alloy 1.19.2.)</div><div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>// alloy/config.alloy
+loki.write "central" {
+  endpoint { url = "http://loki:3100/loki/api/v1/push" }
+}
+
+local.file_match "syslog" {
+  path_targets = [{
+    __path__ = "/var/log/target/auth.log",
+    job      = "varlogs",
+    host     = "target",
+  }]
+  sync_period = "5s"
+}
+
+loki.source.file "syslog" {
+  targets    = local.file_match.syslog.targets
+  forward_to = [loki.process.syslog.receiver]
+}
+
+loki.process "syslog" {
+  stage.regex {
+    expression = "^(?P&lt;timestamp&gt;\\w+\\s+\\d+\\s+\\d+:\\d+:\\d+)\\s+(?P&lt;hostname&gt;\\S+)\\s+(?P&lt;process&gt;[^\\[:]+)(\\[\\d+\\])?:\\s+(?P&lt;message&gt;.*)$"
+  }
+  stage.labels { values = { process = "" } }
+  forward_to = [loki.write.central.receiver]
+}
+
+local.file_match "webapp" {
+  path_targets = [{ __path__ = "/var/log/target/webapp.log", job = "webapp", host = "target" }]
+}
+
+loki.source.file "webapp" {
+  targets    = local.file_match.webapp.targets
+  forward_to = [loki.write.central.receiver]
+}</code></pre></div><div class="pj-note">Keep the number of label values small: <code>process</code> has a handful of values (sshd, sudo, useradd), which is fine. Never make a label out of something high-cardinality like a source IP or a user — those are extracted at query time with <code>| regexp</code> or <code>| json</code>, not stored as labels. This is the single most important operational rule in Loki.</div></div></li><li class="pj-step" id="step-1-7"><label class="pj-step-tick"><input type="checkbox" data-step="1-7" aria-label="Done: step 1.7" /><span class="pj-step-num">1.7</span></label><div class="pj-step-body"><div class="pj-step-text">Wire it together in Compose. The target's <code>/var/log</code> is shared with Alloy read-only so the collector can tail it.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># compose.yml
+services:
+  target:
+    build: ./target
+    ports: ["2222:22", "8080:8080"]
+    volumes: ["varlog:/var/log"]
+
+  alloy:
+    image: grafana/alloy:v1.19.2
+    command: ["run", "--server.http.listen-addr=0.0.0.0:12345", "--storage.path=/var/lib/alloy/data", "/etc/alloy/config.alloy"]
+    volumes:
+      - "./alloy/config.alloy:/etc/alloy/config.alloy:ro"
+      - "varlog:/var/log/target:ro"
+    depends_on: [loki]
+
+  loki:
+    image: grafana/loki:3.7.8
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    ports: ["3100:3100"]
+    volumes:
+      - "./loki/loki.yaml:/etc/loki/loki.yaml:ro"
+      - "./loki/rules:/loki/rules"
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.0
+    ports: ["9093:9093"]
+    volumes: ["./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro"]
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    ports: ["3000:3000"]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Editor
+    volumes:
+      - "./grafana/provisioning:/etc/grafana/provisioning:ro"
+      - "./grafana/dashboards:/var/lib/grafana/dashboards:ro"
+
+volumes:
+  varlog:</code></pre></div></div></li><li class="pj-step" id="step-1-8"><label class="pj-step-tick"><input type="checkbox" data-step="1-8" aria-label="Done: step 1.8" /><span class="pj-step-num">1.8</span></label><div class="pj-step-body"><div class="pj-step-text">Add a minimal Alertmanager config and a Grafana datasource, then bring it all up and generate a first log line by logging into the web app.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>cat &gt; alertmanager/alertmanager.yml &lt;&lt;'EOF'
+route:
+  receiver: default
+  group_by: [alertname, src]
+  group_wait: 10s
+  repeat_interval: 1h
+receivers:
+  - name: default
+EOF
+cat &gt; grafana/provisioning/datasources/loki.yml &lt;&lt;'EOF'
+apiVersion: 1
+datasources:
+  - name: Loki
+    type: loki
+    uid: loki
+    access: proxy
+    url: http://loki:3100
+    isDefault: true
+EOF
+docker compose up -d --build
+sleep 20
+curl -s -X POST localhost:8080/login -d 'user=alice&amp;password=correct-horse'; echo
+curl -s -X POST localhost:8080/login -d 'user=admin&amp;password=wrong'; echo</code></pre></div></div></li><li class="pj-step" id="step-1-9"><label class="pj-step-tick"><input type="checkbox" data-step="1-9" aria-label="Done: step 1.9" /><span class="pj-step-num">1.9</span></label><div class="pj-step-body"><div class="pj-step-text">Confirm the logs arrived in Loki. Open Grafana's Explore view (http://localhost:3000, Explore → Loki) and run the queries, or use the API directly.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>NS=$(($(date +%s)-3600))000000000
+curl -sG localhost:3100/loki/api/v1/query_range --data-urlencode '{job="webapp"}' --data-urlencode "start=$NS" \
+  | python3 -c "import sys,json; [print(s['values'][0][1]) for s in json.load(sys.stdin)['data']['result']]"
+curl -sG localhost:3100/loki/api/v1/query_range --data-urlencode '{job="varlogs"}' --data-urlencode "start=$NS" \
+  | python3 -c "import sys,json; print('varlogs streams:', len(json.load(sys.stdin)['data']['result']))"
+git add . &amp;&amp; git commit -m 'lab: target, alloy, loki with ruler, alertmanager, grafana'</code></pre></div><div class="pj-note">If <code>{job="webapp"}</code> is empty, the app has not logged yet — hit the login endpoint again. If <code>{job="varlogs"}</code> is empty, sshd has not written to auth.log yet; the SSH attacks in phase three will fill it.</div></div></li></ol>
+  </section>
+
+  <section id="phase-2" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 2</span><h2>Detections as code with Sigma</h2></div>
+    <p class="pj-goal">Detections written once in Sigma YAML, converted to LogQL for exploration and to Loki ruler groups for alerting, each tagged with the ATT&amp;CK technique it covers.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-2-1"><label class="pj-step-tick"><input type="checkbox" data-step="2-1" aria-label="Done: step 2.1" /><span class="pj-step-num">2.1</span></label><div class="pj-step-body"><div class="pj-step-text">Install sigma-cli with the Loki backend and confirm it can convert a rule. Sigma is the vendor-neutral detection format; the same rule you write here converts to Splunk, Elastic or Sentinel with a different backend, which is why detection engineers write in it.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>python3 -m venv .venv &amp;&amp; source .venv/bin/activate
+pip install sigma-cli==3.1.0 pysigma-backend-loki==0.13.0
+sigma version &amp;&amp; sigma list targets</code></pre></div></div></li><li class="pj-step" id="step-2-2"><label class="pj-step-tick"><input type="checkbox" data-step="2-2" aria-label="Done: step 2.2" /><span class="pj-step-num">2.2</span></label><div class="pj-step-body"><div class="pj-step-text">Write the pipeline that maps Sigma's abstract log sources to this lab's actual Loki labels and parsers. Without it, Sigma does not know that <code>product: linux, service: sshd</code> means <code>{job="varlogs", process="sshd"}</code> here. (Verified: this pipeline produces the queries used below.)</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># rules/loki-pipeline.yml
+name: lab-loki
+priority: 10
+transformations:
+  - id: sshd-selector
+    type: set_custom_attribute
+    attribute: logsource_loki_selection
+    value: '{job="varlogs", process="sshd"}'
+    rule_conditions:
+      - type: logsource
+        product: linux
+        service: sshd
+  - id: sudo-selector
+    type: set_custom_attribute
+    attribute: logsource_loki_selection
+    value: '{job="varlogs", process="sudo"}'
+    rule_conditions:
+      - type: logsource
+        product: linux
+        service: sudo
+  - id: webapp-selector
+    type: set_custom_attribute
+    attribute: logsource_loki_selection
+    value: '{job="webapp"} | json'
+    rule_conditions:
+      - type: logsource
+        product: webapp</code></pre></div></div></li><li class="pj-step" id="step-2-3"><label class="pj-step-tick"><input type="checkbox" data-step="2-3" aria-label="Done: step 2.3" /><span class="pj-step-num">2.3</span></label><div class="pj-step-body"><div class="pj-step-text">Write the first four detections as Sigma rules. Each names the ATT&amp;CK technique in <code>tags</code>, which the build script turns into an alert label. Start with SSH brute force.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># rules/sigma/ssh_bruteforce.yml
+title: SSH brute force from a single source
+id: 6f1a2b3c-1111-4a2b-8c3d-000000000001
+status: experimental
+description: Five or more failed SSH passwords from one address in five minutes
+logsource: {product: linux, service: sshd}
+detection:
+  selection:
+    message|contains: 'Failed password'
+  condition: selection
+fields: [src]
+level: high
+tags: [attack.credential-access, attack.t1110.001]
+---
+# rules/sigma/sensitive_file_read.yml
+title: Sensitive file access via sudo
+id: 6f1a2b3c-1111-4a2b-8c3d-000000000002
+status: experimental
+description: A user reads /etc/shadow or /etc/sudoers through sudo
+logsource: {product: linux, service: sudo}
+detection:
+  selection:
+    message|contains: 'COMMAND='
+  files:
+    message|re: '/etc/(shadow|sudoers)'
+  condition: selection and files
+level: high
+tags: [attack.credential-access, attack.t1003.008]
+---
+# rules/sigma/new_account.yml
+title: New local account created
+id: 6f1a2b3c-1111-4a2b-8c3d-000000000003
+status: experimental
+description: useradd created a new account — persistence
+logsource: {product: linux, service: sshd}
+detection:
+  selection:
+    message|contains: 'new user'
+  condition: selection
+level: medium
+tags: [attack.persistence, attack.t1136.001]
+---
+# rules/sigma/webapp_bruteforce.yml
+title: Web application login brute force
+id: 6f1a2b3c-1111-4a2b-8c3d-000000000004
+status: experimental
+description: Many failed web logins from one source
+logsource: {product: webapp}
+detection:
+  selection:
+    event: login
+    outcome: failure
+  condition: selection
+fields: [src]
+level: medium
+tags: [attack.credential-access, attack.t1110]</code></pre></div><div class="pj-note">The <code>new_account</code> rule uses the sshd logsource because <code>useradd</code> writes to auth.log with the same format; the process label will be <code>useradd</code>, which the rule does not constrain, so it matches on the message. Real detection is full of these pragmatic choices — write them in the description.</div></div></li><li class="pj-step" id="step-2-4"><label class="pj-step-tick"><input type="checkbox" data-step="2-4" aria-label="Done: step 2.4" /><span class="pj-step-num">2.4</span></label><div class="pj-step-body"><div class="pj-step-text">Convert one rule by hand to see what Sigma produces, both as a raw LogQL query (for Explore) and as a ruler group. This is the exact output the backend generates.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>sigma convert -t loki -p rules/loki-pipeline.yml rules/sigma/ssh_bruteforce.yml
+# -&gt; {job="varlogs", process="sshd"} | logfmt | message=~`(?i).*Failed\ password.*`
+sigma convert -t loki -f ruler -p rules/loki-pipeline.yml rules/sigma/ssh_bruteforce.yml | head -20</code></pre></div><div class="pj-note">Sigma's default ruler output counts matches and alerts if any exist. That is a fine starting point, but a brute-force detection needs a threshold and a per-source group — the build script below rewrites the expression to add those, because a good detection is a Sigma rule plus alerting logic, and only you know the threshold.</div></div></li><li class="pj-step" id="step-2-5"><label class="pj-step-tick"><input type="checkbox" data-step="2-5" aria-label="Done: step 2.5" /><span class="pj-step-num">2.5</span></label><div class="pj-step-body"><div class="pj-step-text">Write the build script. It converts each Sigma rule to its LogQL body, then wraps it in a ruler rule with the threshold, window, <code>for</code> duration and ATT&amp;CK labels appropriate to that detection — encoded in a small table keyed by rule id. The generated LogQL below is exactly what fired against the running stack.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># rules/build.py
+import subprocess
+import sys
+from pathlib import Path
+
+import yaml
+
+# Alerting logic per rule: (threshold expression wrapping the LogQL body, window, for, extra labels)
+ALERTING = {
+    "6f1a2b3c-1111-4a2b-8c3d-000000000001": {  # ssh brute force
+        "expr": 'sum by (src) (count_over_time({job="varlogs", process="sshd"} |= "Failed password" | regexp "from (?P&lt;src&gt;[0-9.]+) port" [5m])) &gt;= 5',
+        "for": "0m", "severity": "page"},
+    "6f1a2b3c-1111-4a2b-8c3d-000000000002": {  # sensitive file read
+        "expr": 'sum(count_over_time({job="varlogs", process="sudo"} |= "COMMAND=" |~ "/etc/(shadow|sudoers)" [5m])) &gt; 0',
+        "for": "0m", "severity": "page"},
+    "6f1a2b3c-1111-4a2b-8c3d-000000000003": {  # new account
+        "expr": 'sum by (newuser) (count_over_time({job="varlogs"} |= "new user" | regexp "name=(?P&lt;newuser&gt;[^,]+)" [10m])) &gt; 0',
+        "for": "0m", "severity": "page"},
+    "6f1a2b3c-1111-4a2b-8c3d-000000000004": {  # webapp brute force
+        "expr": 'sum by (src) (count_over_time({job="webapp"} | json | event="login" | outcome="failure" [5m])) &gt;= 8',
+        "for": "1m", "severity": "ticket"},
+}
+
+
+def technique(tags: list[str]) -&gt; str:
+    return next((t.split(".", 1)[1].upper() for t in tags if t.startswith("attack.t")), "")
+
+
+def tactic(tags: list[str]) -&gt; str:
+    return next((t.split(".", 1)[1] for t in tags if t.startswith("attack.") and not t.startswith("attack.t")), "")
+
+
+def main() -&gt; int:
+    rules = []
+    for path in sorted(Path("rules/sigma").glob("*.yml")):
+        for doc in yaml.safe_load_all(path.read_text()):
+            if not doc:
+                continue
+            spec = ALERTING.get(doc["id"])
+            if spec is None:
+                print(f"no alerting spec for {doc['title']} ({doc['id']})", file=sys.stderr)
+                return 1
+            rules.append({
+                "alert": doc["title"].replace(" ", ""),
+                "expr": spec["expr"],
+                "for": spec["for"],
+                "labels": {"severity": spec["severity"], "tactic": tactic(doc["tags"]), "technique": technique(doc["tags"])},
+                "annotations": {"summary": doc["title"], "description": doc["description"], "rule_id": doc["id"]},
+            })
+    out = Path("loki/rules/fake/detections.yml")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(yaml.safe_dump({"groups": [{"name": "detections", "interval": "30s", "rules": rules}]}, sort_keys=False))
+    print(f"wrote {len(rules)} rules to {out}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())</code></pre></div><div class="pj-note"><code>fake</code> is the Loki tenant id used when auth is disabled — the ruler expects rules under <code>&lt;rules_directory&gt;/&lt;tenant&gt;/</code>. Keeping the LogQL in the build script rather than the Sigma rule is a deliberate boundary: the Sigma rule says *what behaviour*, the script says *how loudly and above what threshold*.</div></div></li><li class="pj-step" id="step-2-6"><label class="pj-step-tick"><input type="checkbox" data-step="2-6" aria-label="Done: step 2.6" /><span class="pj-step-num">2.6</span></label><div class="pj-step-body"><div class="pj-step-text">Build the rules, reload Loki, and confirm the ruler loaded them without error.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>pip install pyyaml
+python rules/build.py
+docker compose restart loki &amp;&amp; sleep 20
+curl -s localhost:3100/prometheus/api/v1/rules | python3 -c "
+import sys,json
+for g in json.load(sys.stdin)['data']['groups']:
+    for r in g['rules']:
+        print(f\"{r['name']:32} health={r.get('health')} {r.get('lastError','')}\")
+"</code></pre></div><div class="pj-note">All four should show <code>health=ok</code>. A <code>lastError</code> about a parse failure means the LogQL is malformed — copy the <code>expr</code> into Grafana Explore and Loki will point at the exact character.</div></div></li></ol>
+  </section>
+
+  <section id="phase-3" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 3</span><h2>Attack, and watch it fire</h2></div>
+    <p class="pj-goal">Four attack scripts, each tripping one detection; you confirm each alert fires in Loki and lands in Alertmanager with its ATT&amp;CK labels.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-3-1"><label class="pj-step-tick"><input type="checkbox" data-step="3-1" aria-label="Done: step 3.1" /><span class="pj-step-num">3.1</span></label><div class="pj-step-body"><div class="pj-step-text">Write the SSH brute-force attack. It fails to log in as several users from the host, which sshd records in auth.log — enough failures in five minutes to cross the threshold.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># attacks/01_ssh_bruteforce.sh
+#!/usr/bin/env bash
+set -e
+for i in $(seq 1 8); do
+  ssh -p 2222 -o StrictHostKeyChecking=no -o PreferredAuthentications=password \
+      -o PubkeyAuthentication=no -o ConnectTimeout=3 \
+      "baduser${i}@localhost" true 2&gt;/dev/null || true
+done
+echo "8 failed SSH attempts sent"</code></pre></div><div class="pj-note"><code>sshpass</code> would let you script real password attempts; the connection attempts above already produce <code>Failed password</code>/<code>Invalid user</code> lines, which is what the detection matches. Install <code>sshpass</code> and pass a wrong password if you want the logs to look even more realistic.</div></div></li><li class="pj-step" id="step-3-2"><label class="pj-step-tick"><input type="checkbox" data-step="3-2" aria-label="Done: step 3.2" /><span class="pj-step-num">3.2</span></label><div class="pj-step-body"><div class="pj-step-text">Write the other three attacks: a sensitive-file read through sudo on the target, a new backdoor account, and a web login brute force.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># attacks/02_shadow_read.sh
+docker compose exec -T target su - ubuntu -c 'echo ubuntu | sudo -S cat /etc/shadow' &gt;/dev/null 2&gt;&amp;1 || true
+echo 'sudo /etc/shadow read'
+
+# attacks/03_new_account.sh
+docker compose exec -T target useradd -m -s /bin/bash backdoor 2&gt;/dev/null || true
+echo 'created backdoor account'
+
+# attacks/04_web_bruteforce.sh
+for i in $(seq 1 12); do
+  curl -s -o /dev/null -H 'X-Forwarded-For: 10.66.66.66' \
+    -X POST localhost:8080/login -d "user=admin&amp;password=guess$i"
+done
+echo '12 failed web logins from 10.66.66.66'</code></pre></div><div class="pj-note">sudo writes its command line to auth.log, so the shadow read appears there with <code>COMMAND=/usr/bin/cat /etc/shadow</code>. useradd writes <code>new user: name=backdoor</code> to auth.log. Both were confirmed to match the detections against the running stack.</div></div></li><li class="pj-step" id="step-3-3"><label class="pj-step-tick"><input type="checkbox" data-step="3-3" aria-label="Done: step 3.3" /><span class="pj-step-num">3.3</span></label><div class="pj-step-body"><div class="pj-step-text">Run all four attacks, wait for the ruler's 30-second evaluation, and confirm each detection fires.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>chmod +x attacks/*.sh
+for a in attacks/*.sh; do bash "$a"; done
+sleep 45
+curl -s localhost:3100/prometheus/api/v1/rules | python3 -c "
+import sys,json
+for g in json.load(sys.stdin)['data']['groups']:
+    for r in g['rules']:
+        alerts = r.get('alerts', [])
+        state = r.get('state', 'inactive')
+        print(f\"{r['name']:32} {state:8} technique={r['labels'].get('technique','')} alerts={len(alerts)}\")
+        for a in alerts:
+            print('   ', {k: v for k, v in a['labels'].items() if k in ('src','newuser','severity')})
+"</code></pre></div><div class="pj-note">Reference result: SSHBruteforce fires with <code>src=&lt;your host ip&gt;</code>, SensitiveFileAccess fires, Newlocalaccountcreated fires with <code>newuser=backdoor</code>, and the web rule fires after its 1-minute <code>for</code> with <code>src=10.66.66.66</code>. If SSH did not fire, your client reused a connection or the host IP varied — check <code>{job="varlogs", process="sshd"}</code> in Explore.</div></div></li><li class="pj-step" id="step-3-4"><label class="pj-step-tick"><input type="checkbox" data-step="3-4" aria-label="Done: step 3.4" /><span class="pj-step-num">3.4</span></label><div class="pj-step-body"><div class="pj-step-text">Confirm the alerts reached Alertmanager, grouped and labelled. This is what an analyst's queue actually looks like.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>curl -s localhost:9093/api/v2/alerts | python3 -c "
+import sys,json
+for a in json.load(sys.stdin):
+    l = a['labels']
+    print(l.get('alertname'), '| technique', l.get('technique'), '| severity', l.get('severity'), '|', {k:v for k,v in l.items() if k in ('src','newuser')})
+"</code></pre></div></div></li><li class="pj-step" id="step-3-5"><label class="pj-step-tick"><input type="checkbox" data-step="3-5" aria-label="Done: step 3.5" /><span class="pj-step-num">3.5</span></label><div class="pj-step-body"><div class="pj-step-text">Build the events dashboard in Grafana (or import the JSON from the repo): a logs panel for <code>{job=~"varlogs|webapp"}</code>, a stat of failed SSH per source over time, a table of firing alerts. Export it to <code>grafana/dashboards/detections.json</code> and commit.</div><div class="code"><div class="code-head"><span>promql</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># Failed SSH by source (time series)
+sum by (src) (count_over_time({job="varlogs", process="sshd"} |= "Failed password" | regexp "from (?P&lt;src&gt;[0-9.]+) port" [5m]))
+
+# Failed web logins by source
+sum by (src) (count_over_time({job="webapp"} | json | event="login" | outcome="failure" [5m]))
+
+# All target log volume by process
+sum by (process) (count_over_time({job="varlogs"} [1m]))</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-4" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 4</span><h2>Measure coverage and tune the noise</h2></div>
+    <p class="pj-goal">A coverage table that is honest about what you can and cannot detect, and at least one rule tuned because it was too noisy or too quiet — measured, not guessed.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-4-1"><label class="pj-step-tick"><input type="checkbox" data-step="4-1" aria-label="Done: step 4.1" /><span class="pj-step-num">4.1</span></label><div class="pj-step-body"><div class="pj-step-text">Write the coverage table: every detection, the ATT&amp;CK technique, whether an attack script tests it, and — crucially — techniques you know you cannot see with these logs. An honest gap list is the mark of a real detection program.</div><div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># COVERAGE.md
+
+## Detections
+| Rule                        | Technique  | Tactic            | Attack script            | Tested |
+|-----------------------------|------------|-------------------|--------------------------|--------|
+| SSH brute force             | T1110.001  | credential-access | 01_ssh_bruteforce.sh     | yes    |
+| Sensitive file via sudo     | T1003.008  | credential-access | 02_shadow_read.sh        | yes    |
+| New local account           | T1136.001  | persistence       | 03_new_account.sh        | yes    |
+| Web login brute force       | T1110      | credential-access | 04_web_bruteforce.sh     | yes    |
+
+## Known blind spots (no telemetry for these here)
+- Process execution (T1059): we log auth and the app, not exec — would need auditd or Sysmon-for-Linux.
+- Lateral movement, C2 (TA0011): no network/flow logs in this lab — would need Zeek or Suricata.
+- Log tampering (T1070): an attacker with root can edit /var/log before Alloy ships it; central shipping
+  reduces but does not remove this. Tested informally: `truncate -s 0 /var/log/auth.log` after the attack.
+
+## False-positive notes
+- SSH brute force at &gt;=5/5m will fire on a fat-fingered admin. Acceptable at severity page in a lab;
+  in production, exclude known bastions and raise to 10, or alert only when followed by a success.</code></pre></div><div class="pj-note">The blind-spots section is where you demonstrate you understand detection: coverage is never complete, and pretending otherwise is how teams get surprised. Interviewers ask exactly this.</div></div></li><li class="pj-step" id="step-4-2"><label class="pj-step-tick"><input type="checkbox" data-step="4-2" aria-label="Done: step 4.2" /><span class="pj-step-num">4.2</span></label><div class="pj-step-body"><div class="pj-step-text">Now make a rule too noisy on purpose, so tuning is a measured act. Trigger a single failed admin login (one, not eight), and confirm the current SSH threshold ignores it — then lower the threshold, rebuild, and watch it fire on the noise, which is what you are learning to avoid.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>ssh -p 2222 -o StrictHostKeyChecking=no -o PubkeyAuthentication=no -o ConnectTimeout=3 typo@localhost true 2&gt;/dev/null || true
+sleep 35
+# with threshold 5, one failure does not fire:
+curl -s localhost:3100/prometheus/api/v1/rules | python3 -c "import sys,json; print('SSH state:', [r['state'] for g in json.load(sys.stdin)['data']['groups'] for r in g['rules'] if 'SSHBrute' in r['name']])"
+# demonstrate the trade-off: temporarily set &gt;= 1 in ALERTING, rebuild, and see it fire on a single typo
+# (then put it back to &gt;= 5)</code></pre></div></div></li><li class="pj-step" id="step-4-3"><label class="pj-step-tick"><input type="checkbox" data-step="4-3" aria-label="Done: step 4.3" /><span class="pj-step-num">4.3</span></label><div class="pj-step-body"><div class="pj-step-text">Add the tuning that a real SSH detection needs — alert only on a brute force *followed by a success from the same source*, which cuts the false positives from mistyped passwords almost entirely. This is a Loki metric query with a join, and it is worth understanding.</div><div class="code"><div class="code-head"><span>promql</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># Brute force AND a subsequent success from the same source (near-zero false positives)
+sum by (src) (count_over_time({job="varlogs", process="sshd"} |= "Failed password" | regexp "from (?P&lt;src&gt;[0-9.]+) port" [5m])) &gt;= 5
+and on (src)
+sum by (src) (count_over_time({job="varlogs", process="sshd"} |= "Accepted" | regexp "from (?P&lt;src&gt;[0-9.]+) port" [5m])) &gt; 0</code></pre></div><div class="pj-note">Add this as a second, higher-severity rule (<code>SSHBruteForceSuccess</code>, severity page) and drop the plain brute-force rule to severity ticket. Now the page means "someone got in after trying hard", and the ticket means "someone is trying" — two different responses, which is the whole point of severities.</div></div></li><li class="pj-step" id="step-4-4"><label class="pj-step-tick"><input type="checkbox" data-step="4-4" aria-label="Done: step 4.4" /><span class="pj-step-num">4.4</span></label><div class="pj-step-body"><div class="pj-step-text">Rebuild with the tuned rules, re-run the brute-force attack (which does not succeed, so only the ticket fires), then simulate a successful compromise and confirm the page fires.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>python rules/build.py &amp;&amp; docker compose restart loki &amp;&amp; sleep 20
+bash attacks/01_ssh_bruteforce.sh
+# now a real success after the brute force:
+sshpass -p correct-horse ssh -p 2222 -o StrictHostKeyChecking=no alice@localhost true 2&gt;/dev/null || \
+  ssh -p 2222 -o StrictHostKeyChecking=no alice@localhost true   # type the password once
+sleep 45
+curl -s localhost:9093/api/v2/alerts | python3 -c "import sys,json; print([(a['labels']['alertname'], a['labels']['severity']) for a in json.load(sys.stdin)])"
+git add rules COVERAGE.md &amp;&amp; git commit -m 'detections: coverage table and brute-force-then-success tuning'</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-5" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 5</span><h2>Run one real incident</h2></div>
+    <p class="pj-goal">Take one fired alert through the response you learned in the incident module: triage, scope, contain, and a blameless postmortem — using only what the SIEM shows you.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-5-1"><label class="pj-step-tick"><input type="checkbox" data-step="5-1" aria-label="Done: step 5.1" /><span class="pj-step-num">5.1</span></label><div class="pj-step-body"><div class="pj-step-text">Start from the page, not from knowing the answer. Open the <code>SSHBruteForceSuccess</code> alert and pivot to the source's full activity — this query is the first thing an analyst runs, and it is the value of central logging.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>SRC=10.0.0.9   # take the src from the alert
+NS=$(($(date +%s)-3600))000000000
+curl -sG localhost:3100/loki/api/v1/query_range \
+  --data-urlencode "{job=~\"varlogs|webapp\"} |~ \"$SRC\"" --data-urlencode "start=$NS" \
+  | python3 -c "import sys,json; [print(s['stream'].get('process','app'), v[1]) for s in json.load(sys.stdin)['data']['result'] for v in s['values']]" | sort</code></pre></div><div class="pj-note">In this lab the source is your own host, so the timeline is short; the skill is the pivot — one indicator (an IP) to everything it touched. In a real SIEM this is where you find the account it compromised, what it read, and whether it created persistence.</div></div></li><li class="pj-step" id="step-5-2"><label class="pj-step-tick"><input type="checkbox" data-step="5-2" aria-label="Done: step 5.2" /><span class="pj-step-num">5.2</span></label><div class="pj-step-body"><div class="pj-step-text">Scope it: did the same source do anything after getting in? Check for the new-account and shadow-read detections around the same window, which is how you connect brute force → access → persistence into one incident rather than three alerts.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>curl -sG localhost:3100/loki/api/v1/query_range \
+  --data-urlencode '{job="varlogs"} |~ "new user|COMMAND=.*etc/(shadow|sudoers)|Accepted"' \
+  --data-urlencode "start=$NS" \
+  | python3 -c "import sys,json; [print(v[1]) for s in json.load(sys.stdin)['data']['result'] for v in s['values']]" | sort</code></pre></div></div></li><li class="pj-step" id="step-5-3"><label class="pj-step-tick"><input type="checkbox" data-step="5-3" aria-label="Done: step 5.3" /><span class="pj-step-num">5.3</span></label><div class="pj-step-body"><div class="pj-step-text">Contain, and preserve evidence first. In the lab, containment is blocking the source and disabling the compromised account and the backdoor — but you copy the logs out before touching anything, because an attacker with root can erase them.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># preserve first — logs are already centralised in Loki, but snapshot the raw file too:
+docker compose exec -T target cat /var/log/auth.log &gt; incidents/evidence-auth.log
+# contain: disable the compromised account and the backdoor, kill sessions
+docker compose exec -T target usermod -L alice
+docker compose exec -T target usermod -L backdoor
+docker compose exec -T target pkill -u backdoor 2&gt;/dev/null || true
+echo 'contained: alice and backdoor locked'</code></pre></div></div></li><li class="pj-step" id="step-5-4"><label class="pj-step-tick"><input type="checkbox" data-step="5-4" aria-label="Done: step 5.4" /><span class="pj-step-num">5.4</span></label><div class="pj-step-body"><div class="pj-step-text">Write the incident with a timeline built from the SIEM's own timestamps and a blameless postmortem: what happened, how it was detected (or would have been missed), and one improvement to the detections or the host. Then implement the improvement.</div><div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># incidents/2026-09-21.md
+
+## Summary
+Brute force against SSH from 10.0.0.9 succeeded against `alice`; the actor read /etc/shadow via sudo and
+created a `backdoor` account. Detected by SSHBruteForceSuccess (T1110.001) at 10:04 UTC.
+
+## Timeline (from Loki)
+- 10:02:11  first failed SSH password from 10.0.0.9
+- 10:02:51  8th failure — SSHBruteForce (ticket) would fire
+- 10:03:20  Accepted password for alice from 10.0.0.9 — SSHBruteForceSuccess (page) fires
+- 10:03:40  sudo cat /etc/shadow — SensitiveFileAccess fires
+- 10:03:55  useradd backdoor — NewLocalAccount fires
+- 10:06:00  alice and backdoor locked (containment)
+
+## What worked / what to improve
+- Worked: the follow-the-source pivot connected four alerts into one incident.
+- Gap: no detection for `usermod -aG sudo` (privilege escalation of an existing account). Added rule
+  `sudo_group_change.yml` (T1098). Tested with attacks/05_add_to_sudo.sh.
+- Gap: password SSH is enabled on the target. Real fix: keys only. Out of scope for the lab, noted.</code></pre></div><div class="pj-note">The improvement is the point of a postmortem. Add the new Sigma rule and its attack script, rebuild, and prove it fires — then the incident produced a durable detection, which is what closing the loop means.</div></div></li><li class="pj-step" id="step-5-5"><label class="pj-step-tick"><input type="checkbox" data-step="5-5" aria-label="Done: step 5.5" /><span class="pj-step-num">5.5</span></label><div class="pj-step-body"><div class="pj-step-text">Add the escalation detection you identified, rebuild, test it, and commit the incident and the new rule together.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>cat &gt; rules/sigma/sudo_group_change.yml &lt;&lt;'EOF'
+title: User added to a privileged group
+id: 6f1a2b3c-1111-4a2b-8c3d-000000000005
+status: experimental
+description: usermod or gpasswd added an account to sudo/wheel/root
+logsource: {product: linux, service: sshd}
+detection:
+  selection:
+    message|re: 'to group .{0,4}(sudo|wheel|root)'
+  condition: selection
+level: high
+tags: [attack.privilege-escalation, attack.t1098]
+EOF
+# add its ALERTING entry in rules/build.py (a &gt; 0 count over 10m), then:
+echo 'docker compose exec -T target usermod -aG sudo backdoor' &gt; attacks/05_add_to_sudo.sh
+python rules/build.py &amp;&amp; docker compose restart loki &amp;&amp; sleep 20
+bash attacks/05_add_to_sudo.sh &amp;&amp; sleep 40
+curl -s localhost:3100/prometheus/api/v1/rules | python3 -c "import sys,json; print([r['state'] for g in json.load(sys.stdin)['data']['groups'] for r in g['rules'] if 'group' in r['name'].lower() or 'privileg' in r['name'].lower()])"
+git add rules attacks incidents &amp;&amp; git commit -m 'incident: 2026-09-21 SSH compromise; add privilege-escalation detection'</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="troubleshooting" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Help</span><h2>Troubleshooting</h2></div>
+    <dl class="pj-trouble"><dt><code>{job="varlogs"}</code> returns nothing in Grafana even after SSH attempts</dt><dd>Alloy tails <code>/var/log/target/auth.log</code> from the shared volume; confirm the file exists and grows: <code>docker compose exec target tail -f /var/log/auth.log</code> while you attempt a login. If it is empty, rsyslog did not start — check <code>docker compose logs target</code>. If the file grows but Loki is empty, check <code>docker compose logs alloy</code> for a push error and confirm Loki is <code>ready</code> (<code>curl localhost:3100/ready</code>).</dd><dt>The ruler shows rules with <code>health=err</code></dt><dd>The generated LogQL does not parse. Copy the <code>expr</code> from <code>loki/rules/fake/detections.yml</code> into Grafana Explore; Loki reports the exact position. The usual causes are an unescaped character in a <code>regexp</code> or a <code>| json</code> on a stream that is not JSON (the varlogs stream is not JSON — use <code>regexp</code>, keep <code>| json</code> for <code>{job="webapp"}</code>).</dd><dt>The SSH brute-force detection never fires although attacks ran</dt><dd>Two common causes: the failures came from varying source IPs (each <code>ssh</code> from your host should be the same address — check with the source-pivot query), or fewer than five landed inside the 5-minute window because retries were slow. Confirm the raw count: run the <code>sum by (src) (count_over_time(...))</code> query in Explore without the <code>&gt;= 5</code>.</dd><dt>Alerts fire in Loki (<code>state=firing</code>) but nothing appears in Alertmanager</dt><dd>The ruler cannot reach Alertmanager. Check <code>alertmanager_url</code> in loki.yaml resolves inside the network (<code>http://alertmanager:9093</code>, the Compose service name), and <code>docker compose logs loki | grep -i alertmanager</code> for connection errors. <code>enable_alertmanager_v2: true</code> is required for a modern Alertmanager.</dd><dt><code>docker compose exec target sudo ...</code> asks for a password or fails</dt><dd>The lab seeds <code>ubuntu</code> with password <code>ubuntu</code> in the sudo group; <code>echo ubuntu | sudo -S</code> supplies it. If you rebuilt the target and it fails, confirm the user exists: <code>docker compose exec target id ubuntu</code>. The point of the attack is the log line it produces, so any path that writes <code>COMMAND=...cat /etc/shadow</code> to auth.log works.</dd><dt>High memory use or Loki restarts under load</dt><dd>You have created a high-cardinality label — almost always by adding <code>src</code> or <code>user</code> as a stream label instead of extracting it at query time. Check <code>curl -s localhost:3100/loki/api/v1/labels</code> and the values of any suspicious label; keep stream labels to <code>job</code>, <code>host</code> and <code>process</code> only.</dd></dl>
+  </section>
+
+  <section id="next" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Next</span><h2>Where to go from here</h2></div>
+    <ul class="pj-next"><li>Add network telemetry: run Zeek or Suricata against a mirrored interface (or pcap replay) and ship its logs, then write detections for port scans and C2 beaconing — the blind spot in COVERAGE.md.</li><li>Add host process telemetry with auditd or Sysmon-for-Linux and write execution detections (T1059), the largest gap in the current coverage.</li><li>Pull the official SigmaHQ rule set (<code>git clone SigmaHQ/sigma</code>), convert the linux rules with your pipeline, and see how many run unmodified against this lab — a lesson in why field mapping is most of detection engineering.</li><li>Replace the manual attack scripts with Atomic Red Team tests for the same techniques, and record which of your detections catch each atomic — the standard way teams measure coverage.</li><li>Route Alertmanager to the ntfy or Slack channel from the SRE incident-drill project, and run a timed detection-and-response drill: mean time from attack to page to containment.</li></ul>
+  </section>
+
+  <p class="feedback-row">Did a step fail or feel unclear? <a href="../../feedback.html?page=/education/projects/proj-sec-detection-lab.html&amp;title=Build%20a%20detection%20lab">Tell me which one →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../../education.html">Education</a>
+      <a href="../../privacy.html">Privacy</a>
+      <a href="../../terms.html">Terms</a>
+      <a href="../../feedback.html?page=/education/projects/proj-sec-detection-lab.html&amp;title=Build%20a%20detection%20lab">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="project.js"></script>
+</body>
+</html>
