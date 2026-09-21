@@ -1,0 +1,220 @@
+{
+  "id": "proj-sre-canary",
+  "track": "sre",
+  "title": "Progressive delivery with automated analysis",
+  "summary": "A deploy that goes to 100 % of users at once is a bet with no way to hedge. This project replaces that bet with a canary: Argo Rollouts shifts 10 %, then 25 %, then 50 % of real traffic to the new version through the ingress you already run, while an analysis loop compares the canary's success rate and p99 latency against the stable version in Prometheus every 30 seconds. A good release promotes itself; a bad one is rolled back before most users ever see it. You will ship one of each, watch both on a release dashboard, and wire the whole thing into the GitOps promotion flow so it happens on every merge.",
+  "outcome": "The `orders-api` chart gains a `Rollout` with a weighted canary strategy, a canary Service and an `AnalysisTemplate` (success rate and latency ratio against stable); Argo Rollouts installed by Argo CD; a recorded good release that promoted through 10/25/50/100 with passing analysis, and a recorded bad release (5 % injected errors) that was aborted automatically at 10 % with the AnalysisRun showing why; a Grafana release dashboard comparing canary and stable, an alert on aborted rollouts, and a prod overlay that pauses at 50 % for a human promote.",
+  "hours": 6,
+  "level": "Advanced",
+  "prereqs": [
+    "The **GitOps with Argo CD** project running: the `kind` cluster, ingress-nginx, Argo CD, kube-prometheus-stack, the `orders-api` chart and the `zero-to-prod-config` repository",
+    "The **SLOs from scratch** project's app changes merged, so the image has `/orders/{id}` and honours `CHAOS_ERROR_RATE` — that is how you will ship a deliberately bad release",
+    "The SRE track's modules on release engineering, SLIs and change management",
+    "A load generator: `hey` (`brew install hey`) or `k6`"
+  ],
+  "tools": [
+    {"name": "Argo Rollouts", "why": "the Rollout resource, traffic shifting through ingress-nginx, and the analysis controller", "url": "https://argo-rollouts.readthedocs.io/"},
+    {"name": "kubectl argo rollouts plugin", "why": "`get rollout --watch`, `promote`, `abort`, and the local dashboard", "url": "https://argo-rollouts.readthedocs.io/en/stable/installation/#kubectl-plugin-installation"},
+    {"name": "Prometheus (kube-prometheus-stack)", "why": "the analysis provider; every verdict is a PromQL query you can run yourself", "url": "https://prometheus.io/docs/prometheus/latest/querying/basics/"},
+    {"name": "Grafana", "why": "the release dashboard: canary vs stable, side by side, during the rollout", "url": "https://grafana.com/docs/grafana/latest/"},
+    {"name": "hey", "why": "steady synthetic traffic so the canary has enough requests to judge", "url": "https://github.com/rakyll/hey"}
+  ],
+  "layout": "zero-to-prod/ (app repo)\n└── chart/\n    ├── values.yaml                     # + rollout: {enabled, steps, analysis}\n    └── templates/\n        ├── deployment.yaml             # rendered only when rollout.enabled is false\n        ├── rollout.yaml                # Rollout with canary strategy + nginx traffic routing\n        ├── service-canary.yaml         # second Service the canary pods sit behind\n        └── analysis.yaml               # AnalysisTemplate: success rate + latency vs stable\n\nzero-to-prod-config/ (config repo)\n├── platform/\n│   └── argo-rollouts/\n│       ├── kustomization.yaml          # pinned install manifest + ServiceMonitor\n│       └── servicemonitor.yaml\n├── apps/orders-api/\n│   ├── base/values.yaml                # rollout.enabled: true\n│   ├── dev/kustomization.yaml          # env.CHAOS_ERROR_RATE patch for the bad release\n│   └── prod/kustomization.yaml         # + indefinite pause at 50 %\n├── platform/monitoring/\n│   ├── dashboards/releases.json        # Grafana release dashboard (as a ConfigMap)\n│   └── rules/rollouts.yaml             # RolloutAborted alert\n└── argocd/applications/argo-rollouts.yaml",
+  "phases": [
+    {
+      "title": "Install Argo Rollouts the GitOps way",
+      "goal": "The Rollouts controller runs in the cluster, managed by Argo CD like everything else, and its metrics are scraped by Prometheus.",
+      "steps": [
+        {
+          "text": "Confirm the GitOps cluster is up and the pieces this project leans on are healthy: ingress-nginx, Argo CD, Prometheus and the orders-api dev application.",
+          "code": {"lang": "bash", "code": "kubectl config use-context kind-gitops\nkubectl -n ingress-nginx get pods\nargocd app list\nkubectl -n monitoring get svc | grep prometheus\ncurl -s http://orders.localtest.me/health"},
+          "note": "Note the Prometheus Service name — with the chart released as `monitoring` it is `monitoring-kube-prometheus-prometheus` on port 9090. The AnalysisTemplate needs that address."
+        },
+        {
+          "text": "In the config repository, add a platform folder for Argo Rollouts. Kustomize pulls the pinned upstream install manifest and adds a ServiceMonitor so the controller's own metrics (rollout phase, analysis results) land in Prometheus.",
+          "code": {"lang": "yaml", "code": "# platform/argo-rollouts/kustomization.yaml\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nnamespace: argo-rollouts\nresources:\n  - https://github.com/argoproj/argo-rollouts/releases/download/v1.8.3/install.yaml\n  - servicemonitor.yaml\n\n# platform/argo-rollouts/servicemonitor.yaml\napiVersion: monitoring.coreos.com/v1\nkind: ServiceMonitor\nmetadata:\n  name: argo-rollouts\n  labels: {release: monitoring}\nspec:\n  selector:\n    matchLabels: {app.kubernetes.io/name: argo-rollouts-metrics}\n  endpoints:\n    - port: metrics\n      interval: 30s"},
+          "note": "Check the Argo Rollouts releases page for the current tag and pin that. The `release: monitoring` label is what the kube-prometheus-stack from the GitOps project uses to pick up ServiceMonitors."
+        },
+        {
+          "text": "Add the Argo CD Application that points at the folder, with `CreateNamespace` and `ServerSideApply` (the CRDs are large; server-side apply avoids the annotation size limit).",
+          "code": {"lang": "yaml", "code": "# argocd/applications/argo-rollouts.yaml\napiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: argo-rollouts\n  namespace: argocd\nspec:\n  project: platform\n  source:\n    repoURL: https://github.com/YOUR_GITHUB_USER/zero-to-prod-config\n    targetRevision: main\n    path: platform/argo-rollouts\n  destination:\n    server: https://kubernetes.default.svc\n    namespace: argo-rollouts\n  syncPolicy:\n    automated: {prune: true, selfHeal: true}\n    syncOptions: [CreateNamespace=true, ServerSideApply=true]"}
+        },
+        {
+          "text": "Commit, let the app-of-apps pick it up, and install the kubectl plugin on your laptop.",
+          "code": {"lang": "bash", "code": "cd zero-to-prod-config\ngit switch -c feat/argo-rollouts\ngit add platform/argo-rollouts argocd/applications/argo-rollouts.yaml\ngit commit -m \"platform: Argo Rollouts controller + metrics\"\ngit push -u origin feat/argo-rollouts && gh pr create --fill && gh pr merge --squash --delete-branch\ngit switch main && git pull\nargocd app wait argo-rollouts --sync --health --timeout 300\nkubectl -n argo-rollouts get pods\nbrew install argoproj/tap/kubectl-argo-rollouts   # Linux: download the release binary\nkubectl argo rollouts version"}
+        }
+      ]
+    },
+    {
+      "title": "Turn the Deployment into a Rollout",
+      "goal": "The chart can render either a plain Deployment or a Rollout with a canary strategy; the Rollout shifts traffic through the existing ingress in weighted steps.",
+      "steps": [
+        {
+          "text": "In the app repository, add the rollout settings to `chart/values.yaml`. The steps are the release plan: weight, then wait for analysis, then more weight. Keep the Deployment as the default so the chart still works anywhere without Argo Rollouts.",
+          "code": {"lang": "yaml", "code": "# chart/values.yaml (append)\nrollout:\n  enabled: false\n  steps:\n    - setWeight: 10\n    - pause: {duration: 2m}\n    - setWeight: 25\n    - pause: {duration: 2m}\n    - setWeight: 50\n    - pause: {duration: 3m}\n  analysis:\n    enabled: true\n    startingStep: 1          # begin judging as soon as the first 10 % is live\n    prometheus: http://monitoring-kube-prometheus-prometheus.monitoring.svc:9090\n    minSuccessRate: \"0.99\"\n    maxLatencyRatio: \"1.5\"   # canary p99 may be at most 1.5x stable p99"}
+        },
+        {
+          "text": "Guard the existing Deployment template so it renders only when rollouts are off. Wrap the whole of `chart/templates/deployment.yaml`.",
+          "code": {"lang": "helm", "code": "{{- if not .Values.rollout.enabled }}\napiVersion: apps/v1\nkind: Deployment\n# ... the existing template, unchanged ...\n{{- end }}"}
+        },
+        {
+          "text": "Write `chart/templates/rollout.yaml`. The pod template is the same as the Deployment's; what differs is `strategy.canary`: a stable and a canary Service, ingress-nginx traffic routing against the chart's Ingress, and the steps from values. Background analysis runs the template continuously from `startingStep` onward.",
+          "code": {"lang": "helm", "code": "{{- if .Values.rollout.enabled }}\napiVersion: argoproj.io/v1alpha1\nkind: Rollout\nmetadata:\n  name: {{ .Release.Name }}\n  labels:\n    app.kubernetes.io/name: {{ .Chart.Name }}\n    app.kubernetes.io/instance: {{ .Release.Name }}\nspec:\n  replicas: {{ .Values.replicaCount }}\n  revisionHistoryLimit: 3\n  selector:\n    matchLabels:\n      app.kubernetes.io/instance: {{ .Release.Name }}\n  template:\n    metadata:\n      labels:\n        app.kubernetes.io/name: {{ .Chart.Name }}\n        app.kubernetes.io/instance: {{ .Release.Name }}\n    spec:\n      containers:\n        - name: app\n          image: \"{{ .Values.image.repository }}{{ if .Values.image.digest }}@{{ .Values.image.digest }}{{ else }}:{{ .Values.image.tag }}{{ end }}\"\n          ports:\n            - name: http\n              containerPort: {{ .Values.service.targetPort }}\n          env:\n            {{- range $k, $v := .Values.env }}\n            - name: {{ $k }}\n              value: {{ $v | quote }}\n            {{- end }}\n          readinessProbe:\n            httpGet: {path: /health, port: http}\n            periodSeconds: 5\n          resources: {{- toYaml .Values.resources | nindent 12 }}\n  strategy:\n    canary:\n      stableService: {{ .Release.Name }}\n      canaryService: {{ .Release.Name }}-canary\n      trafficRouting:\n        nginx:\n          stableIngress: {{ .Release.Name }}\n      {{- if .Values.rollout.analysis.enabled }}\n      analysis:\n        templates:\n          - templateName: {{ .Release.Name }}-canary-vs-stable\n        startingStep: {{ .Values.rollout.analysis.startingStep }}\n        args:\n          - name: canary-hash\n            valueFrom: {podTemplateHashValue: Latest}\n          - name: stable-hash\n            valueFrom: {podTemplateHashValue: Stable}\n      {{- end }}\n      steps: {{- toYaml .Values.rollout.steps | nindent 8 }}\n{{- end }}"},
+          "note": "`stableIngress` must be the name of the chart's Ingress and that Ingress must point at the stable Service. Argo Rollouts creates a second Ingress next to it with the `nginx.ingress.kubernetes.io/canary-weight` annotation and moves the number as the steps advance — no change to ingress-nginx itself."
+        },
+        {
+          "text": "Add the canary Service. It is identical to the stable one; the controller rewrites each Service's selector with the pod-template hash it should point at. Because both carry the chart's labels, the existing ServiceMonitor scrapes canary and stable pods alike — that is what makes the comparison possible.",
+          "code": {"lang": "helm", "code": "{{- if .Values.rollout.enabled }}\napiVersion: v1\nkind: Service\nmetadata:\n  name: {{ .Release.Name }}-canary\n  labels:\n    app.kubernetes.io/name: {{ .Chart.Name }}\n    app.kubernetes.io/instance: {{ .Release.Name }}\nspec:\n  selector:\n    app.kubernetes.io/instance: {{ .Release.Name }}\n  ports:\n    - name: http\n      port: {{ .Values.service.port }}\n      targetPort: http\n{{- end }}"}
+        },
+        {
+          "text": "Render both modes locally to be sure the chart is still valid, then bump the chart version.",
+          "code": {"lang": "bash", "code": "cd zero-to-prod\nhelm lint chart\nhelm template orders-api chart | grep -c '^kind: Deployment'                     # 1\nhelm template orders-api chart --set rollout.enabled=true | grep -E '^kind: (Rollout|Deployment|Service)'\nsed -i.bak 's/^version: 0.1.0/version: 0.2.0/' chart/Chart.yaml && rm chart/Chart.yaml.bak"}
+        }
+      ]
+    },
+    {
+      "title": "The analysis template",
+      "goal": "Two metrics decide every step: the canary's success rate must stay above 99 %, and its p99 latency may not exceed 1.5× the stable version's. Both are PromQL against the pods of each revision.",
+      "steps": [
+        {
+          "text": "Write `chart/templates/analysis.yaml`. Each metric is queried every 30 s; `failureLimit: 2` means two bad samples abort the rollout, `inconclusiveLimit` pauses it when the query returns nothing (no traffic yet). Pods are selected by name, because ReplicaSets created by a Rollout are named `<rollout>-<pod-template-hash>`.",
+          "code": {"lang": "helm", "code": "{{- if and .Values.rollout.enabled .Values.rollout.analysis.enabled }}\napiVersion: argoproj.io/v1alpha1\nkind: AnalysisTemplate\nmetadata:\n  name: {{ .Release.Name }}-canary-vs-stable\nspec:\n  args:\n    - name: canary-hash\n    - name: stable-hash\n  metrics:\n    - name: success-rate\n      interval: 30s\n      failureLimit: 2\n      inconclusiveLimit: 3\n      successCondition: len(result) > 0 && result[0] >= {{ .Values.rollout.analysis.minSuccessRate }}\n      provider:\n        prometheus:\n          address: {{ .Values.rollout.analysis.prometheus }}\n          query: |\n            sum(rate(http_requests_total{pod=~\"{{ .Release.Name }}-{{ \"{{args.canary-hash}}\" }}-.*\",status!~\"5..\"}[2m]))\n            /\n            sum(rate(http_requests_total{pod=~\"{{ .Release.Name }}-{{ \"{{args.canary-hash}}\" }}-.*\"}[2m]))\n    - name: latency-vs-stable\n      interval: 30s\n      failureLimit: 2\n      inconclusiveLimit: 3\n      successCondition: len(result) > 0 && result[0] <= {{ .Values.rollout.analysis.maxLatencyRatio }}\n      provider:\n        prometheus:\n          address: {{ .Values.rollout.analysis.prometheus }}\n          query: |\n            histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{pod=~\"{{ .Release.Name }}-{{ \"{{args.canary-hash}}\" }}-.*\"}[2m])))\n            /\n            histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{pod=~\"{{ .Release.Name }}-{{ \"{{args.stable-hash}}\" }}-.*\"}[2m])))\n{{- end }}"},
+          "note": "The odd-looking `{{ \"{{args.canary-hash}}\" }}` is Helm printing a literal `{{args.canary-hash}}` so that Argo Rollouts, not Helm, substitutes it. Render the template and read the output once; it should contain the plain `{{args.…}}` placeholders."
+        },
+        {
+          "text": "Render and read the AnalysisTemplate, then run both queries by hand in Prometheus with the current stable hash to confirm they return numbers. A query that returns nothing here will return nothing during a rollout.",
+          "code": {"lang": "bash", "code": "helm template orders-api chart --set rollout.enabled=true | sed -n '/kind: AnalysisTemplate/,/^---/p'\nkubectl -n monitoring port-forward svc/monitoring-kube-prometheus-prometheus 9090:9090 &\nsleep 2\ncurl -s 'http://localhost:9090/api/v1/query' --data-urlencode 'query=sum(rate(http_requests_total{pod=~\"orders-api-.*\",status!~\"5..\"}[2m])) / sum(rate(http_requests_total{pod=~\"orders-api-.*\"}[2m]))' | python3 -m json.tool | head -20\nkill %1"},
+          "note": "If the result is empty, generate traffic first (`hey -z 3m -q 5 http://orders.localtest.me/orders/1`) and check the ServiceMonitor target is up under Status → Targets."
+        },
+        {
+          "text": "Commit the chart, merge, and let the release workflow from the GitOps project publish chart 0.2.x and bump the dev overlay. The app image is unchanged; only the chart moves.",
+          "code": {"lang": "bash", "code": "git switch -c feat/canary-rollout\ngit add chart\ngit commit -m \"chart: optional Rollout with weighted canary and Prometheus analysis\"\ngit push -u origin feat/canary-rollout && gh pr create --fill\ngh pr checks --watch && gh pr merge --squash --delete-branch\ngit switch main && git pull\ngh run watch"}
+        },
+        {
+          "text": "In the config repository, switch the dev environment to rollouts. Turning `rollout.enabled` on replaces the Deployment with a Rollout; Argo CD handles the swap as one sync. Argo CD's built-in health check understands Rollouts, so the app shows *Progressing* during a canary and *Degraded* if one is aborted.",
+          "code": {"lang": "bash", "code": "cd ../zero-to-prod-config && git pull\ngit switch -c feat/dev-canary\ncat >> apps/orders-api/base/values.yaml <<'EOF'\nrollout:\n  enabled: true\nEOF\ngit add apps/orders-api/base/values.yaml\ngit commit -m \"orders-api: canary rollouts in all environments\"\ngit push -u origin feat/dev-canary && gh pr create --fill && gh pr merge --squash --delete-branch\ngit switch main && git pull\nargocd app wait orders-api-dev --sync --health --timeout 300\nkubectl -n orders-dev get rollout,svc,ingress"},
+          "note": "The first sync creates the Rollout fresh, so there is no canary yet — the controller treats the initial revision as stable. Expected: one Rollout, two Services (`orders-api`, `orders-api-canary`), two Ingresses (the chart's and `orders-api-orders-api-canary`)."
+        }
+      ]
+    },
+    {
+      "title": "Ship a good release and watch it promote itself",
+      "goal": "With steady traffic flowing, a harmless change walks through 10 → 25 → 50 → 100 % with every analysis measurement green, and you can see each step in the CLI, the dashboard and Prometheus.",
+      "steps": [
+        {
+          "text": "Start a load generator in its own terminal and leave it running for the rest of the project. Twenty requests per second is enough for the 2-minute rate windows to be meaningful at a 10 % canary weight.",
+          "code": {"lang": "bash", "code": "hey -z 60m -q 20 -c 2 -disable-keepalive http://orders.localtest.me/orders/42"},
+          "note": "`-disable-keepalive` matters: ingress-nginx weights new connections, so a client that reuses one connection would stick to whichever version it hit first and the canary would see no traffic."
+        },
+        {
+          "text": "In a second terminal, watch the Rollout, and in a third open the Rollouts dashboard.",
+          "code": {"lang": "bash", "code": "kubectl argo rollouts -n orders-dev get rollout orders-api --watch\n# third terminal:\nkubectl argo rollouts dashboard   # http://localhost:3100 — pick namespace orders-dev"}
+        },
+        {
+          "text": "Make a harmless change through the normal flow: a new greeting in the app repo, merged, built, and bumped into dev by the release workflow's pull request. Merge that bump. The digest change is the pod-template change that starts the canary.",
+          "code": {"lang": "bash", "code": "cd ../zero-to-prod && git switch -c feat/canary-greeting\nsed -i.bak 's/hello from the pipeline/hello from the canary/' app/main.py && rm app/main.py.bak\ngit commit -am \"feat: greeting for the first canary\" && git push -u origin feat/canary-greeting\ngh pr create --fill && gh pr checks --watch && gh pr merge --squash --delete-branch\ngit switch main && git pull && gh run watch\ncd ../zero-to-prod-config && gh pr list      # the bump/dev-… PR from the release bot\ngh pr merge --squash --delete-branch $(gh pr list --search 'bump/dev' --json number -q '.[0].number')"}
+        },
+        {
+          "text": "Follow the rollout. In the watch terminal the status goes `Paused` at `SetWeight: 10` with an AnalysisRun `Running`; the canary Ingress annotation shows the weight; and the greeting alternates roughly one in ten. After the 2-minute pause with passing analysis it moves to 25, then 50, then finishes.",
+          "code": {"lang": "bash", "code": "kubectl -n orders-dev get ingress orders-api-orders-api-canary -o jsonpath='{.metadata.annotations.nginx\\.ingress\\.kubernetes\\.io/canary-weight}{\"\\n\"}'\nfor i in $(seq 1 20); do curl -s http://orders.localtest.me/ | grep -o 'hello from [a-z ]*'; done | sort | uniq -c\nkubectl -n orders-dev get analysisrun\nkubectl -n orders-dev get analysisrun -o jsonpath='{range .items[*]}{.metadata.name}{\": \"}{.status.phase}{\" success-rate=\"}{.status.metricResults[0].successful}{\" latency=\"}{.status.metricResults[1].successful}{\"\\n\"}{end}'"},
+          "note": "Roughly eight minutes end to end. If the AnalysisRun stays `Running` with measurements but the rollout does not advance, it is simply inside a `pause` — read the step index in the watch output."
+        },
+        {
+          "text": "Read the measurements the controller took, so the verdict is not a black box. Each measurement is a timestamp, the raw query result and a phase.",
+          "code": {"lang": "bash", "code": "RUN=$(kubectl -n orders-dev get analysisrun --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')\nkubectl -n orders-dev get analysisrun \"$RUN\" -o jsonpath='{range .status.metricResults[*]}{.name}{\": \"}{.phase}{\" measurements=\"}{.count}{\" failed=\"}{.failed}{\"\\n\"}{range .measurements[*]}{\"  \"}{.startedAt}{\"  \"}{.value}{\"  \"}{.phase}{\"\\n\"}{end}{end}'"}
+        },
+        {
+          "text": "Record the release in the config repository's README table: date, digest, duration, outcome. A release log you can read later is part of the practice, not decoration.",
+          "code": {"lang": "bash", "code": "cd ../zero-to-prod-config\nDIG=$(grep -o 'sha256:[0-9a-f]*' apps/orders-api/dev/kustomization.yaml)\nprintf '| %s | dev | %s | canary 10/25/50/100, analysis green, ~8 min | promoted |\\n' \"$(date -u +%F)\" \"${DIG:7:12}\" >> RELEASES.md\ngit add RELEASES.md && git commit -m \"releases: first canary\" && git push"}
+        }
+      ]
+    },
+    {
+      "title": "Ship a bad release and let the analysis stop it",
+      "goal": "A version with a 5 % error rate reaches 10 % of traffic and no further: the success-rate metric fails twice, the rollout aborts, traffic returns to stable, and you can see all of it.",
+      "steps": [
+        {
+          "text": "The bad release is a configuration change, which is deliberately realistic: most bad deploys are not bad code. Patch the dev overlay to set `CHAOS_ERROR_RATE=0.05` on the Rollout's pod template. A pod-template change is a new revision, so it goes through the canary like an image change would.",
+          "code": {"lang": "yaml", "code": "# apps/orders-api/dev/kustomization.yaml — add to patches:\n  - target: {kind: Rollout, name: orders-api}\n    patch: |\n      - op: add\n        path: /spec/template/spec/containers/0/env/-\n        value: {name: CHAOS_ERROR_RATE, value: \"0.05\"}"},
+          "note": "If the dev overlay already patches `/spec/replicas` on a Deployment, change that target to `kind: Rollout` too — the Deployment no longer exists in this environment."
+        },
+        {
+          "text": "Merge it and watch. Within a minute the canary is at 10 %; within two to three minutes the success-rate measurements read about 0.95, the second failure trips `failureLimit`, and the Rollout aborts: weight back to 0, canary pods scaled down, status `Degraded`.",
+          "code": {"lang": "bash", "code": "git switch -c chaos/bad-release\ngit commit -am \"dev: 5% error injection (bad release drill)\" && git push -u origin chaos/bad-release\ngh pr create --fill && gh pr merge --squash --delete-branch && git switch main && git pull\nkubectl argo rollouts -n orders-dev get rollout orders-api --watch"}
+        },
+        {
+          "text": "Inspect what happened: the AnalysisRun's failed measurements, the Rollout's events, and Argo CD's view of the application, which is now Degraded because the Rollout is.",
+          "code": {"lang": "bash", "code": "RUN=$(kubectl -n orders-dev get analysisrun --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')\nkubectl -n orders-dev get analysisrun \"$RUN\" -o jsonpath='{.status.phase}{\" \"}{.status.message}{\"\\n\"}'\nkubectl -n orders-dev get analysisrun \"$RUN\" -o jsonpath='{range .status.metricResults[0].measurements[*]}{.startedAt}{\"  \"}{.value}{\"  \"}{.phase}{\"\\n\"}{end}'\nkubectl -n orders-dev get events --field-selector involvedObject.name=orders-api --sort-by=.lastTimestamp | tail -15\nargocd app get orders-api-dev | grep -E 'Health|Sync'\nfor i in $(seq 1 50); do curl -s -o /dev/null -w '%{http_code}\\n' http://orders.localtest.me/orders/42; done | sort | uniq -c"},
+          "note": "The last command should show only 200s: users are back on stable. During the canary they saw about 0.5 % errors (5 % of 10 %) for two or three minutes — that is the cost of the experiment, and the reason the first step is 10 % and not 50 %."
+        },
+        {
+          "text": "Fix forward the way you would at work: revert the bad change in Git. Argo CD syncs the revert, which is a *new* revision as far as the Rollout is concerned — but because its pod template equals the stable one, the controller recognises it and completes immediately with no canary.",
+          "code": {"lang": "bash", "code": "git revert --no-edit HEAD && git push\nargocd app wait orders-api-dev --sync --health --timeout 300\nkubectl argo rollouts -n orders-dev get rollout orders-api\nprintf '| %s | dev | chaos 5%% | aborted at 10%% after 2 failed success-rate measurements (~3 min) | rolled back automatically |\\n' \"$(date -u +%F)\" >> RELEASES.md\ngit add RELEASES.md && git commit -m \"releases: bad release drill\" && git push"},
+          "note": "Argo Rollouts also supports `kubectl argo rollouts abort` and `undo` for hand-driven cases; in a GitOps setup the revert is the honest record of what happened."
+        }
+      ]
+    },
+    {
+      "title": "The release dashboard and an alert",
+      "goal": "During any rollout, one Grafana screen shows canary and stable success rate and p99 side by side with the current weight, and an aborted rollout raises an alert through the existing Alertmanager routes.",
+      "steps": [
+        {
+          "text": "Build the dashboard in Grafana's UI with these four panels, all using the pod-name pattern so they split by revision. Use `sum by (pod)` variants first to see individual pods, then the aggregated form shown here.",
+          "code": {"lang": "promql", "code": "# Success rate by revision (one line per ReplicaSet hash)\nsum by (rs) (label_replace(rate(http_requests_total{namespace=\"orders-dev\",status!~\"5..\"}[2m]), \"rs\", \"$1\", \"pod\", \"(orders-api-[a-z0-9]+)-.*\"))\n  / sum by (rs) (label_replace(rate(http_requests_total{namespace=\"orders-dev\"}[2m]), \"rs\", \"$1\", \"pod\", \"(orders-api-[a-z0-9]+)-.*\"))\n\n# p99 latency by revision\nhistogram_quantile(0.99, sum by (rs, le) (label_replace(rate(http_request_duration_seconds_bucket{namespace=\"orders-dev\"}[2m]), \"rs\", \"$1\", \"pod\", \"(orders-api-[a-z0-9]+)-.*\")))\n\n# Requests per second by revision (shows the weight shifting)\nsum by (rs) (label_replace(rate(http_requests_total{namespace=\"orders-dev\"}[1m]), \"rs\", \"$1\", \"pod\", \"(orders-api-[a-z0-9]+)-.*\"))\n\n# Rollout phase from the controller's own metrics (stat panel)\nrollout_info{namespace=\"orders-dev\", name=\"orders-api\"}"},
+          "note": "`label_replace` derives a `rs` label from the pod name, which is the same trick the AnalysisTemplate relies on. Show the `phase` label of `rollout_info` as the stat panel's text."
+        },
+        {
+          "text": "Export the dashboard as JSON and commit it to the config repo as a ConfigMap; the kube-prometheus-stack sidecar loads any ConfigMap labelled `grafana_dashboard: \"1\"`. Add it to the monitoring kustomization's resources.",
+          "code": {"lang": "bash", "code": "mkdir -p platform/monitoring/dashboards\n# In Grafana: dashboard → Share → Export → Save to file → platform/monitoring/dashboards/releases.json\nkubectl create configmap dashboard-releases -n monitoring \\\n  --from-file=releases.json=platform/monitoring/dashboards/releases.json \\\n  --dry-run=client -o yaml > platform/monitoring/dashboard-releases.yaml\nsed -i.bak 's/^metadata:/metadata:\\n  labels: {grafana_dashboard: \"1\"}/' platform/monitoring/dashboard-releases.yaml && rm platform/monitoring/dashboard-releases.yaml.bak\ngrep -n 'grafana_dashboard' platform/monitoring/dashboard-releases.yaml"}
+        },
+        {
+          "text": "Add a PrometheusRule for aborted rollouts. It joins the SLO project's Alertmanager routing: `severity: page` reaches the on-call receiver.",
+          "code": {"lang": "yaml", "code": "# platform/monitoring/rules/rollouts.yaml\napiVersion: monitoring.coreos.com/v1\nkind: PrometheusRule\nmetadata:\n  name: rollouts\n  namespace: monitoring\n  labels: {release: monitoring}\nspec:\n  groups:\n    - name: rollouts\n      rules:\n        - alert: RolloutAborted\n          expr: rollout_info{phase=\"Degraded\"} == 1\n          for: 1m\n          labels: {severity: page}\n          annotations:\n            summary: \"Rollout {{ $labels.namespace }}/{{ $labels.name }} was aborted by analysis\"\n            runbook: \"https://github.com/YOUR_GITHUB_USER/zero-to-prod-config/blob/main/RUNBOOK-rollouts.md\"\n        - alert: RolloutStuck\n          expr: rollout_info{phase=\"Paused\"} == 1\n          for: 30m\n          labels: {severity: ticket}\n          annotations:\n            summary: \"Rollout {{ $labels.namespace }}/{{ $labels.name }} has been paused for 30 minutes\""}
+        },
+        {
+          "text": "Commit both, sync, and re-run the bad release from the previous phase to see the alert fire and the dashboard split. Then revert again.",
+          "code": {"lang": "bash", "code": "git switch -c feat/release-dashboard\ngit add platform/monitoring\ngit commit -m \"monitoring: release dashboard and rollout alerts\"\ngit push -u origin feat/release-dashboard && gh pr create --fill && gh pr merge --squash --delete-branch\ngit switch main && git pull && argocd app wait monitoring --sync --health --timeout 300\ngit revert --no-edit HEAD~2   # re-applies the chaos patch (the revert of the revert)\ngit push && kubectl argo rollouts -n orders-dev get rollout orders-api --watch\n# once Degraded: check Alertmanager at http://alertmanager.localtest.me (or port-forward) for RolloutAborted, then:\ngit revert --no-edit HEAD && git push"},
+          "note": "`HEAD~2` assumes the last three commits on main are: dashboard, revert-of-chaos, chaos. Check `git log --oneline -4` first and pick the revert commit's SHA if the order differs."
+        }
+      ]
+    },
+    {
+      "title": "Make prod wait for a human",
+      "goal": "The prod overlay uses the same chart, the same analysis, but pauses indefinitely at 50 % so promotion is a deliberate act — and the release procedure is written down.",
+      "steps": [
+        {
+          "text": "Patch the prod Rollout's steps: replace the timed pause after 50 % with an indefinite one. The analysis keeps running in the background while it waits, so a canary that goes bad during the pause still aborts on its own.",
+          "code": {"lang": "yaml", "code": "# apps/orders-api/prod/kustomization.yaml — add:\npatches:\n  - target: {kind: Rollout, name: orders-api}\n    patch: |\n      - op: replace\n        path: /spec/strategy/canary/steps\n        value:\n          - setWeight: 10\n          - pause: {duration: 5m}\n          - setWeight: 50\n          - pause: {}"}
+        },
+        {
+          "text": "Promote the good digest to prod through the usual pull request, then watch it stop at 50 % and promote it by hand.",
+          "code": {"lang": "bash", "code": "git switch -c promote/prod-canary\nDIG=$(grep -o 'sha256:[0-9a-f]*' apps/orders-api/dev/kustomization.yaml)\nsed -i.bak \"s#digest: sha256:.*#digest: ${DIG}#\" apps/orders-api/prod/kustomization.yaml && rm apps/orders-api/prod/kustomization.yaml.bak\ngit add apps/orders-api/prod && git commit -m \"prod: promote ${DIG:7:12} with manual gate at 50%\"\ngit push -u origin promote/prod-canary && gh pr create --fill && gh pr merge --squash --delete-branch\ngit switch main && git pull\nkubectl argo rollouts -n orders-prod get rollout orders-api --watch\n# when the step shows 'pause' with no duration and the analysis is green:\nkubectl argo rollouts -n orders-prod promote orders-api"},
+          "note": "Point `hey` at the prod host while this runs, or the analysis will go inconclusive for lack of traffic and pause the rollout before it reaches the gate."
+        },
+        {
+          "text": "Write `RUNBOOK-rollouts.md` in the config repo: how to read `get rollout`, what `promote`, `abort` and `retry` do, what the two alerts mean, and the Git revert as the standard rollback. Link the Grafana dashboard.",
+          "code": {"lang": "bash", "code": "cat > RUNBOOK-rollouts.md <<'EOF'\n# Rollouts runbook\n\n**Watch:** `kubectl argo rollouts -n <ns> get rollout orders-api --watch` — step index, weight, AnalysisRun phase.\n**Dashboard:** Grafana → Releases (canary vs stable success rate and p99, weight, phase).\n\n## RolloutAborted (page)\nAnalysis failed twice. Users are already back on stable. Read the AnalysisRun measurements, find the cause in the\ncanary pods' logs, then `git revert` the change in this repo. Do not `retry` without a fix.\n\n## RolloutStuck (ticket)\nPaused >30 min: either the prod manual gate is waiting for a human, or analysis is Inconclusive (no traffic).\nGate: `kubectl argo rollouts -n orders-prod promote orders-api`. Inconclusive: check Prometheus targets and traffic.\n\n## Rollback\nRevert the commit in Git. `kubectl argo rollouts abort` is for emergencies; follow it with the revert so Git matches the cluster.\nEOF\ngit add RUNBOOK-rollouts.md && git commit -m \"docs: rollouts runbook\" && git push"}
+        },
+        {
+          "text": "Finish by tightening the analysis with what you learned: shorter windows would have caught the bad release faster but with more noise; a stricter ratio would block a slightly slower but correct release. Pick values, change them in `chart/values.yaml`, and record the reasoning in the release log.",
+          "code": {"lang": "bash", "code": "cd ../zero-to-prod\nsed -n '/^rollout:/,$p' chart/values.yaml\n# Adjust minSuccessRate / maxLatencyRatio / the pause durations, bump chart version, PR, merge.\n# Then in the config repo:\n#   printf '| %s | tuning | minSuccessRate 0.995, 90s pauses | reason: ... |\\n' \"$(date -u +%F)\" >> RELEASES.md"}
+        }
+      ]
+    }
+  ],
+  "troubleshooting": [
+    {"symptom": "The AnalysisRun stays `Inconclusive` and the rollout pauses at 10 %", "fix": "The query returned no data: the canary pods are not being scraped or have had no traffic in the last two minutes. Check Prometheus → Status → Targets for the `orders-api-canary` endpoints, confirm the load generator runs with keep-alive disabled, and run the success-rate query by hand with the canary hash from `kubectl argo rollouts get rollout`."},
+    {"symptom": "`kubectl argo rollouts get rollout` shows `Error` on the AnalysisRun with `connection refused`", "fix": "The Prometheus address in `values.yaml` does not match the Service name in the `monitoring` namespace. `kubectl -n monitoring get svc` and use `<service>.<namespace>.svc:9090`. The controller runs in `argo-rollouts`, so a `localhost` address will never work."},
+    {"symptom": "Traffic never reaches the canary (greeting is always the stable one)", "fix": "Look at the canary Ingress: `kubectl -n orders-dev get ingress orders-api-orders-api-canary -o yaml`. Missing `canary: \"true\"` annotations means `stableIngress` in the Rollout does not name the chart's Ingress. If the annotations are there, the client is reusing connections — re-run `hey` with `-disable-keepalive` and `curl` without a session."},
+    {"symptom": "Argo CD shows the app `OutOfSync` forever after enabling rollouts", "fix": "The controller rewrites the two Services' selectors with the pod-template hash, which differs from the chart's rendered selector. Add an `ignoreDifferences` entry for `Service` `/spec/selector` on the Application, or use the Argo CD `RespectIgnoreDifferences=true` sync option."},
+    {"symptom": "The rollout aborts on `latency-vs-stable` although nothing is slower", "fix": "With little traffic, p99 from a single canary pod is noisy. Raise the traffic, widen the rate window to `[5m]`, or start the latency metric at a later step (`startingStep: 3`) once the canary has enough requests to make a quantile meaningful."},
+    {"symptom": "After the revert, the Rollout runs a full canary instead of completing immediately", "fix": "The revert's pod template is not byte-identical to stable — usually an extra label or annotation from a patch. Compare `kubectl get rs -n orders-dev -o yaml` for the two ReplicaSets; the diff is the field to remove."}
+  ],
+  "next": [
+    "Add a smoke-test `Job` provider to the AnalysisTemplate that runs your API tests against the canary Service before any traffic is shifted (`setWeight: 0` + inline analysis as step one).",
+    "Replace ingress-nginx weighting with header-based routing for internal users first (`setHeaderRoute`), so staff see the canary before the public does.",
+    "Run the SRE incident drill against an aborted rollout: the page, the timeline, and a postmortem asking why the change was not caught before the canary.",
+    "Feed the SLO project's burn rate into the analysis as a third metric — a canary that burns budget faster than 2× stable aborts even if its absolute error rate is under the threshold.",
+    "Try the same strategy on AWS with the DevOps track's ECS platform using CodeDeploy blue/green with CloudWatch alarms as the analysis, and compare the two mechanisms."
+  ]
+}

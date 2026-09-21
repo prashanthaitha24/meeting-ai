@@ -1,0 +1,1006 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Terraform an AWS environment from scratch — DevOps project | ThavionAI Education</title>
+  <meta name="description" content="The zero-to-prod project put a container on one EC2 host. This project builds the environment a real team would run it in, entirely from Terraform: a VPC with public and private subnets, an Application Load Balancer, an ECS Fargate service pulling the image you already publish, a Postgres database in RDS whose password never touches a file, and remote state with locking. You finish by handing the whole thing to GitHub Actions — plan on every pull request, apply on merge — and then tearing it all down with one command, because you built it so that you can." />
+  <meta property="og:title" content="Terraform an AWS environment from scratch — ThavionAI project" />
+  <meta property="og:description" content="The zero-to-prod project put a container on one EC2 host. This project builds the environment a real team would run it in, entirely from Terraform: a VPC with public and private subnets, an Application Load Balancer, an ECS Fargate service pulling the image you already publish, a Postgres database in RDS whose password never touches a file, and remote state with locking. You finish by handing the whole thing to GitHub Actions — plan on every pull request, apply on merge — and then tearing it all down with one command, because you built it so that you can." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/projects/proj-devops-aws-platform.html" />
+  <link rel="icon" href="../../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="../lesson.css" />
+  <link rel="stylesheet" href="project.css" />
+</head>
+<body class="track-devops" data-project="proj-devops-aws-platform">
+
+<nav>
+  <a href="../../index.html" class="nav-logo"><img class="nav-logo-icon" src="../../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../../education.html">Tracks</a>
+    <a href="../../index.html#projects" class="active">Projects</a>
+    <a href="../../education.html#certs">Certifications</a>
+    <a href="../../index.html#apps">Apps</a>
+    <a href="../../feedback.html?page=/education/projects/proj-devops-aws-platform.html&amp;title=Terraform%20an%20AWS%20environment%20from%20scratch">Feedback</a>
+    <a href="../../education.html#devops" class="nav-cta">DevOps track</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../../education.html">Education</a> › <a href="../../education.html#devops">DevOps Engineering</a> › Guided project</div>
+    <h1>Terraform an AWS environment from scratch</h1>
+    <p class="lede">The zero-to-prod project put a container on one EC2 host. This project builds the environment a real team would run it in, entirely from Terraform: a VPC with public and private subnets, an Application Load Balancer, an ECS Fargate service pulling the image you already publish, a Postgres database in RDS whose password never touches a file, and remote state with locking. You finish by handing the whole thing to GitHub Actions — plan on every pull request, apply on merge — and then tearing it all down with one command, because you built it so that you can.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">about 8 hours</span>
+      <span class="chip">8 phases · 48 steps</span>
+      <span class="chip chip-quiz" id="progressChip">0 / 48 done</span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav">
+  <div class="wrap">
+    <a href="#overview">Overview</a>
+    <a href="#phase-1">1. Set up the repository and a spending guardrail</a>
+    <a href="#phase-2">2. Remote state with locking</a>
+    <a href="#phase-3">3. The network module</a>
+    <a href="#phase-4">4. The database module</a>
+    <a href="#phase-5">5. The service module: ALB and ECS Fargate</a>
+    <a href="#phase-6">6. Prove the database connection</a>
+    <a href="#phase-7">7. Let GitHub Actions own the environment</a>
+    <a href="#phase-8">8. Operate it, then destroy it</a>
+    <a href="#troubleshooting">Troubleshooting</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <section class="pj-intro" id="overview">
+    <div class="objectives">
+      <div class="box-label">What you will have at the end</div>
+      <p class="pj-outcome">A public <code>aws-platform</code> repository containing about 400 lines of HCL split into <code>network</code>, <code>database</code> and <code>service</code> modules; a running stack reachable at an ALB DNS name that returns your API's greeting and reports a healthy database connection; the state in S3 with lockfile locking; an <code>infra.yml</code> workflow that posts the plan on pull requests and applies on merge using OIDC; and a <code>terraform destroy</code> you have run at least once and rebuilt from, proving the environment is reproducible.</p>
+    </div>
+    <div class="pj-grid">
+      <div class="pj-box">
+        <div class="box-label">Before you start</div>
+        <ul><li>The <strong>zero-to-prod</strong> project completed — you need the <code>ghcr.io/YOUR_USER/zero-to-prod</code> image, the AWS account, the AWS CLI logged in, and the GitHub OIDC provider it created</li><li>The DevOps track's Terraform, cloud and networking modules (VPC, subnets, security groups, IAM roles)</li><li>A credit card on the AWS account. Everything here is small, but a NAT gateway, an ALB and RDS are not free-tier; expect roughly $0.10 per hour while the stack is up, so destroy it when you stop for the day</li></ul>
+      </div>
+      <div class="pj-box">
+        <div class="box-label">Tools you will install</div>
+        <ul class="pj-tools"><li><strong>Terraform 1.10+</strong> — the S3 backend's native lockfile locking needs 1.10 or newer, so no DynamoDB table <a href="https://developer.hashicorp.com/terraform/install" target="_blank" rel="noopener">↗</a></li><li><strong>AWS CLI v2</strong> — bootstrapping the state bucket, checking what Terraform built, reading logs <a href="https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html" target="_blank" rel="noopener">↗</a></li><li><strong>TFLint</strong> — catches invalid instance types, deprecated arguments and unused variables before <code>plan</code> does <a href="https://github.com/terraform-linters/tflint" target="_blank" rel="noopener">↗</a></li><li><strong>GitHub CLI</strong> — creating the repo, setting variables, opening and merging pull requests from the terminal <a href="https://cli.github.com/" target="_blank" rel="noopener">↗</a></li><li><strong>psql</strong> — one connection to prove the database works; install the PostgreSQL client only, not the server <a href="https://www.postgresql.org/download/" target="_blank" rel="noopener">↗</a></li></ul>
+      </div>
+    </div>
+    <div class="pj-box pj-layout"><div class="box-label">Repository layout at the end</div><pre><code>aws-platform/
+├── .github/workflows/
+│   └── infra.yml            # fmt/validate/tflint, plan on PR, apply on merge
+├── modules/
+│   ├── network/             # VPC, subnets, IGW, NAT, route tables
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   └── outputs.tf
+│   ├── database/            # RDS Postgres, subnet group, SG, secret
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   └── outputs.tf
+│   └── service/             # ALB, ECS cluster + Fargate service, IAM, logs
+│       ├── main.tf
+│       ├── variables.tf
+│       └── outputs.tf
+├── envs/
+│   └── dev/
+│       ├── main.tf          # wires the three modules together
+│       ├── backend.tf       # S3 remote state
+│       ├── versions.tf
+│       ├── variables.tf
+│       ├── outputs.tf
+│       └── dev.tfvars       # non-secret values, committed
+├── .tflint.hcl
+├── .gitignore
+└── README.md</code></pre></div>
+    <p class="pj-hint">Tick each step as you finish it — your progress is saved in this browser only (<a href="../../education.html#progressPanel">back up or restore</a> on the hub). Every code block has a copy button. If something goes wrong, the <a href="#troubleshooting">troubleshooting</a> section at the end covers the usual suspects.</p>
+  </section>
+
+  <section id="phase-1" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 1</span><h2>Set up the repository and a spending guardrail</h2></div>
+    <p class="pj-goal">A new repository with the module layout, pinned tool versions, and an AWS budget alert so a forgotten stack cannot surprise you.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-1-1"><label class="pj-step-tick"><input type="checkbox" data-step="1-1" aria-label="Done: step 1.1" /><span class="pj-step-num">1.1</span></label><div class="pj-step-body"><div class="pj-step-text">Check the tools. Terraform must be 1.10 or newer for lockfile-based state locking; anything older needs a DynamoDB table, which this project deliberately avoids.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>terraform version
+aws --version
+tflint --version
+gh --version
+aws sts get-caller-identity   # confirms which account you are about to build in</code></pre></div></div></li><li class="pj-step" id="step-1-2"><label class="pj-step-tick"><input type="checkbox" data-step="1-2" aria-label="Done: step 1.2" /><span class="pj-step-num">1.2</span></label><div class="pj-step-body"><div class="pj-step-text">Create a budget with an email alert at $5. AWS Budgets is free; the alert arrives when forecast or actual spend crosses the threshold, which is exactly the safety net you want while learning.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+cat &gt; budget.json &lt;&lt;EOF
+{"BudgetName": "aws-platform-guardrail", "BudgetLimit": {"Amount": "5", "Unit": "USD"},
+ "TimeUnit": "MONTHLY", "BudgetType": "COST"}
+EOF
+cat &gt; notify.json &lt;&lt;EOF
+[{"Notification": {"NotificationType": "ACTUAL", "ComparisonOperator": "GREATER_THAN", "Threshold": 80},
+  "Subscribers": [{"SubscriptionType": "EMAIL", "Address": "you@example.com"}]}]
+EOF
+aws budgets create-budget --account-id "$ACCOUNT" --budget file://budget.json --notifications-with-subscribers file://notify.json
+rm budget.json notify.json</code></pre></div><div class="pj-note">Put your real address in before running it. The alert fires at 80% of $5; raise the limit later if you keep the stack up for longer experiments.</div></div></li><li class="pj-step" id="step-1-3"><label class="pj-step-tick"><input type="checkbox" data-step="1-3" aria-label="Done: step 1.3" /><span class="pj-step-num">1.3</span></label><div class="pj-step-body"><div class="pj-step-text">Create the repository and the directory layout. Modules hold reusable pieces; <code>envs/dev</code> is the one place that says which pieces, in which region, with which sizes.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>mkdir aws-platform &amp;&amp; cd aws-platform
+git init -b main
+mkdir -p modules/network modules/database modules/service envs/dev .github/workflows
+gh repo create aws-platform --public --source=. --remote=origin</code></pre></div></div></li><li class="pj-step" id="step-1-4"><label class="pj-step-tick"><input type="checkbox" data-step="1-4" aria-label="Done: step 1.4" /><span class="pj-step-num">1.4</span></label><div class="pj-step-body"><div class="pj-step-text">Add a <code>.gitignore</code> that keeps state, provider binaries and local variable files out of the repo. The committed <code>dev.tfvars</code> holds only non-secret values; anything secret comes from AWS itself.</div><div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+*.auto.tfvars
+secret.tfvars
+.terraform.lock.hcl.bak
+tfplan</code></pre></div></div></li><li class="pj-step" id="step-1-5"><label class="pj-step-tick"><input type="checkbox" data-step="1-5" aria-label="Done: step 1.5" /><span class="pj-step-num">1.5</span></label><div class="pj-step-body"><div class="pj-step-text">Pin the provider and Terraform versions in <code>envs/dev/versions.tf</code>. A pinned provider means the plan you review today is the plan that applies tomorrow.</div><div class="code"><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>terraform {
+  required_version = "&gt;= 1.10, &lt; 2.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~&gt; 5.80"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = "~&gt; 3.6"
+    }
+  }
+}
+
+provider "aws" {
+  region = var.region
+
+  default_tags {
+    tags = {
+      project     = "aws-platform"
+      environment = "dev"
+      managed_by  = "terraform"
+    }
+  }
+}</code></pre></div><div class="pj-note"><code>default_tags</code> stamps every resource. When you look at the bill or the console later, you can filter on <code>project=aws-platform</code> and see exactly what this repo owns.</div></div></li><li class="pj-step" id="step-1-6"><label class="pj-step-tick"><input type="checkbox" data-step="1-6" aria-label="Done: step 1.6" /><span class="pj-step-num">1.6</span></label><div class="pj-step-body"><div class="pj-step-text">Commit the skeleton so the first pull request has something to diff against.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>git add .
+git commit -m "chore: module layout, pinned versions, gitignore"
+git push -u origin main</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-2" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 2</span><h2>Remote state with locking</h2></div>
+    <p class="pj-goal">State lives in a versioned, encrypted S3 bucket and every <code>apply</code> takes a lock, so two people (or you and the pipeline) cannot corrupt it.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-2-1"><label class="pj-step-tick"><input type="checkbox" data-step="2-1" aria-label="Done: step 2.1" /><span class="pj-step-num">2.1</span></label><div class="pj-step-body"><div class="pj-step-text">Create the state bucket by hand — it is the one resource Terraform cannot manage for itself, because it has to exist before the first <code>init</code>. Versioning gives you every previous state; public access is blocked outright.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+REGION=eu-west-1
+BUCKET="tfstate-aws-platform-$ACCOUNT"
+aws s3api create-bucket --bucket "$BUCKET" --region "$REGION" --create-bucket-configuration LocationConstraint="$REGION"
+aws s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration Status=Enabled
+aws s3api put-bucket-encryption --bucket "$BUCKET" --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+aws s3api put-public-access-block --bucket "$BUCKET" --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+echo "$BUCKET"</code></pre></div><div class="pj-note">If you did the zero-to-prod project you already have a <code>tfstate-zero-to-prod-…</code> bucket. Reusing it with a different <code>key</code> is fine; a bucket per project is also fine. Do not share a key.</div></div></li><li class="pj-step" id="step-2-2"><label class="pj-step-tick"><input type="checkbox" data-step="2-2" aria-label="Done: step 2.2" /><span class="pj-step-num">2.2</span></label><div class="pj-step-body"><div class="pj-step-text">Write <code>envs/dev/backend.tf</code>. <code>use_lockfile = true</code> makes Terraform create <code>terraform.tfstate.tflock</code> in the bucket for the duration of a run, which is the locking mechanism that replaced the DynamoDB table.</div><div class="code"><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>terraform {
+  backend "s3" {
+    bucket       = "tfstate-aws-platform-123456789012"
+    key          = "envs/dev/terraform.tfstate"
+    region       = "eu-west-1"
+    encrypt      = true
+    use_lockfile = true
+  }
+}</code></pre></div></div></li><li class="pj-step" id="step-2-3"><label class="pj-step-tick"><input type="checkbox" data-step="2-3" aria-label="Done: step 2.3" /><span class="pj-step-num">2.3</span></label><div class="pj-step-body"><div class="pj-step-text">Declare the environment's inputs in <code>envs/dev/variables.tf</code> and give them values in <code>envs/dev/dev.tfvars</code>. The image is the one your zero-to-prod release workflow publishes.</div><div class="code"><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># envs/dev/variables.tf
+variable "region" {
+  type    = string
+  default = "eu-west-1"
+}
+
+variable "name" {
+  type    = string
+  default = "aws-platform-dev"
+}
+
+variable "vpc_cidr" {
+  type    = string
+  default = "10.20.0.0/16"
+}
+
+variable "image" {
+  description = "Container image the service runs"
+  type        = string
+}
+
+variable "desired_count" {
+  type    = number
+  default = 2
+}
+
+variable "db_instance_class" {
+  type    = string
+  default = "db.t4g.micro"
+}
+
+# envs/dev/dev.tfvars
+# image         = "ghcr.io/YOUR_GITHUB_USER/zero-to-prod:latest"
+# desired_count = 2</code></pre></div><div class="pj-note">Write the two <code>dev.tfvars</code> lines into their own file without the leading <code>#</code>. They are shown here in one block so the variables and their values sit together.</div></div></li><li class="pj-step" id="step-2-4"><label class="pj-step-tick"><input type="checkbox" data-step="2-4" aria-label="Done: step 2.4" /><span class="pj-step-num">2.4</span></label><div class="pj-step-body"><div class="pj-step-text">Initialise against the remote backend and confirm the lock works by holding one open in a second terminal.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>cd envs/dev
+terraform init
+terraform plan -var-file=dev.tfvars   # nothing to build yet; it should say 'No changes'
+# in a second terminal, inside envs/dev:
+#   terraform console      (keeps the state lock while open)
+# back in the first terminal:
+terraform plan -var-file=dev.tfvars   # -&gt; 'Error acquiring the state lock' until you exit the console</code></pre></div><div class="pj-note">Seeing the lock error once, on purpose, is worth more than reading about it. Close the console and the plan goes through.</div></div></li></ol>
+  </section>
+
+  <section id="phase-3" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 3</span><h2>The network module</h2></div>
+    <p class="pj-goal">A VPC with two public and two private subnets across two availability zones, an internet gateway for the public side, and one NAT gateway so private tasks can pull images and reach AWS APIs without being reachable themselves.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-3-1"><label class="pj-step-tick"><input type="checkbox" data-step="3-1" aria-label="Done: step 3.1" /><span class="pj-step-num">3.1</span></label><div class="pj-step-body"><div class="pj-step-text">Declare the module's inputs in <code>modules/network/variables.tf</code>. Taking the availability zones as data rather than hard-coding them makes the module work in any region.</div><div class="code"><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>variable "name" {
+  type = string
+}
+
+variable "cidr" {
+  type = string
+}
+
+variable "az_count" {
+  type    = number
+  default = 2
+}</code></pre></div></div></li><li class="pj-step" id="step-3-2"><label class="pj-step-tick"><input type="checkbox" data-step="3-2" aria-label="Done: step 3.2" /><span class="pj-step-num">3.2</span></label><div class="pj-step-body"><div class="pj-step-text">Write <code>modules/network/main.tf</code>: the VPC, one public and one private subnet per AZ, an internet gateway, and a single NAT gateway with an Elastic IP. <code>cidrsubnet</code> carves <code>/20</code> blocks out of the VPC range so the addressing is derived, not typed.</div><div class="code"><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+locals {
+  azs = slice(data.aws_availability_zones.available.names, 0, var.az_count)
+}
+
+resource "aws_vpc" "this" {
+  cidr_block           = var.cidr
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+  tags                 = { Name = var.name }
+}
+
+resource "aws_internet_gateway" "this" {
+  vpc_id = aws_vpc.this.id
+  tags   = { Name = var.name }
+}
+
+resource "aws_subnet" "public" {
+  count                   = var.az_count
+  vpc_id                  = aws_vpc.this.id
+  cidr_block              = cidrsubnet(var.cidr, 4, count.index)
+  availability_zone       = local.azs[count.index]
+  map_public_ip_on_launch = true
+  tags                    = { Name = "${var.name}-public-${local.azs[count.index]}", tier = "public" }
+}
+
+resource "aws_subnet" "private" {
+  count             = var.az_count
+  vpc_id            = aws_vpc.this.id
+  cidr_block        = cidrsubnet(var.cidr, 4, count.index + 8)
+  availability_zone = local.azs[count.index]
+  tags              = { Name = "${var.name}-private-${local.azs[count.index]}", tier = "private" }
+}
+
+resource "aws_eip" "nat" {
+  domain = "vpc"
+  tags   = { Name = "${var.name}-nat" }
+}
+
+resource "aws_nat_gateway" "this" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.public[0].id
+  tags          = { Name = var.name }
+  depends_on    = [aws_internet_gateway.this]
+}
+
+resource "aws_route_table" "public" {
+  vpc_id = aws_vpc.this.id
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.this.id
+  }
+  tags = { Name = "${var.name}-public" }
+}
+
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.this.id
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.this.id
+  }
+  tags = { Name = "${var.name}-private" }
+}
+
+resource "aws_route_table_association" "public" {
+  count          = var.az_count
+  subnet_id      = aws_subnet.public[count.index].id
+  route_table_id = aws_route_table.public.id
+}
+
+resource "aws_route_table_association" "private" {
+  count          = var.az_count
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private.id
+}</code></pre></div><div class="pj-note">One NAT gateway is a deliberate dev-environment trade-off: it costs about $0.045/hour and is a single point of failure for outbound traffic. Production runs one per AZ; the change is <code>count = var.az_count</code> on the EIP, the gateway and the private route table.</div></div></li><li class="pj-step" id="step-3-3"><label class="pj-step-tick"><input type="checkbox" data-step="3-3" aria-label="Done: step 3.3" /><span class="pj-step-num">3.3</span></label><div class="pj-step-body"><div class="pj-step-text">Expose what the other modules need in <code>modules/network/outputs.tf</code>.</div><div class="code"><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>output "vpc_id" {
+  value = aws_vpc.this.id
+}
+
+output "public_subnet_ids" {
+  value = aws_subnet.public[*].id
+}
+
+output "private_subnet_ids" {
+  value = aws_subnet.private[*].id
+}
+
+output "vpc_cidr" {
+  value = aws_vpc.this.cidr_block
+}</code></pre></div></div></li><li class="pj-step" id="step-3-4"><label class="pj-step-tick"><input type="checkbox" data-step="3-4" aria-label="Done: step 3.4" /><span class="pj-step-num">3.4</span></label><div class="pj-step-body"><div class="pj-step-text">Wire the module into <code>envs/dev/main.tf</code> and apply just the network first. Building in layers keeps each plan small enough to actually read.</div><div class="code"><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>module "network" {
+  source   = "../../modules/network"
+  name     = var.name
+  cidr     = var.vpc_cidr
+  az_count = 2
+}</code></pre></div></div></li><li class="pj-step" id="step-3-5"><label class="pj-step-tick"><input type="checkbox" data-step="3-5" aria-label="Done: step 3.5" /><span class="pj-step-num">3.5</span></label><div class="pj-step-body"><div class="pj-step-text">Format, validate, plan and apply. Read the plan: it should add exactly 14 resources — 1 VPC, 4 subnets, 1 IGW, 1 EIP, 1 NAT gateway, 2 route tables, 4 associations. The availability-zone data source is read, not created, so it does not count.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>cd envs/dev
+terraform fmt -recursive ..
+terraform validate
+terraform plan -var-file=dev.tfvars -out=tfplan
+terraform apply tfplan
+aws ec2 describe-subnets --filters Name=tag:project,Values=aws-platform \
+  --query 'Subnets[].{az:AvailabilityZone,cidr:CidrBlock,tier:Tags[?Key==`tier`].Value|[0]}' --output table</code></pre></div><div class="pj-note">The NAT gateway takes a minute or two to become available; Terraform waits for it. If your count differs, read the plan to find out why before applying — that habit is the whole skill.</div></div></li><li class="pj-step" id="step-3-6"><label class="pj-step-tick"><input type="checkbox" data-step="3-6" aria-label="Done: step 3.6" /><span class="pj-step-num">3.6</span></label><div class="pj-step-body"><div class="pj-step-text">Commit the module on a branch and merge it. From here on, every phase is a pull request, so you build the habit before the pipeline enforces it.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>cd ../..
+git switch -c feat/network
+git add modules/network envs/dev
+git commit -m "feat(network): VPC with public/private subnets, IGW and NAT"
+git push -u origin feat/network
+gh pr create --fill &amp;&amp; gh pr merge --squash --delete-branch
+git switch main &amp;&amp; git pull</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-4" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 4</span><h2>The database module</h2></div>
+    <p class="pj-goal">A Postgres instance in the private subnets that only the service's security group can reach, with a generated password stored in Secrets Manager and never written to disk or state as plain text.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-4-1"><label class="pj-step-tick"><input type="checkbox" data-step="4-1" aria-label="Done: step 4.1" /><span class="pj-step-num">4.1</span></label><div class="pj-step-body"><div class="pj-step-text">Declare the inputs in <code>modules/database/variables.tf</code>. The module takes the security group that is allowed to connect rather than a CIDR, so the rule follows the service wherever it runs.</div><div class="code"><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>variable "name" {
+  type = string
+}
+
+variable "vpc_id" {
+  type = string
+}
+
+variable "subnet_ids" {
+  type = list(string)
+}
+
+variable "allowed_security_group_id" {
+  description = "Security group of the workload that may connect on 5432"
+  type        = string
+}
+
+variable "instance_class" {
+  type    = string
+  default = "db.t4g.micro"
+}
+
+variable "db_name" {
+  type    = string
+  default = "app"
+}</code></pre></div></div></li><li class="pj-step" id="step-4-2"><label class="pj-step-tick"><input type="checkbox" data-step="4-2" aria-label="Done: step 4.2" /><span class="pj-step-num">4.2</span></label><div class="pj-step-body"><div class="pj-step-text">Write <code>modules/database/main.tf</code>. <code>random_password</code> generates the password inside Terraform, the secret stores it, and RDS reads it from the resource — nobody types it and it never appears in a tfvars file.</div><div class="code"><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>resource "aws_db_subnet_group" "this" {
+  name       = var.name
+  subnet_ids = var.subnet_ids
+}
+
+resource "aws_security_group" "db" {
+  name        = "${var.name}-db"
+  description = "Postgres, reachable only from the service"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [var.allowed_security_group_id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "random_password" "db" {
+  length           = 32
+  special          = true
+  override_special = "!#$%^&amp;*()-_=+"
+}
+
+resource "aws_secretsmanager_secret" "db" {
+  name                    = "${var.name}/database"
+  recovery_window_in_days = 0
+}
+
+resource "aws_db_instance" "this" {
+  identifier             = var.name
+  engine                 = "postgres"
+  engine_version         = "16"
+  instance_class         = var.instance_class
+  allocated_storage      = 20
+  storage_type           = "gp3"
+  db_name                = var.db_name
+  username               = "app"
+  password               = random_password.db.result
+  db_subnet_group_name   = aws_db_subnet_group.this.name
+  vpc_security_group_ids = [aws_security_group.db.id]
+  publicly_accessible    = false
+  multi_az               = false
+  backup_retention_period = 1
+  skip_final_snapshot    = true
+  deletion_protection    = false
+  apply_immediately      = true
+}
+
+resource "aws_secretsmanager_secret_version" "db" {
+  secret_id = aws_secretsmanager_secret.db.id
+  secret_string = jsonencode({
+    username = aws_db_instance.this.username
+    password = random_password.db.result
+    host     = aws_db_instance.this.address
+    port     = aws_db_instance.this.port
+    dbname   = aws_db_instance.this.db_name
+    url      = "postgresql://${aws_db_instance.this.username}:${random_password.db.result}@${aws_db_instance.this.address}:${aws_db_instance.this.port}/${aws_db_instance.this.db_name}"
+  })
+}</code></pre></div><div class="pj-note"><code>skip_final_snapshot</code>, <code>deletion_protection = false</code> and a zero-day secret recovery window make <code>destroy</code> clean for a learning environment. In production all three flip the other way — that is the difference between an environment you can recreate and one you must protect. The password is still in the state file, which is why the state bucket is encrypted and private.</div></div></li><li class="pj-step" id="step-4-3"><label class="pj-step-tick"><input type="checkbox" data-step="4-3" aria-label="Done: step 4.3" /><span class="pj-step-num">4.3</span></label><div class="pj-step-body"><div class="pj-step-text">Export the connection details and the secret's ARN in <code>modules/database/outputs.tf</code>. The service will inject the secret by ARN, so the URL itself never appears in a task definition.</div><div class="code"><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>output "endpoint" {
+  value = aws_db_instance.this.address
+}
+
+output "secret_arn" {
+  value = aws_secretsmanager_secret.db.arn
+}
+
+output "security_group_id" {
+  value = aws_security_group.db.id
+}</code></pre></div></div></li><li class="pj-step" id="step-4-4"><label class="pj-step-tick"><input type="checkbox" data-step="4-4" aria-label="Done: step 4.4" /><span class="pj-step-num">4.4</span></label><div class="pj-step-body"><div class="pj-step-text">The database module needs the service's security group, and the service needs the database's secret — a cycle if both are created inside their modules. Break it by creating the service security group in <code>envs/dev/main.tf</code>, where both modules can see it, then add the database module.</div><div class="code"><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>resource "aws_security_group" "service" {
+  name        = "${var.name}-service"
+  description = "ECS tasks"
+  vpc_id      = module.network.vpc_id
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+module "database" {
+  source                    = "../../modules/database"
+  name                      = var.name
+  vpc_id                    = module.network.vpc_id
+  subnet_ids                = module.network.private_subnet_ids
+  allowed_security_group_id = aws_security_group.service.id
+  instance_class            = var.db_instance_class
+}</code></pre></div><div class="pj-note">This is a common Terraform design decision: the resource that two modules share is owned by neither of them. Ingress to the service group is added in the next phase, by the ALB.</div></div></li><li class="pj-step" id="step-4-5"><label class="pj-step-tick"><input type="checkbox" data-step="4-5" aria-label="Done: step 4.5" /><span class="pj-step-num">4.5</span></label><div class="pj-step-body"><div class="pj-step-text">Apply on a branch. RDS takes five to ten minutes to create, so this is a good moment to read ahead. Then confirm the secret exists without printing it.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>git switch -c feat/database
+cd envs/dev &amp;&amp; terraform fmt -recursive .. &amp;&amp; terraform validate
+terraform plan -var-file=dev.tfvars -out=tfplan &amp;&amp; terraform apply tfplan
+aws secretsmanager describe-secret --secret-id "aws-platform-dev/database" --query '{name:Name,created:CreatedDate}'
+aws rds describe-db-instances --db-instance-identifier aws-platform-dev --query 'DBInstances[0].{status:DBInstanceStatus,public:PubliclyAccessible,az:AvailabilityZone}'</code></pre></div></div></li><li class="pj-step" id="step-4-6"><label class="pj-step-tick"><input type="checkbox" data-step="4-6" aria-label="Done: step 4.6" /><span class="pj-step-num">4.6</span></label><div class="pj-step-body"><div class="pj-step-text">Commit and merge.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>cd ../..
+git add modules/database envs/dev
+git commit -m "feat(database): private RDS Postgres with generated password in Secrets Manager"
+git push -u origin feat/database
+gh pr create --fill &amp;&amp; gh pr merge --squash --delete-branch
+git switch main &amp;&amp; git pull</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-5" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 5</span><h2>The service module: ALB and ECS Fargate</h2></div>
+    <p class="pj-goal">An Application Load Balancer in the public subnets forwarding to two Fargate tasks in the private subnets, with the database URL injected from Secrets Manager and logs in CloudWatch.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-5-1"><label class="pj-step-tick"><input type="checkbox" data-step="5-1" aria-label="Done: step 5.1" /><span class="pj-step-num">5.1</span></label><div class="pj-step-body"><div class="pj-step-text">Declare the inputs in <code>modules/service/variables.tf</code>.</div><div class="code"><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>variable "name" {
+  type = string
+}
+
+variable "vpc_id" {
+  type = string
+}
+
+variable "public_subnet_ids" {
+  type = list(string)
+}
+
+variable "private_subnet_ids" {
+  type = list(string)
+}
+
+variable "service_security_group_id" {
+  type = string
+}
+
+variable "image" {
+  type = string
+}
+
+variable "container_port" {
+  type    = number
+  default = 8000
+}
+
+variable "desired_count" {
+  type    = number
+  default = 2
+}
+
+variable "cpu" {
+  type    = number
+  default = 256
+}
+
+variable "memory" {
+  type    = number
+  default = 512
+}
+
+variable "db_secret_arn" {
+  type = string
+}
+
+variable "environment" {
+  description = "Plain (non-secret) environment variables"
+  type        = map(string)
+  default     = {}
+}</code></pre></div></div></li><li class="pj-step" id="step-5-2"><label class="pj-step-tick"><input type="checkbox" data-step="5-2" aria-label="Done: step 5.2" /><span class="pj-step-num">5.2</span></label><div class="pj-step-body"><div class="pj-step-text">Write the load balancer half of <code>modules/service/main.tf</code>: the ALB's own security group open on 80, a target group that health-checks <code>/health</code>, and a listener. The ingress rule on the service's group is created here too, allowing traffic only from the ALB.</div><div class="code"><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>resource "aws_security_group" "alb" {
+  name        = "${var.name}-alb"
+  description = "Public HTTP in"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_vpc_security_group_ingress_rule" "service_from_alb" {
+  security_group_id            = var.service_security_group_id
+  referenced_security_group_id = aws_security_group.alb.id
+  from_port                    = var.container_port
+  to_port                      = var.container_port
+  ip_protocol                  = "tcp"
+}
+
+resource "aws_lb" "this" {
+  name               = var.name
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb.id]
+  subnets            = var.public_subnet_ids
+}
+
+resource "aws_lb_target_group" "this" {
+  name        = var.name
+  port        = var.container_port
+  protocol    = "HTTP"
+  target_type = "ip"
+  vpc_id      = var.vpc_id
+
+  health_check {
+    path                = "/health"
+    matcher             = "200"
+    interval            = 15
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+  }
+
+  deregistration_delay = 10
+}
+
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.this.arn
+  port              = 80
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.this.arn
+  }
+}</code></pre></div><div class="pj-note"><code>target_type = "ip"</code> is required for Fargate: tasks have no instance, only an ENI with an address. HTTPS is left for the <code>next</code> list — it needs a domain you own and an ACM certificate.</div></div></li><li class="pj-step" id="step-5-3"><label class="pj-step-tick"><input type="checkbox" data-step="5-3" aria-label="Done: step 5.3" /><span class="pj-step-num">5.3</span></label><div class="pj-step-body"><div class="pj-step-text">Now the compute half, appended to the same file: a log group, the execution role (what ECS itself needs: pull images, write logs, read the secret), the task definition and the service. The <code>secrets</code> block is what turns the Secrets Manager entry into <code>DATABASE_URL</code> inside the container.</div><div class="code"><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>resource "aws_cloudwatch_log_group" "this" {
+  name              = "/ecs/${var.name}"
+  retention_in_days = 7
+}
+
+data "aws_iam_policy_document" "ecs_assume" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["ecs-tasks.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "execution" {
+  name               = "${var.name}-execution"
+  assume_role_policy = data.aws_iam_policy_document.ecs_assume.json
+}
+
+resource "aws_iam_role_policy_attachment" "execution" {
+  role       = aws_iam_role.execution.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+resource "aws_iam_role_policy" "read_secret" {
+  name = "read-db-secret"
+  role = aws_iam_role.execution.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["secretsmanager:GetSecretValue"]
+      Resource = var.db_secret_arn
+    }]
+  })
+}
+
+resource "aws_ecs_cluster" "this" {
+  name = var.name
+}
+
+resource "aws_ecs_task_definition" "this" {
+  family                   = var.name
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = var.cpu
+  memory                   = var.memory
+  execution_role_arn       = aws_iam_role.execution.arn
+
+  runtime_platform {
+    cpu_architecture        = "X86_64"
+    operating_system_family = "LINUX"
+  }
+
+  container_definitions = jsonencode([{
+    name      = "app"
+    image     = var.image
+    essential = true
+    portMappings = [{
+      containerPort = var.container_port
+      protocol      = "tcp"
+    }]
+    environment = [for k, v in var.environment : { name = k, value = v }]
+    secrets = [{
+      name      = "DATABASE_URL"
+      valueFrom = "${var.db_secret_arn}:url::"
+    }]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.this.name
+        "awslogs-region"        = data.aws_region.current.name
+        "awslogs-stream-prefix" = "app"
+      }
+    }
+  }])
+}
+
+data "aws_region" "current" {}
+
+resource "aws_ecs_service" "this" {
+  name            = var.name
+  cluster         = aws_ecs_cluster.this.id
+  task_definition = aws_ecs_task_definition.this.arn
+  desired_count   = var.desired_count
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = var.private_subnet_ids
+    security_groups  = [var.service_security_group_id]
+    assign_public_ip = false
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.this.arn
+    container_name   = "app"
+    container_port   = var.container_port
+  }
+
+  deployment_minimum_healthy_percent = 50
+  deployment_maximum_percent         = 200
+
+  depends_on = [aws_lb_listener.http]
+}</code></pre></div><div class="pj-note"><code>valueFrom = "&lt;secret-arn&gt;:url::"</code> picks the <code>url</code> key out of the JSON secret. The trailing <code>::</code> means 'latest version, no version stage'. If your zero-to-prod image was built on an Apple Silicon Mac without <code>--platform linux/amd64</code>, change <code>cpu_architecture</code> to <code>ARM64</code> — Fargate supports both, but the image and the setting must agree.</div></div></li><li class="pj-step" id="step-5-4"><label class="pj-step-tick"><input type="checkbox" data-step="5-4" aria-label="Done: step 5.4" /><span class="pj-step-num">5.4</span></label><div class="pj-step-body"><div class="pj-step-text">Export the ALB address and the identifiers you will want for the CLI in <code>modules/service/outputs.tf</code>.</div><div class="code"><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>output "alb_dns_name" {
+  value = aws_lb.this.dns_name
+}
+
+output "cluster_name" {
+  value = aws_ecs_cluster.this.name
+}
+
+output "service_name" {
+  value = aws_ecs_service.this.name
+}
+
+output "log_group" {
+  value = aws_cloudwatch_log_group.this.name
+}</code></pre></div></div></li><li class="pj-step" id="step-5-5"><label class="pj-step-tick"><input type="checkbox" data-step="5-5" aria-label="Done: step 5.5" /><span class="pj-step-num">5.5</span></label><div class="pj-step-body"><div class="pj-step-text">Add the module to <code>envs/dev/main.tf</code> and the environment outputs to <code>envs/dev/outputs.tf</code>.</div><div class="code"><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># envs/dev/main.tf (append)
+module "service" {
+  source                    = "../../modules/service"
+  name                      = var.name
+  vpc_id                    = module.network.vpc_id
+  public_subnet_ids         = module.network.public_subnet_ids
+  private_subnet_ids        = module.network.private_subnet_ids
+  service_security_group_id = aws_security_group.service.id
+  image                     = var.image
+  desired_count             = var.desired_count
+  db_secret_arn             = module.database.secret_arn
+  environment = {
+    GREETING = "hello from ECS Fargate"
+  }
+}
+
+# envs/dev/outputs.tf
+output "url" {
+  value = "http://${module.service.alb_dns_name}/"
+}
+
+output "db_endpoint" {
+  value = module.database.endpoint
+}
+
+output "cluster" {
+  value = module.service.cluster_name
+}</code></pre></div></div></li><li class="pj-step" id="step-5-6"><label class="pj-step-tick"><input type="checkbox" data-step="5-6" aria-label="Done: step 5.6" /><span class="pj-step-num">5.6</span></label><div class="pj-step-body"><div class="pj-step-text">Make the image pullable. Fargate pulls <code>ghcr.io/…</code> anonymously only if the package is public; check it, and flip it if needed (Packages → your package → Package settings → Change visibility).</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>gh api "/users/$(gh api user -q .login)/packages/container/zero-to-prod" -q .visibility
+# 'public' -&gt; fine. 'private' -&gt; make it public in the package settings, or use
+# repositoryCredentials in the task definition with a Secrets Manager entry holding a GHCR token.</code></pre></div></div></li><li class="pj-step" id="step-5-7"><label class="pj-step-tick"><input type="checkbox" data-step="5-7" aria-label="Done: step 5.7" /><span class="pj-step-num">5.7</span></label><div class="pj-step-body"><div class="pj-step-text">Apply, then watch the service reach a steady state and the targets turn healthy. The first deployment takes two or three minutes: pull, start, pass two health checks.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>git switch -c feat/service
+cd envs/dev &amp;&amp; terraform fmt -recursive .. &amp;&amp; terraform validate
+terraform plan -var-file=dev.tfvars -out=tfplan &amp;&amp; terraform apply tfplan
+aws ecs wait services-stable --cluster aws-platform-dev --services aws-platform-dev
+TG=$(aws elbv2 describe-target-groups --names aws-platform-dev --query 'TargetGroups[0].TargetGroupArn' --output text)
+aws elbv2 describe-target-health --target-group-arn "$TG" --query 'TargetHealthDescriptions[].{ip:Target.Id,state:TargetHealth.State}'
+curl -s "$(terraform output -raw url)"
+curl -s "$(terraform output -raw url)health"</code></pre></div><div class="pj-note"><code>services-stable</code> waits up to ten minutes and exits non-zero if tasks keep dying; if it does, go straight to the CloudWatch logs in the troubleshooting section rather than re-applying.</div></div></li></ol>
+  </section>
+
+  <section id="phase-6" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 6</span><h2>Prove the database connection</h2></div>
+    <p class="pj-goal">The running service actually reaches Postgres through the private network using the injected secret, and you can see it happen in the logs.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-6-1"><label class="pj-step-tick"><input type="checkbox" data-step="6-1" aria-label="Done: step 6.1" /><span class="pj-step-num">6.1</span></label><div class="pj-step-body"><div class="pj-step-text">The zero-to-prod app does not talk to a database yet. Add a <code>/db</code> endpoint to it — in the zero-to-prod repository, on a branch — that opens a connection with <code>DATABASE_URL</code> and returns the server version. Add <code>psycopg[binary]</code> to its requirements.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># app/main.py (zero-to-prod repo) — add below the existing routes
+import psycopg
+
+
+@app.get("/db")
+def db():
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        return {"database": "not configured"}
+    with psycopg.connect(url, connect_timeout=3) as conn:
+        version = conn.execute("select version()").fetchone()[0]
+    return {"database": "ok", "version": version.split(",")[0]}</code></pre></div><div class="pj-note">Keep <code>os</code> imported at the top as it already is. <code>psycopg[binary]==3.2.*</code> in <code>requirements.txt</code> is enough; no build tools needed in the image.</div></div></li><li class="pj-step" id="step-6-2"><label class="pj-step-tick"><input type="checkbox" data-step="6-2" aria-label="Done: step 6.2" /><span class="pj-step-num">6.2</span></label><div class="pj-step-body"><div class="pj-step-text">Add a test that the endpoint degrades gracefully without a database, then push the branch, let CI pass, merge, and wait for the release workflow to publish a new <code>:latest</code> image.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># tests/test_main.py (zero-to-prod repo) — append
+def test_db_reports_not_configured_without_url(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    assert client.get("/db").json() == {"database": "not configured"}</code></pre></div></div></li><li class="pj-step" id="step-6-3"><label class="pj-step-tick"><input type="checkbox" data-step="6-3" aria-label="Done: step 6.3" /><span class="pj-step-num">6.3</span></label><div class="pj-step-body"><div class="pj-step-text">Back in <code>aws-platform</code>, force a new deployment so the service pulls the new image. Because the tag is still <code>:latest</code>, Terraform sees no change — this is the moment you learn why teams deploy by digest or immutable tag, which the pipeline phase fixes.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>aws ecs update-service --cluster aws-platform-dev --service aws-platform-dev --force-new-deployment --query 'service.deployments[].{status:status,running:runningCount,taskDef:taskDefinition}'
+aws ecs wait services-stable --cluster aws-platform-dev --services aws-platform-dev
+curl -s "$(cd envs/dev &amp;&amp; terraform output -raw url)db"</code></pre></div><div class="pj-note">Expected: <code>{"database":"ok","version":"PostgreSQL 16.x"}</code>. The request went ALB → private task → RDS, and the password came from Secrets Manager at task start, never from your laptop.</div></div></li><li class="pj-step" id="step-6-4"><label class="pj-step-tick"><input type="checkbox" data-step="6-4" aria-label="Done: step 6.4" /><span class="pj-step-num">6.4</span></label><div class="pj-step-body"><div class="pj-step-text">Look at the logs the way you will during an incident: tail the log group and make a few requests. Then confirm the database is unreachable from the internet, which is the point of the private subnet.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>aws logs tail /ecs/aws-platform-dev --follow --since 5m &amp;
+for i in 1 2 3; do curl -s "$(cd envs/dev &amp;&amp; terraform output -raw url)db" &gt; /dev/null; done
+sleep 5; kill %1
+DB=$(cd envs/dev &amp;&amp; terraform output -raw db_endpoint)
+timeout 5 psql "postgresql://app@$DB:5432/app" -c 'select 1' || echo "unreachable from here — correct"</code></pre></div></div></li><li class="pj-step" id="step-6-5"><label class="pj-step-tick"><input type="checkbox" data-step="6-5" aria-label="Done: step 6.5" /><span class="pj-step-num">6.5</span></label><div class="pj-step-body"><div class="pj-step-text">Commit the environment changes and merge.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>git add modules/service envs/dev
+git commit -m "feat(service): ALB + ECS Fargate service with DATABASE_URL from Secrets Manager"
+git push -u origin feat/service
+gh pr create --fill &amp;&amp; gh pr merge --squash --delete-branch
+git switch main &amp;&amp; git pull</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-7" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 7</span><h2>Let GitHub Actions own the environment</h2></div>
+    <p class="pj-goal">Every pull request that touches HCL gets fmt, validate, tflint and a plan posted as a comment; merging to main applies. Credentials are short-lived OIDC tokens, and image tags become immutable so a deploy is a reviewable diff.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-7-1"><label class="pj-step-tick"><input type="checkbox" data-step="7-1" aria-label="Done: step 7.1" /><span class="pj-step-num">7.1</span></label><div class="pj-step-body"><div class="pj-step-text">Create an IAM role for this repository. The OIDC provider already exists from zero-to-prod; the trust policy is scoped to this repo's <code>main</code> branch and pull requests.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+USER=$(gh api user -q .login)
+cat &gt; trust.json &lt;&lt;EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": {"Federated": "arn:aws:iam::$ACCOUNT:oidc-provider/token.actions.githubusercontent.com"},
+    "Action": "sts:AssumeRoleWithWebIdentity",
+    "Condition": {
+      "StringEquals": {"token.actions.githubusercontent.com:aud": "sts.amazonaws.com"},
+      "StringLike": {"token.actions.githubusercontent.com:sub": "repo:$USER/aws-platform:*"}
+    }
+  }]
+}
+EOF
+aws iam create-role --role-name github-aws-platform --assume-role-policy-document file://trust.json
+rm trust.json</code></pre></div><div class="pj-note">If <code>create-open-id-connect-provider</code> was never run in this account, do it now: <code>aws iam create-open-id-connect-provider --url https://token.actions.githubusercontent.com --client-id-list sts.amazonaws.com</code>.</div></div></li><li class="pj-step" id="step-7-2"><label class="pj-step-tick"><input type="checkbox" data-step="7-2" aria-label="Done: step 7.2" /><span class="pj-step-num">7.2</span></label><div class="pj-step-body"><div class="pj-step-text">Attach permissions. For a learning account the managed policies below are acceptable; the <code>next</code> list points at scoping them down. The state bucket policy is the one you should write by hand even here.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+for p in AmazonVPCFullAccess AmazonECS_FullAccess AmazonRDSFullAccess ElasticLoadBalancingFullAccess CloudWatchLogsFullAccess SecretsManagerReadWrite IAMFullAccess; do
+  aws iam attach-role-policy --role-name github-aws-platform --policy-arn "arn:aws:iam::aws:policy/$p"
+done
+cat &gt; state.json &lt;&lt;EOF
+{"Version": "2012-10-17", "Statement": [
+  {"Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": "arn:aws:s3:::tfstate-aws-platform-$ACCOUNT"},
+  {"Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"], "Resource": "arn:aws:s3:::tfstate-aws-platform-$ACCOUNT/envs/*"}
+]}
+EOF
+aws iam put-role-policy --role-name github-aws-platform --policy-name tfstate --policy-document file://state.json
+rm state.json</code></pre></div></div></li><li class="pj-step" id="step-7-3"><label class="pj-step-tick"><input type="checkbox" data-step="7-3" aria-label="Done: step 7.3" /><span class="pj-step-num">7.3</span></label><div class="pj-step-body"><div class="pj-step-text">Store the role ARN and region as repository variables — they are not secrets, and variables show up in logs, which helps debugging.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+gh variable set AWS_ROLE_ARN --body "arn:aws:iam::$ACCOUNT:role/github-aws-platform"
+gh variable set AWS_REGION --body "eu-west-1"
+gh variable list</code></pre></div></div></li><li class="pj-step" id="step-7-4"><label class="pj-step-tick"><input type="checkbox" data-step="7-4" aria-label="Done: step 7.4" /><span class="pj-step-num">7.4</span></label><div class="pj-step-body"><div class="pj-step-text">Add a TFLint configuration at the repo root. The AWS ruleset knows which instance classes exist and which arguments are deprecated — errors that <code>validate</code> cannot see because they need the provider's knowledge.</div><div class="code"><div class="code-head"><span>hcl</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># .tflint.hcl
+plugin "terraform" {
+  enabled = true
+  preset  = "recommended"
+}
+
+plugin "aws" {
+  enabled = true
+  version = "0.38.0"
+  source  = "github.com/terraform-linters/tflint-ruleset-aws"
+}</code></pre></div></div></li><li class="pj-step" id="step-7-5"><label class="pj-step-tick"><input type="checkbox" data-step="7-5" aria-label="Done: step 7.5" /><span class="pj-step-num">7.5</span></label><div class="pj-step-body"><div class="pj-step-text">Write <code>.github/workflows/infra.yml</code>. The <code>plan</code> job runs on pull requests and posts the plan; the <code>apply</code> job runs only on <code>main</code> and only after a fresh plan, so what applies is what was reviewed. <code>TF_VAR_image</code> overrides the tfvars image so the pipeline can pin a tag.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>name: infra
+
+on:
+  pull_request:
+    paths: ["modules/**", "envs/**", ".tflint.hcl"]
+  push:
+    branches: [main]
+    paths: ["modules/**", "envs/**"]
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+concurrency:
+  group: infra-dev
+  cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: envs/dev
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10.5"
+      - uses: terraform-linters/setup-tflint@v4
+      - run: terraform fmt -check -recursive ..
+      - run: terraform init -backend=false
+      - run: terraform validate
+      - run: tflint --init &amp;&amp; tflint --recursive --chdir=..
+
+  plan:
+    needs: check
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10.5"
+      - run: terraform init
+      - id: plan
+        run: terraform plan -var-file=dev.tfvars -no-color -out=tfplan 2&gt;&amp;1 | tee plan.txt
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('envs/dev/plan.txt', 'utf8').slice(-60000);
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: '### Terraform plan (envs/dev)\n```\n' + plan + '\n```'
+            });
+
+  apply:
+    needs: check
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10.5"
+      - run: terraform init
+      - run: terraform plan -var-file=dev.tfvars -out=tfplan
+      - run: terraform apply -auto-approve tfplan</code></pre></div><div class="pj-note"><code>concurrency</code> with <code>cancel-in-progress: false</code> queues applies instead of running two at once; the S3 lockfile is the second line of defence. The <code>environment: dev</code> line lets you add a required reviewer under Settings → Environments later, which turns apply-on-merge into apply-on-approval without touching the workflow.</div></div></li><li class="pj-step" id="step-7-6"><label class="pj-step-tick"><input type="checkbox" data-step="7-6" aria-label="Done: step 7.6" /><span class="pj-step-num">7.6</span></label><div class="pj-step-body"><div class="pj-step-text">Switch the image from <code>:latest</code> to an immutable tag, so that changing the image is a one-line diff Terraform can see. Your zero-to-prod release workflow also tags images with the commit SHA; find the newest one.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>git switch -c ci/infra-pipeline
+USER=$(gh api user -q .login)
+TAG=$(gh api "/users/$USER/packages/container/zero-to-prod/versions" -q '.[0].metadata.container.tags[] | select(. != "latest")' | head -1)
+echo "$TAG"
+sed -i.bak "s#zero-to-prod:latest#zero-to-prod:$TAG#" envs/dev/dev.tfvars &amp;&amp; rm envs/dev/dev.tfvars.bak
+cat envs/dev/dev.tfvars</code></pre></div><div class="pj-note">If your release workflow only pushes <code>:latest</code>, add <code>type=sha</code> to its <code>docker/metadata-action</code> tags first — the zero-to-prod project's <code>release.yml</code> shows where. From now on a deploy is: change the tag, open a PR, read the plan (one task definition revision), merge.</div></div></li><li class="pj-step" id="step-7-7"><label class="pj-step-tick"><input type="checkbox" data-step="7-7" aria-label="Done: step 7.7" /><span class="pj-step-num">7.7</span></label><div class="pj-step-body"><div class="pj-step-text">Open the pull request and read the plan comment. It should show one change: a new task definition revision with the new image, and the service pointing at it.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>git add .github .tflint.hcl envs/dev/dev.tfvars
+git commit -m "ci: plan on PR, apply on merge with OIDC; pin image tag"
+git push -u origin ci/infra-pipeline
+gh pr create --fill
+gh pr checks --watch
+gh pr view --comments | tail -40</code></pre></div></div></li><li class="pj-step" id="step-7-8"><label class="pj-step-tick"><input type="checkbox" data-step="7-8" aria-label="Done: step 7.8" /><span class="pj-step-num">7.8</span></label><div class="pj-step-body"><div class="pj-step-text">Merge and watch the apply. Then confirm the service is running the pinned tag.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>gh pr merge --squash --delete-branch
+git switch main &amp;&amp; git pull
+gh run watch
+aws ecs describe-services --cluster aws-platform-dev --services aws-platform-dev --query 'services[0].taskDefinition' --output text | xargs -I{} aws ecs describe-task-definition --task-definition {} --query 'taskDefinition.containerDefinitions[0].image'</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-8" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 8</span><h2>Operate it, then destroy it</h2></div>
+    <p class="pj-goal">Scale, deploy and roll back through pull requests; check what it costs; tear the whole environment down and prove you can bring it back.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-8-1"><label class="pj-step-tick"><input type="checkbox" data-step="8-1" aria-label="Done: step 8.1" /><span class="pj-step-num">8.1</span></label><div class="pj-step-body"><div class="pj-step-text">Scale through a PR. Change <code>desired_count</code> to 3, read the plan (one attribute on one resource), merge, and watch the third task appear behind the ALB.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>git switch -c ops/scale-3
+sed -i.bak 's/desired_count = 2/desired_count = 3/' envs/dev/dev.tfvars &amp;&amp; rm envs/dev/dev.tfvars.bak
+git commit -am "ops: scale service to 3 tasks" &amp;&amp; git push -u origin ops/scale-3
+gh pr create --fill &amp;&amp; gh pr checks --watch &amp;&amp; gh pr merge --squash --delete-branch
+git switch main &amp;&amp; git pull &amp;&amp; gh run watch
+aws ecs describe-services --cluster aws-platform-dev --services aws-platform-dev --query 'services[0].{desired:desiredCount,running:runningCount}'</code></pre></div></div></li><li class="pj-step" id="step-8-2"><label class="pj-step-tick"><input type="checkbox" data-step="8-2" aria-label="Done: step 8.2" /><span class="pj-step-num">8.2</span></label><div class="pj-step-body"><div class="pj-step-text">Roll back a deploy the same way you roll forward: revert the commit that changed the image tag. The plan shows the old task definition revision coming back; ECS drains new tasks behind the ALB with no downtime because <code>deployment_minimum_healthy_percent</code> keeps half of them serving.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>git log --oneline -5 -- envs/dev/dev.tfvars
+# pick the commit that changed the image tag and put its SHA here:
+SHA=abc1234
+git switch -c ops/rollback &amp;&amp; git revert --no-edit "$SHA"
+git push -u origin ops/rollback &amp;&amp; gh pr create --fill
+# read the plan comment, merge, watch — then revert the revert to move forward again</code></pre></div></div></li><li class="pj-step" id="step-8-3"><label class="pj-step-tick"><input type="checkbox" data-step="8-3" aria-label="Done: step 8.3" /><span class="pj-step-num">8.3</span></label><div class="pj-step-body"><div class="pj-step-text">Look at what the environment has cost so far, by the <code>project</code> tag that <code>default_tags</code> applied to every resource. Cost Explorer data lags about a day, so run this tomorrow as well.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>aws ce get-cost-and-usage --time-period Start=$(date -v-7d +%F 2&gt;/dev/null || date -d '7 days ago' +%F),End=$(date +%F) \
+  --granularity DAILY --metrics UnblendedCost \
+  --filter '{"Tags":{"Key":"project","Values":["aws-platform"]}}' \
+  --query 'ResultsByTime[].{day:TimePeriod.Start,usd:Total.UnblendedCost.Amount}' --output table</code></pre></div><div class="pj-note">Cost allocation tags must be activated once in Billing → Cost allocation tags before Cost Explorer can filter on them; the activation takes up to 24 hours.</div></div></li><li class="pj-step" id="step-8-4"><label class="pj-step-tick"><input type="checkbox" data-step="8-4" aria-label="Done: step 8.4" /><span class="pj-step-num">8.4</span></label><div class="pj-step-body"><div class="pj-step-text">Destroy everything. Because nothing was created by hand except the state bucket, one command removes it all; the plan lists every resource it will delete — read it before typing yes.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>cd envs/dev
+terraform plan -destroy -var-file=dev.tfvars
+terraform destroy -var-file=dev.tfvars
+aws ecs list-clusters; aws rds describe-db-instances --query 'DBInstances[].DBInstanceIdentifier'; aws ec2 describe-nat-gateways --filter Name=state,Values=available --query 'NatGateways[].NatGatewayId'</code></pre></div><div class="pj-note">RDS deletion takes several minutes; the NAT gateway a couple more. The three checks at the end should print empty lists. The state bucket stays — it is tiny and it holds the history.</div></div></li><li class="pj-step" id="step-8-5"><label class="pj-step-tick"><input type="checkbox" data-step="8-5" aria-label="Done: step 8.5" /><span class="pj-step-num">8.5</span></label><div class="pj-step-body"><div class="pj-step-text">Rebuild it from nothing to prove the point, then destroy it again. If the second apply needs any manual step you did not write down, that step belongs in the README or in Terraform.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>terraform apply -var-file=dev.tfvars
+aws ecs wait services-stable --cluster aws-platform-dev --services aws-platform-dev
+curl -s "$(terraform output -raw url)db"
+terraform destroy -var-file=dev.tfvars</code></pre></div></div></li><li class="pj-step" id="step-8-6"><label class="pj-step-tick"><input type="checkbox" data-step="8-6" aria-label="Done: step 8.6" /><span class="pj-step-num">8.6</span></label><div class="pj-step-body"><div class="pj-step-text">Write the README: what the stack is, the bootstrap steps (bucket, OIDC role), how a deploy and a rollback work, the hourly cost, and the one-line destroy. Commit it and you are done.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>cd ../..
+git switch -c docs/readme
+cat &gt; README.md &lt;&lt;'EOF'
+# aws-platform
+
+Terraform for a dev environment: VPC (2 AZ, public/private, 1 NAT), ALB, ECS Fargate service, RDS Postgres, Secrets Manager.
+
+## Bootstrap (once)
+1. State bucket: `tfstate-aws-platform-&lt;account&gt;` (versioned, encrypted, private).
+2. IAM role `github-aws-platform` trusted by this repo via GitHub OIDC.
+
+## Deploy
+Change `image` in `envs/dev/dev.tfvars`, open a PR, read the plan comment, merge. Rollback = revert the commit.
+
+## Cost
+About $0.10/hour while up (NAT, ALB, RDS db.t4g.micro, 2 x 0.25 vCPU Fargate). `terraform destroy` when idle.
+EOF
+git add README.md &amp;&amp; git commit -m "docs: bootstrap, deploy, rollback, cost" &amp;&amp; git push -u origin docs/readme
+gh pr create --fill &amp;&amp; gh pr merge --squash --delete-branch</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="troubleshooting" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Help</span><h2>Troubleshooting</h2></div>
+    <dl class="pj-trouble"><dt><code>services-stable</code> times out; tasks start and stop every minute</dt><dd>Read the stopped reason: <code>aws ecs list-tasks --cluster aws-platform-dev --desired-status STOPPED</code> then <code>describe-tasks … --query 'tasks[].stoppedReason'</code>. <code>CannotPullContainerError</code> means the image is private or the private subnets have no NAT route; <code>ResourceInitializationError … secretsmanager</code> means the execution role cannot read the secret or the ARN in <code>valueFrom</code> is wrong; <code>exec format error</code> in the logs means the image architecture and <code>cpu_architecture</code> disagree.</dd><dt>Targets stay <code>unhealthy</code> although tasks are running</dt><dd>The ALB reaches the task on the container port through the service security group; check that the ingress rule from the ALB's group exists (<code>aws ec2 describe-security-group-rules --filters Name=group-id,Values=&lt;service-sg&gt;</code>), and that <code>/health</code> returns 200 on port 8000 — <code>curl</code> it from inside a task with ECS Exec if you enable it, or check the app logs for the health-check requests.</dd><dt><code>Error acquiring the state lock</code> in the pipeline with no other run in progress</dt><dd>A previous run was cancelled mid-apply and left <code>terraform.tfstate.tflock</code> in the bucket. Confirm nothing is running, then <code>terraform force-unlock &lt;ID&gt;</code> from your laptop (the ID is in the error). Never delete the lock object by hand while a run might be active.</dd><dt><code>/db</code> returns a connection timeout</dt><dd>The database security group only admits the service group on 5432; if you changed the service group's name or replaced it, the rule points at the old group. Also check the task is in a private subnet whose route table has the NAT route — RDS is inside the VPC, but DNS resolution for the endpoint still needs <code>enable_dns_support</code>.</dd><dt><code>destroy</code> fails on the security group or the subnet with <code>DependencyViolation</code></dt><dd>ENIs from the ALB or from tasks that are still draining hold the group. Wait a minute and run <code>destroy</code> again; if it persists, find the ENI with <code>aws ec2 describe-network-interfaces --filters Name=group-id,Values=&lt;sg&gt;</code> and check what still owns it.</dd><dt>The plan comment on the PR is empty or truncated</dt><dd>The script takes the last 60,000 characters of <code>plan.txt</code>; a very large plan is cut from the top. Look at the job log for the full plan, and consider <code>terraform show -no-color tfplan</code> piped through a summariser action as a next step.</dd></dl>
+  </section>
+
+  <section id="next" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Next</span><h2>Where to go from here</h2></div>
+    <ul class="pj-next"><li>Add HTTPS: a Route 53 hosted zone for a domain you own, an ACM certificate validated by DNS, a 443 listener, and a redirect from 80. All four are Terraform resources; the change is about 40 lines.</li><li>Replace the managed <code>*FullAccess</code> policies on the pipeline role with a policy generated from what the apply actually called (IAM Access Analyzer's policy generation reads CloudTrail and writes it for you).</li><li>Add a <code>envs/prod</code> that reuses the three modules with <code>multi_az = true</code>, one NAT per AZ, <code>deletion_protection = true</code> and a required reviewer on the <code>prod</code> environment — the whole point of writing modules.</li><li>Wire the SRE track's SLO project to this stack: scrape the ALB's CloudWatch metrics or run the Prometheus stack as a second ECS service, and alert on the same error-ratio and latency objectives.</li><li>Run the infra workflow's <code>plan</code> job against <code>terraform plan -refresh-only</code> on a schedule to detect drift — anything changed in the console shows up as a diff.</li></ul>
+  </section>
+
+  <p class="feedback-row">Did a step fail or feel unclear? <a href="../../feedback.html?page=/education/projects/proj-devops-aws-platform.html&amp;title=Terraform%20an%20AWS%20environment%20from%20scratch">Tell me which one →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../../education.html">Education</a>
+      <a href="../../privacy.html">Privacy</a>
+      <a href="../../terms.html">Terms</a>
+      <a href="../../feedback.html?page=/education/projects/proj-devops-aws-platform.html&amp;title=Terraform%20an%20AWS%20environment%20from%20scratch">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="project.js"></script>
+</body>
+</html>
