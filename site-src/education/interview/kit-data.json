@@ -1,0 +1,253 @@
+{
+  "id": "kit-data",
+  "role": "Data Engineer",
+  "tracks": ["data"],
+  "summary": "Data engineering interviews have a distinctive shape: a SQL live-coding round that filters ruthlessly, a data-modelling discussion, a pipeline system-design, and questions about the streaming, quality, and orchestration decisions that make data trustworthy. These questions and model answers cover all of it — including worked SQL — with the reasoning interviewers listen for. Depth and hands-on evidence come from the data track and its projects.",
+  "rounds": [
+    {"name": "Phone screen", "what": "Background and fundamentals — the tools you have used, batch versus streaming, a SQL warm-up. Often a quick SQL question even here, because SQL is the gate.", "tip": "Be ready to write a GROUP BY with a HAVING and a join off the top of your head; rusty SQL sinks data candidates early."},
+    {"name": "SQL live-coding", "what": "The signature round: write real SQL against a schema, often escalating to window functions and multi-step aggregations. They watch correctness, clarity, and how you handle edge cases like NULLs and duplicates.", "tip": "Clarify the schema and the grain first, state your assumptions, and talk through the query as you build it."},
+    {"name": "Data modelling", "what": "Design a schema for a scenario — 'model an e-commerce order system for analytics'. Star schemas, grain, slowly-changing dimensions, normalization trade-offs.", "tip": "Nail the grain of each table first — 'one row per what' — because every modelling mistake starts there."},
+    {"name": "Pipeline / system design", "what": "Design a data pipeline end to end — ingestion, transformation, storage, serving — and defend the batch-vs-streaming and tooling choices.", "tip": "Design for idempotency and failure from the start; a pipeline that cannot be safely re-run is the classic junior mistake."},
+    {"name": "Behavioural / data quality", "what": "How you handle a data-quality incident, a stakeholder who does not trust the numbers, or a pipeline that silently produced wrong data. Ownership of trust.", "tip": "Have a story about catching (or missing) a data-quality problem and the check you added so it could not recur."}
+  ],
+  "sections": [
+    {
+      "title": "SQL",
+      "intro": "The round that filters. Interviewers want correct, clear SQL and evidence you think about grain, NULLs, and duplicates. Write it out, talk through it, and check your edge cases.",
+      "questions": [
+        {
+          "q": "Given orders(order_id, customer_id, amount, order_date), find the top 3 customers by total spend in 2026.",
+          "tests": "Basic aggregation, filtering, ordering, and limiting — the SQL warm-up that must be automatic.",
+          "answer": "Aggregate spend per customer, filter to the year, order descending, and limit. The query below is the standard shape; talk through each clause as you write it, and mention that `WHERE` on the date filters before aggregation (correct and efficient) versus filtering after.",
+          "code": {"lang": "sql", "code": "SELECT customer_id,\n       SUM(amount) AS total_spend\nFROM orders\nWHERE order_date >= DATE '2026-01-01'\n  AND order_date <  DATE '2027-01-01'\nGROUP BY customer_id\nORDER BY total_spend DESC\nLIMIT 3;"},
+          "followups": [
+            "Why use `order_date < '2027-01-01'` instead of `<= '2026-12-31'`?",
+            "How would you also return the customer's name from a customers table?"
+          ]
+        },
+        {
+          "q": "For each customer, find their most recent order. Write the query.",
+          "tests": "Window functions — the escalation that separates people who know SQL from people who know basic SQL.",
+          "answer": "This is a per-group 'top-1' problem, and the clean, general solution is a window function: rank each customer's orders by date and keep rank 1. `ROW_NUMBER()` picks exactly one even if there are ties on date (use `RANK()` if you want all ties). Mention the older self-join-on-a-max-subquery approach and why the window version is cleaner and handles ties explicitly.",
+          "code": {"lang": "sql", "code": "SELECT customer_id, order_id, amount, order_date\nFROM (\n  SELECT o.*,\n         ROW_NUMBER() OVER (\n           PARTITION BY customer_id\n           ORDER BY order_date DESC, order_id DESC\n         ) AS rn\n  FROM orders o\n) ranked\nWHERE rn = 1;"},
+          "followups": [
+            "What is the difference between ROW_NUMBER, RANK, and DENSE_RANK here?",
+            "How would the query change if you wanted the most recent order per customer per month?"
+          ]
+        },
+        {
+          "q": "What is the difference between an INNER JOIN and a LEFT JOIN, and how can a JOIN accidentally change your row counts?",
+          "tests": "Whether you understand joins deeply enough to avoid the fan-out bug that silently corrupts aggregates.",
+          "answer": "An **INNER JOIN** returns only rows with a match in both tables; a **LEFT JOIN** returns all rows from the left table and fills NULLs where the right has no match — so LEFT JOIN is what you use when you want to keep left rows regardless (e.g. all customers, even those with no orders). The subtle, dangerous part interviewers are really probing: a join can **change your row count** in ways that corrupt aggregates. If you join to a table where the key is **not unique** — a one-to-many relationship — each left row is duplicated once per match (a **fan-out**), so a subsequent `SUM` double-counts. Example: joining orders to a payments table with multiple payments per order, then `SUM(orders.amount)`, inflates the total because each order's amount is repeated per payment. The tells and fixes: know the **cardinality** of every join (is the join key unique on the right?), and if it is not, aggregate the right table to the right grain *before* joining, or use `COUNT(DISTINCT ...)`. Also, a LEFT JOIN with a `WHERE` filter on the right table silently becomes an inner join (the NULLs fail the filter) — put right-table conditions in the `ON` clause instead. The signal: you check join cardinality and watch for fan-out, because a join that quietly multiplies rows is one of the most common sources of wrong numbers, and it does not error — it just gives you a bigger, wrong total.",
+          "followups": [
+            "How would you detect a fan-out before it corrupts a SUM?",
+            "Why does a WHERE condition on the right table turn a LEFT JOIN into an INNER JOIN?"
+          ]
+        },
+        {
+          "q": "How do NULLs behave in SQL, and where do they trip people up?",
+          "tests": "Whether you know the three-valued logic that causes subtle, silent bugs — a favourite gotcha.",
+          "answer": "NULL means 'unknown', and SQL uses **three-valued logic** (TRUE, FALSE, UNKNOWN) as a result, which produces surprises. The core rule: any comparison **with** NULL yields UNKNOWN, not TRUE or FALSE — so `x = NULL` is never true (that is why you must write `x IS NULL`), and `x != 5` does **not** return rows where `x` is NULL, because `NULL != 5` is UNKNOWN and UNKNOWN rows are excluded by `WHERE`. This trips people constantly: a filter like `WHERE status != 'active'` silently drops the NULL-status rows you probably wanted, and a `NOT IN (subquery)` returns *nothing* if the subquery contains a single NULL (because `x NOT IN (1, NULL)` evaluates to UNKNOWN for every x). Aggregates mostly **ignore** NULLs — `SUM`, `AVG`, `COUNT(column)` skip them (so `AVG` divides by the non-null count, and `COUNT(column)` differs from `COUNT(*)`), which is usually what you want but can surprise. NULLs also affect joins (they never match, even NULL to NULL) and uniqueness. The defensive habits to state: use `IS NULL`/`IS NOT NULL` for null checks, use `COALESCE` to substitute a default when you need one, be wary of `NOT IN` with nullable subqueries (prefer `NOT EXISTS`), and remember that a `!=`/`<>` filter excludes NULLs unless you explicitly `OR col IS NULL`. The signal interviewers want: you know NULL comparisons are UNKNOWN, and you handle them deliberately, because NULL bugs are silent — the query runs and returns a plausible, wrong answer.",
+          "followups": [
+            "Why can `NOT IN` with a subquery containing a NULL return zero rows?",
+            "What is the difference between COUNT(*) and COUNT(column)?"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Data modelling",
+      "intro": "Designing schemas that are correct and query-able. Interviewers want you to nail the grain, choose the right model for the use case, and handle history.",
+      "questions": [
+        {
+          "q": "What is a star schema, and why is it used for analytics rather than a normalized model?",
+          "tests": "The foundational analytics modelling concept — dimensional modelling.",
+          "answer": "A **star schema** has a central **fact table** (the measurable events — sales, clicks, orders — one row per event at a defined grain, with numeric measures and foreign keys) surrounded by **dimension tables** (the descriptive context — customer, product, date, store — that you filter and group by). It is deliberately **denormalized**: dimensions repeat descriptive attributes rather than normalizing them into many small tables. This is the opposite of the highly **normalized** model (3NF) used for transactional systems (OLTP), and the reason is that the two have opposite goals. Normalized models optimize for **writes and integrity** — no duplicated data, so updates are cheap and consistent, which suits an application inserting and updating single records. Analytics (OLAP) optimizes for **reads** — big aggregating queries scanning millions of rows — and there, joins are expensive and denormalization pays off: a star schema means an analytical query joins the fact to a few dimensions (a shallow, predictable join pattern) rather than traversing a deep web of normalized tables, so queries are faster and, just as importantly, **simpler for analysts to write and understand**. The framing interviewers want: normalize for transactional integrity, denormalize into star schemas for analytical performance and usability — same data, opposite optimization, chosen by whether the workload is many small writes or few big reads. Mention the grain of the fact table is the first and most important decision.",
+          "followups": [
+            "What is the 'grain' of a fact table, and why decide it first?",
+            "When would a snowflake schema (normalized dimensions) be worth it over a star?"
+          ]
+        },
+        {
+          "q": "What is a slowly changing dimension, and how would you handle a customer changing their address?",
+          "tests": "Whether you can handle history in dimensions — a standard modelling problem with real consequences.",
+          "answer": "A **slowly changing dimension (SCD)** is a dimension whose attributes change over time (a customer moves, a product is recategorized), and the question is what to do with the history. The main types: **Type 1** — overwrite the old value with the new one; simple, but you lose history, so a report of 'sales by customer region' would retroactively move all their past sales to the new region, which is often wrong. **Type 2** — keep history by adding a **new row** for the changed version, with effective-from/effective-to dates (and a current-flag), so each fact links to the dimension version that was current when the event happened; this preserves the truth that past orders shipped to the old address, at the cost of more rows and more complex loading. **Type 3** — keep a limited history in columns (previous_value alongside current_value); rarely used, only when you need just the prior value. For the address example: the right choice depends on the business question. If you need 'where did we ship this order' to stay historically accurate — and for anything analytical about the past, you usually do — **Type 2** is correct, because it captures that the order went to the address that was current at order time. If the address is just the current contact detail and history does not matter, Type 1 (overwrite) is fine. The signal interviewers want: you know the types, and you choose by whether the history matters to the analysis — the classic trap is Type 1 overwriting silently rewriting the past, so when in doubt for analytics, Type 2 preserves the truth.",
+          "followups": [
+            "Why does a Type 1 overwrite give you historically wrong reports?",
+            "How does a fact row link to the correct version of a Type 2 dimension?"
+          ]
+        },
+        {
+          "q": "How would you model an e-commerce system for analytics — orders, customers, products?",
+          "tests": "Whether you can apply dimensional modelling to a concrete scenario and reason about grain.",
+          "answer": "I would build a star schema and start by choosing the **grain of the fact table**, because everything follows from it. For order analytics, the most useful grain is usually **one row per order line item** (an order for three products becomes three fact rows) rather than one row per order — because line-item grain lets you analyze by product, quantity, and price, which order-level grain cannot, and you can always aggregate up to order level but not down. So: a **fact_order_items** table with one row per line item, holding the numeric **measures** (quantity, unit price, line total, discount) and **foreign keys** to the dimensions and the event's date. The **dimensions**: **dim_customer** (name, segment, region — a Type 2 SCD if you need historical accuracy on things like their region at order time), **dim_product** (name, category, brand — also potentially Type 2 if products get recategorized), **dim_date** (a standard date dimension so you can group by month, quarter, weekday, holiday easily), and possibly **dim_store/channel**. Degenerate dimensions like the order_id live on the fact for grouping line items back into orders. I would also consider a separate **fact_orders** at order grain for order-level measures (shipping cost, order status) that do not belong at line-item grain — facts at different grains get different tables. The reasoning interviewers want to hear: pick the finest useful grain (line item), put measures on the fact and descriptive context in conformed dimensions, use a date dimension, and handle history in the dimensions with SCD Type 2 where the analysis needs the past to stay correct — and explain *why* line-item grain over order grain, because that grain decision is the heart of the design.",
+          "followups": [
+            "Why choose line-item grain over order grain, and when would order grain be enough?",
+            "What goes in a date dimension, and why not just use the raw date column?"
+          ]
+        },
+        {
+          "q": "What is normalization, and when is denormalization the right choice?",
+          "tests": "Whether you understand the trade-off rather than treating one as always correct.",
+          "answer": "**Normalization** is organizing data to eliminate redundancy — each fact stored once, in one place — through normal forms (up to 3NF for most purposes): you split data into related tables so that, for example, a customer's address is stored once in a customers table rather than repeated on every order. The benefits are **integrity and cheap writes** — no duplicated data means no update anomalies (change the address once, everywhere reflects it) and no inconsistency, which is why transactional (OLTP) systems normalize: they do many small inserts and updates and must keep them consistent. **Denormalization** deliberately reintroduces redundancy — duplicating or pre-joining data — and it is the right choice when **read performance and simplicity matter more than write efficiency and you can manage the redundancy**. The main case is **analytics**: star schemas denormalize dimensions because analytical queries are read-heavy aggregations where joins are expensive and analyst-usability matters, so trading some storage and update complexity for faster, simpler reads is worth it. Other denormalization cases: caching a computed value or a pre-joined view to avoid recomputing it on every read, or storing an aggregate. The cost of denormalization is that the redundant data can drift out of sync (you must update it everywhere, or rebuild it), which is exactly the problem normalization prevents — so denormalized data in analytics is typically **derived and rebuilt** by the pipeline (recomputed from normalized sources) rather than updated in place, which sidesteps the drift. The framing interviewers want: normalize for write-heavy transactional integrity, denormalize for read-heavy analytical performance, and understand denormalization's cost (redundancy and drift) is managed by rebuilding derived data rather than mutating it — so it is a deliberate trade, not a shortcut.",
+          "followups": [
+            "How do you keep denormalized data from drifting out of sync with its source?",
+            "Why do OLTP systems normalize while OLAP systems denormalize — what is different about the workload?"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Pipelines and orchestration",
+      "intro": "Designing pipelines that are correct, re-runnable, and observable. Interviewers want idempotency, failure handling, and the right batch-vs-streaming call.",
+      "questions": [
+        {
+          "q": "What does it mean for a pipeline to be idempotent, and why does it matter so much?",
+          "tests": "Whether you understand the single most important property of a reliable pipeline.",
+          "answer": "An **idempotent** pipeline produces the same correct result no matter how many times it runs — running it twice for the same input gives the same output as running it once, with no duplicates and no double-counting. It matters enormously because pipelines **fail and get re-run** all the time — a task crashes halfway, a schedule fires twice, someone backfills a date range, a retry kicks in — and if the pipeline is not idempotent, each re-run corrupts the data (a load that appends without deduplication doubles the rows; an aggregation that adds to existing totals inflates them). Idempotency is what lets you re-run safely, which is the foundation of reliable operations: you can retry a failed task without fear, backfill a period without cleaning up first, and recover from a partial failure by just running it again. How you achieve it: design loads to be **overwrite or upsert by key**, not blind append — process a partition (say a day) by *replacing* that partition's data rather than adding to it, so re-running a day gives the same result; use **merge/upsert keyed on a business key** so a re-processed record updates rather than duplicates; and make transformations deterministic functions of their input. The framing interviewers want: idempotency means 'safe to re-run', and it is non-negotiable because re-runs are inevitable — a pipeline you cannot safely re-run is one that turns every transient failure into a data-cleanup incident. The classic junior mistake is an append-only load that doubles data on the first retry, and demonstrating you design for re-runnability from the start is a strong signal.",
+          "followups": [
+            "How do you make a load that appends data idempotent?",
+            "Why is 'process by replacing the partition' a common idempotency pattern?"
+          ]
+        },
+        {
+          "q": "How do you decide between batch and streaming for a data pipeline?",
+          "tests": "Whether you can make the batch-vs-streaming call on real requirements rather than reaching for streaming reflexively.",
+          "answer": "The deciding question is **how fresh does the data actually need to be**, weighed against the complexity and cost that freshness demands. **Batch** processes data in scheduled chunks (hourly, daily) — it is simpler to build, test, reason about, and recover (re-run a failed batch), cheaper, and handles large volumes efficiently; it is the right default and covers most analytics, where data being an hour or a day old is perfectly fine. **Streaming** processes events continuously as they arrive, giving **low latency** (seconds), but it is genuinely harder: you deal with out-of-order and late events, exactly-once semantics, stateful processing and windowing, and it is more expensive and harder to debug and recover. So you choose streaming only when the **use case truly requires low latency** — real-time fraud detection, live dashboards that must be current-to-the-second, immediate alerting, recommendations that react to the current session — and batch otherwise. The mistake interviewers watch for is reaching for streaming because it sounds better; the mature answer is 'batch unless a requirement forces streaming', because streaming's complexity is a real, ongoing cost you should only pay when the latency genuinely matters. Mention that it is not always binary — micro-batching (frequent small batches) can get you 'fresh enough' with much of batch's simplicity, and many systems run batch for the bulk and streaming only for the latency-critical slice (the lambda/kappa question). The signal: freshness requirement drives the choice, batch is the simpler default, and streaming's cost is justified by a genuine low-latency need, not by preference.",
+          "followups": [
+            "What specific problems does streaming force you to handle that batch does not?",
+            "What is micro-batching, and when is it a good middle ground?"
+          ]
+        },
+        {
+          "q": "A daily pipeline failed at 2am. Walk me through how it should recover, and how you would design it to recover well.",
+          "tests": "Whether you understand orchestration failure handling and design for recoverability.",
+          "answer": "How it *should* recover depends on how it was designed, which is the real point. In a well-designed pipeline: the orchestrator (Airflow, Dagster) **retries** the failed task automatically a few times with backoff, because many failures are transient (a brief network blip, a temporarily locked resource); if retries exhaust, it **alerts** someone and the downstream tasks that depend on it **do not run** (they wait or are marked upstream-failed), so a partial failure does not propagate half-processed data forward. When a human looks, because the pipeline is **idempotent**, they can simply **re-run** the failed task (or the whole day) once the cause is fixed, without cleaning up partial state — the re-run replaces that partition's data. Designing it to recover well means: **atomic, idempotent tasks** (each task either completes fully or leaves no partial output, and re-running is safe — write to a staging location and swap, or replace-by-partition, so a task that dies halfway does not leave corrupt data); **retries with backoff** for transient errors; **alerting** on final failure with enough context (which task, which date, the error); **dependency management** so downstream tasks wait for upstream success rather than running on missing or partial data; and **backfill support** so you can re-run a range of past dates. The framing interviewers want: recovery is a design property you build in, not something you scramble for at 2am — atomic idempotent tasks plus retries plus proper dependencies mean a failure is a re-run, not an incident. The junior version is a monolithic non-idempotent script where a 2am failure means manually untangling partial state; the senior version is 're-run the task, it is idempotent, done'.",
+          "followups": [
+            "How do you make a task atomic so a mid-task crash leaves no partial data?",
+            "Why should downstream tasks not run when an upstream task fails?"
+          ]
+        },
+        {
+          "q": "What is the difference between ETL and ELT, and why has ELT become common?",
+          "tests": "Whether you understand the shift modern warehouses enabled and its trade-offs.",
+          "answer": "Both move data from sources into a warehouse, differing in *when* the transformation happens. **ETL** (Extract, Transform, Load): extract from sources, transform the data in a separate processing layer (a dedicated ETL tool or engine), then load the *transformed* result into the warehouse — the warehouse only ever sees cleaned, modelled data. **ELT** (Extract, Load, Transform): extract, load the **raw** data into the warehouse first, then transform it *inside* the warehouse using its own compute (SQL, often orchestrated by dbt). ELT became common because **cloud warehouses got cheap, elastic, and powerful** — Snowflake, BigQuery, DuckDB — so it is now efficient to load raw data and transform it with the warehouse's own scalable compute, which was not true when warehouses were expensive and rigid. The advantages of ELT: you keep the **raw data** in the warehouse, so you can re-transform it differently later or debug by comparing raw to transformed (with ETL, if the transform was wrong, the un-transformed data may be gone); transformations are just **SQL in the warehouse** (accessible to analysts, version-controlled and tested with tools like dbt), rather than a separate ETL system; and it **scales** with the warehouse. The trade-offs: ELT loads more (raw) data so storage is higher, and pushing heavy transformation into the warehouse can be costly if not managed (warehouse compute is metered). The framing interviewers want: ELT shifted transformation into the warehouse because cloud warehouse compute made that cheap and flexible, keeping raw data and enabling SQL-based, version-controlled, analyst-friendly transformations — while ETL still fits when you must transform before loading (e.g. to strip sensitive data, or when the target cannot transform, or for heavy processing better done outside the warehouse). It is a shift enabled by infrastructure, with its own cost trade-off, not a strict upgrade.",
+          "followups": [
+            "What do you gain by keeping the raw data in the warehouse under ELT?",
+            "When is ETL (transform before load) still the right choice?"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Storage, warehousing and performance",
+      "intro": "How data is stored and queried at scale. Interviewers want you to understand columnar formats, partitioning, and why a query is slow.",
+      "questions": [
+        {
+          "q": "Why are columnar formats like Parquet used for analytics instead of row-based storage like CSV?",
+          "tests": "Whether you understand the storage layout that underlies all modern analytics performance.",
+          "answer": "Analytical queries and columnar storage are matched to each other. Analytical queries typically **scan many rows but only a few columns** — 'average order amount by month' touches the amount and date columns across millions of rows, not the other twenty columns. **Row-based** storage (CSV, or a traditional row store) lays out all of a row's columns together, so to read just two columns you still read every row's entire contents off disk — hugely wasteful. **Columnar** storage (Parquet, ORC) stores each column's values together, so the query reads *only* the columns it needs, skipping the rest entirely — often a 10x+ reduction in data scanned. That layout enables two more big wins: **compression** is far better because a column holds values of one type and often low cardinality or similar values, which compress tightly (much better than mixed-type rows), reducing both storage and the bytes read; and **predicate/partition pushdown and column statistics** let the engine skip entire chunks (row groups) whose min/max stats show they cannot match the filter, so it reads even less. Parquet also stores the **schema and types**, so there is no parsing ambiguity, unlike CSV. The framing interviewers want: columnar formats read only the needed columns and compress by column, which matches how analytical queries actually access data (few columns, many rows), so they are dramatically faster and cheaper to scan — and since cloud query engines and warehouses charge by data scanned, columnar is directly a cost lever too. Row-based still wins for transactional access (reading or writing whole individual records), which is why OLTP uses row stores and OLAP uses columnar.",
+          "followups": [
+            "Why does columnar data compress so much better than row-based?",
+            "How do column statistics let a query skip data it does not need to read?"
+          ]
+        },
+        {
+          "q": "A query over a large table is slow. How do you investigate and speed it up?",
+          "tests": "Whether you can diagnose query performance methodically rather than randomly adding indexes.",
+          "answer": "Do not guess — read the **query plan** (`EXPLAIN`/`EXPLAIN ANALYZE`), which shows what the engine actually does and where the time and rows go, so you optimize the real bottleneck instead of a suspected one. Look for the usual culprits: a **full table scan** where a filter should have narrowed it (the query is reading far more data than the result needs); the biggest lever in a warehouse is **how much data is scanned**, so check whether **partitioning and clustering** are being used — a query filtering on date should only scan the relevant date partitions (partition pruning), and if it scans everything, the table is not partitioned on the filter column or the query is not written to enable pruning. In a transactional/row database, a **missing index** on the filter or join column forces a scan — add the right index. Other common issues: a **join fan-out** or a bad join order blowing up intermediate row counts; **selecting more columns than needed** (`SELECT *` on a columnar store defeats the point — select only needed columns); an expensive operation like a large sort or a `DISTINCT`/`GROUP BY` on high cardinality; or a function on a filtered column that prevents index/partition use. The method to voice: read the plan, find where the rows and time actually go, and fix that specifically — usually 'reduce data scanned' via partitioning/pruning/column selection in a warehouse, or 'add the right index' in an OLTP database, or 'fix the join' if intermediate results explode. And prefer precomputation for repeated heavy queries (a materialized view or an aggregate table) rather than optimizing the same expensive query forever. The signal interviewers want: EXPLAIN first, optimize the measured bottleneck, and know the warehouse lever (scan less data) differs from the OLTP lever (index the access path).",
+          "followups": [
+            "What is partition pruning, and how do you write a query so it happens?",
+            "Why is 'SELECT *' especially bad on a columnar warehouse?"
+          ]
+        },
+        {
+          "q": "How would you partition a large fact table, and what happens if you get the partition key wrong?",
+          "tests": "Whether you understand partitioning strategy and its failure modes — a real performance-and-cost decision.",
+          "answer": "You partition to let queries **skip data they do not need** — the engine reads only the partitions matching the filter (partition pruning), which is the main lever for performance and cost on a big table. The partition key should be the column(s) most queries **filter on**, and for a fact table that is almost always a **date/time** column (analytics is overwhelmingly time-filtered — 'last month', 'this quarter'), typically partitioned by day or month depending on volume. Getting the key wrong has real costs. **Too granular** (e.g. partitioning by hour, or by a high-cardinality key like customer_id) creates a huge number of small partitions — the 'small files' / too-many-partitions problem — which adds metadata overhead and actually *slows* queries and file operations, because managing thousands of tiny partitions costs more than it saves. **Too coarse** (one giant partition) gives no pruning benefit — every query scans everything. **Wrong column** — partitioning by something queries do not filter on — means pruning never triggers, so you paid the partitioning complexity for nothing while queries still scan the whole table. **Skewed** partitions (one partition far larger than others, e.g. partitioning by a category where 90% of rows share one value) create hotspots that dominate query time. The framing interviewers want: partition on the column queries filter on (usually date), at a granularity that matches query patterns and keeps partition sizes reasonable (not thousands of tiny ones, not a few enormous ones), because the whole point is pruning — and a wrong partition key either fails to prune (no benefit) or over-partitions (net harm). Mention that clustering/sorting within partitions is the secondary lever for the next-most-filtered column.",
+          "followups": [
+            "What is the 'small files' problem and how does over-partitioning cause it?",
+            "How is clustering (or sort order) within a partition different from partitioning?"
+          ]
+        },
+        {
+          "q": "What is the difference between a data warehouse, a data lake, and a lakehouse?",
+          "tests": "Whether you know the storage architectures and their trade-offs — a common conceptual question.",
+          "answer": "They differ in structure, flexibility, and what they optimize for. A **data warehouse** stores **structured, modelled** data optimized for fast SQL analytics — data is cleaned and shaped on the way in (schema-on-write), so queries are fast and reliable, but it is less flexible (everything must fit the schema) and traditionally more expensive, and it does not naturally hold raw or unstructured data. A **data lake** stores **raw data of any kind** — structured, semi-structured, unstructured (logs, images, JSON) — cheaply in object storage, with **schema-on-read** (you impose structure when you query), so it is flexible and cheap and keeps everything, but without governance it becomes a 'data swamp' — hard to query reliably, no guarantees, no transactions, easy to make a mess. A **lakehouse** is the convergence: it puts a **table format** (Apache Iceberg, Delta Lake, Hudi) *on top of* cheap object storage (the lake), adding the things warehouses had and lakes lacked — ACID transactions, schema enforcement and evolution, time travel, and efficient querying — so you get the lake's cheap, flexible, open storage of raw and structured data *with* warehouse-like reliability and performance, queried by engines like Spark, Trino, or DuckDB. The framing interviewers want: warehouse = structured, curated, fast, less flexible; lake = raw, flexible, cheap, needs governance; lakehouse = a table format over the lake that adds ACID/schema/performance so one system serves both raw storage and reliable analytics — which is why it has become the common modern architecture. Mention the lakehouse's appeal is avoiding the old two-system split (raw in the lake, copy the curated subset into a separate warehouse) by making the lake itself reliable enough to be the warehouse.",
+          "followups": [
+            "What does a table format like Iceberg or Delta add to raw files in object storage?",
+            "How does a lakehouse avoid the 'copy the curated data into a separate warehouse' pattern?"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Data quality and trust",
+      "intro": "A data engineer's real product is trustworthy data. Interviewers probe whether you build the checks and handle the incident when the numbers are wrong.",
+      "questions": [
+        {
+          "q": "How do you ensure data quality in a pipeline, and what checks would you add?",
+          "tests": "Whether you treat data quality as engineered assertions, not hope — the core of trustworthy data.",
+          "answer": "Data quality is enforced by **automated checks that gate the pipeline and fail loudly**, because bad data is silent — the pipeline runs and produces plausible, wrong numbers that people act on, which is worse than a visible failure. The checks, at the boundaries where data enters and after each transformation: **schema/type checks** (the expected columns and types are present — an upstream rename or retype should fail, not corrupt downstream); **not-null / completeness** (required fields are populated, and the null rate has not spiked, which flags a broken join or a failed source); **uniqueness** (primary/business keys are actually unique — a duplicate here fans out downstream aggregates); **referential integrity** (foreign keys resolve — orphaned records signal a load-ordering or source problem); **range/value checks** (numbers are plausible, categoricals are in the known set — no negative quantities, no unknown status codes); **volume/anomaly checks** (roughly the expected row count arrived — a 90% drop means an upstream break, a 10x spike means a duplicate load); and **freshness** (the data is recent enough — a silently stale pipeline is a common failure). Tools like **dbt tests** or **Great Expectations** express these as declarative assertions, versioned with the code and run in the pipeline; the key design choice is that failing checks **block** the bad data from propagating (or quarantine it) rather than just logging a warning nobody reads. The framing interviewers want: data quality is engineered — assertions at every boundary, treated as seriously as unit tests, that fail the pipeline so bad data never reaches consumers — because the data engineer's actual deliverable is *trust*, and one silent bad load that reaches a dashboard destroys it. Add monitoring of these checks over time so you catch gradual degradation, not just hard failures.",
+          "followups": [
+            "Why should a failing quality check block the pipeline rather than warn?",
+            "What is the difference between a hard schema check and an anomaly/volume check?"
+          ]
+        },
+        {
+          "q": "A stakeholder says a dashboard number is wrong. How do you investigate?",
+          "tests": "Whether you can trace data lineage and debug a correctness problem end to end — the everyday reality.",
+          "answer": "Treat it as a debugging problem with a clear method, and start by pinning down *what* 'wrong' means before touching anything: get the specific number, what they expected, and why — sometimes it is a **definition mismatch** (they and the dashboard define 'active user' or 'revenue' differently), which is the most common cause and needs no data fix, just alignment on the metric. If it is genuinely a data problem, **trace it backward through the lineage**: the dashboard reads a table, which is built by a transformation, from upstream tables, from source data — walk that chain and find where the number diverges from correct. At each layer check: did the source data arrive complete and correct (compare to the source system if possible)? Did a transformation introduce it — a **join fan-out** double-counting, a filter dropping or including wrong rows, a NULL-handling bug, a timezone or date-boundary issue (a surprisingly common cause of 'the daily number is off'), a **duplicate load**? Did a recent **change** to the pipeline cause it (check what deployed recently — the diff is often the answer)? Use the **data-quality checks and run history** — if a check would have caught it but did not exist, that is the gap. Once found, fix the root cause, **backfill** the corrected data, communicate clearly to the stakeholder what was wrong and for how long (trust depends on transparency), and — critically — **add a check** so that specific problem cannot silently recur. The framing interviewers want: verify the definition first, then trace the lineage layer by layer to localize where correct becomes wrong, fix and backfill, and close the loop with a new quality check — plus the maturity to communicate honestly, because a data engineer's credibility rests on how they handle the moment the numbers are questioned.",
+          "followups": [
+            "Why is a metric-definition mismatch the first thing to rule out?",
+            "After you fix the root cause, why is adding a new data-quality check part of the fix?"
+          ]
+        },
+        {
+          "q": "How would you handle a schema change in an upstream source that you do not control?",
+          "tests": "Whether you build pipelines resilient to the inevitable upstream change — a constant real-world pain.",
+          "answer": "Upstream schemas *will* change without warning — a column renamed, a type changed, a field added or dropped — and the pipeline must handle it safely rather than either crashing on everything or silently corrupting data. The strategy has two parts: **detect** and **contain**. **Detect** with a schema check at ingestion: validate the incoming data's schema against what you expect, so an unexpected change is caught immediately and explicitly — the pipeline fails or alerts *loudly* at the boundary rather than propagating a broken assumption downstream. The judgement is *what to do* on each kind of change: a **new column** you do not use is safe to ignore (do not fail on additive changes — that makes the pipeline brittle); a **dropped or renamed column** you depend on must fail and alert, because continuing would produce wrong data; a **type change** must be caught because it silently corrupts (a number becoming a string, a date format changing). **Contain** by design: land the **raw** data first (ELT-style) so a change does not lose information and you can adapt the transform without re-extracting; decouple your model from the source with a **staging/mapping layer** (a view or dbt staging model that maps source columns to your stable internal names) so an upstream rename is a one-line fix in the mapping, not a change rippling through every downstream model; and version your expected schema. Longer term, if the source is within the org, push for a **data contract** — an agreed, versioned schema the producer commits to, with a deprecation process for changes — which turns 'surprise breakage' into 'notified, versioned change'. The framing interviewers want: detect schema changes at the boundary and fail loudly on breaking ones while tolerating additive ones, insulate downstream with a staging/mapping layer and raw storage so changes are localized, and ideally establish data contracts — because a pipeline that assumes the upstream schema is stable is one upstream deploy away from breaking or, worse, silently lying.",
+          "followups": [
+            "Why tolerate an added column but fail on a dropped one?",
+            "What is a data contract, and how does it change the upstream-change problem?"
+          ]
+        },
+        {
+          "q": "What is data lineage, and why does it matter for a data platform?",
+          "tests": "Whether you understand lineage and its role in trust, debugging, and impact analysis.",
+          "answer": "**Data lineage** is the map of where data comes from and how it flows and transforms — for any table or column, which sources and transformations produced it, and which downstream tables, dashboards, and models depend on it. It matters for several concrete reasons that come up constantly. **Debugging and root-cause** (the 'wrong number' problem): lineage lets you trace a bad value backward through its dependencies to find where it went wrong, instead of guessing — without lineage, debugging a data issue across a web of tables is archaeology. **Impact analysis** (forward): before you change or a source breaks a table, lineage tells you what depends on it — which dashboards and models will be affected — so you can assess blast radius and warn consumers, rather than discovering the breakage when someone complains. **Trust and governance**: consumers can see where a number came from and whether its sources are reliable, and you can trace sensitive data (PII) through the system for compliance ('where does this personal data flow, who can access it') — essential for regulations like GDPR. **Understanding the system**: in a large platform with hundreds of tables, lineage is how new engineers and analysts understand what exists and how it connects. Where it comes from: tools like dbt generate lineage automatically from the model dependencies (the DAG), and dedicated catalogs (DataHub, OpenMetadata) capture it across the whole platform. The framing interviewers want: lineage is the dependency graph of your data, and it underpins debugging (trace backward), impact analysis (trace forward), trust (provenance), and compliance (track sensitive data) — so a mature data platform makes lineage visible, because at scale you cannot safely operate, debug, or govern data whose flow you cannot see.",
+          "followups": [
+            "How would lineage help you assess the impact of deprecating a source table?",
+            "How does a tool like dbt produce lineage automatically?"
+          ]
+        }
+      ]
+    }
+  ],
+  "task": {
+    "title": "Take-home: build a tested, re-runnable data pipeline",
+    "brief": "Data take-homes and design rounds keep asking for the same thing: a pipeline that ingests data, transforms it into a clean model, is safe to re-run, and is tested for quality. The ThavionAI **Lakehouse pipeline**, **Real-time pipeline with Kafka**, and **Data platform with IaC and CI** projects build exactly these — medallion layers, dbt models with tests, streaming, and CI. Do them and use the repository as your evidence. Below is what a strong pipeline demonstrates.",
+    "checklist": [
+      "The pipeline is idempotent — re-running it (a retry, a backfill) produces the same result with no duplicates, via overwrite/upsert-by-key, not blind append.",
+      "Data is modelled deliberately — clear layers (raw → cleaned → marts), a stated grain for each table, and dimensional modelling where it is analytical.",
+      "Data-quality checks gate the pipeline — schema, not-null, uniqueness, referential integrity, volume/anomaly — and they fail loudly rather than warn.",
+      "Transformations are version-controlled and tested (dbt or equivalent), and the pipeline is orchestrated with retries, dependencies, and alerting on failure.",
+      "The storage and query choices are justified — columnar format, partitioning on the columns queries filter on — and you can explain the batch-vs-streaming decision.",
+      "Lineage is visible (dbt's DAG or documentation), so a consumer can trace a number to its source.",
+      "A README explains the model, the grain decisions, the quality guarantees, and how to run and re-run it safely."
+    ]
+  },
+  "standout": [
+    "Do not be rusty on SQL. The SQL round filters hard and fast — practise window functions, joins with correct cardinality, and NULL handling until they are automatic, because a strong candidate who fumbles SQL still often fails.",
+    "Nail the grain first, always. In any modelling question, stating 'one row per ___' before designing shows you think like a data engineer; skipping it is where every modelling mistake begins.",
+    "Design for re-runnability from the start. Mentioning idempotency and safe backfills unprompted signals you have operated pipelines and felt the pain of the append-only load that doubled the data.",
+    "Treat data quality as your actual product. Framing your job as 'delivering trustworthy data' — with checks that fail loudly and a story about a quality incident — is the mindset that separates senior data engineers.",
+    "Choose boringly and justify it. 'Batch unless a requirement forces streaming', 'columnar and partitioned by date', 'managed warehouse' — reaching for the simpler, proven option and explaining why beats reaching for the exciting one."
+  ],
+  "resources": [
+    {"label": "Data Engineering track", "href": "../../education.html#data", "note": "the 16 lessons behind every answer — SQL, modelling, storage, orchestration, streaming, quality"},
+    {"label": "Project: Lakehouse pipeline", "href": "../projects/proj-de-lakehouse.html", "note": "the medallion pipeline, dbt models and tests the take-home describes"},
+    {"label": "Project: Real-time pipeline with Kafka", "href": "../projects/proj-de-streaming.html", "note": "the streaming, windowing and idempotency evidence for the batch-vs-streaming questions"},
+    {"label": "Project: Data platform with IaC and CI", "href": "../projects/proj-de-platform.html", "note": "the warehouse, environments, CI and cost story for the platform questions"}
+  ]
+}

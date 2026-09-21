@@ -1,0 +1,252 @@
+{
+  "id": "kit-cloud",
+  "role": "Cloud Engineer",
+  "tracks": ["devops", "certs"],
+  "summary": "Cloud engineering interviews test whether you can design, secure, and pay for infrastructure on a cloud provider — the networking, identity, resilience, cost, and migration decisions that come up whether you work on AWS, Azure, or GCP. These questions and model answers are provider-aware but concept-first, because interviewers care that you understand VPCs and IAM and cost drivers, not that you memorised a service name. Pair this with the certification track for the exam-level depth.",
+  "rounds": [
+    {"name": "Phone screen", "what": "Which clouds you have used, what you have built, and a few fundamentals (what is a VPC, how does IAM work). Concrete experience beats a certification list.", "tip": "Have one architecture you built or operated ready to describe end to end."},
+    {"name": "Technical / scenario", "what": "A design or troubleshooting scenario: 'set up secure networking for a three-tier app', 'this instance can't reach the internet — why'. They want the reasoning and the trade-offs.", "tip": "Reason from requirements and the layered model (route table, security group, NACL) rather than reciting service features."},
+    {"name": "Architecture / systems design", "what": "Design a cloud architecture for resilience, scale, and cost: 'design a highly available web application on AWS'. No single right answer; they grade trade-offs.", "tip": "Clarify the availability target and budget first, then design to them — do not over-engineer by default."},
+    {"name": "Security / cost review", "what": "Given an architecture, find the security holes and the cost waste. Least privilege, encryption, and knowing what actually costs money on the bill.", "tip": "Name the expensive resources (NAT, data transfer, idle capacity) and the common security misconfigurations (public buckets, broad IAM)."},
+    {"name": "Behavioural", "what": "How you handle a cloud incident, a cost overrun, or a migration. Ownership and calm under a production or billing surprise.", "tip": "Have a story about a real cost or reliability problem and what you changed structurally to prevent a repeat."}
+  ],
+  "sections": [
+    {
+      "title": "Networking",
+      "intro": "Cloud networking is the foundation everything else sits on, and it is where the 'why can't this reach that' questions live. Interviewers want the layered mental model, not memorised defaults.",
+      "questions": [
+        {
+          "q": "What is a VPC, and how do public and private subnets differ?",
+          "tests": "The foundational cloud networking model — a vague answer here is disqualifying.",
+          "answer": "A **VPC** (Virtual Private Cloud) is your own isolated virtual network in the cloud, with a private IP range you choose (a CIDR block), divided into **subnets** that each live in one availability zone. The public/private distinction is entirely about **routing**, not a checkbox: a **public subnet** has a route table with a route to an **Internet Gateway**, so resources in it can be reached from and reach the internet directly; a **private subnet** has no such route, so its resources are not directly reachable from the internet. Private-subnet resources reach *out* to the internet (for updates, API calls) through a **NAT Gateway** that lives in a public subnet — outbound only, so nothing can initiate a connection inward. The standard pattern: load balancers and NAT gateways in public subnets; application servers and databases in private subnets, never directly exposed. The precision that signals real understanding: 'public' and 'private' are defined by the route table's path to an internet gateway, and a resource with a public IP in a subnet with no IGW route still cannot reach the internet.",
+          "followups": [
+            "What makes a subnet public — the exact thing?",
+            "How does a private-subnet instance download OS updates?"
+          ]
+        },
+        {
+          "q": "An EC2 instance in a private subnet cannot reach an external API. Walk me through the layers you would check.",
+          "tests": "Whether you can debug cloud networking systematically through the layers, a bread-and-butter cloud task.",
+          "answer": "Cloud reachability is a stack of independent controls, and all must allow the traffic, so I check them in order. **Route table**: does the private subnet have a route for `0.0.0.0/0` pointing at a **NAT Gateway** (or NAT instance)? No route means no outbound internet, full stop — this is the most common cause. **The NAT itself**: is it in a *public* subnet with a route to the Internet Gateway, and healthy? A NAT in a private subnet or a missing IGW route breaks it. **Security group** on the instance: does its outbound (egress) rule allow the traffic? Security groups are stateful, so allowing outbound is enough for the response to return. **Network ACL** on the subnet: NACLs are stateless, so both the outbound rule *and* the inbound rule for the return traffic (ephemeral ports) must allow it — a classic gotcha. **DNS**: can the instance resolve the API's hostname (is `enableDnsSupport` on)? And finally the destination — is it actually reachable, is there an endpoint policy or firewall in the way? The method interviewers want: reachability is route table AND security group AND NACL AND DNS, checked layer by layer, because any one of them silently blocks and 'it's the security group' is only right a fraction of the time.",
+          "followups": [
+            "Why do NACLs require you to allow the return traffic explicitly but security groups do not?",
+            "How would a VPC endpoint change this for an AWS-service API?"
+          ]
+        },
+        {
+          "q": "How would you connect a cloud VPC to an on-premises data center securely?",
+          "tests": "Whether you know the hybrid-connectivity options and their trade-offs — a common enterprise scenario.",
+          "answer": "The two main options trade cost against reliability and bandwidth. A **VPN** (site-to-site) runs an encrypted tunnel over the public internet between your on-prem network and the VPC — quick to set up, cheap, but it rides the public internet so bandwidth and latency are variable and it depends on internet reliability. A **dedicated connection** (AWS Direct Connect, Azure ExpressRoute) is a private physical link from your data center to the cloud provider — consistent bandwidth and latency, more secure and reliable (does not touch the public internet), but expensive and slow to provision (weeks, physical cross-connects). Common practice is both: Direct Connect for the primary path with a VPN as encrypted backup. Details to mention: you route between the networks (BGP for dynamic routing on the dedicated link), ensure the IP ranges do not overlap, and for connecting multiple VPCs and on-prem together at scale you use a **Transit Gateway** as a hub rather than a mesh of peering connections. The trade-off framing: VPN for speed-to-set-up and cost, dedicated for consistent performance and reliability, often combined — chosen by the bandwidth needs, the latency sensitivity, and the budget.",
+          "followups": [
+            "When is Direct Connect worth the cost and lead time over a VPN?",
+            "Why use a Transit Gateway instead of peering many VPCs together?"
+          ]
+        },
+        {
+          "q": "What is a security group versus a network ACL, and when would you use each?",
+          "tests": "Whether you know the two firewall layers precisely — stateful versus stateless is a classic exam and interview point.",
+          "answer": "Both are virtual firewalls, but they operate at different layers and behave differently. A **security group** is attached to an instance (really to its network interface) and is **stateful** — if you allow an inbound request, the response is automatically allowed out, and vice versa, so you only write rules for the direction you initiate. Security groups only have *allow* rules (everything not allowed is denied) and are the primary, everyday control — you use them to say 'this app tier accepts traffic only from the load balancer's security group'. A **network ACL** operates at the **subnet** level and is **stateless** — it evaluates every packet independently, so you must explicitly allow both the inbound rule *and* the return traffic on ephemeral ports, and it supports both allow and deny rules, evaluated in numbered order. In practice: use **security groups for almost everything** (they are stateful, easier, and can reference other security groups), and reach for **NACLs as a coarse subnet-level backstop** — for example, to explicitly deny a range of IPs across a whole subnet, or as defense-in-depth. The gotcha interviewers listen for: because NACLs are stateless, a common bug is allowing inbound traffic but forgetting to allow the ephemeral-port return traffic, which silently breaks connections. Security groups do not have that trap.",
+          "followups": [
+            "Why can a stateless NACL silently break connections that a security group would not?",
+            "Can a security group reference another security group, and why is that useful?"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Identity and access",
+      "intro": "IAM is where most serious cloud breaches begin. Interviewers probe whether least privilege is a reflex and whether you know how to avoid long-lived credentials.",
+      "questions": [
+        {
+          "q": "How does cloud IAM work, and what does least privilege mean in practice?",
+          "tests": "Whether you understand the identity model and can apply least privilege concretely, not as a slogan.",
+          "answer": "Cloud IAM controls **who** (a principal — a user, a role, a service) can do **what** (actions) on **which** resources, expressed as policies that allow or deny. The building blocks: **users** (long-lived identities, usually for humans), **roles** (assumable identities with temporary credentials, the preferred way to grant access to services and cross-account), **policies** (the JSON documents granting permissions), and **groups** (to attach policies to many users). **Least privilege** in practice means granting exactly the permissions a principal needs and no more: scope actions narrowly (`s3:GetObject`, not `s3:*`), scope resources to specific ARNs (this bucket, not all buckets), and add conditions where useful (only from this VPC, only with encryption). Concretely I would start from zero and add permissions as needed rather than granting broad access and trimming later (which never happens), prefer **roles over users** so credentials are temporary and there is no key to leak, and use tools like access analyzers to find and remove unused permissions. The anti-patterns to name: wildcard `*:*` policies, long-lived access keys, and shared credentials — each is a common breach vector. The signal: least privilege is a default posture (deny by default, grant the minimum), not a cleanup task.",
+          "followups": [
+            "Why are roles preferred over users with access keys?",
+            "How would you find and remove permissions a role is not actually using?"
+          ]
+        },
+        {
+          "q": "How would you give a CI/CD pipeline access to deploy to your cloud without storing long-lived credentials?",
+          "tests": "Whether you know OIDC federation — the current best practice that separates modern from dated answers.",
+          "answer": "The modern answer is **OIDC federation** (workload identity), which eliminates the stored key entirely. Instead of putting a long-lived cloud access key in the CI system's secrets — which can leak, does not rotate, and grants standing access — you set up a trust relationship: the CI provider (GitHub Actions, GitLab) issues a short-lived **OIDC token** identifying the workflow, and the cloud is configured to trust that identity provider and let a specific workflow **assume a role** in exchange for the token, receiving temporary credentials that live minutes. The security wins: there is no secret to leak because none is stored; the credentials are short-lived so a leaked one expires almost immediately; and the trust is scoped precisely — you can require the token to come from a specific repository and branch, so only *your* pipeline on *main* can assume the deploy role, not a fork's PR. Compared to the old way (a stored access key with broad permissions), this is dramatically safer and is what interviewers listen for as evidence you are current. Mention scoping the assumable role to least privilege and restricting the trust condition tightly (repo + ref), because a loosely-scoped OIDC trust is its own hole.",
+          "followups": [
+            "How do you stop a fork's pull request from assuming your deploy role?",
+            "What is the concrete risk of a stored long-lived access key in CI?"
+          ]
+        },
+        {
+          "q": "How do you structure accounts and permissions for an organization with many teams and environments?",
+          "tests": "Whether you understand multi-account strategy and blast-radius isolation at organizational scale.",
+          "answer": "The prevailing best practice is **multiple accounts**, not one big account with everything in it, organised under an organization (AWS Organizations, Azure management groups). Typically an account per environment per team or per workload — at minimum separating **prod from non-prod**, often further by team or business unit. The reasons: **blast-radius isolation** (a mistake, a compromise, or a runaway cost in a dev account cannot touch prod), clean **security boundaries** (prod access is separate and tightly controlled), **cost attribution** (each account's bill is that team's), and independent **limits/quotas**. Governance is applied top-down: **Service Control Policies** (or Azure policies) set organization-wide guardrails that no account can override — 'no one can disable logging', 'only these regions', 'no public S3' — while within each account teams get autonomy under those guardrails. Identity is centralised (SSO / an identity provider) with roles assumed into each account, so you do not have separate users per account. The framing that signals maturity: isolation by account is the primary security and blast-radius control in the cloud, with centralized identity and org-wide policy guardrails on top — versus the naive 'one account, separate with IAM and tags', which shares a blast radius and is far easier to get wrong.",
+          "followups": [
+            "What is a Service Control Policy and how is it different from an IAM policy?",
+            "Why separate prod into its own account rather than just using IAM within one account?"
+          ]
+        },
+        {
+          "q": "How should encryption be handled in the cloud — at rest and in transit — and who manages the keys?",
+          "tests": "Whether you understand encryption as a default posture and know the key-management trade-offs.",
+          "answer": "Encryption should be the default, both **at rest** and **in transit**, and most clouds now make at-rest encryption easy or on-by-default, so the interesting part is key management. **In transit**: TLS everywhere — between users and your load balancer, and ideally between internal services too; terminate TLS at the edge (load balancer or CDN) with a managed certificate, and do not send anything sensitive in the clear even inside the VPC for defense-in-depth. **At rest**: enable encryption on storage (disks, object storage, databases, backups, snapshots) — it is cheap or free and turns a stolen disk or a leaked snapshot into useless ciphertext. The **key management** choice is the nuance: cloud **provider-managed keys** (the default) are simplest — the provider handles rotation and storage, and it is fine for most cases; **customer-managed keys** in a KMS give you control over rotation, access policy (you can revoke a key to instantly render data unreadable), and an audit trail of every key use, which you want for sensitive or regulated data; **customer-supplied / external keys (HYOK/BYOK)** go further for the highest compliance needs, at more operational burden. The framing: encrypt everything by default (the cost of *not* is a headline breach), use TLS in transit, and choose the key-management level by how much control and auditability the data's sensitivity demands — provider-managed for most, customer-managed KMS keys for the sensitive and regulated.",
+          "followups": [
+            "What does using a customer-managed KMS key give you that a provider-managed key does not?",
+            "Why encrypt data in transit even inside your own VPC?"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Resilience and architecture",
+      "intro": "Designing to survive failure and scale with demand. Interviewers want failure modes named and the availability/cost trade-off made deliberately.",
+      "questions": [
+        {
+          "q": "Design a highly available web application on a cloud provider. What are the components?",
+          "tests": "Whether you can assemble the standard resilient architecture and justify each piece.",
+          "answer": "The canonical design spreads every tier across at least two availability zones so no single AZ failure takes it down. Front to back: **DNS** (Route 53 / Azure DNS) resolving to a **load balancer** (multi-AZ by design) that health-checks and spreads traffic; an **auto-scaling group of stateless application instances** across two or more AZs, sized with headroom so losing one AZ still serves peak; a **managed database** with a **multi-AZ / synchronous standby** for automatic failover on the same endpoint (so the app does not reconfigure), plus read replicas if reads need scaling; **object storage** (S3 / Blob) for static assets, which is already multi-AZ and highly durable; and a **CDN** (CloudFront) in front for global latency and origin offload. Cross-cutting: everything defined as infrastructure-as-code so it is reproducible, secrets from a secret manager, and monitoring/alerting on the golden signals. The trade-offs to name unprompted: multi-AZ costs more (idle standby capacity, you cannot run at 100%) and cross-AZ traffic adds latency and data-transfer cost; three AZs or multi-region buys more resilience at more cost and complexity, justified only if the availability target demands it. Always ask the target first — designing for five-nines when the business needs three is over-engineering.",
+          "followups": [
+            "Why can't you run your two AZs at full utilization?",
+            "When would you go multi-region, and what does it cost you in complexity?"
+          ]
+        },
+        {
+          "q": "What is the difference between vertical and horizontal scaling, and when do you use each in the cloud?",
+          "tests": "Whether you understand the two scaling axes and the cloud's bias toward horizontal.",
+          "answer": "**Vertical scaling** (scaling up) means a bigger machine — more CPU/RAM on one instance; **horizontal scaling** (scaling out) means more machines behind a load balancer. Vertical is simple (no code changes, no distribution) and sometimes necessary (a single database primary you cannot easily shard scales up), but it has a hard ceiling (the biggest instance available), usually requires downtime to resize, and the one big box is a single point of failure. Horizontal has effectively no ceiling, adds redundancy (many instances, lose one and continue), and enables autoscaling to match demand — but it requires the workload to be **stateless** (or state externalised to a shared store) so any instance can handle any request, and it adds the complexity of load balancing and distribution. The cloud strongly favours horizontal for these reasons — it is how you get elasticity and resilience — so the default answer for an app tier is 'scale out with autoscaling'. Vertical is the answer when the workload cannot be distributed (a stateful single-writer database, at least until you shard) or when a quick capacity bump is simpler than re-architecting. The judgement: prefer horizontal for anything you can make stateless; reach for vertical when statefulness or simplicity forces it, and treat the database as the tier where this gets hard.",
+          "followups": [
+            "Why does horizontal scaling require the workload to be stateless?",
+            "Which tier is usually the hardest to scale horizontally, and why?"
+          ]
+        },
+        {
+          "q": "What is the difference between reliability provided by high availability versus by disaster recovery?",
+          "tests": "Whether you distinguish surviving a component failure from surviving a region-scale disaster — a nuance the strongest candidates get.",
+          "answer": "They address different scales of failure. **High availability** is about surviving *component or AZ failures* automatically and with little or no downtime — redundant instances across AZs, a multi-AZ database that fails over in a minute — so the service stays up through the everyday failures (a bad instance, an AZ outage). **Disaster recovery** is about surviving a *larger, rarer catastrophe* — an entire region going down, data corruption, a ransomware event — and is measured by two objectives: **RTO** (Recovery Time Objective — how long until you are back) and **RPO** (Recovery Point Objective — how much data you can afford to lose). DR strategies trade cost against RTO/RPO: **backup and restore** (cheap, slow — hours to recover, RPO of the last backup), **pilot light** (a minimal standby in another region you scale up), **warm standby** (a scaled-down running copy), and **multi-region active-active** (near-zero RTO/RPO, most expensive and complex). The distinction interviewers reward: HA keeps you running through the failures you expect; DR is your plan for the disaster you hope never happens, chosen by how much downtime and data loss the business can tolerate versus what it will pay. And the point most people miss: **backups are not DR until you have tested restoring them** — an untested backup is a guess.",
+          "followups": [
+            "What do RTO and RPO mean, and how do they drive the DR strategy?",
+            "Why is an untested backup not a real disaster-recovery plan?"
+          ]
+        },
+        {
+          "q": "How do you decide between a managed service and running something yourself on VMs — say a managed database versus self-hosting one?",
+          "tests": "Whether you can reason about the operational-burden trade-off rather than reflexively picking one.",
+          "answer": "The trade-off is **operational burden and expertise versus control and (sometimes) cost**. A **managed service** (RDS, a managed Kubernetes control plane, a managed queue) hands the provider the undifferentiated heavy lifting — patching, backups, failover, replication, scaling, high availability — so your team does not build or operate it, and you get proven reliability features (multi-AZ failover, automated backups) essentially for free. The costs: you pay a premium, you have less control (limited configuration, the provider's version cadence, sometimes no root access), and you accept some lock-in. **Self-hosting** on VMs gives full control and can be cheaper at scale or for unusual configurations, but you now own everything — patching, backups, HA, on-call for it — which needs real expertise and time that is often more expensive than the managed premium once you count the engineering hours and the risk of getting HA wrong. The default should be **managed unless there is a specific reason not to**, because the managed service's reliability engineering is very hard to match and your team's time is better spent on the product than on operating a database. Reasons to self-host: a requirement the managed service cannot meet (a specific version, extension, or configuration), a scale where the premium is large and you have the expertise, or an air-gapped/compliance constraint. The maturity signal: 'managed by default, self-host when there is a concrete, justified reason' — and honesty that self-hosting's real cost is the ongoing operational burden, which teams routinely underestimate.",
+          "followups": [
+            "What does a managed database give you that is genuinely hard to replicate yourself?",
+            "What is a legitimate reason to self-host despite the operational burden?"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Cost and operations",
+      "intro": "Someone pays the cloud bill, and cloud engineers are increasingly judged on it. Interviewers want you to know what actually costs money and how to control it without a fire drill.",
+      "questions": [
+        {
+          "q": "A cloud bill has grown unexpectedly. How do you find where the money is going and bring it down?",
+          "tests": "Whether you can approach cost as an engineering problem with data, not guesswork.",
+          "answer": "Start with data, not intuition — cloud bills are rarely where you guess. Use the cost tooling (Cost Explorer, Azure Cost Management) to **break the bill down by service, then by resource, by tag, and by account** to find the biggest movers and what changed. The usual culprits in rough order: **idle or oversized resources** (instances running at 5% utilization, dev environments left on overnight and weekends, unattached disks and old snapshots, unused load balancers); **data transfer** (cross-AZ, cross-region, and egress to the internet — often a surprising line item people forget is metered); **storage that was never cleaned up** (old backups, logs with no retention, objects that should be in a cheaper tier); and **over-provisioned managed services** (a database class far bigger than needed). Bringing it down: **right-size** based on actual utilization, **turn off** non-prod outside working hours, apply **storage lifecycle** rules to tier and expire data, **commit** to Savings Plans / Reserved Instances for steady baseline load and use **Spot** for interruptible work, and set **budgets and alerts** so the next surprise is caught early. The framing that signals FinOps maturity: attribute cost (tag everything, so you know who owns each dollar), find the biggest waste first (do not micro-optimize a $5 line while a $5000 one idles), and put guardrails in place so it does not recur — cost is a continuous engineering practice, not a one-off cleanup.",
+          "followups": [
+            "Why is data transfer a commonly overlooked cost, and how do you reduce it?",
+            "When do Reserved Instances / Savings Plans make sense versus Spot?"
+          ]
+        },
+        {
+          "q": "What is the difference between Reserved Instances / Savings Plans, On-Demand, and Spot pricing?",
+          "tests": "Whether you understand the pricing models well enough to match them to workloads — direct cost impact.",
+          "answer": "They trade commitment and interruption risk for price. **On-Demand** is the default: pay per hour/second with no commitment, maximum flexibility, highest price — right for unpredictable or short-lived workloads and for the variable part of your capacity. **Reserved Instances / Savings Plans** are a **commitment** (1 or 3 years) to a certain usage in exchange for a large discount (up to ~70%) — right for your **steady baseline** load that you know you will run continuously; you are pre-paying for capacity you are certain to use, so it only saves money if the utilization is actually there. **Spot** is spare capacity sold at a deep discount (up to ~90% off) with the catch that the provider can **reclaim it with little notice** — right for **interruptible, fault-tolerant** workloads (batch processing, CI, stateless workers behind a queue, anything that can checkpoint and resume) but wrong for anything that cannot tolerate a sudden termination (a stateful database, a long job with no checkpointing). The strategy interviewers want: layer them — Reserved/Savings Plans for the predictable baseline, On-Demand for the variable middle, Spot for the interruptible batch — so you pay the lowest sustainable price for each kind of workload rather than On-Demand for everything.",
+          "followups": [
+            "What kind of workload is a bad fit for Spot, and why?",
+            "How do you decide how much to commit with a Savings Plan without over-committing?"
+          ]
+        },
+        {
+          "q": "A team wants to migrate a monolithic application to the cloud. How would you approach it?",
+          "tests": "Whether you know migration strategies and can pick pragmatically rather than reflexively rewriting.",
+          "answer": "Start by resisting the urge to rewrite — the fastest way to fail a migration is to try to re-architect everything at once. The standard framework is the **migration strategies (the 'R's)**: **Rehost** ('lift and shift' — move the app to cloud VMs with minimal change; fast, low-risk, captures cloud benefits like elasticity and managed infrastructure without a rewrite); **Replatform** ('lift and reshape' — small optimizations, like moving the database to a managed service (RDS) or containerizing, without changing the core app); **Refactor/Re-architect** (rewrite for cloud-native — microservices, serverless — highest value but highest cost and risk); plus **Repurchase** (move to a SaaS equivalent), **Retire** (turn off what is unused), and **Retain** (leave some things on-prem for now). The pragmatic approach: **assess** the application portfolio first (dependencies, what is actually used), then choose per-application — often **rehost or replatform first** to get to the cloud quickly and safely, then refactor the pieces that most benefit *after* you are there and have learned the environment, rather than trying to modernise during the move. Do it **incrementally** (a pilot, then waves), keep a rollback path, and watch cost (a lifted-and-shifted app can be expensive until optimized). The maturity signal: migration strategy is chosen per-workload by value and risk, and 'lift and shift then improve' beats 'rewrite everything' for most real portfolios because it de-risks the move and lets you modernise deliberately.",
+          "followups": [
+            "When is a straight lift-and-shift the right call over refactoring?",
+            "Why can a lifted-and-shifted app cost more in the cloud until it is optimized?"
+          ]
+        },
+        {
+          "q": "How would you set up monitoring and alerting for cloud infrastructure so problems and cost surprises are caught early?",
+          "tests": "Whether you treat observability and cost governance as things you build in, not react to.",
+          "answer": "You build the feedback loops in from the start, covering both operational health and cost, because both fail silently otherwise. For **operational health**: collect metrics, logs, and (ideally) traces into the cloud's monitoring stack (CloudWatch, Azure Monitor) or a shared observability platform, and alert on **symptoms users feel** — availability and latency of the services, plus resource saturation as a leading indicator — rather than on every raw metric, so the on-call gets actionable pages, not noise. Set up **health checks** on load balancers and **dashboards** for the golden signals. For **cost**: this is where cloud specifically bites, so set **budgets with alerts** (notify at, say, 50/80/100% of the expected spend) and **anomaly detection** on the bill, tag resources so cost is **attributable** to teams, and review spend regularly — a cost alert is the difference between finding a runaway resource in a day versus at the end of the month. Cross-cutting good practice: enable the **audit log** (CloudTrail / activity log) so you have a record of who changed what (essential for both security and debugging a 'what changed' incident), and treat the monitoring/alerting config itself as infrastructure-as-code so it is consistent and version-controlled. The framing: you cannot operate or afford what you cannot see, so observability and cost governance are set up *with* the infrastructure, with actionable alerts on both axes — problems and dollars — caught early rather than discovered late.",
+          "followups": [
+            "Why alert on symptoms rather than on every resource metric?",
+            "Why is an audit log (CloudTrail / activity log) valuable for both security and debugging?"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Storage, data and serverless",
+      "intro": "The services layer: object versus block storage, database choices, and when serverless is the right tool. Interviewers want fit-for-purpose reasoning, not a favourite.",
+      "questions": [
+        {
+          "q": "What is the difference between object storage, block storage, and file storage, and when do you use each?",
+          "tests": "Whether you know the storage primitives and match them to workloads — a foundational cloud distinction.",
+          "answer": "They are different access models for different jobs. **Object storage** (S3, Azure Blob) stores whole objects with metadata in a flat namespace, accessed over HTTP APIs — massively scalable, highly durable (many nines), cheap, but not a filesystem and not low-latency random access. Use it for static assets, backups, data lakes, logs, media — anything you write and read as whole files at scale. **Block storage** (EBS, Azure Disk) presents raw block devices you attach to a single instance and format with a filesystem — low latency, high performance, but tied to one instance at a time and one AZ. Use it as the boot disk and the fast local storage for a database or an application. **File storage** (EFS, Azure Files) is a network filesystem (NFS/SMB) that **many** instances can mount at once, sharing files — more expensive than the others but solves shared-access. Use it when multiple servers need the same files (shared content, a legacy app expecting a POSIX filesystem). The fit-for-purpose framing interviewers want: object for scale-out unstructured data accessed by API, block for a single instance's fast disk, file for shared POSIX access across instances — and the common mistake is trying to use one where another fits (e.g. treating object storage like a filesystem, or scaling block storage where object storage belonged).",
+          "followups": [
+            "Why can't you attach one block volume to many instances the way you mount a file share?",
+            "Why is object storage a bad choice for a database's data files?"
+          ]
+        },
+        {
+          "q": "How do you choose between a relational database and a NoSQL database in the cloud?",
+          "tests": "Whether you can match the data model to the workload rather than defaulting to one.",
+          "answer": "Match the database to the data and access pattern, not to fashion. **Relational** (Postgres, MySQL, managed as RDS/Aurora/Azure SQL) fits when you have **structured data with relationships**, need **strong consistency and transactions** (ACID), run **flexible ad-hoc queries and joins**, and the scale fits what a well-provisioned primary (plus read replicas) handles — which is most applications. It is the safe default because SQL, transactions, and joins are powerful and well understood. **NoSQL** covers several models for cases relational struggles with: **key-value / document** stores (DynamoDB, Cosmos DB, MongoDB) for **massive scale with simple access patterns** — you know how you will query the data (by key), you need predictable single-digit-millisecond latency at huge scale and horizontal partitioning, and you can live without joins and with eventual consistency; **wide-column** for time-series and huge write volumes; **graph** for relationship-heavy traversals. The decision drivers to state: is the data structured and relational (relational) or does it need to scale horizontally beyond one primary with known access patterns (NoSQL)? Do you need joins and transactions (relational) or extreme scale and flexible schema (NoSQL)? The nuance: NoSQL trades away joins, ad-hoc querying, and often strong consistency to buy horizontal scale, so it wins when scale is the binding constraint and the access pattern is known — but choosing it prematurely (before you have a scale relational cannot meet) usually costs you the querying flexibility you did not know you needed. Default relational; reach for NoSQL when the scale or access pattern specifically demands it.",
+          "followups": [
+            "What do you give up by choosing NoSQL, and when is that trade worth it?",
+            "Why is 'we might need to scale someday' a weak reason to start with NoSQL?"
+          ]
+        },
+        {
+          "q": "When is serverless (functions like Lambda) a good fit, and when is it the wrong choice?",
+          "tests": "Whether you understand serverless trade-offs beyond the hype — the cost and latency characteristics that decide fit.",
+          "answer": "Serverless functions run your code on demand with no servers to manage, scaling automatically to zero and up, billed per invocation and execution time. **Good fit**: **event-driven and spiky** workloads — reacting to a file upload, a queue message, an API call, a scheduled job — where you pay nothing when idle and it scales to handle bursts without provisioning; **glue** between services; and **variable or unpredictable load** where paying per-request beats keeping servers warm. The economics shine when traffic is intermittent, because you are not paying for idle capacity. **Wrong choice**: **steady, high-volume** workloads — at constant heavy load, per-invocation pricing becomes *more* expensive than a right-sized always-on instance, so a busy service is often cheaper on containers/VMs; **latency-sensitive** paths that cannot tolerate **cold starts** (the delay when a function spins up from idle); **long-running or heavy compute** (functions have execution-time and resource limits); and workloads needing persistent connections or local state (functions are stateless and ephemeral). Other considerations: vendor lock-in is higher, and debugging/observability across many small functions is harder. The judgement interviewers want: serverless is excellent for event-driven, spiky, and low-to-variable-traffic work where scale-to-zero and no-ops pay off, and a poor fit for steady high-volume, latency-critical, or long-running workloads where its pricing and cold starts turn against you — so it is a tool matched to the traffic shape, not a default.",
+          "followups": [
+            "Why does serverless get more expensive than a VM at high steady load?",
+            "What is a cold start, and which workloads cannot tolerate it?"
+          ]
+        },
+        {
+          "q": "How would you architect a system to process a large batch of files uploaded to object storage each night?",
+          "tests": "Whether you can compose cloud services into an event-driven pipeline with the right decoupling.",
+          "answer": "The clean cloud pattern is event-driven and decoupled, so it scales with the batch and tolerates failures. Files land in **object storage** (S3); the upload emits an **event** (S3 event notification) that goes onto a **queue** (SQS) rather than directly triggering processing — the queue is the key decoupling piece, because it buffers the work, smooths spikes, and lets you retry failed items and dead-letter poison ones. **Workers** consume from the queue and process files: these can be **serverless functions** if each file's processing is short and independent (auto-scales with queue depth, pay per file — great fit for a nightly spiky batch), or a **container/instance pool** (on Spot for cost, since batch is interruptible) if processing is heavy or long-running. Results write to a **database or a processed bucket**, and you track progress/idempotency (process each file exactly once, keyed by file id, so a retry does not double-count). Cross-cutting: a **dead-letter queue** for files that repeatedly fail so one bad file does not block the batch, **monitoring** on queue depth and processing lag (queue backing up means workers cannot keep up — scale them or the batch will not finish by morning), and **idempotent** workers so retries are safe. The design principles to name: decouple with a queue (do not process straight off the event), scale workers by queue depth, make processing idempotent and retryable, isolate failures with a DLQ, and choose serverless-vs-containers by how heavy each file's work is — a textbook event-driven pipeline that most cloud interviews are happy to see.",
+          "followups": [
+            "Why put a queue between the upload event and the workers instead of processing directly?",
+            "What does a dead-letter queue protect you from?"
+          ]
+        }
+      ]
+    }
+  ],
+  "task": {
+    "title": "Take-home: design and build a secure, resilient cloud architecture",
+    "brief": "Cloud take-homes and design rounds keep asking for the same artifact: a well-architected environment on a real provider, as infrastructure-as-code, that is secure, resilient, and cost-aware. The ThavionAI **Terraform an AWS environment** and **AWS Solutions Architect lab** projects build exactly this — the three-tier, multi-AZ reference architecture with IaC, IAM, and a cost breakdown. Do them and use the repository as your submission. Below is what a strong architecture demonstrates.",
+    "checklist": [
+      "Networking is correct: a VPC with public and private subnets across two AZs, load balancer and NAT in public, app and database in private, and you can explain why each resource is where it is.",
+      "Identity is least-privilege: instances use roles not stored keys, permissions are scoped to specific actions and resources, and any pipeline access uses OIDC federation, not a long-lived key.",
+      "It survives an AZ failure: every tier spans two AZs, the database is multi-AZ with automatic failover, and you left capacity headroom.",
+      "Data is protected: storage is private and encrypted, secrets come from a secret manager, and there is a backup/DR consideration with stated RTO/RPO thinking.",
+      "It is all infrastructure-as-code with remote state, structured so environments share code and differ only in variables.",
+      "There is a cost breakdown identifying the expensive resources (NAT, load balancer, multi-AZ database, data transfer) and the levers to reduce them.",
+      "A README explains the trade-offs — availability versus cost — and a teardown so the reviewer can run and remove it."
+    ]
+  },
+  "standout": [
+    "Reason from the layered model. In a networking question, walking route table → security group → NACL → DNS in order beats naming a service, and it is exactly how the job is actually done.",
+    "Be current on identity. Reaching for OIDC federation over stored access keys, and multi-account isolation over one-account-with-tags, signals you know modern cloud security rather than 2018 cloud security.",
+    "Know what costs money. Naming NAT gateways, data transfer, and idle capacity as the usual bill-drivers — unprompted — shows you have actually owned a cloud bill, which more and more roles require.",
+    "Ask for the target before designing. Clarifying the availability requirement and budget, then designing to them rather than defaulting to the most resilient (and expensive) option, is the senior instinct interviewers reward.",
+    "Distinguish HA from DR, and back both with tested restores. Knowing that surviving an AZ is different from surviving a region — and that an untested backup is not a DR plan — is a depth marker few candidates reach."
+  ],
+  "resources": [
+    {"label": "DevOps / SRE / Cloud track", "href": "../../education.html#devops", "note": "the cloud, networking, IaC and security lessons behind every answer here"},
+    {"label": "Certifications track", "href": "../../education.html#certs", "note": "AWS Solutions Architect and Azure AZ-104 guides for exam-level depth"},
+    {"label": "Project: Terraform an AWS environment", "href": "../projects/proj-devops-aws-platform.html", "note": "the IaC, VPC, IAM and multi-AZ architecture the take-home describes"},
+    {"label": "AWS Solutions Architect lab", "href": "../projects/proj-cert-aws-lab.html", "note": "the resilient three-tier reference architecture, per exam domain, with a cost breakdown"},
+    {"label": "Project: Signed and attested builds", "href": "../projects/proj-sec-supply-chain.html", "note": "the OIDC-federated pipeline access the identity questions describe"}
+  ]
+}

@@ -1,0 +1,252 @@
+{
+  "id": "kit-sre",
+  "role": "Site Reliability Engineer",
+  "tracks": ["sre"],
+  "summary": "SRE interviews test a specific kind of thinking: how you reason about reliability as an engineering problem with a budget, how you behave when a system is on fire, and whether you can debug something you have never seen before by narrowing possibilities. These questions and model answers cover the SLO round, the incident scenarios, the troubleshooting deep-dives and the systems-design that every SRE loop includes — with the reasoning interviewers are actually grading.",
+  "rounds": [
+    {"name": "Phone screen", "what": "Background and fundamentals: what you have operated, your on-call experience, a couple of definition checks (what is an SLO, what is a percentile). Concrete beats comprehensive.", "tip": "Have one reliability story ready: a system you kept up, or an incident you handled and what changed after."},
+    {"name": "Troubleshooting / debugging", "what": "The signature SRE round: a broken system, often live, sometimes a shared terminal. They watch how you form hypotheses and narrow them — the destination matters less than the method.", "tip": "Say your hypothesis and the observation that would confirm or kill it, every step. Silent debugging scores zero even if you find it."},
+    {"name": "Systems design / reliability design", "what": "Design a system and then make it reliable: 'design a URL shortener' becomes 'now make it handle an AZ failure'. They want failure modes named and defended.", "tip": "Design for the failure, not just the happy path. Ask what the availability target is before you design."},
+    {"name": "SLO / reliability judgement", "what": "How you would measure and defend reliability: SLIs, SLOs, error budgets, and the decisions they drive. Often a discussion, not a whiteboard.", "tip": "Tie every reliability decision back to users and the error budget, not to your preference."},
+    {"name": "Behavioural / incident retro", "what": "Walk through a real incident: what you did, how you communicated, what the postmortem changed. Blamelessness and learning are what they listen for.", "tip": "Own your mistakes plainly and focus on the systemic fix. 'I was on call, here is what went wrong and what we changed' is the shape they want."}
+  ],
+  "sections": [
+    {
+      "title": "SLOs, SLIs and error budgets",
+      "intro": "The conceptual core of SRE. Interviewers want to hear that reliability is a measurable target with a budget, not a vague aspiration or a race to 100%.",
+      "questions": [
+        {
+          "q": "What is the difference between an SLI, an SLO, and an SLA?",
+          "tests": "Whether you have the vocabulary exactly right — these are confused constantly, and precision signals real SRE experience.",
+          "answer": "An **SLI** (Service Level Indicator) is a *measurement* — a number describing some aspect of the service, like the fraction of requests served successfully under 300 ms over the last 30 days. An **SLO** (Objective) is a *target* for an SLI — 'the successful-under-300ms SLI should be at least 99.9%'. An **SLA** (Agreement) is a *contract* with a consequence — a promise to a customer, usually with money attached if broken (a refund or credit). The relationships that matter: the SLI is what you measure, the SLO is what you aim for internally, and the SLA is what you promise externally — and the SLO should always be stricter than the SLA, so you notice you are in trouble before you breach the contract. A common mistake to avoid is conflating them or setting an SLO of 100%, which is neither achievable nor desirable.",
+          "followups": [
+            "Why should the SLO be tighter than the SLA?",
+            "Give an example of a good SLI for a batch pipeline, where 'requests' do not apply."
+          ]
+        },
+        {
+          "q": "Why is 100% the wrong reliability target?",
+          "tests": "Whether you understand the central economic idea of SRE — reliability has a cost and a point of diminishing returns.",
+          "answer": "Because 100% is impossible and pursuing it is counterproductive. Impossible: your dependencies, the network, and the client's own connection all fail sometimes, so end-to-end 100% is not something you control. Counterproductive: every extra nine costs exponentially more — more redundancy, more caution, slower change — and past a point the user cannot even perceive the difference because their own network is less reliable than your service. So the right target is 'reliable enough that users are happy', which is almost always below 100%, and the gap between that target and 100% is the **error budget** — the amount of unreliability you are allowed to spend. That budget is what makes it an engineering decision instead of a moral one: if you have budget left you can take risks and ship fast; if you have burned it you slow down and stabilise. The insight interviewers reward: reliability trades against velocity, and the error budget is the tool for spending that trade deliberately.",
+          "followups": [
+            "How does an error budget change what the team is allowed to do?",
+            "Who should decide the target — SRE, the product team, or both?"
+          ]
+        },
+        {
+          "q": "How would you choose SLIs for a new service?",
+          "tests": "Whether you can pick measurements that reflect user experience rather than internal metrics that are easy to collect.",
+          "answer": "Start from the user's experience of the service, because an SLI is only useful if it tracks what users actually feel. For a request-driven service the standard menu is **availability** (fraction of valid requests that succeed) and **latency** (fraction served under a threshold), measured as close to the user as possible — at the load balancer or, better, the client, not deep inside where you miss failures that never reach your code. For a pipeline or async system, availability and latency do not map cleanly, so use **freshness** (is the data recent enough), **correctness** (fraction of records processed without error), and **coverage** (fraction of expected data that arrived). The principles to state: measure the user's experience not the machine's health (CPU is not an SLI); measure as a ratio of good events to valid events; and keep it to a few SLIs that matter, because a service with fifteen SLIs has none. Then set the SLO from what keeps users happy, verified against historical data.",
+          "followups": [
+            "Why measure at the load balancer or client rather than inside the service?",
+            "What SLIs would you pick for a data pipeline?"
+          ]
+        },
+        {
+          "q": "Your service has burned 90% of its monthly error budget in the first week. What happens?",
+          "tests": "Whether you understand that the error budget is meant to drive concrete decisions, not just be a number on a dashboard.",
+          "answer": "A budget burned that fast means something is wrong, and the whole point of the budget is that it now changes behaviour. The immediate response is to understand the burn — is it one incident that is over, or an ongoing elevated error rate? If ongoing, that is effectively an incident and gets treated as one. Then the **error budget policy** kicks in, which the team should have agreed in advance: with the budget nearly gone, non-essential risky changes are frozen and effort shifts from shipping features to reliability work — fixing whatever is burning the budget — until the burn is under control. The value interviewers want you to articulate: the budget turns 'should we slow down?' from an argument into a rule everyone agreed to beforehand, so it depersonalises the decision. If the burn was a single resolved incident, you note it, protect the remaining budget, and review at the postmortem whether the SLO or the alerting needs adjusting.",
+          "followups": [
+            "What should an error budget policy specify before you ever need it?",
+            "How do multi-window burn-rate alerts help you catch this earlier?"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Incident response",
+      "intro": "How you behave when the system is down. Interviewers want structure under pressure: the order of operations, the communication, and the learning afterwards.",
+      "questions": [
+        {
+          "q": "You get paged at 3am: the main service is returning errors for many users. Walk me through your first 15 minutes.",
+          "tests": "Whether you have an incident structure — the order of operations under pressure is the whole point.",
+          "answer": "The order is the answer, and it starts with acknowledging the page and assessing scope, not diving into logs. First: **acknowledge** so the page stops escalating, and glance at the dashboards to confirm it is real and gauge blast radius — all users or some, all endpoints or one. Second: **declare an incident** if it is significant, which means opening a channel and, if it is big, pulling in an incident commander and comms so one person is not doing everything. Third: **mitigate before diagnosing** — if a deploy went out recently, roll it back; if a dependency is down, fail over or shed load; the goal of the first 15 minutes is to stop the bleeding, not to find root cause. Fourth: **communicate** — a status update to stakeholders early, even 'we are investigating', because silence is worse than bad news. Throughout, someone keeps a **timeline** for the postmortem. The senior signal: recovery first, root cause later; and the discipline of declaring, assigning roles, and communicating rather than heroically debugging alone.",
+          "followups": [
+            "When would you pull in an incident commander versus handling it solo?",
+            "Why mitigate before you understand the root cause?"
+          ]
+        },
+        {
+          "q": "What makes a good postmortem, and why must it be blameless?",
+          "tests": "Whether you understand that the goal of incident review is learning, and that blame destroys learning.",
+          "answer": "A good postmortem reconstructs what happened as a timeline, identifies the contributing factors (usually several, not one 'root cause'), and produces specific, owned, tracked action items that make the same failure less likely or less severe. It is **blameless** because the purpose is to improve the system, and blame makes that impossible: if people fear punishment they hide information, and the postmortem gets less honest exactly when honesty matters most. The reframe that signals understanding: when someone runs the wrong command and causes an outage, the blameless question is not 'why were they careless' but 'why did the system let a single wrong command cause an outage — where were the guardrails?' Human error is treated as a symptom of a system that permitted it, not as the cause. The output is systemic fixes (better guardrails, automation, alerting), not 'be more careful', because 'be more careful' is not a fix. Action items with owners and dates, or the postmortem was theatre.",
+          "followups": [
+            "Someone ran a destructive command by mistake — what does a blameless analysis focus on?",
+            "How do you make sure postmortem action items actually get done?"
+          ]
+        },
+        {
+          "q": "How do you decide the severity of an incident, and why does it matter?",
+          "tests": "Whether you can right-size the response — over-escalating burns people out, under-escalating leaves users suffering.",
+          "answer": "Severity should map to user impact and drive the response, so define it before you need it. A typical scale: **SEV1** is a major outage affecting many users or core functionality — all-hands, incident commander, exec awareness; **SEV2** is significant but partial — a degraded feature, a subset of users; **SEV3** is minor — a cosmetic bug, a single non-critical component. The point of severity is to calibrate the response: SEV1 justifies waking people up and pulling in a commander; treating every alert as SEV1 causes burnout and trains people to ignore pages, while treating a real SEV1 as routine leaves users suffering. Severity also drives communication cadence and who needs to know. The judgement interviewers want: severity is about impact on users, not about how hard the fix is or how scary it looks, and having the levels agreed in advance means you are not debating process while the site is down.",
+          "followups": [
+            "Why is it dangerous to treat every alert as high severity?",
+            "Who has the authority to raise or lower severity mid-incident?"
+          ]
+        },
+        {
+          "q": "During an incident, the team keeps proposing fixes and arguing. How should the response be coordinated?",
+          "tests": "Whether you understand incident roles — that coordination is a distinct job from debugging.",
+          "answer": "Uncoordinated incident response — several people changing things at once, arguing, no one tracking what has been tried — makes incidents longer and sometimes worse (two simultaneous 'fixes' can conflict). The answer is defined **roles**, borrowed from established incident frameworks: an **Incident Commander** who coordinates and decides but does not personally debug — their job is to run the incident, keep focus, and prevent chaos; **subject-matter experts** who actually investigate and propose actions, which the commander approves so changes are serialised, not simultaneous; a **communications** person who handles stakeholder updates so the responders are not interrupted; and a **scribe** keeping the timeline. For a small incident one person may wear several hats, but the principle holds: someone owns coordination separately from doing the work. The commander's authority to say 'we are trying X, everyone hold' is what stops the thrash. The signal interviewers want: you know that at a certain size, *coordinating* the response is itself a full-time role, and that debugging and commanding should not be the same person in a big incident.",
+          "followups": [
+            "Why should the incident commander not also be the person debugging?",
+            "How do roles scale down for a small, one-person incident?"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Troubleshooting and debugging",
+      "intro": "The round SRE is famous for. They will hand you an unfamiliar broken system. What they grade is the method: hypothesis, test, narrow, repeat — spoken aloud.",
+      "questions": [
+        {
+          "q": "A service's latency suddenly doubled with no deploy. How do you investigate?",
+          "tests": "Systematic narrowing without the obvious 'it was the deploy' answer available.",
+          "answer": "No deploy removes the easy suspect, so the method is to narrow by asking what else changed. Frame it as: latency is up, so either the service is doing more work per request, or something it waits on got slower, or it has less capacity for the same load. Check each: **load** — did traffic increase (more requests, or a change in the mix toward expensive ones)? **dependencies** — is a downstream database, cache, or API slower (check its latency, not just yours)? **resources** — is the service throttled, low on memory, hitting connection limits, or is a noisy neighbour or a degraded node involved? **data** — did a table grow past an index's usefulness, or a cache hit rate drop? The discipline: form a hypothesis ('the database got slower'), find the observation that tests it (the DB's own latency metric), and either confirm and drill in or move on. Correlate the latency jump with a timestamp and look for what else moved at that moment — a cron job, a cache expiry, a traffic shift, a dependency's own incident. 'No deploy' just means the change was somewhere other than your code.",
+          "followups": [
+            "How would tracing help you find which dependency slowed down?",
+            "What could cause latency to rise without any change in traffic or code?"
+          ]
+        },
+        {
+          "q": "Requests are failing intermittently — about 1 in 20, seemingly at random. How do you find the cause?",
+          "tests": "Debugging partial failure, which is harder than total failure and separates experienced SREs.",
+          "answer": "One in 20 that looks random usually is not random — it correlates with something, and the job is to find the correlate. The most productive first hypothesis for a fraction like 1-in-N is that **one instance out of N is bad**: if there are 20 backends behind a load balancer and one is broken, you get exactly this pattern. So check whether the failures concentrate on one instance, one availability zone, one shard, or one code path — pull the failing requests and look for what they share that the succeeding ones do not. Other classic causes of intermittent partial failure: a **race condition** that only sometimes loses; a **resource limit** (a connection pool exhausted under bursts, so requests fail when it is momentarily full); a **flaky dependency** that itself fails a fraction of the time; or **retries masking** a higher underlying rate. The method to voice: partial failure is a signal to segment — by instance, zone, endpoint, customer, time — because the failures are almost never uniformly distributed, and the dimension they cluster on is the cause.",
+          "followups": [
+            "Why is 'one bad instance out of N' a strong first hypothesis for a 1-in-N failure rate?",
+            "How can aggressive retries hide the real failure rate?"
+          ]
+        },
+        {
+          "q": "The system is slow, and you suspect the database. How do you confirm or rule it out?",
+          "tests": "Whether you can test a hypothesis with evidence rather than assuming, and whether you know how to read a database.",
+          "answer": "Do not assume — measure the database directly and see whether its latency actually rose when the system slowed. If you have tracing, the span breakdown tells you immediately how much of a request's time is spent in the database versus the app; without it, compare the database's own latency metrics against the timeline of the slowdown. If the database is the culprit, drill into *why*: look at slow query logs and the query plans for the expensive ones (a query that lost an index as a table grew is a classic), check for **lock contention** or long-running transactions blocking others, connection-pool saturation, and resource limits (CPU, IO, memory) on the database host. A useful discriminator: if app latency is high but the database's own latency is flat, the problem is not the database itself but perhaps connection acquisition (pool exhaustion looks like DB slowness but is on the app side) or the network between them. The point interviewers want: confirm the hypothesis with the dependency's own metrics before you spend hours optimising the wrong layer.",
+          "followups": [
+            "How can connection-pool exhaustion look exactly like a slow database?",
+            "What would a query plan tell you that a latency graph would not?"
+          ]
+        },
+        {
+          "q": "A host is running out of memory and processes are being killed. How do you approach it?",
+          "tests": "Whether you can debug a resource-exhaustion problem methodically rather than just restarting.",
+          "answer": "Processes being killed on a low-memory host is usually the kernel's **OOM killer** reclaiming memory by terminating the process using the most — so the symptom is a killed process, but the cause is memory pressure that needs finding, not just a restart (which resets the clock until it happens again). Investigate: confirm it is OOM (the kernel log — `dmesg` — records OOM kills and which process was targeted), then find where the memory went. Is it one process **leaking** (memory climbing steadily over time — profile it or check for the growth pattern), a process legitimately needing more than the host has (undersized), too many processes for the box (over-scheduled), or a cache or buffer that grew unbounded? On a container host specifically: a container with no memory limit can consume the node and get others OOMKilled, so limits are the guardrail. The method to voice: distinguish a leak (grows without bound, restart only defers it — fix the code) from legitimate demand (right-size the host or the limit) from over-subscription (schedule fewer workloads) — because each has a different fix, and 'just restart it' addresses none of them.",
+          "followups": [
+            "How do you tell a memory leak from a workload that legitimately needs more memory?",
+            "How can one container with no memory limit take down other pods on a node?"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Reliability and systems design",
+      "intro": "Design something, then defend it against failure. The design half is table stakes; the reliability half — what breaks and how the system survives it — is where SRE candidates are separated.",
+      "questions": [
+        {
+          "q": "Design a system to be highly available across the failure of a whole data center or availability zone.",
+          "tests": "Whether you understand redundancy, statelessness, and where state makes availability hard.",
+          "answer": "The principle is: no single AZ can be a single point of failure, so every tier must have capacity in at least two AZs and the system must keep working when one is gone. For **stateless tiers** (web and app servers) this is straightforward — run instances in multiple AZs behind a load balancer that spreads traffic and health-checks them, with enough capacity that losing one AZ's share still serves peak load (which means you cannot run at 100% in two AZs; you need headroom). The hard part is **state**: a database cannot simply be duplicated, so you use a replicated setup — a synchronous standby in another AZ with automatic failover (like RDS Multi-AZ) for availability, accepting the latency cost of synchronous replication. Name the trade-offs: multi-AZ costs more (idle standby capacity) and cross-AZ calls add latency; synchronous replication is safe but slower, asynchronous is faster but can lose recent writes on failover. And do not forget the things people miss: the load balancer and DNS must themselves be multi-AZ, and you should actually test the failover, because untested failover is a hope, not a design.",
+          "followups": [
+            "Why can't you run your two AZs at 100% utilization?",
+            "What is the trade-off between synchronous and asynchronous database replication for failover?"
+          ]
+        },
+        {
+          "q": "How would you prevent a slow or failing dependency from taking down your service?",
+          "tests": "Whether you know the resilience patterns — this is the difference between a fragile system and a robust one.",
+          "answer": "The danger is that a slow dependency ties up your resources (threads, connections) until you cannot serve anyone — a failure in one dependency cascading into your total failure. The patterns that prevent it: **timeouts** on every call, so you never wait forever on a hung dependency (the single most important one — a missing timeout is how one slow service takes down everything upstream); **retries with backoff and jitter**, but capped, and never on non-idempotent operations, because naive retries amplify load on an already-struggling dependency; a **circuit breaker** that stops calling a dependency that is failing, fails fast, and periodically tests whether it has recovered — this stops you from hammering a downed service and frees your resources; **bulkheads** (isolated resource pools per dependency) so one saturated dependency cannot consume all your threads; and **graceful degradation** — serve a cached or default response when a non-critical dependency is down rather than failing the whole request. The framing: assume dependencies will fail and design so their failure is contained, not contagious.",
+          "followups": [
+            "Why can retries make an incident worse instead of better?",
+            "What does a circuit breaker do that a timeout alone does not?"
+          ]
+        },
+        {
+          "q": "How do you design a system so you can roll back a bad release safely?",
+          "tests": "Whether you understand that reliability includes the ability to undo, and the constraints that make rollback hard.",
+          "answer": "Rollback is a design property, not an afterthought — you build for it. The foundation: **immutable, versioned artifacts** so 'roll back' means 'redeploy the previous version', which is deterministic, and a **progressive rollout** (canary or rolling behind health checks) so a bad release is caught while it affects a fraction of traffic and can be reversed before full exposure. The hard constraint is **state**: database schema changes are often not reversible, so you decouple them from code using expand/contract — the schema change goes out first and is backward-compatible, so old and new code both work, which means you can roll the code back without touching the schema. Feature flags help too: shipping code dark and enabling it with a flag makes 'rollback' a config toggle, faster and safer than a redeploy. The senior points: never ship a schema change and the code requiring it together; make the previous version always redeployable; and keep rollbacks fast, because a rollback you can do in 30 seconds changes how boldly the team can ship.",
+          "followups": [
+            "Why are database migrations the main obstacle to safe rollback, and how do you get around it?",
+            "How do feature flags change the rollback story?"
+          ]
+        },
+        {
+          "q": "How would you design a system to gracefully handle a sudden traffic spike far above normal, like a viral event?",
+          "tests": "Whether you know load-shedding and degradation — that protecting the system beats trying to serve everything and collapsing.",
+          "answer": "A spike far above capacity forces a choice: serve everyone and collapse (so *no one* is served), or protect the system and serve as many as you can well. The reliable answer is the latter, through **load shedding** and **graceful degradation**. Autoscaling helps but has limits — it takes time to add capacity, and some tiers (a database) cannot scale in seconds — so you cannot rely on it alone against a sudden spike. So: **rate-limit** and **shed load** at the edge, rejecting or queuing excess requests with a fast, cheap response (a 429 or a lightweight page) rather than letting them pile up and take everything down — a request you reject quickly is far better than one that hangs and consumes resources. **Degrade gracefully**: disable expensive non-essential features under load (personalisation, recommendations), serve cached or static content, and prioritise critical paths (checkout over browse). Protect the weakest tier — put a cache and a queue in front of the database so a read spike does not reach it. The principle to land: under overload, a system that serves 80% of users well and cleanly rejects the rest is healthy; one that tries to serve 100% and falls over serves 0%.",
+          "followups": [
+            "Why is rejecting a request quickly better than letting it queue indefinitely?",
+            "What would you disable first to shed load, and how do you decide?"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Operations and toil",
+      "intro": "SRE is defined partly by its attitude to manual work: automate it away. Interviewers probe whether you think like an engineer about operations, not just a firefighter.",
+      "questions": [
+        {
+          "q": "What is toil, and how do you decide what to automate?",
+          "tests": "Whether you understand a core SRE concept and can prioritise automation rationally rather than automating everything.",
+          "answer": "Toil is operational work that is manual, repetitive, automatable, reactive, and scales linearly with the service — the kind of work that keeps the lights on but produces no lasting value, like manually restarting a stuck job or hand-applying the same fix. It matters because if toil grows with the service, the team eventually spends all its time on toil and none on engineering, and burns out. Deciding what to automate is a cost-benefit calculation: the time the automation saves over its lifetime versus the time to build and maintain it — automate the frequent, time-consuming, error-prone tasks first, and be honest that some rare tasks are cheaper to do by hand than to automate (the classic xkcd trade-off). SRE teams often cap toil (Google's guideline is under 50% of time) so there is always capacity for engineering that reduces future toil. The maturity signal: not 'automate everything' but 'automate the toil that is eating the team, measure it, and protect engineering time to keep it down'.",
+          "followups": [
+            "When is it not worth automating a manual task?",
+            "Why do SRE teams put a cap on how much time goes to toil?"
+          ]
+        },
+        {
+          "q": "How would you approach capacity planning for a service with growing traffic?",
+          "tests": "Whether you can reason quantitatively about headroom and cost rather than reacting to saturation.",
+          "answer": "Capacity planning is making sure you have enough resources for expected demand plus a safety margin, ahead of need rather than after saturation. The inputs: current utilization and its headroom, the growth trend (organic growth plus known events like a launch or a sale), and the lead time to add capacity (autoscaling is minutes, but a new database shard or a quota increase can be weeks). Method: establish the current capacity through **load testing** (how much can one unit actually handle before latency degrades — do not guess from CPU alone), project demand forward, and plan to keep utilization below a target that leaves room for spikes, failover (you need to survive losing an AZ, so you cannot run full), and the time to provision more. Distinguish **autoscaling** (handles short-term variation automatically, but needs headroom for cold starts and cannot conjure capacity that has a long lead time) from **capacity planning** (the longer-horizon provisioning). The trade-off to name: too little headroom risks outages under spikes or failover; too much wastes money — the target utilization is where those meet.",
+          "followups": [
+            "Why can't you plan to run at your maximum measured capacity?",
+            "How does autoscaling change capacity planning, and what does it not solve?"
+          ]
+        },
+        {
+          "q": "Your team is overwhelmed by on-call pages, many of them not actionable. What do you do?",
+          "tests": "Whether you treat alert quality as an engineering problem and understand that alert fatigue is a reliability risk.",
+          "answer": "Non-actionable pages are a bug in the alerting, and they are dangerous: an on-call flooded with noise will miss the real page and burn out, so this is a reliability problem, not just a morale one. The fix is systematic. First, **audit the pages**: for each recurring alert ask 'did a human need to do something right now?' — if not, it should not page. Then triage: alerts that need no immediate human action become dashboards or tickets, not pages; alerts that fire on causes (high CPU) rather than symptoms (users failing) get replaced with **symptom-based, SLO-driven alerts** that page only when users are actually affected; noisy thresholds get tuned or given a `for` duration so a brief blip does not page; and anything that pages repeatedly for the same fixable cause gets that cause *fixed* or the response automated. The principle to state: every page should be actionable, urgent, and documented with a runbook — fewer, better alerts. And measure it: track pages per shift and drive the non-actionable ones to zero, because alert fatigue quietly erodes the whole point of on-call.",
+          "followups": [
+            "What is the difference between symptom-based and cause-based alerting?",
+            "How would you measure whether your alerting is improving?"
+          ]
+        },
+        {
+          "q": "What are the four golden signals, and why those four?",
+          "tests": "Whether you know the standard observability starting point and understand what each one catches.",
+          "answer": "The four golden signals — from the Google SRE book — are **latency**, **traffic**, **errors**, and **saturation**, and they are the recommended minimum for monitoring any user-facing system because between them they catch most problems. **Latency** is how long requests take (measured splitting successful from failed requests, because a fast error is still an error and skews the average). **Traffic** is how much demand there is (requests per second) — the denominator that gives the others meaning. **Errors** is the rate of failing requests, including the sneaky ones that return 200 but with wrong content. **Saturation** is how full the system's most constrained resource is — the leading indicator that the others are about to degrade, because a system near saturation is about to get slow or start erroring. Why these four: latency and errors are what users feel directly, traffic explains changes in them, and saturation predicts trouble before users feel it — so you get both symptom detection and early warning from a small, universal set. The maturity point: start every service's monitoring with these, then add service-specific SLIs; they are the floor, not the ceiling.",
+          "followups": [
+            "Why measure the latency of successful and failed requests separately?",
+            "Which of the four is a leading indicator, and why does that matter?"
+          ]
+        }
+      ]
+    }
+  ],
+  "task": {
+    "title": "Take-home: put a service under an SLO and make it page correctly",
+    "brief": "SRE take-homes and system-design rounds keep circling the same practical skill: instrument a service with SLOs, alert on them properly, and prove the whole chain fires when the service degrades. The ThavionAI **SLOs from scratch** and **Run a full incident drill** projects build exactly this — do them and use the repository as your evidence. Below is what a strong reliability setup demonstrates.",
+    "checklist": [
+      "SLIs are measured as a ratio of good to valid events, close to the user (load balancer or client), not from internal health metrics like CPU.",
+      "An SLO document states the target, the window, and an error-budget policy agreed in advance — what happens when the budget runs low.",
+      "Alerts are multi-window burn-rate alerts on the SLO, so a fast burn pages and a slow burn tickets — not a wall of threshold alerts.",
+      "Every alert links to a runbook, and every page is something a human must act on now.",
+      "You broke the service on purpose and showed the alert fire, the page arrive, and the recovery — the chain works end to end, not just on paper.",
+      "There is a blameless postmortem template and at least one incident write-up with owned, tracked action items.",
+      "The setup distinguishes availability and latency SLIs, and you can explain why the target is below 100%."
+    ]
+  },
+  "standout": [
+    "Debug out loud. The troubleshooting round grades your method — hypothesis, the observation that tests it, narrow — and the interviewer literally cannot score it if you go quiet. Narrate even when you are unsure.",
+    "Reach for evidence before action. 'I would check the database's own latency to confirm before optimising' beats 'I would optimise the database' every time; it shows you test hypotheses instead of guessing.",
+    "Tie reliability to users and budgets, never to preference. 'This affects the latency SLO, and we have budget to absorb it' is an SRE sentence; 'I like things fast' is not.",
+    "Be blameless unprompted. When you tell an incident story, focus on the systemic fix and treat human error as a system that allowed it — interviewers are listening for exactly this reflex.",
+    "Show you know the limits: name what your design does not handle and what you would monitor to find out. Reliability engineering is the discipline of assuming things fail, so a candidate who assumes their own design might is the credible one."
+  ],
+  "resources": [
+    {"label": "DevOps / SRE track", "href": "../../education.html#devops", "note": "the SLO, observability, incident-response and on-call lessons behind every answer here"},
+    {"label": "Project: SLOs from scratch", "href": "../projects/proj-sre-slo-stack.html", "note": "build the SLO, burn-rate alerts and dashboard the take-home describes"},
+    {"label": "Project: Run a full incident drill", "href": "../projects/proj-sre-incident-drill.html", "note": "the incident-response and postmortem evidence for the behavioural round"},
+    {"label": "Project: Progressive delivery with automated analysis", "href": "../projects/proj-sre-canary.html", "note": "for the rollback and safe-release design questions"},
+    {"label": "Project: An on-call copilot with guardrails", "href": "../projects/proj-ai-oncall-copilot.html", "note": "the investigation-and-mitigation flow, made concrete"}
+  ]
+}
