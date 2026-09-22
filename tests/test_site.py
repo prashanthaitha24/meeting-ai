@@ -89,8 +89,6 @@ def test_home_link_on_every_page(built_site):
         if want not in hrefs:
             no_index.append(f"{page.relative_to(DOCS)} (want a nav link to {want})")
             continue
-        if page.name == "index.html":
-            continue  # the home page itself needs no explicit "Home" button
         has_home = any(
             h.split("#")[0].split("?")[0] == want and text_of(t) == "Home"
             for h, t in anchors

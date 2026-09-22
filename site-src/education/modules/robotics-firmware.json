@@ -1,0 +1,163 @@
+{
+  "id": "robotics-firmware",
+  "minutes": 34,
+  "intro": "Firmware is the program that runs on your microcontroller — the reflexes of the robot. This lesson takes you past the blink into how real robot code is structured: the setup-and-loop model, reading inputs and driving outputs, generating analog-like signals with PWM, timing things without freezing the robot, and using the serial link to see what your code is actually doing. Get these right and your robot becomes responsive instead of stuttery.",
+  "objectives": [
+    "Structure a sketch with setup() and a non-blocking loop()",
+    "Read digital and analog inputs and drive digital and PWM outputs",
+    "Replace delay() with millis()-based timing so the robot stays responsive",
+    "Use the serial link to debug what the firmware is seeing and doing"
+  ],
+  "sections": [
+    {
+      "heading": "The setup-and-loop model",
+      "blocks": [
+        {"type": "p", "text": "Every Arduino sketch has two functions. `setup()` runs **once** when the board powers up — you configure pins and start the serial link here. `loop()` runs **forever** afterwards, as fast as the board can go, and it is where the sense–think–act cycle lives. The mental model to hold: `setup()` is 'get ready', `loop()` is 'the robot's heartbeat'. Everything the robot does happens because `loop()` runs thousands of times a second, each pass reading inputs and updating outputs."},
+        {"type": "p", "text": "Pins are configured with `pinMode(pin, MODE)`. An **output** pin drives something (`OUTPUT`); an **input** pin reads something (`INPUT`, or `INPUT_PULLUP` to use the board's internal resistor so a floating button reads a clean HIGH until pressed). Getting the mode wrong is a common bug: a pin left as input cannot drive an LED, and an input without a pull-up floats and reads random noise."}
+      ]
+    },
+    {
+      "heading": "Reading inputs, driving outputs",
+      "blocks": [
+        {"type": "p", "text": "There are two flavours of each direction. **Digital** is on/off: `digitalRead(pin)` returns HIGH or LOW, and `digitalWrite(pin, HIGH/LOW)` sets a pin fully on or off. **Analog in** reads a varying voltage: `analogRead(pin)` returns a number from 0 to 1023 representing 0 V to the board's reference, which is how you read a potentiometer, a light sensor, or a distance sensor's analog output. There is no true analog *out* on most boards — instead you use PWM (next section) via `analogWrite`."},
+        {"type": "list", "items": [
+          "`digitalRead(pin)` → HIGH or LOW; read a button or a digital sensor.",
+          "`digitalWrite(pin, HIGH)` → drive an LED, a relay, or a motor-driver enable.",
+          "`analogRead(pin)` → 0–1023; read a potentiometer or analog sensor.",
+          "`analogWrite(pin, 0-255)` → PWM 'analog' output on a PWM-capable pin."
+        ]}
+      ]
+    },
+    {
+      "heading": "PWM — fake analog for speed and brightness",
+      "blocks": [
+        {"type": "p", "text": "A digital pin can only be fully on or fully off, so how do you dim an LED or run a motor at half speed? **Pulse-width modulation (PWM)** switches the pin on and off very fast, and the fraction of time it spends on — the *duty cycle* — sets the effective level. Fifty per cent duty is half brightness or half speed. On Arduino, `analogWrite(pin, value)` sets PWM where value 0 is off, 255 is full, and 127 is about half. Only certain pins support it (marked with a `~`)."},
+        {"type": "p", "text": "This is exactly how you control motor speed through a driver: you send the driver a PWM signal, and it delivers that fraction of the motor's power. Brightness, speed, and servo-like control all come from PWM, so it is one of the most-used tools in robot firmware."}
+      ]
+    },
+    {
+      "heading": "Timing without freezing the robot",
+      "blocks": [
+        {"type": "p", "text": "The single biggest beginner firmware mistake is `delay()`. `delay(1000)` stops the *entire* program for a second — the robot cannot read its sensors, react to a wall, or do anything else while it waits. For a blink that is fine; for a robot it is fatal, because a robot must keep sensing while it acts. The professional pattern is **non-blocking timing** with `millis()`, which returns the milliseconds since power-on. Instead of waiting, you check whether enough time has passed and act if so, letting the rest of the loop keep running."},
+        {"type": "code", "lang": "cpp", "code": "// Non-blocking blink: the loop stays free to do other work.\nconst int LED = 13;\nunsigned long lastToggle = 0;\nconst unsigned long INTERVAL = 500;  // ms\nbool on = false;\n\nvoid setup() {\n  pinMode(LED, OUTPUT);\n  Serial.begin(9600);\n}\n\nvoid loop() {\n  unsigned long now = millis();\n  if (now - lastToggle >= INTERVAL) {   // time to flip?\n    on = !on;\n    digitalWrite(LED, on ? HIGH : LOW);\n    lastToggle = now;\n  }\n  // ...read sensors and drive motors here every pass, no waiting...\n}"},
+        {"type": "callout", "kind": "warning", "text": "If your robot 'ignores' its sensors for a moment, look for a delay(). While delay() runs, nothing else happens — no sensor reads, no motor updates. Convert timed behaviour to the millis() pattern and the robot becomes responsive."}
+      ]
+    },
+    {
+      "heading": "Serial: your window into the firmware",
+      "blocks": [
+        {"type": "p", "text": "You cannot see what a microcontroller is thinking — unless it tells you. `Serial.begin(9600)` in `setup()` opens a channel to your computer, and `Serial.println(value)` prints to the **Serial Monitor**. This is the most important debugging tool in robotics: when a robot misbehaves, printing the sensor values shows you what it is *actually* sensing, which is almost always different from what you assumed. Print the distance, the button state, the motor command — and the bug usually reveals itself."},
+        {"type": "p", "text": "A good habit is to structure the loop clearly: read all sensors into variables, compute the decision, then drive the outputs — and print the key values while developing. Keeping sense, think and act as distinct phases each loop makes the code readable and the robot predictable."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Build a responsive input-to-output sketch",
+    "steps": [
+      "Wire a potentiometer to an analog pin and an LED (with resistor) to a PWM pin.",
+      "In loop(), read the potentiometer with analogRead and map its 0–1023 range to 0–255.",
+      "Use analogWrite to set the LED brightness from that value, so turning the knob dims the LED.",
+      "Add Serial.println of the raw and mapped values, and watch them in the Serial Monitor.",
+      "Add a blink on a second LED using the millis() pattern, and confirm the knob still responds instantly while it blinks."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "setup() runs once to configure; loop() runs forever as the robot's heartbeat.",
+      "pinMode sets a pin as INPUT, INPUT_PULLUP or OUTPUT.",
+      "digitalRead/Write for on-off; analogRead for a voltage; analogWrite for PWM.",
+      "PWM's duty cycle fakes analog output for brightness and motor speed.",
+      "Use millis() not delay() so the robot keeps sensing while it acts.",
+      "Serial.println is your primary debugging tool — print what the robot senses."
+    ],
+    "groups": [
+      {"title": "Pins", "items": [
+        {"syntax": "pinMode(p, OUTPUT)", "desc": "configure a pin to drive a load"},
+        {"syntax": "pinMode(p, INPUT_PULLUP)", "desc": "read a button with the internal resistor"},
+        {"syntax": "digitalRead(p)", "desc": "returns HIGH or LOW"},
+        {"syntax": "digitalWrite(p, HIGH)", "desc": "turn a pin fully on"}
+      ]},
+      {"title": "Analog & PWM", "items": [
+        {"syntax": "analogRead(p)", "desc": "0–1023 from a varying voltage"},
+        {"syntax": "analogWrite(p, 0-255)", "desc": "PWM output; duty cycle sets the level"},
+        {"syntax": "map(x, 0,1023, 0,255)", "desc": "rescale one range to another"},
+        {"syntax": "~ pins", "desc": "the pins that support PWM"}
+      ]},
+      {"title": "Timing", "items": [
+        {"syntax": "millis()", "desc": "ms since power-on; use for non-blocking timing"},
+        {"syntax": "now - last >= interval", "desc": "the non-blocking 'has time passed?' check"},
+        {"syntax": "unsigned long", "desc": "the type for millis() values so they don't overflow"},
+        {"syntax": "delay(ms)", "desc": "blocks everything — avoid in robot loops"}
+      ]},
+      {"title": "Serial", "items": [
+        {"syntax": "Serial.begin(9600)", "desc": "open the channel in setup()"},
+        {"syntax": "Serial.println(v)", "desc": "print a value and newline for debugging"},
+        {"syntax": "Serial Monitor", "desc": "the window that shows the prints"}
+      ]}
+    ],
+    "pitfalls": [
+      "Using delay() in a robot loop, so it stops sensing while it waits.",
+      "Leaving an input pin floating instead of using INPUT_PULLUP, giving random reads.",
+      "Calling analogWrite on a non-PWM pin, which does nothing useful.",
+      "Debugging blind instead of printing the sensor values that reveal the real behaviour.",
+      "Mixing up analogRead's 0–1023 scale with analogWrite's 0–255 scale."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "What runs repeatedly for the life of the program in an Arduino sketch?",
+      "options": [
+        "setup()",
+        "loop()",
+        "pinMode()",
+        "Serial.begin()"
+      ],
+      "answer": 1,
+      "explain": "setup() runs once at power-on; loop() then runs forever and is where the sense–think–act cycle lives."
+    },
+    {
+      "q": "Why is delay() a poor choice inside a robot's main loop?",
+      "options": [
+        "It uses too much memory on the board",
+        "It stops the whole program, so the robot cannot sense or react while it waits",
+        "It only works on PWM pins",
+        "It disables the serial monitor permanently"
+      ],
+      "answer": 1,
+      "explain": "delay() blocks everything for its duration, so the robot ignores its sensors and cannot react — use the millis() pattern instead."
+    },
+    {
+      "q": "How do you run a motor at roughly half speed from a microcontroller?",
+      "options": [
+        "Send a PWM signal with about a 50% duty cycle",
+        "Halve the board's supply voltage",
+        "Call digitalWrite with a value of 0.5",
+        "Use a longer jumper wire"
+      ],
+      "answer": 0,
+      "explain": "PWM switches the pin on and off quickly; a ~50% duty cycle delivers about half the power, which the driver passes to the motor."
+    },
+    {
+      "q": "What does analogRead() return?",
+      "options": [
+        "Only HIGH or LOW",
+        "A number from 0 to 255",
+        "A number from 0 to 1023 representing a voltage",
+        "The time since power-on"
+      ],
+      "answer": 2,
+      "explain": "analogRead maps the input voltage to an integer from 0 to 1023; analogWrite (PWM) uses the 0–255 scale."
+    },
+    {
+      "q": "Your robot briefly stops responding to its distance sensor. What should you suspect first?",
+      "options": [
+        "A delay() call blocking the loop",
+        "The board is out of memory",
+        "The LED resistor is the wrong value",
+        "The USB cable is too long"
+      ],
+      "answer": 0,
+      "explain": "A delay() freezes the loop so sensors are not read during it; converting to non-blocking millis() timing restores responsiveness."
+    }
+  ]
+}
