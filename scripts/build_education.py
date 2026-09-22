@@ -238,6 +238,7 @@ PAGE = """<!DOCTYPE html>
 <nav>
   <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
   <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
     <a href="../education.html" class="active">Tracks</a>
     <a href="../engineering.html#projects">Projects</a>
     <a href="../education.html#certs">Certifications</a>
