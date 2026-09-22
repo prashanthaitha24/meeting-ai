@@ -334,6 +334,7 @@ PAGE = """<!DOCTYPE html>
     <p>© 2025–2026 ThavionAI. All rights reserved.</p>
     <div class="footer-legal">
       <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
       <a href="../privacy.html">Privacy</a>
       <a href="../terms.html">Terms</a>
       <a href="../feedback.html?module={id}&amp;page=/education/{id}.html&amp;title={title_q}">Report an error</a>
