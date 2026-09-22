@@ -340,6 +340,8 @@ def main():
     (DOCS / "engineering.html").write_text(eng)
     (DOCS / "index.html").write_text(fill((SRC / "site" / "home.html").read_text(), stats))
     (DOCS / "exams.html").write_text(fill((SRC / "site" / "exams.html").read_text(), {}))
+    (DOCS / "sat-practice.html").write_text(fill((SRC / "site" / "sat-practice.html").read_text(), {}))
+    (DOCS / "sat-guide.html").write_text(fill((SRC / "site" / "sat-guide.html").read_text(), {}))
     (DOCS / "school.html").write_text(fill((SRC / "site" / "school.html").read_text(), {}))
     (DOCS / "careers.html").write_text(fill((SRC / "site" / "careers.html").read_text(), {}))
     hub = fill((SRC / "site" / "hub.html").read_text(), {
