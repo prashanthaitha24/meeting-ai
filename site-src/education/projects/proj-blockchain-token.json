@@ -1,0 +1,96 @@
+{
+  "id": "proj-blockchain-token",
+  "track": "blockchain",
+  "title": "Deploy your own ERC-20 token",
+  "summary": "Go from an empty folder to your own token live on a public test network: set up Hardhat, write an ERC-20 by inheriting OpenZeppelin's audited base, test it properly, deploy it to a local chain and then to Sepolia, and interact with it from a script and your wallet — all for free.",
+  "outcome": "A working ERC-20 token deployed to the Sepolia testnet, verified on Etherscan, visible in your wallet, and transferable — built with the professional write-test-deploy loop.",
+  "hours": 5,
+  "level": "Beginner",
+  "prereqs": [
+    "The Blockchain lessons through **Tokens and standards** and **Developer tooling** — you'll use the ERC-20 interface, the develop-test-deploy loop, and a testnet",
+    "Node.js (18+) and npm installed, and a code editor",
+    "A browser wallet (MetaMask) with the Sepolia testnet added, and a little Sepolia test ETH from a faucet"
+  ],
+  "tools": [
+    {"name": "Hardhat", "why": "compile, test, and deploy the contract, and run scripts against local and test networks", "url": "https://hardhat.org/docs"},
+    {"name": "OpenZeppelin Contracts", "why": "the audited ERC-20 base you inherit instead of writing the standard yourself", "url": "https://docs.openzeppelin.com/contracts/"},
+    {"name": "MetaMask + a Sepolia faucet", "why": "an account to deploy from and free test ETH to pay gas on the testnet", "url": "https://sepoliafaucet.com/"},
+    {"name": "Etherscan (Sepolia)", "why": "inspect your deployed contract, verify its source, and watch transfers", "url": "https://sepolia.etherscan.io/"}
+  ],
+  "phases": [
+    {
+      "title": "Set up the toolkit",
+      "goal": "Get a working Hardhat project with OpenZeppelin installed, so you can compile and test contracts locally.",
+      "steps": [
+        {"text": "Confirm your Node.js version is 18 or newer, since Hardhat needs a current runtime. If it's older, install a newer Node before continuing.", "code": {"lang": "bash", "code": "node --version"}, "check": "The printed version is v18 or higher."},
+        {"text": "Create a project folder, initialise npm, and install Hardhat and the toolbox as dev dependencies.", "code": {"lang": "bash", "code": "mkdir my-token && cd my-token\nnpm init -y\nnpm install --save-dev hardhat @nomicfoundation/hardhat-toolbox"}},
+        {"text": "Initialise a Hardhat project and choose the JavaScript project when prompted. This scaffolds the folders (contracts, test, scripts) and a config file.", "code": {"lang": "bash", "code": "npx hardhat init"}, "check": "You have contracts/, test/, and scripts/ folders and a hardhat.config.js."},
+        {"text": "Install OpenZeppelin Contracts, the library holding the audited ERC-20 you'll inherit from.", "code": {"lang": "bash", "code": "npm install @openzeppelin/contracts"}},
+        {"text": "Delete the sample contract and test that Hardhat generated (usually Lock.sol and its test) so you start clean, then confirm the project still compiles.", "code": {"lang": "bash", "code": "rm contracts/Lock.sol test/Lock.js\nnpx hardhat compile"}, "check": "Compilation succeeds with nothing to compile, or an empty artifacts build, and no errors."}
+      ]
+    },
+    {
+      "title": "Write the token",
+      "goal": "Create your ERC-20 by inheriting the audited base and minting an initial supply — the whole contract is a few lines.",
+      "steps": [
+        {"text": "Create contracts/MyToken.sol. Inherit from OpenZeppelin's ERC20 and set the name and symbol in the constructor, minting an initial supply to the deployer. Remember amounts are in the smallest unit, so multiply by 10**decimals().", "code": {"lang": "solidity", "code": "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.20;\n\nimport \"@openzeppelin/contracts/token/ERC20/ERC20.sol\";\n\ncontract MyToken is ERC20 {\n    constructor() ERC20(\"My Token\", \"MTK\") {\n        _mint(msg.sender, 1000000 * 10 ** decimals());  // 1,000,000 MTK\n    }\n}"}},
+        {"text": "Compile the contract and fix any errors. Compilation turns your Solidity into the EVM bytecode that will be deployed.", "code": {"lang": "bash", "code": "npx hardhat compile"}, "check": "Compilation succeeds and an artifact for MyToken appears under artifacts/."},
+        {"text": "Read the OpenZeppelin ERC20 source you inherited (in node_modules/@openzeppelin) and note that transfer, approve, transferFrom, balanceOf and the Transfer/Approval events all come from it — you wrote only the constructor.", "note": "This is the point of standards and audited libraries: your token is fully ERC-20 compliant and every wallet will support it, yet you wrote almost no code."}
+      ]
+    },
+    {
+      "title": "Test it",
+      "goal": "Write tests that deploy the token and check its behaviour, so you trust it before spending gas on a real network.",
+      "steps": [
+        {"text": "Create test/MyToken.js. Deploy the token in the test and check the name, symbol, and that the deployer received the full initial supply.", "code": {"lang": "javascript", "code": "const { expect } = require(\"chai\");\nconst { ethers } = require(\"hardhat\");\n\ndescribe(\"MyToken\", function () {\n  it(\"mints the full supply to the deployer\", async function () {\n    const [owner] = await ethers.getSigners();\n    const Token = await ethers.getContractFactory(\"MyToken\");\n    const token = await Token.deploy();\n    expect(await token.name()).to.equal(\"My Token\");\n    const supply = await token.totalSupply();\n    expect(await token.balanceOf(owner.address)).to.equal(supply);\n  });\n});"}},
+        {"text": "Add a test that transfers tokens from the owner to a second account and checks both balances changed correctly.", "code": {"lang": "javascript", "code": "  it(\"transfers tokens between accounts\", async function () {\n    const [owner, alice] = await ethers.getSigners();\n    const Token = await ethers.getContractFactory(\"MyToken\");\n    const token = await Token.deploy();\n    const amount = ethers.parseUnits(\"100\", 18);\n    await token.transfer(alice.address, amount);\n    expect(await token.balanceOf(alice.address)).to.equal(amount);\n  });"}},
+        {"text": "Run the test suite against Hardhat's built-in local chain. Everything runs in seconds with no gas cost.", "code": {"lang": "bash", "code": "npx hardhat test"}, "check": "All tests pass."},
+        {"text": "Add one more test that confirms a transfer of more than your balance reverts, so you've exercised a failure case, and re-run the suite.", "note": "Testing the failure path matters as much as the happy path — a token that lets you overspend is broken. OpenZeppelin's ERC20 reverts on insufficient balance; your test should assert that."}
+      ]
+    },
+    {
+      "title": "Deploy to a local chain",
+      "goal": "Practise the deployment itself on a free local network before touching a real testnet.",
+      "steps": [
+        {"text": "Write scripts/deploy.js that deploys the token and prints its address. A deploy script is code you keep and version, so deployment is reproducible.", "code": {"lang": "javascript", "code": "const { ethers } = require(\"hardhat\");\n\nasync function main() {\n  const Token = await ethers.getContractFactory(\"MyToken\");\n  const token = await Token.deploy();\n  await token.waitForDeployment();\n  console.log(\"MyToken deployed to:\", await token.getAddress());\n}\n\nmain().catch((e) => { console.error(e); process.exit(1); });"}},
+        {"text": "In one terminal, start a standalone local blockchain. It prints a set of test accounts pre-funded with fake ETH.", "code": {"lang": "bash", "code": "npx hardhat node"}, "check": "A local node is running and lists 20 funded accounts with their private keys."},
+        {"text": "In a second terminal, run the deploy script against that local node and note the printed contract address.", "code": {"lang": "bash", "code": "npx hardhat run scripts/deploy.js --network localhost"}, "check": "The script prints 'MyToken deployed to: 0x...'."},
+        {"text": "Open the Hardhat console against the local node and read a value from your deployed token to confirm it responds, then stop the node when done. This proves the deployment works before spending anything on a testnet.", "code": {"lang": "bash", "code": "npx hardhat console --network localhost"}, "note": "In the console you can attach to the address and call token.name() or token.totalSupply(). It's the quickest way to sanity-check a fresh deployment interactively."}
+      ]
+    },
+    {
+      "title": "Deploy to a testnet",
+      "goal": "Put your token on the public Sepolia test network, where it behaves exactly like mainnet but the ETH is free.",
+      "steps": [
+        {"text": "Get a Sepolia RPC URL from a node provider (such as Alchemy or Infura — a free account gives you one), and export your deployer wallet's private key from MetaMask for a throwaway test account.", "note": "Use a fresh test-only account, never a wallet holding real funds. A private key in a project can leak; keep real value far away from development keys."},
+        {"text": "Install dotenv and create a .env file holding your RPC URL and private key. Add .env to .gitignore immediately so it is never committed.", "code": {"lang": "bash", "code": "npm install dotenv\nprintf 'SEPOLIA_RPC_URL=your-rpc-url\\nPRIVATE_KEY=your-test-key\\n' > .env\necho '.env' >> .gitignore"}, "check": "A .env file exists with your two values, and .gitignore contains .env."},
+        {"text": "Configure the Sepolia network in hardhat.config.js, reading the URL and key from the environment so no secrets are hard-coded.", "code": {"lang": "javascript", "code": "require(\"@nomicfoundation/hardhat-toolbox\");\nrequire(\"dotenv\").config();\n\nmodule.exports = {\n  solidity: \"0.8.20\",\n  networks: {\n    sepolia: {\n      url: process.env.SEPOLIA_RPC_URL,\n      accounts: [process.env.PRIVATE_KEY],\n    },\n  },\n};"}},
+        {"text": "Make sure your test account holds a little Sepolia ETH (from a faucet), then deploy to Sepolia. This is a real transaction on a shared network, so it takes a few seconds to confirm.", "code": {"lang": "bash", "code": "npx hardhat run scripts/deploy.js --network sepolia"}, "check": "The script prints the deployed address, and searching it on sepolia.etherscan.io shows your contract."}
+      ]
+    },
+    {
+      "title": "Interact and verify",
+      "goal": "Use your live token from a script and your wallet, and publish its source so anyone can read it — the finishing touches of a real deployment.",
+      "steps": [
+        {"text": "Import the token into MetaMask by adding a custom token with your deployed contract address. Your 1,000,000 MTK balance appears — because your wallet is just reading the contract's ledger.", "check": "MetaMask shows your MTK balance under the Sepolia network."},
+        {"text": "Send some MTK from your wallet to a friend's address (or a second account of yours) and watch the transfer confirm, then find the Transfer event on Etherscan.", "check": "The recipient's balance increases and the transfer appears on sepolia.etherscan.io."},
+        {"text": "Verify the contract's source on Etherscan using the Hardhat verify plugin, so anyone can read and trust the code behind your token. You'll need a free Etherscan API key in your .env and the verify config added.", "code": {"lang": "bash", "code": "npm install --save-dev @nomicfoundation/hardhat-verify\nnpx hardhat verify --network sepolia YOUR_CONTRACT_ADDRESS"}, "check": "Etherscan shows a green check and displays your verified Solidity source."},
+        {"text": "Write a script that reads the total supply and the deployer's balance from the live Sepolia contract, and run it, so you've interacted with your token programmatically as well as through the wallet.", "code": {"lang": "bash", "code": "npx hardhat run scripts/read.js --network sepolia"}, "note": "A small read script (getContractAt to your address, then call totalSupply/balanceOf) confirms your deployment is reachable over the public network from code, not just the wallet UI."},
+        {"text": "Write down your token's address, network, and the transactions you made in a short README, so the project is a shareable portfolio piece — a token you designed, tested, deployed, and verified.", "note": "A verified contract with a clear README is a genuine portfolio artifact. You've done the full professional loop: write, test, deploy locally, deploy to a testnet, interact, and verify."}
+      ]
+    }
+  ],
+  "troubleshooting": [
+    {"symptom": "npx hardhat compile fails with a Solidity version error.", "fix": "The pragma in your contract and the solidity version in hardhat.config.js must be compatible. Set both to a 0.8.x version (e.g. pragma ^0.8.20 and solidity: \"0.8.20\"), and ensure OpenZeppelin is installed so its imports resolve."},
+    {"symptom": "Deploying to Sepolia fails with 'insufficient funds'.", "fix": "Your deployer account has no Sepolia ETH. Copy the account address from MetaMask, request test ETH from a Sepolia faucet, wait for it to arrive, and try again — deployment costs gas even on a testnet."},
+    {"symptom": "The deploy script errors with 'invalid private key' or 'network not found'.", "fix": "Check the .env values are loaded (require('dotenv').config() at the top of the config) and the private key has no 0x issues or stray spaces. Confirm you passed --network sepolia and that the sepolia block is present in hardhat.config.js."},
+    {"symptom": "MetaMask doesn't show the token after import.", "fix": "Confirm MetaMask is on the Sepolia network, and that you pasted the exact deployed contract address. The symbol and decimals should auto-fill from the contract; if the balance is zero, you may be looking at an account that isn't the deployer."},
+    {"symptom": "Etherscan verification fails with a bytecode mismatch.", "fix": "Verification must use the exact compiler version and settings you deployed with. Ensure the solidity version in hardhat.config.js matches, that optimizer settings are identical, and that you're verifying the right address on the right network."}
+  ],
+  "next": [
+    "Add a capped supply or an owner-only mint function (inherit OpenZeppelin's Ownable) so only you can create more tokens — and write the access-control tests for it.",
+    "Make the token burnable or pausable by inheriting the matching OpenZeppelin extensions, and test the new behaviour.",
+    "Build a tiny frontend with ethers.js that connects a wallet and shows the connected account's MTK balance, using the Connecting-a-frontend lesson.",
+    "Deploy the same token to a Layer 2 testnet and compare the gas cost with Sepolia, connecting it to the Scaling lesson."
+  ]
+}

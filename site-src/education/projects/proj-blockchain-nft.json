@@ -1,0 +1,102 @@
+{
+  "id": "proj-blockchain-nft",
+  "track": "blockchain",
+  "title": "Mint an NFT collection",
+  "summary": "Build a real NFT collection: an ERC-721 contract with a public mint function, artwork and metadata stored on IPFS, deployed to a testnet, and minted from your own wallet — so you understand exactly what an NFT is and where its image actually lives.",
+  "outcome": "An ERC-721 collection deployed to Sepolia, with metadata on IPFS, a working mint function, and at least one token you minted showing up in your wallet and on a testnet marketplace or explorer.",
+  "hours": 6,
+  "level": "Intermediate",
+  "prereqs": [
+    "The ERC-20 token project (or equivalent Hardhat comfort) — you'll reuse the same setup, testing, and deployment loop",
+    "The Blockchain lessons through **Tokens and standards** and **Web3: storage and identity** — you'll use ERC-721 and IPFS content addressing",
+    "A wallet on Sepolia with test ETH, and a free IPFS pinning account (such as Pinata or web3.storage / NFT.Storage)"
+  ],
+  "tools": [
+    {"name": "Hardhat + OpenZeppelin ERC721", "why": "the audited non-fungible-token base you inherit, plus the develop-test-deploy loop", "url": "https://docs.openzeppelin.com/contracts/erc721"},
+    {"name": "IPFS pinning (Pinata / NFT.Storage)", "why": "store the artwork and metadata off-chain, referenced by CID so it's tamper-evident", "url": "https://www.pinata.cloud/"},
+    {"name": "MetaMask + a Sepolia faucet", "why": "the account you deploy and mint from, and free test ETH for gas", "url": "https://sepoliafaucet.com/"},
+    {"name": "A testnet explorer / marketplace", "why": "see your minted tokens and their metadata render", "url": "https://sepolia.etherscan.io/"}
+  ],
+  "phases": [
+    {
+      "title": "Understand what you're building",
+      "goal": "Get the mental model straight before coding, so the IPFS and tokenURI steps make sense rather than feeling like magic.",
+      "steps": [
+        {"text": "Write down, in your own words, the split you're about to build: the contract stores who owns each tokenId on-chain, while each token's image and metadata live off-chain on IPFS, referenced by a URL the contract returns from tokenURI.", "note": "The NFT is the on-chain ownership record, not the image. Keeping this straight is what makes the rest of the project coherent."},
+        {"text": "Sketch the metadata JSON shape each token will use — the standard fields marketplaces read: name, description, and image (an IPFS URL). You'll create one of these per token.", "code": {"lang": "json", "code": "{\n  \"name\": \"My Collection #1\",\n  \"description\": \"The first token in my test collection.\",\n  \"image\": \"ipfs://REPLACE_WITH_IMAGE_CID\"\n}"}},
+        {"text": "Note why the image goes off-chain: storing even a small image directly on Ethereum would cost far more in gas than the picture is worth, because every node stores it forever. This cost is exactly why the CID-reference pattern exists.", "note": "If someone claims an NFT's art is 'on the blockchain', it almost never is — the chain holds ownership and a reference; the bytes live off-chain. Knowing this protects you from a common misconception."}
+      ]
+    },
+    {
+      "title": "Set up the project",
+      "goal": "A Hardhat project with OpenZeppelin ready, reusing the workflow from the token project.",
+      "steps": [
+        {"text": "Confirm Node.js is 18 or newer, since Hardhat requires a current runtime.", "code": {"lang": "bash", "code": "node --version"}, "check": "The version printed is v18 or higher."},
+        {"text": "Create and initialise a Hardhat project and install OpenZeppelin, exactly as in the token project.", "code": {"lang": "bash", "code": "mkdir my-nft && cd my-nft\nnpm init -y\nnpm install --save-dev hardhat @nomicfoundation/hardhat-toolbox\nnpx hardhat init\nnpm install @openzeppelin/contracts dotenv"}, "check": "The project scaffolds and OpenZeppelin is installed."},
+        {"text": "Remove the sample Lock contract and test so you start clean, then confirm the project compiles.", "code": {"lang": "bash", "code": "rm -f contracts/Lock.sol test/Lock.js\nnpx hardhat compile"}, "check": "Compilation runs with no errors."}
+      ]
+    },
+    {
+      "title": "Store the art and metadata on IPFS",
+      "goal": "Put the actual files off-chain and get the CIDs your contract will point to.",
+      "steps": [
+        {"text": "Prepare a small image for token #1 (any image is fine for a test). Upload it to your IPFS pinning service and copy the returned CID — this is the content address of your image.", "check": "You have an image CID, and opening ipfs://that-cid through a gateway shows your image."},
+        {"text": "Create the metadata JSON for token #1, setting its image field to ipfs://your-image-CID. Upload that JSON to IPFS too and copy its CID — this metadata CID is what the contract's tokenURI will return.", "note": "Two uploads per token: the image, then a metadata JSON that references the image's CID. The contract only ever stores/returns the metadata reference."},
+        {"text": "Verify the whole chain resolves: fetch the metadata CID through a gateway, confirm it's your JSON, and that its image field points to an image that loads. If this resolves, marketplaces will render your NFT.", "check": "The metadata JSON loads from its CID and its image link displays the picture."},
+        {"text": "In your pinning service, confirm both files are actually pinned (kept), not merely cached. Pinning is what keeps content-addressed data available, since IPFS guarantees integrity but not permanence.", "note": "A token whose metadata later 'disappears' is almost always an unpinned file. Make sure the service is pinning, and understand you're responsible for keeping the data hosted."}
+      ]
+    },
+    {
+      "title": "Write the NFT contract",
+      "goal": "An ERC-721 that anyone can mint from, assigning each new token the next id and its metadata URI.",
+      "steps": [
+        {"text": "Create contracts/MyNFT.sol inheriting OpenZeppelin's ERC721URIStorage (an ERC-721 that can store a per-token URI). Add a counter and a public mint function that mints the next id to the caller and sets its tokenURI.", "code": {"lang": "solidity", "code": "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.20;\n\nimport \"@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol\";\n\ncontract MyNFT is ERC721URIStorage {\n    uint256 private _nextId;\n\n    constructor() ERC721(\"My Collection\", \"MYC\") {}\n\n    function mint(string memory metadataURI) public returns (uint256) {\n        uint256 tokenId = _nextId++;\n        _safeMint(msg.sender, tokenId);        // caller becomes the owner\n        _setTokenURI(tokenId, metadataURI);    // ipfs://metadata-CID\n        return tokenId;\n    }\n}"}},
+        {"text": "Compile the contract and fix any import or version issues.", "code": {"lang": "bash", "code": "npx hardhat compile"}, "check": "MyNFT compiles and an artifact is produced."},
+        {"text": "Decide your collection name and symbol in the constructor (here \"My Collection\" / \"MYC\") — these are permanent identity for the whole collection, shown by wallets and marketplaces, so pick them deliberately before deploying.", "note": "Unlike a token's per-transfer data, the name and symbol are set once at deployment and can't be changed later, so choose them as carefully as you'd name a product."},
+        {"text": "Read the ERC721URIStorage source you inherited and confirm ownerOf, balanceOf, transferFrom, safeTransferFrom and tokenURI all come from it — you added only the mint logic and the id counter.", "note": "As with the token, the standard behaviour is inherited and audited; you wrote just the part that's specific to your collection."}
+      ]
+    },
+    {
+      "title": "Test it",
+      "goal": "Deploy and mint in tests so you trust the contract before spending gas.",
+      "steps": [
+        {"text": "Create test/MyNFT.js. Deploy the contract, mint a token with a sample URI, and check the caller owns token 0 and its tokenURI matches what you set.", "code": {"lang": "javascript", "code": "const { expect } = require(\"chai\");\nconst { ethers } = require(\"hardhat\");\n\ndescribe(\"MyNFT\", function () {\n  it(\"mints a token to the caller with its URI\", async function () {\n    const [owner] = await ethers.getSigners();\n    const NFT = await ethers.getContractFactory(\"MyNFT\");\n    const nft = await NFT.deploy();\n    const uri = \"ipfs://sample-metadata-cid\";\n    await nft.mint(uri);\n    expect(await nft.ownerOf(0)).to.equal(owner.address);\n    expect(await nft.tokenURI(0)).to.equal(uri);\n  });\n});"}},
+        {"text": "Add a test that mints two tokens and checks the ids increment (0 then 1) and the owner's balance is 2, then run the suite.", "code": {"lang": "bash", "code": "npx hardhat test"}, "check": "All tests pass, confirming ids increment and ownership is tracked."},
+        {"text": "Add a failure-case test: calling ownerOf (or tokenURI) for a token id that was never minted should revert. Asserting this confirms the contract doesn't invent owners for nonexistent tokens.", "note": "Testing that queries on nonexistent tokens revert is a small but important check — it proves the contract's view of ownership is exactly the tokens actually minted."}
+      ]
+    },
+    {
+      "title": "Deploy and mint on a testnet",
+      "goal": "Put the collection on Sepolia and mint your first real token pointing at your IPFS metadata.",
+      "steps": [
+        {"text": "Set up your .env with a Sepolia RPC URL and a test-only private key, add the sepolia network to hardhat.config.js, and add .env to .gitignore — the same secure setup as the token project.", "code": {"lang": "bash", "code": "printf 'SEPOLIA_RPC_URL=your-rpc-url\\nPRIVATE_KEY=your-test-key\\n' > .env\necho '.env' >> .gitignore"}, "note": "Use a throwaway key with only test ETH. Never commit .env."},
+        {"text": "Write scripts/deploy.js to deploy MyNFT and print its address, then deploy to Sepolia and save the address.", "code": {"lang": "bash", "code": "npx hardhat run scripts/deploy.js --network sepolia"}, "check": "The contract address prints and appears on sepolia.etherscan.io."},
+        {"text": "Mint token #1 by calling mint with your real metadata URI (ipfs://your-metadata-CID) — either from a small script or the Hardhat console attached to the deployed address.", "code": {"lang": "javascript", "code": "// scripts/mint.js\nconst { ethers } = require(\"hardhat\");\nasync function main() {\n  const nft = await ethers.getContractAt(\"MyNFT\", \"YOUR_CONTRACT_ADDRESS\");\n  const tx = await nft.mint(\"ipfs://YOUR_METADATA_CID\");\n  await tx.wait();\n  console.log(\"minted token, tx:\", tx.hash);\n}\nmain().catch((e) => { console.error(e); process.exit(1); });"}, "check": "The mint transaction confirms and you own a new token in the collection."}
+      ]
+    },
+    {
+      "title": "See it render and share it",
+      "goal": "Confirm your NFT shows up with its art, and turn the project into a portfolio piece.",
+      "steps": [
+        {"text": "Import the collection into MetaMask's NFTs tab using your contract address and token id, and confirm the token appears under your account. Your wallet is simply reading ownerOf and tokenURI from the contract.", "check": "The NFT shows in MetaMask's NFTs tab for the account that minted it."},
+        {"text": "Find your token on a testnet explorer or a testnet-enabled marketplace by its contract address and token id, and confirm the image and name render from your IPFS metadata.", "check": "Your NFT displays its image and name, pulled from the IPFS metadata."},
+        {"text": "Transfer the token to a second address of yours (or a friend's) and watch ownership change on-chain, confirming the ERC-721 transfer works.", "check": "ownerOf the token returns the new address after the transfer confirms."},
+        {"text": "Verify the contract source on Etherscan (as in the token project) so the code behind your collection is public and readable.", "code": {"lang": "bash", "code": "npx hardhat verify --network sepolia YOUR_CONTRACT_ADDRESS"}, "check": "Etherscan shows the verified source for your NFT contract."},
+        {"text": "Write a short README with the contract address, the IPFS CIDs, and how to mint, so the collection is a shareable portfolio artifact — a real NFT collection you built end to end.", "note": "You now understand NFTs from the inside: an on-chain ownership record plus off-chain, content-addressed metadata — not a mysterious 'image on the blockchain'."}
+      ]
+    }
+  ],
+  "troubleshooting": [
+    {"symptom": "The NFT shows up but with no image or a broken image.", "fix": "The metadata or image CID isn't resolving. Confirm you uploaded BOTH the image and a metadata JSON, that the metadata's image field is ipfs://the-image-CID, and that the token's tokenURI points at the metadata CID. Test each CID through a public gateway before blaming the contract."},
+    {"symptom": "Minting reverts or the token id isn't what you expected.", "fix": "Check you're calling mint with a string URI argument and that the counter starts where you think (this contract starts at 0). If a transaction reverts, read the revert reason; a common cause is a typo in the contract address you attached to."},
+    {"symptom": "A marketplace doesn't show the NFT even though ownerOf is correct.", "fix": "Some marketplaces index slowly or only support certain testnets, and they read the metadata format strictly. Confirm your metadata JSON has name, description and image fields, that it resolves from its CID, and give the indexer time; the explorer is the source of truth for ownership."},
+    {"symptom": "Deployment or mint fails with 'insufficient funds'.", "fix": "Your deployer account needs Sepolia ETH for gas. Request more from a faucet to the exact deployer address, wait for it to arrive, and retry — deploying and minting are both gas-costing transactions."},
+    {"symptom": "IPFS content stops loading later.", "fix": "IPFS guarantees integrity, not permanence — data must stay pinned. Ensure your pinning service is actually pinning the files (not just caching them), or they can disappear. For a durable collection, use a service that keeps content pinned."}
+  ],
+  "next": [
+    "Add a mint price and a max supply, and restrict who can mint or how many, using require checks and OpenZeppelin's Ownable — then test the new rules.",
+    "Generate a whole collection with a script that uploads many images and metadata files and mints them in a loop, giving each a unique tokenId.",
+    "Build a small mint-page frontend with ethers.js that connects a wallet and lets visitors mint, using the Connecting-a-frontend lesson.",
+    "Move the collection to a Layer 2 testnet and compare minting gas costs with Sepolia, tying into the Scaling lesson."
+  ]
+}
