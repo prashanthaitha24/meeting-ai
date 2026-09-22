@@ -73,6 +73,13 @@
         <button type="button" class="btn-link" id="resetProgress">Reset</button>
       </div>
     </div>
+    <div class="plan-panel" id="planPanel" hidden>
+      <div class="plan-head">
+        <div class="plan-title">🎯 <strong>Study plan</strong><span>Pick a track and a pace — it splits into daily sessions, saves where you stop, and picks up next time.</span></div>
+        <label class="plan-track-pick">Track <select id="planTrack" aria-label="Study plan track"></select></label>
+      </div>
+      <div class="plan-body" id="planBody"></div>
+    </div>
     <div class="track-tabs" role="tablist" aria-label="Learning tracks" id="trackTabs" hidden>
 {{TABS}}
     </div>
@@ -137,6 +144,7 @@
   </div>
 </footer>
 
+<script id="planData" type="application/json">{{PLAN_DATA}}</script>
 <script>
   function toggleNav() {
     var n = document.getElementById('navLinks'); var open = n.classList.toggle('open');
@@ -269,6 +277,119 @@
       var best = scores[el.dataset.quiz];
       if (typeof best === 'number') { el.textContent = 'Quiz ' + best + '/5'; el.hidden = false; }
     });
+  })();
+
+  // STUDY PLANNER — per-track daily sessions, cached in this browser only
+  (function () {
+    var DATA; try { DATA = JSON.parse(document.getElementById('planData').textContent); } catch (e) { return; }
+    var panel = document.getElementById('planPanel'), sel = document.getElementById('planTrack'), body = document.getElementById('planBody');
+    if (!DATA || !DATA.tracks || !panel || !sel || !body) return;
+    var KEY = 'thavionai-edu-plan', PROG = 'thavionai-edu-progress';
+    function read(k) { try { return JSON.parse(localStorage.getItem(k)) || {}; } catch (e) { return {}; } }
+    var state = read(KEY); if (!state.plans) state.plans = {};
+    function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
+    function progress() { return read(PROG); }
+    function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+    function pad(n) { return String(n).length < 2 ? '0' + n : '' + n; }
+    function todayStr() { var d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
+    function daysBetween(a, b) { return Math.round((new Date(b + 'T00:00:00') - new Date(a + 'T00:00:00')) / 86400000); }
+
+    var trackById = {}, intensById = {};
+    DATA.tracks.forEach(function (t) { trackById[t.id] = t; });
+    DATA.intensities.forEach(function (i) { intensById[i.id] = i; });
+    DATA.tracks.forEach(function (t) { var o = document.createElement('option'); o.value = t.id; o.textContent = t.name; sel.appendChild(o); });
+    sel.value = (state.active && trackById[state.active]) ? state.active : DATA.tracks[0].id;
+
+    function buildDays(items, perDay) {
+      var days = [], cur = null;
+      items.forEach(function (it) {
+        if (it.type === 'project') { if (cur) { days.push(cur); cur = null; } days.push({ kind: 'project', items: [it] }); }
+        else {
+          if (!cur) cur = { kind: 'study', items: [], min: 0 };
+          if (cur.min + it.min > perDay && cur.items.length) { days.push(cur); cur = { kind: 'study', items: [], min: 0 }; }
+          cur.items.push(it); cur.min += it.min;
+        }
+      });
+      if (cur) days.push(cur);
+      return days;
+    }
+    function itemDone(plan, it) { return it.type === 'project' ? !!(plan.done && plan.done[it.key]) : !!progress()[it.key]; }
+    function dayComplete(plan, day) { return day.items.every(function (it) { return itemDone(plan, it); }); }
+
+    function renderSetup(track, keep) {
+      body.style.setProperty('--tc', track.accent);
+      var totalMin = 0, nL = 0, nP = 0, nC = 0;
+      track.items.forEach(function (it) { totalMin += it.min; if (it.type === 'lesson') nL++; else if (it.type === 'project') nP++; else nC++; });
+      var parts = [nL + ' lessons'];
+      if (nP) parts.push(nP + ' project' + (nP > 1 ? 's' : ''));
+      if (nC) parts.push(nC + ' cert guide' + (nC > 1 ? 's' : ''));
+      var opts = DATA.intensities.map(function (i) {
+        return '<button type="button" class="plan-int" data-int="' + i.id + '"><span class="plan-int-label">' + i.label + '</span>' +
+          '<span class="plan-int-days">' + buildDays(track.items, i.perDay).length + ' days</span><span class="plan-int-blurb">' + i.blurb + '</span></button>';
+      }).join('');
+      body.innerHTML = '<p class="plan-lead">' + parts.join(' · ') + ' · about ' + Math.round(totalMin / 60) + ' hours total. ' +
+        (keep ? 'Pick a new pace:' : 'Choose a pace and start:') + '</p><div class="plan-ints">' + opts + '</div>';
+      body.querySelectorAll('.plan-int').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var base = keep || {};
+          state.plans[track.id] = { intensity: btn.dataset.int, start: base.start || todayStr(), cursor: 1, done: base.done || {} };
+          state.active = track.id; save(); render();
+        });
+      });
+    }
+
+    function renderActive(track, plan) {
+      body.style.setProperty('--tc', track.accent);
+      var inten = intensById[plan.intensity] || DATA.intensities[1];
+      var days = buildDays(track.items, inten.perDay), total = days.length;
+      if (plan.cursor < 1) plan.cursor = 1; if (plan.cursor > total) plan.cursor = total;
+      var calTarget = Math.min(total, Math.max(1, daysBetween(plan.start, todayStr()) + 1)), moved = false;
+      while (plan.cursor < calTarget && dayComplete(plan, days[plan.cursor - 1])) { plan.cursor++; moved = true; }
+      if (moved) save();
+      var day = days[plan.cursor - 1], doneDays = 0;
+      for (var i = 0; i < total; i++) if (dayComplete(plan, days[i])) doneDays++;
+      var allDone = doneDays === total, todayDone = dayComplete(plan, day);
+
+      var head = allDone
+        ? '<div class="plan-day-label">🎉 Track complete</div><h4>You finished the ' + esc(track.name) + ' plan</h4>'
+        : '<div class="plan-day-label">Day ' + plan.cursor + ' of ' + total + ' · ' + esc(inten.label) + ' pace</div><h4>' + (day.kind === 'project' ? 'Project day' : "Today's session") + '</h4>';
+      var itemsHtml = allDone ? '' : '<ul class="plan-items">' + day.items.map(function (it) {
+        var done = itemDone(plan, it), tag = it.type === 'project' ? 'Project' : (it.type === 'cert' ? 'Cert' : Math.round(it.min) + ' min');
+        var right = it.type === 'project'
+          ? '<label class="plan-item-tick"><input type="checkbox" data-projkey="' + esc(it.key) + '"' + (done ? ' checked' : '') + ' /> done</label>'
+          : '<span class="plan-item-state' + (done ? ' on' : '') + '">' + (done ? '✓ done' : 'to do') + '</span>';
+        return '<li class="plan-item' + (done ? ' done' : '') + '"><a href="' + it.url + '">' + esc(it.title) + '</a><span class="plan-item-tag">' + tag + '</span>' + right + '</li>';
+      }).join('') + '</ul>';
+      var msg;
+      if (allDone) msg = '<p class="plan-done-msg">Every lesson, project and cert guide in this track is done. Start a plan for another track, or revisit anything.</p>';
+      else if (todayDone) msg = '<div class="plan-eod"><strong>That’s it for Day ' + plan.cursor + ' — nicely done.</strong> Come back tomorrow and it continues automatically' +
+        (plan.cursor < total ? ', or keep the momentum: <button type="button" class="btn btn-primary btn-sm" id="planNext">Continue to Day ' + (plan.cursor + 1) + ' →</button>' : '.') + '</div>';
+      else msg = '<p class="plan-hint">Open each item and tick it done when you finish — your place is saved on this device.</p>';
+
+      body.innerHTML = '<div class="plan-active-head">' + head +
+        '<div class="plan-overall"><div class="plan-overall-bar"><span style="width:' + (total ? doneDays / total * 100 : 0) + '%"></span></div><span class="plan-overall-txt">' + doneDays + ' / ' + total + ' days</span></div></div>' +
+        itemsHtml + msg +
+        '<div class="plan-foot"><button type="button" class="btn-link" id="planChange">Change pace</button><button type="button" class="btn-link" id="planReset">Reset this plan</button></div>';
+
+      var next = document.getElementById('planNext');
+      if (next) next.addEventListener('click', function () { if (plan.cursor < total) { plan.cursor++; save(); render(); } });
+      body.querySelectorAll('input[data-projkey]').forEach(function (cb) {
+        cb.addEventListener('change', function () { if (!plan.done) plan.done = {}; if (cb.checked) plan.done[cb.dataset.projkey] = 1; else delete plan.done[cb.dataset.projkey]; save(); render(); });
+      });
+      document.getElementById('planChange').addEventListener('click', function () { renderSetup(track, plan); });
+      document.getElementById('planReset').addEventListener('click', function () {
+        if (!confirm('Reset the ' + track.name + ' study plan? Your lesson progress is kept; only the day-by-day schedule resets.')) return;
+        delete state.plans[track.id]; save(); render();
+      });
+    }
+
+    function render() {
+      var track = trackById[sel.value]; state.active = track.id; save();
+      if (state.plans[track.id]) renderActive(track, state.plans[track.id]); else renderSetup(track);
+    }
+    sel.addEventListener('change', render);
+    panel.hidden = false;
+    render();
   })();
 </script>
 </body>

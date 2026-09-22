@@ -254,6 +254,61 @@ def fit_tiles(tracks):
 
 # ---------------------------------------------------------------- main
 
+# Certification guides most directly related to each track (used by the study planner).
+# ai and data have no cert on the site, so they get none.
+RELATED_CERTS = {
+    "devops": ["cert-terraform", "cert-cka"],
+    "sre": ["cert-cka"],
+    "security": ["cert-security-plus", "cert-cissp"],
+}
+
+_minutes_cache = {}
+
+
+def module_minutes(mod_id):
+    if mod_id not in _minutes_cache:
+        try:
+            _minutes_cache[mod_id] = int(json.load(open(EDU / "modules" / f"{mod_id}.json")).get("minutes", 30))
+        except Exception:
+            _minutes_cache[mod_id] = 30
+    return _minutes_cache[mod_id]
+
+
+def plan_data(tracks):
+    """Per-track ordered study items (lessons → projects → related cert) for the client-side planner."""
+    certs_tr = next(t for t in tracks if t["id"] == "certs")
+    cert_lookup = {m["id"]: m for m in certs_tr["modules"]}
+    out_tracks = []
+    for tr in tracks:
+        items = []
+        for m in tr["modules"]:
+            if m["live"]:
+                items.append({"type": "lesson", "title": m["title"], "key": m["id"],
+                              "url": f"education/{m['id']}.html", "min": module_minutes(m["id"])})
+        for p in tr["projects"]:
+            if p.get("live"):
+                items.append({"type": "project", "title": p["title"], "key": p["id"],
+                              "url": f"education/projects/{p['id']}.html", "min": int(round(p["hours"] * 60))})
+        if tr["id"] != "certs":
+            for cid in RELATED_CERTS.get(tr["id"], []):
+                cm = cert_lookup.get(cid)
+                if cm and cm["live"]:
+                    items.append({"type": "cert", "title": cm["title"], "key": cid,
+                                  "url": f"education/{cid}.html", "min": module_minutes(cid)})
+        out_tracks.append({"id": tr["id"], "name": tr["name"], "short": tr["short"],
+                           "accent": tr["accent"], "emoji": tr["emoji"], "items": items})
+    payload = {
+        "tracks": out_tracks,
+        "intensities": [
+            {"id": "intense", "label": "Intense", "perDay": 120, "blurb": "~2 hrs/day"},
+            {"id": "steady", "label": "Steady", "perDay": 60, "blurb": "~1 hr/day"},
+            {"id": "relaxed", "label": "Relaxed", "perDay": 35, "blurb": "~35 min/day"},
+            {"id": "casual", "label": "Casual", "perDay": 20, "blurb": "~20 min/day"},
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def fill(template, values):
     out = template
     for k, v in values.items():
@@ -290,6 +345,7 @@ def main():
         "FIT_TILES": fit_tiles(tracks),
         "FOOTER_TRACKS": footer_tracks(tracks),
         "TRACK_IDS": json.dumps([tr["id"] for tr in tracks]),
+        "PLAN_DATA": plan_data(tracks),
     })
     (DOCS / "education.html").write_text(hub)
     print(f"built docs/index.html and docs/education.html: {stats}")
