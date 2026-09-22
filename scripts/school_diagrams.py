@@ -261,6 +261,147 @@ def blocks(items, **_):
     return _svg(left + w + 12, y - gap + pad, "".join(body), "structure: " + ", ".join(i.get("label", "") for i in items))
 
 
+def equation_dots(a, b, op="add", color="green", **_):
+    fillc, strokec = COLORS[color]
+    r, gap, sgap = 12, 7, 22
+    y = 32
+    parts, x = [], 10
+
+    def dots(n, cross_from=None):
+        nonlocal x
+        for i in range(n):
+            cx = x + r
+            parts.append(f'<circle cx="{cx}" cy="{y}" r="{r}" fill="{fillc}" stroke="{strokec}" stroke-width="2"/>')
+            if cross_from is not None and i >= cross_from:
+                parts.append(f'<line x1="{cx-r}" y1="{y-r}" x2="{cx+r}" y2="{y+r}" stroke="{COLORS["rose"][1]}" stroke-width="2.6" stroke-linecap="round"/>')
+            x += 2 * r + gap
+        x += sgap - gap
+
+    def sign(s):
+        nonlocal x
+        parts.append(_text(x + 4, y + 7, s, 22, INK, weight="700"))
+        x += 24
+
+    if op == "add":
+        dots(a); sign("+"); dots(b); sign("="); dots(a + b)
+        label = f"{a} + {b} = {a + b}"
+    else:
+        dots(a, cross_from=a - b); sign("="); dots(a - b)
+        label = f"{a} take away {b} = {a - b}"
+    w = x + 6
+    parts.append(_text(w / 2, y + 38, label, 15, INK, weight="700"))
+    return _svg(w, y + 50, "".join(parts), label)
+
+
+def compare(a, b, **_):
+    r, gap = 13, 8
+    fa, fb = COLORS["blue"], COLORS["amber"]
+    parts = []
+
+    def row(n, y, col):
+        for i in range(n):
+            cx = 16 + r + i * (2 * r + gap)
+            parts.append(f'<circle cx="{cx}" cy="{y}" r="{r}" fill="{col[0]}" stroke="{col[1]}" stroke-width="2"/>')
+    row(a, 30, fa)
+    row(b, 74, fb)
+    sym = ">" if a > b else ("<" if a < b else "=")
+    word = "more than" if a > b else ("fewer than" if a < b else "the same as")
+    w = 16 + max(a, b) * (2 * r + gap) + 60
+    parts.append(_text(w - 30, 56, sym, 26, INK, weight="800"))
+    parts.append(_text((w - 40) / 2, 108, f"{a} is {word} {b}   ({a} {sym} {b})", 14, INK, weight="600"))
+    return _svg(w, 122, "".join(parts), f"{a} {sym} {b}")
+
+
+def pattern(items, **_):
+    cell, size, top = 52, 34, 14
+    parts = []
+    for i, it in enumerate(items):
+        cx, cy = i * cell + cell / 2, top + size / 2
+        if it.get("q"):
+            parts.append(f'<rect x="{cx-size/2}" y="{cy-size/2}" width="{size}" height="{size}" rx="8" fill="none" stroke="{EMPTY_STROKE}" stroke-width="2" stroke-dasharray="4 4"/>')
+            parts.append(_text(cx, cy + 9, "?", 28, FAINT, weight="700"))
+            continue
+        col = COLORS[it.get("color", "green")]
+        shp = it.get("shape", "circle")
+        if shp == "circle":
+            parts.append(f'<circle cx="{cx}" cy="{cy}" r="{size/2}" fill="{col[0]}" stroke="{col[1]}" stroke-width="2.5"/>')
+        elif shp == "square":
+            parts.append(f'<rect x="{cx-size/2}" y="{cy-size/2}" width="{size}" height="{size}" rx="7" fill="{col[0]}" stroke="{col[1]}" stroke-width="2.5"/>')
+        elif shp == "triangle":
+            parts.append(f'<polygon points="{cx},{cy-size/2} {cx+size/2},{cy+size/2} {cx-size/2},{cy+size/2}" fill="{col[0]}" stroke="{col[1]}" stroke-width="2.5" stroke-linejoin="round"/>')
+    return _svg(len(items) * cell, top + size + 16, "".join(parts), "repeating pattern")
+
+
+def place_value(number, **_):
+    s = str(int(number)).rjust(3, "0")
+    cols = [("Hundreds", int(s[0]), "rose"), ("Tens", int(s[1]), "amber"), ("Ones", int(s[2]), "green")]
+    cw, parts = 100, []
+    for i, (name, d, color) in enumerate(cols):
+        x = i * cw
+        col = COLORS[color]
+        parts.append(f'<rect x="{x+8}" y="14" width="{cw-16}" height="88" rx="12" fill="{col[0]}" stroke="{col[1]}" stroke-width="2"/>')
+        parts.append(_text(x + cw / 2, 34, name, 12, INK, weight="700"))
+        parts.append(_text(x + cw / 2, 82, d, 34, INK, weight="800"))
+    parts.append(_text(1.5 * cw, 126, f"{int(number)} = {cols[0][1]} hundreds, {cols[1][1]} tens, {cols[2][1]} ones", 13, INK, weight="600"))
+    return _svg(3 * cw, 138, "".join(parts), f"place value of {int(number)}")
+
+
+def line_graph(m=1, b=0, color="blue", **_):
+    fillc, strokec = COLORS[color]
+    W, O, step = 240, 120, 20
+    parts = []
+    for i in range(-5, 6):
+        g = O + i * step
+        parts.append(f'<line x1="{g}" y1="0" x2="{g}" y2="{W}" stroke="{EMPTY}" stroke-width="1"/>')
+        parts.append(f'<line x1="0" y1="{g}" x2="{W}" y2="{g}" stroke="{EMPTY}" stroke-width="1"/>')
+    parts.append(f'<line x1="0" y1="{O}" x2="{W}" y2="{O}" stroke="{INK}" stroke-width="1.6"/>')
+    parts.append(f'<line x1="{O}" y1="0" x2="{O}" y2="{W}" stroke="{INK}" stroke-width="1.6"/>')
+
+    def px(x, y):
+        return (O + x * step, O - y * step)
+    p1, p2 = px(-5, m * -5 + b), px(5, m * 5 + b)
+    parts.append(f'<line x1="{p1[0]:.1f}" y1="{p1[1]:.1f}" x2="{p2[0]:.1f}" y2="{p2[1]:.1f}" stroke="{strokec}" stroke-width="3" stroke-linecap="round"/>')
+    sign = "+" if b >= 0 else "−"
+    parts.append(_text(W / 2, W + 20, f"y = {m}x {sign} {abs(b)}", 14, strokec, weight="700"))
+    return _svg(W, W + 30, "".join(parts), f"line y = {m}x + {b}")
+
+
+def right_triangle(opp=3, adj=4, **_):
+    hyp = math.hypot(opp, adj)
+    scale = 150 / max(opp, adj)
+    ax, ay = 112, 176           # right-angle corner (bottom-left), left margin for the label
+    bx, by = ax + adj * scale, ay   # bottom-right (angle theta here)
+    cx, cy = ax, ay - opp * scale   # top-left
+    parts = [f'<polygon points="{ax},{ay} {bx:.1f},{by} {cx},{cy:.1f}" fill="{COLORS["blue"][0]}" stroke="{INK}" stroke-width="2" stroke-linejoin="round"/>']
+    parts.append(f'<rect x="{ax}" y="{ay-14}" width="14" height="14" fill="none" stroke="{INK}" stroke-width="1.4"/>')  # right angle
+    parts.append(f'<path d="M{bx-26:.1f} {by} A26 26 0 0 0 {bx-24:.1f} {by-11:.1f}" fill="none" stroke="{COLORS["rose"][1]}" stroke-width="2"/>')
+    parts.append(_text(bx - 34, by - 6, "θ", 15, COLORS["rose"][1], weight="700"))
+    parts.append(_text((ax + bx) / 2, ay + 20, f"adjacent = {adj}", 12.5, INK, weight="600"))
+    parts.append(_text(ax - 10, (ay + cy) / 2, f"opposite = {opp}", 12, INK, anchor="end", weight="600"))
+    parts.append(_text((bx + cx) / 2 + 14, (by + cy) / 2 - 6, f"hyp = {hyp:g}", 12.5, COLORS["blue"][1], weight="700"))
+    return _svg(bx + 20, ay + 34, "".join(parts), f"right triangle {opp}, {adj}, {hyp:g}")
+
+
+def curve_tangent(color="purple", **_):
+    fillc, strokec = COLORS[color]
+    W, H = 240, 150
+
+    def fy(x):
+        return H - 22 - 105 * (x / W) ** 2
+    pts = [(i, fy(i)) for i in range(0, W + 1, 8)]
+    d = "M" + " L".join(f"{x:.0f} {y:.0f}" for x, y in pts)
+    parts = [f'<line x1="0" y1="{H-22}" x2="{W}" y2="{H-22}" stroke="{EMPTY_STROKE}" stroke-width="1.4"/>',
+             f'<path d="{d}" fill="none" stroke="{strokec}" stroke-width="3" stroke-linecap="round"/>']
+    tx = 150
+    ty = fy(tx)
+    slope = (fy(tx + 1) - fy(tx - 1)) / 2
+    x1, x2 = tx - 55, tx + 55
+    parts.append(f'<line x1="{x1}" y1="{ty+slope*(x1-tx):.1f}" x2="{x2}" y2="{ty+slope*(x2-tx):.1f}" stroke="{INK}" stroke-width="2" stroke-dasharray="5 4"/>')
+    parts.append(f'<circle cx="{tx}" cy="{ty:.1f}" r="5" fill="{strokec}"/>')
+    parts.append(_text(W / 2, H + 16, "the tangent's steepness is the rate of change", 12, INK, weight="600"))
+    return _svg(W, H + 26, "".join(parts), "curve with a tangent line showing slope")
+
+
 KINDS = {
     "fraction_circle": fraction_circle,
     "fraction_bar": fraction_bar,
@@ -272,6 +413,13 @@ KINDS = {
     "flow": flow,
     "phrase": labeled_phrase,
     "blocks": blocks,
+    "equation_dots": equation_dots,
+    "compare": compare,
+    "pattern": pattern,
+    "place_value": place_value,
+    "line_graph": line_graph,
+    "right_triangle": right_triangle,
+    "curve_tangent": curve_tangent,
 }
 
 

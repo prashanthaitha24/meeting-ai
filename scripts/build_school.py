@@ -44,11 +44,16 @@ def inline(text):
     return t
 
 
-def validate(lid, lesson, subject_ids):
+def validate(lid, lesson, subj_by_id):
     errs = []
     need = lambda c, m: None if c else errs.append(m)  # noqa: E731
     need(lesson.get("id") == lid, f"'id' must equal the filename ({lid})")
-    need(lesson.get("subject") in subject_ids, f"'subject' must be one of {sorted(subject_ids)}")
+    subj = subj_by_id.get(lesson.get("subject"))
+    need(subj is not None, f"'subject' must be one of {sorted(subj_by_id)}")
+    if subj and subj.get("levels"):
+        level_ids = {lv["id"] for lv in subj["levels"]}
+        need(lesson.get("level") in level_ids, f"'level' must be one of {sorted(level_ids)} for subject {subj['id']}")
+        need(isinstance(lesson.get("order"), int), "'order' (int) required when the subject has levels")
     for k in ("title", "grade", "intro"):
         need(lesson.get(k), f"'{k}' missing")
     need(isinstance(lesson.get("minutes"), int) and 5 <= lesson["minutes"] <= 60, "'minutes' must be 5-60")
@@ -300,7 +305,7 @@ def build(check=None):
         if check and lid not in check:
             pass
         data = json.loads(f.read_text())
-        errs = validate(lid, data, set(subj_by_id))
+        errs = validate(lid, data, subj_by_id)
         if errs:
             failed += 1
             print(f"FAIL {lid}:")
@@ -339,17 +344,33 @@ def build(check=None):
         (LOUT / f"{les['id']}.html").write_text(page)
 
     # hub
+    def lesson_cards(items, accent):
+        return "\n".join(
+            f'        <a class="module-body" href="school/{l["id"]}.html" style="border-left:3px solid {accent}">'
+            f'<span class="t" style="font-weight:700">{esc(l["title"])}</span>'
+            f'<span class="d" style="display:block;color:var(--text3);font-size:13px;margin-top:2px">{esc(l["grade"])} · {esc(l["intro"][:80])}…</span></a>'
+            for l in items
+        )
+
     sections_html = []
     for s in subjects:
         items = by_subject.get(s["id"], [])
-        if items:
-            cards = "\n".join(
-                f'        <a class="module-body" href="school/{l["id"]}.html" style="border-left:3px solid {s["accent"]}">'
-                f'<span class="t" style="font-weight:700">{esc(l["title"])}</span>'
-                f'<span class="d" style="display:block;color:var(--text3);font-size:13px;margin-top:2px">{esc(l["grade"])} · {esc(l["intro"][:90])}…</span></a>'
-                for l in items
-            )
-            lessons_block = f'      <div class="stage-modules" style="display:flex;flex-direction:column;gap:8px;margin-top:14px">\n{cards}\n      </div>'
+        if s.get("levels"):
+            blocks_out = []
+            for lv in s["levels"]:
+                lv_items = sorted([l for l in items if l.get("level") == lv["id"]], key=lambda l: l.get("order", 0))
+                if not lv_items:
+                    continue
+                blocks_out.append(
+                    f'      <div style="margin-top:18px">'
+                    f'<div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding-bottom:6px;border-bottom:1px solid var(--border)">'
+                    f'<span style="font-weight:700;font-size:14px;color:var(--text)">{esc(lv["name"])}</span>'
+                    f'<span style="font-size:12px;color:var(--text3)">{esc(lv["grade"])}</span></div>'
+                    f'<div class="stage-modules" style="display:flex;flex-direction:column;gap:8px;margin-top:10px">\n{lesson_cards(lv_items, s["accent"])}\n      </div></div>'
+                )
+            lessons_block = "\n".join(blocks_out) if blocks_out else '      <p class="soon" style="margin-top:14px">Lessons publishing soon.</p>'
+        elif items:
+            lessons_block = f'      <div class="stage-modules" style="display:flex;flex-direction:column;gap:8px;margin-top:14px">\n{lesson_cards(items, s["accent"])}\n      </div>'
         else:
             lessons_block = '      <p class="soon" style="margin-top:14px">Lessons publishing soon.</p>'
         sections_html.append(
