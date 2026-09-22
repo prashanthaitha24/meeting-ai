@@ -300,10 +300,10 @@ def plan_data(tracks):
     payload = {
         "tracks": out_tracks,
         "intensities": [
-            {"id": "intense", "label": "Intense", "perDay": 120, "blurb": "~2 hrs/day"},
-            {"id": "steady", "label": "Steady", "perDay": 60, "blurb": "~1 hr/day"},
-            {"id": "relaxed", "label": "Relaxed", "perDay": 35, "blurb": "~35 min/day"},
-            {"id": "casual", "label": "Casual", "perDay": 20, "blurb": "~20 min/day"},
+            {"id": "intense", "label": "Intense", "maxItems": 4, "perDay": 180, "everyDays": 1, "blurb": "~2 hrs a day"},
+            {"id": "steady", "label": "Steady", "maxItems": 2, "perDay": 100, "everyDays": 1, "blurb": "~1 hr a day"},
+            {"id": "relaxed", "label": "Relaxed", "maxItems": 1, "perDay": 60, "everyDays": 1, "blurb": "a lesson a day"},
+            {"id": "casual", "label": "Casual", "maxItems": 1, "perDay": 60, "everyDays": 2, "blurb": "a lesson every 2 days"},
         ],
     }
     return json.dumps(payload, ensure_ascii=False)

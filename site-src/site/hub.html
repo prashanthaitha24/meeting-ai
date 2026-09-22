@@ -300,13 +300,13 @@
     DATA.tracks.forEach(function (t) { var o = document.createElement('option'); o.value = t.id; o.textContent = t.name; sel.appendChild(o); });
     sel.value = (state.active && trackById[state.active]) ? state.active : DATA.tracks[0].id;
 
-    function buildDays(items, perDay) {
-      var days = [], cur = null;
+    function buildDays(items, inten) {
+      var perDay = inten.perDay, maxItems = inten.maxItems || 99, days = [], cur = null;
       items.forEach(function (it) {
         if (it.type === 'project') { if (cur) { days.push(cur); cur = null; } days.push({ kind: 'project', items: [it] }); }
         else {
           if (!cur) cur = { kind: 'study', items: [], min: 0 };
-          if (cur.min + it.min > perDay && cur.items.length) { days.push(cur); cur = { kind: 'study', items: [], min: 0 }; }
+          if (cur.items.length && (cur.items.length >= maxItems || cur.min + it.min > perDay)) { days.push(cur); cur = { kind: 'study', items: [], min: 0 }; }
           cur.items.push(it); cur.min += it.min;
         }
       });
@@ -324,8 +324,10 @@
       if (nP) parts.push(nP + ' project' + (nP > 1 ? 's' : ''));
       if (nC) parts.push(nC + ' cert guide' + (nC > 1 ? 's' : ''));
       var opts = DATA.intensities.map(function (i) {
+        var sess = buildDays(track.items, i).length, every = i.everyDays || 1;
+        var cal = (sess - 1) * every + 1;
         return '<button type="button" class="plan-int" data-int="' + i.id + '"><span class="plan-int-label">' + i.label + '</span>' +
-          '<span class="plan-int-days">' + buildDays(track.items, i.perDay).length + ' days</span><span class="plan-int-blurb">' + i.blurb + '</span></button>';
+          '<span class="plan-int-days">' + cal + ' days</span><span class="plan-int-blurb">' + i.blurb + '</span></button>';
       }).join('');
       body.innerHTML = '<p class="plan-lead">' + parts.join(' · ') + ' · about ' + Math.round(totalMin / 60) + ' hours total. ' +
         (keep ? 'Pick a new pace:' : 'Choose a pace and start:') + '</p><div class="plan-ints">' + opts + '</div>';
@@ -341,18 +343,20 @@
     function renderActive(track, plan) {
       body.style.setProperty('--tc', track.accent);
       var inten = intensById[plan.intensity] || DATA.intensities[1];
-      var days = buildDays(track.items, inten.perDay), total = days.length;
+      var every = inten.everyDays || 1;
+      var days = buildDays(track.items, inten), total = days.length;
       if (plan.cursor < 1) plan.cursor = 1; if (plan.cursor > total) plan.cursor = total;
-      var calTarget = Math.min(total, Math.max(1, daysBetween(plan.start, todayStr()) + 1)), moved = false;
+      var calTarget = Math.min(total, Math.max(1, Math.floor(daysBetween(plan.start, todayStr()) / every) + 1)), moved = false;
       while (plan.cursor < calTarget && dayComplete(plan, days[plan.cursor - 1])) { plan.cursor++; moved = true; }
       if (moved) save();
       var day = days[plan.cursor - 1], doneDays = 0;
       for (var i = 0; i < total; i++) if (dayComplete(plan, days[i])) doneDays++;
       var allDone = doneDays === total, todayDone = dayComplete(plan, day);
+      var paceLabel = esc(inten.label) + (every > 1 ? ' · a lesson every ' + every + ' days' : ' pace');
 
       var head = allDone
         ? '<div class="plan-day-label">🎉 Track complete</div><h4>You finished the ' + esc(track.name) + ' plan</h4>'
-        : '<div class="plan-day-label">Day ' + plan.cursor + ' of ' + total + ' · ' + esc(inten.label) + ' pace</div><h4>' + (day.kind === 'project' ? 'Project day' : "Today's session") + '</h4>';
+        : '<div class="plan-day-label">Session ' + plan.cursor + ' of ' + total + ' · ' + paceLabel + '</div><h4>' + (day.kind === 'project' ? 'Project session' : "This session") + '</h4>';
       var itemsHtml = allDone ? '' : '<ul class="plan-items">' + day.items.map(function (it) {
         var done = itemDone(plan, it), tag = it.type === 'project' ? 'Project' : (it.type === 'cert' ? 'Cert' : Math.round(it.min) + ' min');
         var right = it.type === 'project'
@@ -362,12 +366,12 @@
       }).join('') + '</ul>';
       var msg;
       if (allDone) msg = '<p class="plan-done-msg">Every lesson, project and cert guide in this track is done. Start a plan for another track, or revisit anything.</p>';
-      else if (todayDone) msg = '<div class="plan-eod"><strong>That’s it for Day ' + plan.cursor + ' — nicely done.</strong> Come back tomorrow and it continues automatically' +
-        (plan.cursor < total ? ', or keep the momentum: <button type="button" class="btn btn-primary btn-sm" id="planNext">Continue to Day ' + (plan.cursor + 1) + ' →</button>' : '.') + '</div>';
+      else if (todayDone) msg = '<div class="plan-eod"><strong>That’s it for this session — nicely done.</strong> Come back ' + (every === 1 ? 'tomorrow' : 'in ' + every + ' days') + ' and it continues automatically' +
+        (plan.cursor < total ? ', or keep the momentum: <button type="button" class="btn btn-primary btn-sm" id="planNext">Continue to session ' + (plan.cursor + 1) + ' →</button>' : '.') + '</div>';
       else msg = '<p class="plan-hint">Open each item and tick it done when you finish — your place is saved on this device.</p>';
 
       body.innerHTML = '<div class="plan-active-head">' + head +
-        '<div class="plan-overall"><div class="plan-overall-bar"><span style="width:' + (total ? doneDays / total * 100 : 0) + '%"></span></div><span class="plan-overall-txt">' + doneDays + ' / ' + total + ' days</span></div></div>' +
+        '<div class="plan-overall"><div class="plan-overall-bar"><span style="width:' + (total ? doneDays / total * 100 : 0) + '%"></span></div><span class="plan-overall-txt">' + doneDays + ' / ' + total + ' sessions</span></div></div>' +
         itemsHtml + msg +
         '<div class="plan-foot"><button type="button" class="btn-link" id="planChange">Change pace</button><button type="button" class="btn-link" id="planReset">Reset this plan</button></div>';
 
