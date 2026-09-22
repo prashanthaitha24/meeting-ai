@@ -1,0 +1,156 @@
+{
+  "id": "robotics-slam",
+  "minutes": 34,
+  "intro": "For a robot to move purposefully through a space it has never seen, it must answer two entangled questions at once: what does the world around me look like, and where am I within it? Solving both together is SLAM — Simultaneous Localization and Mapping. This lesson builds the intuition without heavy maths: why the two problems are a chicken-and-egg pair, how a robot fuses odometry with sensors to solve them, what a map actually is to a robot, and how it plans a path once it has one. This is the capstone idea of mobile robotics.",
+  "objectives": [
+    "State the two questions SLAM answers and why they depend on each other",
+    "Explain how sensor fusion corrects the drift of odometry",
+    "Describe what an occupancy-grid map represents",
+    "Outline how a robot plans and follows a path on a map"
+  ],
+  "sections": [
+    {
+      "heading": "The chicken-and-egg problem",
+      "blocks": [
+        {"type": "p", "text": "Imagine being placed blindfolded in an unfamiliar building and asked to draw a map while also tracking where you are. To build the map you need to know your position (so you can place what you see correctly); but to know your position you need a map (to recognise where you are). Each depends on the other — that is the heart of SLAM. A robot faces exactly this: it must **map** the environment and **localize** itself in that map at the same time, from noisy sensors. It sounds impossible, but it works because the robot does both incrementally and constantly cross-checks: it uses its motion to predict where it moved, uses its sensors to see the world, and adjusts both the map and its position estimate so they stay consistent. Grasping that the two are solved together, not one then the other, is the whole conceptual leap."}
+      ]
+    },
+    {
+      "heading": "Odometry drift and how sensing fixes it",
+      "blocks": [
+        {"type": "p", "text": "Recall from the kinematics lesson that **odometry** — adding up wheel movements — gives a fast position estimate but drifts, because small errors accumulate forever. SLAM's job is to correct that drift using what the robot actually senses. The pattern is **predict then correct**: odometry *predicts* where the robot moved this instant; then a range sensor (a lidar or depth camera) *observes* the surroundings, and if those observations do not match where the map says those walls should be, the robot nudges its position estimate to make them line up again. A powerful special case is a **loop closure**: when the robot recognises a place it has visited before, it can snap the accumulated drift back into alignment, sharply improving the whole map. This constant 'predict from motion, correct from sensing' loop is why a SLAM robot can wander a building and come back with a coherent map, while dead-reckoning alone would have drifted into nonsense."},
+        {"type": "callout", "kind": "note", "text": "The two-step heartbeat of SLAM: predict (use motion/odometry to guess the new pose), then correct (use sensor observations to fix that guess and update the map). Loop closure — recognising a previously seen place — is the moment accumulated drift gets pulled back into line."}
+      ]
+    },
+    {
+      "heading": "What a map is to a robot",
+      "blocks": [
+        {"type": "p", "text": "A robot's map is not a picture; it is a data structure it can compute over. The most common for indoor robots is an **occupancy grid**: the world divided into small cells, each holding the probability that it is occupied by an obstacle. Free space, walls, and unknown-yet cells are all just numbers in the grid. This representation is perfect for navigation because planning a route becomes a search over the grid — find a path of free cells from here to the goal. Other robots use maps of distinct **landmarks** (feature points the sensors can re-recognise) or, in three dimensions, point clouds and meshes. For a first mobile robot, the occupancy grid is the mental model to hold: a grid of 'free / occupied / unknown' that the robot builds as it explores and plans over to get around."},
+        {"type": "code", "lang": "python", "code": "# An occupancy grid is just a 2D array of probabilities.\n# 0.0 = certainly free, 1.0 = certainly occupied, 0.5 = unknown.\nimport numpy as np\n\ngrid = np.full((100, 100), 0.5)   # start: everything unknown\n\ndef mark_occupied(gx, gy):\n    grid[gy, gx] = min(1.0, grid[gy, gx] + 0.3)   # sensor saw a wall here\n\ndef mark_free(gx, gy):\n    grid[gy, gx] = max(0.0, grid[gy, gx] - 0.3)   # sensor saw through here\n\ndef is_free(gx, gy):\n    return grid[gy, gx] < 0.4                       # safe to plan through"}
+      ]
+    },
+    {
+      "heading": "Planning a path on the map",
+      "blocks": [
+        {"type": "p", "text": "Once the robot has a map and knows where it is, getting somewhere is a **path-planning** problem: find a route of free space from the current cell to the goal cell, ideally short and away from walls. On a grid this is a graph search, and the classic algorithm is **A\\*** (A-star), which explores promising directions first using an estimate of remaining distance, so it finds a good path efficiently. The plan is a sequence of waypoints; the robot then *follows* it, using the closed-loop control from the control lesson to steer toward each waypoint in turn, while still watching its sensors for anything new — a person who walked into the corridor — and replanning if the world changed. Map, localize, plan, follow, and react: those five together are how an autonomous mobile robot gets from one room to another on its own."},
+        {"type": "list", "items": [
+          "Map → build an occupancy grid of free/occupied/unknown cells.",
+          "Localize → keep track of which cell you are in via SLAM.",
+          "Plan → search the grid (e.g. A*) for a free path to the goal.",
+          "Follow → steer to each waypoint with closed-loop control.",
+          "React → watch sensors for new obstacles and replan if needed."
+        ]}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Reason through an autonomous run",
+    "steps": [
+      "Run a ROS 2 SLAM package (such as slam_toolbox) in the provided simulator with a lidar-equipped robot.",
+      "Drive the robot around by teleop and watch the occupancy-grid map fill in as it senses walls.",
+      "Return the robot to a place it started and observe the map sharpen as a loop closure corrects drift.",
+      "Give the robot a navigation goal and watch the planner draw a path of free cells to it.",
+      "Place an obstacle in the planned path and confirm the robot replans around it instead of colliding."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "SLAM answers 'what is the map?' and 'where am I?' at the same time.",
+      "The two depend on each other — map needs pose, pose needs map — solved incrementally.",
+      "Predict from odometry, then correct with sensor observations.",
+      "Loop closure snaps accumulated drift back when a place is re-recognised.",
+      "An occupancy grid stores free/occupied/unknown probabilities per cell.",
+      "Planning is a grid search (A*); the robot follows waypoints and replans on change."
+    ],
+    "groups": [
+      {"title": "The core idea", "items": [
+        {"syntax": "Localization", "desc": "where am I in the map?"},
+        {"syntax": "Mapping", "desc": "what does the world look like?"},
+        {"syntax": "Simultaneous", "desc": "both solved together, incrementally"},
+        {"syntax": "chicken-and-egg", "desc": "each needs the other"}
+      ]},
+      {"title": "Predict & correct", "items": [
+        {"syntax": "predict", "desc": "use motion/odometry to guess new pose"},
+        {"syntax": "correct", "desc": "use sensor observations to fix the guess"},
+        {"syntax": "loop closure", "desc": "re-recognise a place, pull drift back"},
+        {"syntax": "lidar / depth cam", "desc": "the range sensors that observe walls"}
+      ]},
+      {"title": "The map", "items": [
+        {"syntax": "occupancy grid", "desc": "cells of occupied probability"},
+        {"syntax": "0 / 0.5 / 1", "desc": "free / unknown / occupied"},
+        {"syntax": "landmarks", "desc": "distinct re-recognisable features"},
+        {"syntax": "point cloud", "desc": "a 3D map representation"}
+      ]},
+      {"title": "Navigation", "items": [
+        {"syntax": "path planning", "desc": "find a free route to the goal"},
+        {"syntax": "A* search", "desc": "efficient grid path search"},
+        {"syntax": "waypoints", "desc": "the sequence the robot follows"},
+        {"syntax": "replan", "desc": "recompute when the world changes"}
+      ]}
+    ],
+    "pitfalls": [
+      "Thinking mapping and localization are done one after the other rather than together.",
+      "Trusting odometry without sensor correction, so the map drifts into nonsense.",
+      "Ignoring loop closure, missing the biggest chance to fix accumulated drift.",
+      "Planning a path but never re-checking sensors, so a new obstacle causes a collision.",
+      "Treating the map as a picture instead of a grid the robot computes routes over."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "Why is SLAM described as a chicken-and-egg problem?",
+      "options": [
+        "It only ever works when two robots cooperate together",
+        "Building the map needs your pose, and finding your pose needs the map",
+        "It strictly requires specially egg-shaped robot wheels",
+        "It is only able to run correctly during the night"
+      ],
+      "answer": 1,
+      "explain": "Mapping needs a known pose to place observations, and localizing needs a map to place yourself — so the two must be solved together, incrementally."
+    },
+    {
+      "q": "In SLAM's predict-then-correct loop, what does the 'correct' step use?",
+      "options": [
+        "Only the accumulated wheel odometry values",
+        "Sensor observations of the surroundings",
+        "The current battery voltage reading",
+        "A completely random positional guess"
+      ],
+      "answer": 1,
+      "explain": "Odometry predicts the new pose; sensor observations (lidar or depth) then correct that prediction so the estimate matches the real world."
+    },
+    {
+      "q": "What is a loop closure?",
+      "options": [
+        "Closing the robot's main power switch off",
+        "Re-recognising a visited place to pull drift back",
+        "Finishing the last iteration of a for-loop in code",
+        "Physically closing the camera's mechanical shutter"
+      ],
+      "answer": 1,
+      "explain": "When the robot re-recognises somewhere it has been, it can correct the drift built up since, sharply improving the whole map's consistency."
+    },
+    {
+      "q": "In an occupancy grid, what does a cell value near 1.0 mean?",
+      "options": [
+        "The cell is almost certainly occupied by an obstacle",
+        "The cell is definitely free space",
+        "The battery is full",
+        "The robot is moving fast"
+      ],
+      "answer": 0,
+      "explain": "An occupancy grid stores the probability a cell is occupied; near 1.0 means likely an obstacle, near 0.0 means free, around 0.5 means unknown."
+    },
+    {
+      "q": "A person steps into the robot's already-planned path. What should an autonomous robot do?",
+      "options": [
+        "Continue along the original planned path regardless",
+        "Detect the new obstacle and replan around it",
+        "Shut itself down completely and permanently",
+        "Delete its whole map and start over from scratch"
+      ],
+      "answer": 1,
+      "explain": "The robot keeps watching its sensors while following waypoints, and replans a new free path when the world changes, instead of colliding."
+    }
+  ]
+}
