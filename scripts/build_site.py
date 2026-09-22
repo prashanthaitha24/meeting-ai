@@ -341,6 +341,7 @@ def main():
     (DOCS / "index.html").write_text(fill((SRC / "site" / "home.html").read_text(), stats))
     (DOCS / "exams.html").write_text(fill((SRC / "site" / "exams.html").read_text(), {}))
     (DOCS / "school.html").write_text(fill((SRC / "site" / "school.html").read_text(), {}))
+    (DOCS / "careers.html").write_text(fill((SRC / "site" / "careers.html").read_text(), {}))
     hub = fill((SRC / "site" / "hub.html").read_text(), {
         **stats,
         "TABS": tabs(tracks),
