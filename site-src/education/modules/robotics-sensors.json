@@ -1,0 +1,158 @@
+{
+  "id": "robotics-sensors",
+  "minutes": 34,
+  "intro": "Sensors are how a robot perceives the world — without them it is a machine moving blind. This lesson covers the sensors you will actually use first: ultrasonic and infrared for distance and lines, the IMU for orientation, and encoders for measuring wheel rotation. You will learn how each works, how to read it in code, and why every real sensor is noisy and what to do about it. Good sensing is the foundation of every behaviour you will build.",
+  "objectives": [
+    "Choose the right sensor for a task: distance, line, orientation or rotation",
+    "Read an ultrasonic and an infrared sensor in code",
+    "Understand what an IMU and a wheel encoder measure",
+    "Recognise sensor noise and apply a simple filter or threshold"
+  ],
+  "sections": [
+    {
+      "heading": "Distance: ultrasonic and infrared",
+      "blocks": [
+        {"type": "p", "text": "The two cheap ways to measure distance are ultrasonic and infrared, and they fail differently. An **ultrasonic sensor** (the HC-SR04 in every kit) sends a burst of sound and times the echo; distance is half the round-trip time multiplied by the speed of sound. It works from a few centimetres to a couple of metres, is cheap and reliable, but has a wide beam (it sees a cone, not a point) and struggles with soft or angled surfaces that scatter the echo. An **infrared distance sensor** shines IR light and measures the reflection; it is faster and narrower but shorter-range and fooled by surface colour and sunlight."},
+        {"type": "p", "text": "You read the HC-SR04 by sending a short trigger pulse and timing how long the echo pin stays high. `pulseIn` does the timing for you; divide by the round-trip factor to get centimetres."},
+        {"type": "code", "lang": "cpp", "code": "// Read distance in cm from an HC-SR04 ultrasonic sensor.\nconst int TRIG = 9, ECHO = 10;\n\nvoid setup() {\n  pinMode(TRIG, OUTPUT);\n  pinMode(ECHO, INPUT);\n  Serial.begin(9600);\n}\n\nlong readCm() {\n  digitalWrite(TRIG, LOW); delayMicroseconds(2);\n  digitalWrite(TRIG, HIGH); delayMicroseconds(10);  // 10us trigger burst\n  digitalWrite(TRIG, LOW);\n  long us = pulseIn(ECHO, HIGH, 30000);  // echo time, timeout 30ms\n  return us / 58;                         // us to centimetres\n}\n\nvoid loop() {\n  Serial.println(readCm());\n  delay(60);  // small gap so echoes don't overlap\n}"}
+      ]
+    },
+    {
+      "heading": "Lines and edges: infrared reflectance",
+      "blocks": [
+        {"type": "p", "text": "A **line sensor** is a small IR emitter and detector pointed at the ground. A black line absorbs IR and reflects little; a white surface reflects a lot. The sensor gives a digital HIGH/LOW (past a built-in threshold) or an analog value you threshold yourself. An array of two or more line sensors under the front of a robot is all you need to follow a line: if the left sensor sees black and the right sees white, steer left, and vice versa. The same reflectance idea, pointed forward, makes a cheap short-range obstacle detector."},
+        {"type": "callout", "kind": "tip", "text": "Line sensors are sensitive to height and ambient light. Mount them a few millimetres above the surface, and calibrate the black/white threshold in the actual room you will run in — a value tuned under office lights can fail in daylight."}
+      ]
+    },
+    {
+      "heading": "Orientation: the IMU",
+      "blocks": [
+        {"type": "p", "text": "An **IMU** (inertial measurement unit, like the MPU-6050) combines an accelerometer and a gyroscope, usually read over the I2C bus. The **accelerometer** measures acceleration including gravity, so at rest it tells you which way is down — useful for tilt. The **gyroscope** measures rotational speed, so integrating it tells you how much the robot has turned. Neither is perfect alone: the accelerometer is noisy under motion, and the gyro drifts over time. Combining them (sensor fusion, often a complementary or Kalman filter) gives a stable orientation, which is how balancing robots and drones know their attitude."},
+        {"type": "p", "text": "For a first robot you rarely need full fusion — a gyro read to detect 'have I turned 90 degrees yet' is often enough. Know that the IMU exists and what each part measures; reach for fusion when you build something that must stay upright."}
+      ]
+    },
+    {
+      "heading": "Rotation: wheel encoders",
+      "blocks": [
+        {"type": "p", "text": "An **encoder** counts how far a wheel has turned. A simple version is a slotted disc on the axle and an IR sensor that pulses once per slot; counting pulses tells you rotation, and rotation times wheel circumference tells you distance travelled. Encoders are what turn 'drive forward' into 'drive forward exactly 30 cm' and are essential for accurate movement, odometry (estimating position from wheel motion), and closed-loop speed control. Without them, a robot commanded to go straight drifts, because no two motors are identical."},
+        {"type": "p", "text": "Encoders produce pulses that can come fast, so they are usually read with **interrupts** — a function that fires on each pulse and increments a counter — rather than polling in the loop, so none are missed. Even a cheap encoder transforms how precisely a robot can move."}
+      ]
+    },
+    {
+      "heading": "Every sensor is noisy",
+      "blocks": [
+        {"type": "p", "text": "Real sensors do not give clean numbers. An ultrasonic reading occasionally spikes to a wrong value; an analog line sensor jitters; an IMU is noisy under vibration. If your robot reacts to every raw reading, it will twitch and misbehave. Two simple defences handle most of it: **thresholding with hysteresis** (act only when a value clearly crosses a level, and require it to cross back by a margin before reversing, so it does not chatter at the boundary), and **averaging or a running filter** (average several readings, or a simple exponential filter, to smooth jitter). A median of three readings also kills isolated spikes cheaply."},
+        {"type": "callout", "kind": "note", "text": "The rule: never trust a single reading for an important decision. Smooth it, threshold it with margin, or take a few readings and use the median. This one habit removes most 'why is my robot twitching' problems."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Read and smooth a distance sensor",
+    "steps": [
+      "Wire an HC-SR04 and print its distance to the Serial Monitor once per loop.",
+      "Wave your hand at it and watch for occasional spike readings among the good ones.",
+      "Take three readings and use their median instead of one, and confirm the spikes disappear.",
+      "Add a threshold with hysteresis: light an LED when closer than 15 cm, turn it off only above 20 cm.",
+      "Add a line sensor over black and white surfaces, read its value, and pick a threshold that separates them reliably in your room."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Ultrasonic times an echo; wide beam, good for general distance.",
+      "Infrared reflectance reads lines and short-range obstacles by how much light bounces back.",
+      "An IMU gives tilt (accelerometer) and turn rate (gyroscope); fuse them for stable orientation.",
+      "Encoders count wheel rotation for accurate distance and odometry.",
+      "Read fast pulses (encoders) with interrupts, not polling.",
+      "Never trust one reading — threshold with hysteresis, or take a median/average."
+    ],
+    "groups": [
+      {"title": "Distance & lines", "items": [
+        {"syntax": "HC-SR04", "desc": "ultrasonic distance; trigger + echo timing"},
+        {"syntax": "pulseIn(echo, HIGH)", "desc": "times the echo pulse in microseconds"},
+        {"syntax": "us / 58", "desc": "converts echo time to centimetres"},
+        {"syntax": "IR line sensor", "desc": "black absorbs, white reflects; digital or analog"}
+      ]},
+      {"title": "Orientation", "items": [
+        {"syntax": "Accelerometer", "desc": "measures acceleration incl. gravity → tilt"},
+        {"syntax": "Gyroscope", "desc": "measures turn rate; integrate for angle (drifts)"},
+        {"syntax": "IMU (MPU-6050)", "desc": "accel + gyro over I2C"},
+        {"syntax": "Sensor fusion", "desc": "combine accel + gyro for stable attitude"}
+      ]},
+      {"title": "Rotation", "items": [
+        {"syntax": "Encoder", "desc": "counts wheel rotation via slotted disc + IR"},
+        {"syntax": "Interrupt", "desc": "fires on each pulse so none are missed"},
+        {"syntax": "Odometry", "desc": "estimate position from wheel rotation"},
+        {"syntax": "pulses × circumference", "desc": "converts counts to distance travelled"}
+      ]},
+      {"title": "Cleaning noise", "items": [
+        {"syntax": "Median of 3", "desc": "kills isolated spike readings cheaply"},
+        {"syntax": "Hysteresis", "desc": "cross by a margin before reversing a decision"},
+        {"syntax": "Running average", "desc": "smooths jitter over several readings"}
+      ]}
+    ],
+    "pitfalls": [
+      "Trusting a single ultrasonic reading, which occasionally spikes to a wrong value.",
+      "Setting a line-sensor threshold under different light than the robot will run in.",
+      "Polling a fast encoder in the loop and missing pulses instead of using interrupts.",
+      "Expecting the accelerometer to give a clean heading — it is noisy under motion and needs fusion.",
+      "Reacting to raw noisy values, so the robot twitches at decision boundaries."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "How does an ultrasonic sensor measure distance?",
+      "options": [
+        "By timing the echo of a sound burst it emits",
+        "By measuring the colour of the surface",
+        "By counting wheel rotations",
+        "By reading the Earth's magnetic field"
+      ],
+      "answer": 0,
+      "explain": "It sends a sound pulse and times how long the echo takes; distance is derived from that round-trip time and the speed of sound."
+    },
+    {
+      "q": "What does a wheel encoder let a robot do that it otherwise cannot?",
+      "options": [
+        "See colours",
+        "Measure how far it has actually travelled",
+        "Detect obstacles ahead",
+        "Sense its own temperature"
+      ],
+      "answer": 1,
+      "explain": "By counting wheel rotation, an encoder turns 'drive forward' into 'drive forward a measured distance' and enables odometry and closed-loop speed."
+    },
+    {
+      "q": "In an IMU, what does the gyroscope measure?",
+      "options": [
+        "Distance to the nearest wall",
+        "The rate of rotation",
+        "The battery voltage",
+        "Ambient light level"
+      ],
+      "answer": 1,
+      "explain": "The gyroscope measures angular rate; integrating it gives how much the robot has turned, though it drifts over time and is fused with the accelerometer."
+    },
+    {
+      "q": "Your robot twitches because a sensor occasionally spikes. What is a cheap fix?",
+      "options": [
+        "Read the sensor less often",
+        "Use the median of three readings instead of one",
+        "Add a longer wire to the sensor",
+        "Increase the motor speed"
+      ],
+      "answer": 1,
+      "explain": "A median of a few readings removes isolated spikes; thresholding with hysteresis and averaging also smooth noisy sensors."
+    },
+    {
+      "q": "Why are wheel encoders usually read with interrupts?",
+      "options": [
+        "Interrupts make the pulses louder",
+        "So fast pulses are not missed while the loop does other work",
+        "Because encoders cannot be read any other way",
+        "To save battery power"
+      ],
+      "answer": 1,
+      "explain": "Encoder pulses can arrive quickly; an interrupt increments the count on each one so none are lost while the main loop runs."
+    }
+  ]
+}
