@@ -1,0 +1,160 @@
+{
+  "id": "robotics-control",
+  "minutes": 33,
+  "intro": "Control is how a robot makes reality match intention — how it holds a speed, a heading, or a position despite friction, slope, and imperfect motors. The workhorse idea is feedback: measure the error between what you want and what you have, and act to shrink it. This lesson builds the PID controller from that single idea, one term at a time, and shows you how to tune it without the maths becoming a wall. Once you understand PID you can make a robot drive straight, hold a distance, or balance.",
+  "objectives": [
+    "Explain the difference between open-loop and closed-loop control",
+    "Describe what the P, I and D terms each contribute",
+    "Implement a basic PID controller in code",
+    "Tune a PID controller and recognise overshoot and oscillation"
+  ],
+  "sections": [
+    {
+      "heading": "Open loop vs closed loop",
+      "blocks": [
+        {"type": "p", "text": "There are two ways to make a robot do something. **Open loop** means you send a command and hope: 'run the motor at 70% and it should go about the right speed.' It is simple but blind — if the robot hits a slope or the battery sags, it slows and nothing corrects it. **Closed loop** means you *measure the result* and adjust: read the actual speed, compare it to the target, and change the motor command to close the gap. The measured difference between what you want (the setpoint) and what you have (the measurement) is the **error**, and control is the art of driving that error to zero. Almost everything a robot does well — holding a speed, a distance, a heading — is closed-loop."},
+        {"type": "callout", "kind": "note", "text": "The core loop of all feedback control: error = setpoint − measurement; then choose an action that reduces the error; then measure again. PID is just a good, general recipe for choosing that action."}
+      ]
+    },
+    {
+      "heading": "P: react to the error now",
+      "blocks": [
+        {"type": "p", "text": "The **proportional** term is the obvious one: push in proportion to how big the error is. Far from target, push hard; close to target, push gently. In code the correction is simply a gain `Kp` times the error. Proportional control alone gets you surprisingly far — a line follower that steers harder the further off the line it is works on P alone. But P has two weaknesses. If `Kp` is too small the robot responds sluggishly; too large and it overshoots and oscillates around the target. And P alone often settles just short of the target, leaving a small permanent **steady-state error**, because as the error shrinks so does the push, until it balances against friction before reaching zero."}
+      ]
+    },
+    {
+      "heading": "I and D: kill the offset, damp the wobble",
+      "blocks": [
+        {"type": "p", "text": "The other two terms fix P's weaknesses. The **integral** term accumulates the error over time, so a small error that persists keeps adding up until the controller pushes enough to eliminate it — this is what removes the steady-state offset that P leaves behind. Its danger is *windup*: if the error stays large for a while (say the robot is blocked), the integral grows huge and overshoots wildly once freed, so real controllers cap it. The **derivative** term looks at how fast the error is changing and pushes against rapid change, acting like a shock absorber that damps overshoot and oscillation. It is sensitive to noise, so it is often used gently. Put together — P reacts to the present error, I to the accumulated past, D to the predicted future — and you have PID, the most widely used controller in all of engineering."},
+        {"type": "code", "lang": "python", "code": "class PID:\n    def __init__(self, kp, ki, kd):\n        self.kp, self.ki, self.kd = kp, ki, kd\n        self.integral = 0.0\n        self.prev_error = 0.0\n\n    def update(self, setpoint, measurement, dt):\n        error = setpoint - measurement\n        self.integral += error * dt\n        self.integral = max(-100, min(100, self.integral))  # anti-windup clamp\n        derivative = (error - self.prev_error) / dt\n        self.prev_error = error\n        return self.kp * error + self.ki * self.integral + self.kd * derivative\n\n# hold a target speed of 1.0\npid = PID(kp=2.0, ki=0.5, kd=0.1)\ncommand = pid.update(setpoint=1.0, measurement=0.7, dt=0.02)"}
+      ]
+    },
+    {
+      "heading": "Tuning without the maths",
+      "blocks": [
+        {"type": "p", "text": "You rarely calculate PID gains; you tune them, and there is a reliable recipe. Start with I and D at zero. Raise **Kp** until the robot responds briskly and just begins to overshoot and oscillate a little — that is your ceiling for P. Then add a little **Kd** to damp that overshoot so the response settles cleanly instead of ringing. Finally add a small **Ki** to erase any remaining steady-state offset — the robot settling just short of target. Change one gain at a time and watch the behaviour: sluggish means more P; overshoot and wobble means more D (or less P); never quite reaching the target means more I. This 'watch and adjust one thing' loop is how PID is tuned in practice, and it works without any equations."},
+        {"type": "list", "items": [
+          "Too slow to respond → increase Kp.",
+          "Overshoots and oscillates → increase Kd, or reduce Kp.",
+          "Settles just short of the target → increase Ki.",
+          "Oscillates slowly and grows → too much Ki (windup); reduce it and clamp."
+        ]}
+      ]
+    },
+    {
+      "heading": "Where you will use it",
+      "blocks": [
+        {"type": "p", "text": "PID shows up everywhere on a robot. **Wheel speed**: hold each wheel at a target speed using its encoder, so the robot drives straight regardless of slope or battery — the closed-loop fix for the 'curves when going straight' problem from the motors lesson. **Heading**: use the IMU or the wheel difference to hold or reach a target heading. **Line following**: treat the line-sensor offset as the error and steer to zero it. **Distance holding**: keep a set distance from a wall using the ultrasonic reading. The same small controller, pointed at different errors, produces all of these behaviours — which is why learning PID once pays off across every robot you build."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Tune a speed controller",
+    "steps": [
+      "Read one wheel's actual speed from its encoder and pick a target speed as the setpoint.",
+      "Implement the PID update and use its output to set the motor PWM each loop.",
+      "With Ki and Kd at zero, raise Kp until the wheel responds quickly and just starts to overshoot.",
+      "Add Kd to damp the overshoot so the speed settles cleanly, then add a little Ki to remove any offset.",
+      "Push against the wheel briefly and confirm the controller pushes back to hold the target speed."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Open loop commands blindly; closed loop measures the result and corrects.",
+      "error = setpoint − measurement; control drives the error to zero.",
+      "P pushes proportional to the present error but leaves a small offset.",
+      "I accumulates past error to erase the offset (watch for windup).",
+      "D damps overshoot by reacting to how fast the error changes.",
+      "Tune by raising Kp to a slight overshoot, add Kd to damp, add Ki to remove offset."
+    ],
+    "groups": [
+      {"title": "The idea", "items": [
+        {"syntax": "Open loop", "desc": "command and hope; no correction"},
+        {"syntax": "Closed loop", "desc": "measure result and adjust"},
+        {"syntax": "setpoint", "desc": "the value you want"},
+        {"syntax": "error", "desc": "setpoint minus measurement"}
+      ]},
+      {"title": "The three terms", "items": [
+        {"syntax": "P (Kp·error)", "desc": "reacts to the present error"},
+        {"syntax": "I (Ki·Σerror)", "desc": "erases persistent steady-state offset"},
+        {"syntax": "D (Kd·Δerror)", "desc": "damps overshoot and oscillation"},
+        {"syntax": "output = P + I + D", "desc": "sum of the three corrections"}
+      ]},
+      {"title": "Tuning", "items": [
+        {"syntax": "raise Kp", "desc": "faster response, until slight overshoot"},
+        {"syntax": "add Kd", "desc": "damp the overshoot so it settles"},
+        {"syntax": "add Ki", "desc": "remove the remaining offset"},
+        {"syntax": "anti-windup clamp", "desc": "cap the integral so it can't blow up"}
+      ]},
+      {"title": "Uses on a robot", "items": [
+        {"syntax": "wheel speed", "desc": "hold a target speed via encoder"},
+        {"syntax": "heading hold", "desc": "reach or keep a target heading"},
+        {"syntax": "line following", "desc": "steer to zero the line offset"}
+      ]}
+    ],
+    "pitfalls": [
+      "Using open-loop commands and wondering why slope or a low battery throws the robot off.",
+      "Cranking Kp too high, causing overshoot and oscillation instead of a clean settle.",
+      "Leaving out I and never reaching the target, sitting at a steady-state offset.",
+      "Letting the integral wind up while blocked, then overshooting wildly once freed.",
+      "Using a large D term on a noisy signal, so noise makes the output jump around."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "What defines closed-loop control?",
+      "options": [
+        "Sending a fixed command and never checking the actual result at all",
+        "Measuring the result and adjusting to reduce the error",
+        "Running both of the motors at full speed the whole time",
+        "Using two separate motors on the robot instead of one"
+      ],
+      "answer": 1,
+      "explain": "Closed loop measures the actual result, compares it to the target, and corrects; open loop commands blindly with no feedback."
+    },
+    {
+      "q": "A P-only controller leaves the robot sitting slightly short of its target. Which term fixes that?",
+      "options": [
+        "The integral term",
+        "A larger derivative term",
+        "Removing the proportional term",
+        "A longer loop delay"
+      ],
+      "answer": 0,
+      "explain": "The integral term accumulates the persistent small error until it pushes enough to eliminate the steady-state offset that P alone leaves."
+    },
+    {
+      "q": "What does the derivative term contribute to a PID controller?",
+      "options": [
+        "It makes the robot's motors run noticeably louder",
+        "It damps overshoot by reacting to the error's rate of change",
+        "It increases the robot's overall top speed",
+        "It removes the need for any feedback sensor at all"
+      ],
+      "answer": 1,
+      "explain": "The derivative term pushes against rapid changes in error, acting like a shock absorber that reduces overshoot and oscillation."
+    },
+    {
+      "q": "During tuning the robot overshoots and oscillates around the target. What is the usual first move?",
+      "options": [
+        "Increase the integral gain sharply",
+        "Increase the derivative gain (or reduce the proportional gain)",
+        "Turn off the sensor feedback",
+        "Double the loop period"
+      ],
+      "answer": 1,
+      "explain": "Overshoot and oscillation are damped by more D or less P; more I would make it worse by adding accumulated push."
+    },
+    {
+      "q": "What is integral 'windup'?",
+      "options": [
+        "The robot's motors spinning up to their target speed",
+        "The integral growing huge during a long error, then overshooting",
+        "The battery slowly charging itself back up again",
+        "The derivative term overreacting to sensor measurement noise"
+      ],
+      "answer": 1,
+      "explain": "If the error persists (e.g. the robot is blocked), the integral accumulates to a huge value and overshoots when the robot is freed, so it is clamped."
+    }
+  ]
+}
