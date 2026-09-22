@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Smart-contract security — Blockchain | ThavionAI Education</title>
+  <meta name="description" content="Reentrancy, access control, integer bugs — the mindset of writing contracts that hold real money." />
+  <meta property="og:title" content="Smart-contract security — ThavionAI Education" />
+  <meta property="og:description" content="Reentrancy, access control, integer bugs — the mindset of writing contracts that hold real money." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/blockchain-security.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-blockchain" data-module="blockchain-security">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=blockchain-security&amp;page=/education/blockchain-security.html&amp;title=Smart-contract%20security">Feedback</a>
+    <a href="../education.html#blockchain" class="nav-cta">All Blockchain modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#blockchain">Blockchain</a> › Stage 3: Building dApps</div>
+    <h1>Smart-contract security</h1>
+    <p class="lede">Reentrancy, access control, integer bugs — the mindset of writing contracts that hold real money.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 11 of 16</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">Smart contracts are the rare kind of software where a single bug can drain millions in seconds, with no undo. Contracts are public, immutable, and hold value directly, which means attackers can read your code, and every flaw is a standing invitation. This lesson covers the security mindset and the classic vulnerabilities every developer must know — reentrancy, broken access control, unchecked inputs — plus the defensive patterns and habits that prevent them. You don't need to become an auditor, but you must know these, because on-chain, security isn't a feature; it's the whole job.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Adopt the mindset that contract code is public, immutable, and adversarial</li><li>Explain the reentrancy attack and the checks-effects-interactions defence</li><li>Recognise access-control and input-validation failures</li><li>Apply defensive habits: audited libraries, testing, and audits before mainnet</li></ul>
+    </div>
+    <section id="the-security-mindset"><h2>The security mindset</h2>
+    <p>Three facts make smart-contract security unlike ordinary software. First, your code is <strong>public</strong> — attackers read the exact source and bytecode looking for flaws. Second, a deployed contract is usually <strong>immutable</strong> — you can't quietly patch a bug once it's live. Third, contracts <strong>hold value directly</strong>, so a flaw isn't a crash, it's a theft. Together these mean you must assume every function will be called by a hostile party, in any order, with any inputs, possibly many times in one transaction. Security here is adversarial by default. The good news is that most real losses come from a small set of well-understood mistakes — learn them and you avoid the majority of danger.</p></section>
+  <section id="reentrancy-the-classic-attack"><h2>Reentrancy: the classic attack</h2>
+    <p><strong>Reentrancy</strong> is the most famous smart-contract vulnerability, and it caused one of the largest early hacks. It happens when your contract sends ether to an external address *before* it updates its own bookkeeping. Sending ether can hand control to the recipient's code, and a malicious recipient can call back *into your function again* before your first call finished — re-entering it while your state still says they're owed money. Done repeatedly in one transaction, they withdraw far more than they had. The vulnerable shape is: check balance, send money, then reduce balance. The attacker strikes in the gap between sending and reducing.</p>
+    <div class="code"><div class="code-head"><span>solidity</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>// VULNERABLE: sends ether before updating state
+function withdraw() public {
+    uint256 amount = balanceOf[msg.sender];
+    (bool ok, ) = msg.sender.call{value: amount}("");  // hands over control!
+    require(ok, "send failed");
+    balanceOf[msg.sender] = 0;   // too late: attacker re-entered above
+}</code></pre></div></section>
+  <section id="the-checks-effects-interactions-defence"><h2>The checks-effects-interactions defence</h2>
+    <p>The fix is a simple, universal ordering rule: <strong>checks, then effects, then interactions.</strong> First do all your <strong>checks</strong> (require statements). Then apply all your <strong>effects</strong> — update your own state, including zeroing the balance. *Only last* do you <strong>interact</strong> with external addresses (send ether, call another contract). Because your state is already updated before you hand over control, a re-entering call sees the correct, updated state and gets nothing. This one ordering discipline prevents reentrancy. A reusable <strong>reentrancy guard</strong> modifier (OpenZeppelin's <code>nonReentrant</code>) adds belt-and-braces protection by blocking any nested call into the same function.</p>
+    <div class="code"><div class="code-head"><span>solidity</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>// SAFE: update state BEFORE sending (effects before interactions)
+function withdraw() public {
+    uint256 amount = balanceOf[msg.sender];
+    require(amount &gt; 0, "nothing to withdraw");   // checks
+    balanceOf[msg.sender] = 0;                     // effects (state first!)
+    (bool ok, ) = msg.sender.call{value: amount}("");  // interactions last
+    require(ok, "send failed");
+}</code></pre></div>
+    <div class="callout callout-tip"><strong>Tip</strong><p>Memorise the order: checks → effects → interactions. Update your own bookkeeping before you ever call out to another address. This single habit closes the door on reentrancy, the vulnerability behind some of the biggest losses in the space's history.</p></div></section>
+  <section id="access-control-and-input-validation"><h2>Access control and input validation</h2>
+    <p>Two more failure classes cause a huge share of real incidents. <strong>Broken access control</strong> means a sensitive function isn't properly restricted — a mint function, a withdraw-everything function, or an upgrade function left callable by anyone, or a missing <code>onlyOwner</code>. Because the code is public, attackers specifically hunt for powerful functions lacking a guard. Always ask, for every state-changing function: *who should be allowed to call this, and is that enforced?* <strong>Missing input validation</strong> is the other: not checking amounts, addresses (the zero address is a classic trap), or conditions, so the contract does something nonsensical or exploitable. Every external input is attacker-controlled and must be validated.</p>
+    <ul><li>Restrict privileged functions (mint, withdraw, upgrade) with a modifier like onlyOwner.</li><li>Reject the zero address where an address must be real.</li><li>Validate amounts and ranges — don't trust that inputs are sensible.</li><li>Assume every external caller is hostile and every input is chosen to break you.</li></ul></section>
+  <section id="other-traps-and-defensive-habits"><h2>Other traps and defensive habits</h2>
+    <p>A few more to keep on your radar. <strong>Integer overflow</strong> — arithmetic wrapping around — was a common bug, but Solidity 0.8+ reverts on it automatically, so keep your compiler current and be cautious with any <code>unchecked</code> blocks. <strong>Oracle and price manipulation</strong>: never trust a price you can cheaply move (like a single DEX's spot price) for anything valuable; use robust oracles (a DeFi topic). <strong>Relying on secrecy</strong>: nothing on-chain is hidden — private variables are still readable, so never store secrets in a contract. The defensive habits that tie it together are steady: prefer <strong>audited libraries</strong> (OpenZeppelin) over hand-rolled code, <strong>test adversarially</strong> including the failure and attack cases, keep functions small and permissioned, and — for anything holding real value — get a professional <strong>audit</strong> before mainnet.</p>
+    <div class="callout callout-warning"><strong>Watch out</strong><p>Nothing on a public blockchain is secret. Marking a variable <code>private</code> only stops other contracts from reading it in Solidity — anyone can still read its value directly from the chain's storage. Never store passwords, keys, or answers you need to keep hidden in a contract.</p></div></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Find and fix the vulnerability</h2>
+    <ol><li>Explain the three facts (public, immutable, holds value) that make contract security adversarial.</li><li>Given the vulnerable withdraw function, explain step by step how a reentrancy attack drains it.</li><li>Rewrite it using checks-effects-interactions and explain why the reordering defeats the attack.</li><li>Review a contract with a mint function and add the access control it needs.</li><li>List three defensive habits you'll apply to any contract that will hold real value.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Smart-contract security — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Contract code is public, immutable, and holds value — assume every caller is hostile.</li><li>Reentrancy: sending ether before updating state lets an attacker re-enter and over-withdraw.</li><li>Defence: checks → effects → interactions; update state before any external call.</li><li>Access control: guard privileged functions; attackers hunt for unguarded powerful ones.</li><li>Validate every input — amounts, ranges, and the zero address.</li><li>Prefer audited libraries, test the attack cases, and audit before mainnet.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Mindset</h3><table><tbody><tr><td><code>public code</code></td><td>attackers read your source</td></tr><tr><td><code>immutable</code></td><td>usually can't patch after deploy</td></tr><tr><td><code>holds value</code></td><td>a bug is a theft, not a crash</td></tr><tr><td><code>assume hostile</code></td><td>any caller, order, and input</td></tr></tbody></table></div><div class="cheat-group"><h3>Reentrancy</h3><table><tbody><tr><td><code>send before update</code></td><td>the vulnerable ordering</td></tr><tr><td><code>attacker re-enters</code></td><td>calls back before state updates</td></tr><tr><td><code>checks-effects-interactions</code></td><td>the ordering that fixes it</td></tr><tr><td><code>nonReentrant</code></td><td>a guard modifier for extra safety</td></tr></tbody></table></div><div class="cheat-group"><h3>Access &amp; inputs</h3><table><tbody><tr><td><code>onlyOwner</code></td><td>restrict privileged functions</td></tr><tr><td><code>address(0) check</code></td><td>reject the zero address</td></tr><tr><td><code>validate amounts</code></td><td>don't trust inputs are sane</td></tr><tr><td><code>hunt for gaps</code></td><td>unguarded powerful functions</td></tr></tbody></table></div><div class="cheat-group"><h3>Habits</h3><table><tbody><tr><td><code>audited libraries</code></td><td>OpenZeppelin over hand-rolled</td></tr><tr><td><code>test attacks</code></td><td>cover failure and exploit cases</td></tr><tr><td><code>no on-chain secrets</code></td><td>private isn't hidden</td></tr><tr><td><code>audit before mainnet</code></td><td>for anything holding value</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Sending ether before updating state, opening a reentrancy hole.</li><li>Leaving a powerful function (mint, withdraw, upgrade) without an access-control guard.</li><li>Trusting external inputs without validating amounts, ranges, and the zero address.</li><li>Storing secrets in a contract, forgetting that private variables are still readable on-chain.</li><li>Shipping to mainnet without adversarial tests or an audit for value-holding code.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "What makes smart-contract security especially unforgiving?", "options": ["Contracts run too slowly to defend themselves", "Code is public and immutable and holds value directly", "Only the owner is ever able to read the code", "Bugs can always be patched quietly after launch"], "answer": 1, "explain": "Attackers can read your public code, you usually can't patch a deployed contract, and it holds value directly — so a flaw is an unfixable theft, not a crash."}, {"q": "How does a reentrancy attack work?", "options": ["It guesses the contract owner's private key", "It re-enters a function before state is updated to over-withdraw", "It floods the network with too many transactions", "It changes the contract's source code remotely"], "answer": 1, "explain": "If a contract sends ether before updating its bookkeeping, the recipient's code can call back into the function while the state still credits them, withdrawing repeatedly."}, {"q": "What ordering prevents reentrancy?", "options": ["Interactions, then effects, then checks", "Checks, then effects, then interactions", "Effects, then checks, then interactions", "Send the ether first, then do everything else"], "answer": 1, "explain": "Do checks, then update your own state (effects), and only then interact with external addresses — so a re-entering call sees the already-updated state and gets nothing."}, {"q": "A mint function can be called by anyone. What is the flaw?", "options": ["The gas limit on the function is set too low", "Broken access control — it lacks a restriction like onlyOwner", "The function is written in the wrong Solidity version", "It emits too many events for the network to handle"], "answer": 1, "explain": "A powerful function left unguarded is broken access control; attackers specifically look for privileged functions (mint, withdraw, upgrade) missing a modifier like onlyOwner."}, {"q": "Can you safely store a secret value in a private contract variable?", "options": ["Yes, private variables are fully hidden from everyone", "No, on-chain data is readable even if marked private", "Yes, but only if the contract is on a testnet", "No, because private variables cost too much gas"], "answer": 1, "explain": "'private' only stops other Solidity contracts from reading a variable; anyone can read its value directly from on-chain storage, so never store secrets in a contract."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="blockchain-frontend.html"><span>← Previous</span><strong>Connecting a frontend</strong></a>
+    <a class="pager-up" href="../education.html#blockchain">All Blockchain modules</a>
+    <a class="pager-link pager-next" href="blockchain-defi.html"><span>Next →</span><strong>DeFi: the money protocols</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=blockchain-security&amp;page=/education/blockchain-security.html&amp;title=Smart-contract%20security">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=blockchain-security&amp;page=/education/blockchain-security.html&amp;title=Smart-contract%20security">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

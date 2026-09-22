@@ -1,0 +1,163 @@
+{
+  "id": "blockchain-security",
+  "minutes": 35,
+  "intro": "Smart contracts are the rare kind of software where a single bug can drain millions in seconds, with no undo. Contracts are public, immutable, and hold value directly, which means attackers can read your code, and every flaw is a standing invitation. This lesson covers the security mindset and the classic vulnerabilities every developer must know — reentrancy, broken access control, unchecked inputs — plus the defensive patterns and habits that prevent them. You don't need to become an auditor, but you must know these, because on-chain, security isn't a feature; it's the whole job.",
+  "objectives": [
+    "Adopt the mindset that contract code is public, immutable, and adversarial",
+    "Explain the reentrancy attack and the checks-effects-interactions defence",
+    "Recognise access-control and input-validation failures",
+    "Apply defensive habits: audited libraries, testing, and audits before mainnet"
+  ],
+  "sections": [
+    {
+      "heading": "The security mindset",
+      "blocks": [
+        {"type": "p", "text": "Three facts make smart-contract security unlike ordinary software. First, your code is **public** — attackers read the exact source and bytecode looking for flaws. Second, a deployed contract is usually **immutable** — you can't quietly patch a bug once it's live. Third, contracts **hold value directly**, so a flaw isn't a crash, it's a theft. Together these mean you must assume every function will be called by a hostile party, in any order, with any inputs, possibly many times in one transaction. Security here is adversarial by default. The good news is that most real losses come from a small set of well-understood mistakes — learn them and you avoid the majority of danger."}
+      ]
+    },
+    {
+      "heading": "Reentrancy: the classic attack",
+      "blocks": [
+        {"type": "p", "text": "**Reentrancy** is the most famous smart-contract vulnerability, and it caused one of the largest early hacks. It happens when your contract sends ether to an external address *before* it updates its own bookkeeping. Sending ether can hand control to the recipient's code, and a malicious recipient can call back *into your function again* before your first call finished — re-entering it while your state still says they're owed money. Done repeatedly in one transaction, they withdraw far more than they had. The vulnerable shape is: check balance, send money, then reduce balance. The attacker strikes in the gap between sending and reducing."},
+        {"type": "code", "lang": "solidity", "code": "// VULNERABLE: sends ether before updating state\nfunction withdraw() public {\n    uint256 amount = balanceOf[msg.sender];\n    (bool ok, ) = msg.sender.call{value: amount}(\"\");  // hands over control!\n    require(ok, \"send failed\");\n    balanceOf[msg.sender] = 0;   // too late: attacker re-entered above\n}"}
+      ]
+    },
+    {
+      "heading": "The checks-effects-interactions defence",
+      "blocks": [
+        {"type": "p", "text": "The fix is a simple, universal ordering rule: **checks, then effects, then interactions.** First do all your **checks** (require statements). Then apply all your **effects** — update your own state, including zeroing the balance. *Only last* do you **interact** with external addresses (send ether, call another contract). Because your state is already updated before you hand over control, a re-entering call sees the correct, updated state and gets nothing. This one ordering discipline prevents reentrancy. A reusable **reentrancy guard** modifier (OpenZeppelin's `nonReentrant`) adds belt-and-braces protection by blocking any nested call into the same function."},
+        {"type": "code", "lang": "solidity", "code": "// SAFE: update state BEFORE sending (effects before interactions)\nfunction withdraw() public {\n    uint256 amount = balanceOf[msg.sender];\n    require(amount > 0, \"nothing to withdraw\");   // checks\n    balanceOf[msg.sender] = 0;                     // effects (state first!)\n    (bool ok, ) = msg.sender.call{value: amount}(\"\");  // interactions last\n    require(ok, \"send failed\");\n}"},
+        {"type": "callout", "kind": "tip", "text": "Memorise the order: checks → effects → interactions. Update your own bookkeeping before you ever call out to another address. This single habit closes the door on reentrancy, the vulnerability behind some of the biggest losses in the space's history."}
+      ]
+    },
+    {
+      "heading": "Access control and input validation",
+      "blocks": [
+        {"type": "p", "text": "Two more failure classes cause a huge share of real incidents. **Broken access control** means a sensitive function isn't properly restricted — a mint function, a withdraw-everything function, or an upgrade function left callable by anyone, or a missing `onlyOwner`. Because the code is public, attackers specifically hunt for powerful functions lacking a guard. Always ask, for every state-changing function: *who should be allowed to call this, and is that enforced?* **Missing input validation** is the other: not checking amounts, addresses (the zero address is a classic trap), or conditions, so the contract does something nonsensical or exploitable. Every external input is attacker-controlled and must be validated."},
+        {"type": "list", "items": [
+          "Restrict privileged functions (mint, withdraw, upgrade) with a modifier like onlyOwner.",
+          "Reject the zero address where an address must be real.",
+          "Validate amounts and ranges — don't trust that inputs are sensible.",
+          "Assume every external caller is hostile and every input is chosen to break you."
+        ]}
+      ]
+    },
+    {
+      "heading": "Other traps and defensive habits",
+      "blocks": [
+        {"type": "p", "text": "A few more to keep on your radar. **Integer overflow** — arithmetic wrapping around — was a common bug, but Solidity 0.8+ reverts on it automatically, so keep your compiler current and be cautious with any `unchecked` blocks. **Oracle and price manipulation**: never trust a price you can cheaply move (like a single DEX's spot price) for anything valuable; use robust oracles (a DeFi topic). **Relying on secrecy**: nothing on-chain is hidden — private variables are still readable, so never store secrets in a contract. The defensive habits that tie it together are steady: prefer **audited libraries** (OpenZeppelin) over hand-rolled code, **test adversarially** including the failure and attack cases, keep functions small and permissioned, and — for anything holding real value — get a professional **audit** before mainnet."},
+        {"type": "callout", "kind": "warning", "text": "Nothing on a public blockchain is secret. Marking a variable `private` only stops other contracts from reading it in Solidity — anyone can still read its value directly from the chain's storage. Never store passwords, keys, or answers you need to keep hidden in a contract."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Find and fix the vulnerability",
+    "steps": [
+      "Explain the three facts (public, immutable, holds value) that make contract security adversarial.",
+      "Given the vulnerable withdraw function, explain step by step how a reentrancy attack drains it.",
+      "Rewrite it using checks-effects-interactions and explain why the reordering defeats the attack.",
+      "Review a contract with a mint function and add the access control it needs.",
+      "List three defensive habits you'll apply to any contract that will hold real value."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Contract code is public, immutable, and holds value — assume every caller is hostile.",
+      "Reentrancy: sending ether before updating state lets an attacker re-enter and over-withdraw.",
+      "Defence: checks → effects → interactions; update state before any external call.",
+      "Access control: guard privileged functions; attackers hunt for unguarded powerful ones.",
+      "Validate every input — amounts, ranges, and the zero address.",
+      "Prefer audited libraries, test the attack cases, and audit before mainnet."
+    ],
+    "groups": [
+      {"title": "Mindset", "items": [
+        {"syntax": "public code", "desc": "attackers read your source"},
+        {"syntax": "immutable", "desc": "usually can't patch after deploy"},
+        {"syntax": "holds value", "desc": "a bug is a theft, not a crash"},
+        {"syntax": "assume hostile", "desc": "any caller, order, and input"}
+      ]},
+      {"title": "Reentrancy", "items": [
+        {"syntax": "send before update", "desc": "the vulnerable ordering"},
+        {"syntax": "attacker re-enters", "desc": "calls back before state updates"},
+        {"syntax": "checks-effects-interactions", "desc": "the ordering that fixes it"},
+        {"syntax": "nonReentrant", "desc": "a guard modifier for extra safety"}
+      ]},
+      {"title": "Access & inputs", "items": [
+        {"syntax": "onlyOwner", "desc": "restrict privileged functions"},
+        {"syntax": "address(0) check", "desc": "reject the zero address"},
+        {"syntax": "validate amounts", "desc": "don't trust inputs are sane"},
+        {"syntax": "hunt for gaps", "desc": "unguarded powerful functions"}
+      ]},
+      {"title": "Habits", "items": [
+        {"syntax": "audited libraries", "desc": "OpenZeppelin over hand-rolled"},
+        {"syntax": "test attacks", "desc": "cover failure and exploit cases"},
+        {"syntax": "no on-chain secrets", "desc": "private isn't hidden"},
+        {"syntax": "audit before mainnet", "desc": "for anything holding value"}
+      ]}
+    ],
+    "pitfalls": [
+      "Sending ether before updating state, opening a reentrancy hole.",
+      "Leaving a powerful function (mint, withdraw, upgrade) without an access-control guard.",
+      "Trusting external inputs without validating amounts, ranges, and the zero address.",
+      "Storing secrets in a contract, forgetting that private variables are still readable on-chain.",
+      "Shipping to mainnet without adversarial tests or an audit for value-holding code."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "What makes smart-contract security especially unforgiving?",
+      "options": [
+        "Contracts run too slowly to defend themselves",
+        "Code is public and immutable and holds value directly",
+        "Only the owner is ever able to read the code",
+        "Bugs can always be patched quietly after launch"
+      ],
+      "answer": 1,
+      "explain": "Attackers can read your public code, you usually can't patch a deployed contract, and it holds value directly — so a flaw is an unfixable theft, not a crash."
+    },
+    {
+      "q": "How does a reentrancy attack work?",
+      "options": [
+        "It guesses the contract owner's private key",
+        "It re-enters a function before state is updated to over-withdraw",
+        "It floods the network with too many transactions",
+        "It changes the contract's source code remotely"
+      ],
+      "answer": 1,
+      "explain": "If a contract sends ether before updating its bookkeeping, the recipient's code can call back into the function while the state still credits them, withdrawing repeatedly."
+    },
+    {
+      "q": "What ordering prevents reentrancy?",
+      "options": [
+        "Interactions, then effects, then checks",
+        "Checks, then effects, then interactions",
+        "Effects, then checks, then interactions",
+        "Send the ether first, then do everything else"
+      ],
+      "answer": 1,
+      "explain": "Do checks, then update your own state (effects), and only then interact with external addresses — so a re-entering call sees the already-updated state and gets nothing."
+    },
+    {
+      "q": "A mint function can be called by anyone. What is the flaw?",
+      "options": [
+        "The gas limit on the function is set too low",
+        "Broken access control — it lacks a restriction like onlyOwner",
+        "The function is written in the wrong Solidity version",
+        "It emits too many events for the network to handle"
+      ],
+      "answer": 1,
+      "explain": "A powerful function left unguarded is broken access control; attackers specifically look for privileged functions (mint, withdraw, upgrade) missing a modifier like onlyOwner."
+    },
+    {
+      "q": "Can you safely store a secret value in a private contract variable?",
+      "options": [
+        "Yes, private variables are fully hidden from everyone",
+        "No, on-chain data is readable even if marked private",
+        "Yes, but only if the contract is on a testnet",
+        "No, because private variables cost too much gas"
+      ],
+      "answer": 1,
+      "explain": "'private' only stops other Solidity contracts from reading a variable; anyone can read its value directly from on-chain storage, so never store secrets in a contract."
+    }
+  ]
+}
