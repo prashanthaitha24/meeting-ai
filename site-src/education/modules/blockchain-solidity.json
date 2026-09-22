@@ -1,0 +1,160 @@
+{
+  "id": "blockchain-solidity",
+  "minutes": 34,
+  "intro": "Solidity is the language most smart contracts are written in — the code that lives at a contract account and runs on the EVM. It looks a little like JavaScript, but it runs in a very unusual environment: every line costs gas, storage is permanent and public, and a deployed contract usually can't be changed. This lesson walks through the anatomy of a Solidity contract — its structure, its types, state variables, and functions — by building up a small, real contract you could actually deploy. By the end you can read most simple contracts and write one yourself.",
+  "objectives": [
+    "Lay out a Solidity file: license, pragma, and a contract block",
+    "Use the core value types and understand state vs local variables",
+    "Write functions with visibility and state-mutability modifiers",
+    "Read and reason about a small, complete contract"
+  ],
+  "sections": [
+    {
+      "heading": "The skeleton of a contract",
+      "blocks": [
+        {"type": "p", "text": "Every Solidity file starts with two lines and a contract block. The first is an **SPDX licence identifier**, a machine-readable note of the code's licence (the compiler warns if it's missing). The second is the **pragma**, which pins the compiler version so your code isn't compiled by an incompatible future version — `^0.8.20` means 0.8.20 or any compatible 0.8.x. Then comes the `contract` keyword and a name; everything inside the braces — the state variables and functions — is what gets deployed to a contract account. This skeleton never changes; internalise it and every contract you read starts to look familiar."},
+        {"type": "code", "lang": "solidity", "code": "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.20;\n\ncontract Counter {\n    // state variables and functions go here\n    uint256 public count;\n\n    function increment() public {\n        count += 1;\n    }\n}"},
+        {"type": "p", "text": "That is a complete, deployable contract. It stores a number `count` and offers a function to increase it. Notice `public` on the state variable — Solidity automatically creates a getter function for it, so anyone can read `count` for free. This tiny contract already demonstrates the two things a contract is made of: **persistent state** (the number, stored on-chain forever) and **functions** that change it."}
+      ]
+    },
+    {
+      "heading": "Types you'll use constantly",
+      "blocks": [
+        {"type": "p", "text": "Solidity is statically typed — every variable declares its type. A handful cover most needs. `uint256` is an unsigned (non-negative) integer, the workhorse for amounts, counts and balances; you'll see `uint` as shorthand for it. `bool` is true/false. `address` holds a 20-byte account address and has members like `.balance`. `string` holds text and `bytes` holds raw bytes. For collections, `mapping(address => uint256)` is a key-value store — think of it as a dictionary from addresses to numbers, ideal for tracking balances — and arrays hold ordered lists. Choosing the right type matters because storage costs gas and types can't silently overflow (since Solidity 0.8, arithmetic that would overflow reverts automatically)."},
+        {"type": "code", "lang": "solidity", "code": "uint256 public totalSupply;              // a non-negative integer\nbool public paused;                      // true / false\naddress public owner;                    // an account address\nstring public name;                      // text, e.g. a token name\nmapping(address => uint256) public balanceOf;  // address -> amount"}
+      ]
+    },
+    {
+      "heading": "State variables vs local variables",
+      "blocks": [
+        {"type": "p", "text": "This distinction is central to writing correct, gas-aware contracts. A **state variable** is declared at the contract level and lives in the contract's permanent, on-chain **storage** — it persists between transactions and is part of the world state, so writing to it costs significant gas. A **local variable** is declared inside a function and lives only for that call in cheap, temporary **memory**; it vanishes when the function returns. The rule of thumb: state variables are the contract's long-term memory (a balance, an owner), and local variables are scratch space for a single computation. Because storage writes are expensive, well-written contracts minimise how often they touch state."},
+        {"type": "callout", "kind": "note", "text": "Storage is permanent, public, and expensive; memory is temporary, private to the call, and cheap. Every state variable you add and every time you write to one costs real gas forever. Reaching for a local variable when you only need a value during one call is both cheaper and clearer."}
+      ]
+    },
+    {
+      "heading": "Functions, visibility and mutability",
+      "blocks": [
+        {"type": "p", "text": "Functions carry two important labels. **Visibility** says who can call them: `public` (anyone, and other contract code), `external` (only from outside the contract), `internal` (only this contract and ones that inherit it), and `private` (only this contract). **State mutability** says what they do to state: a plain function can change state and costs gas; a `view` function only reads state and is free to call from outside; a `pure` function uses neither state nor even reads it. Marking a read-only function `view` signals intent and lets others query it without paying. Getting these labels right is part of writing safe contracts — a function that should be internal but is left public is a common vulnerability."},
+        {"type": "code", "lang": "solidity", "code": "// changes state -> costs gas when called in a transaction\nfunction setOwner(address newOwner) public {\n    owner = newOwner;\n}\n\n// only reads state -> free to call from outside\nfunction getOwner() public view returns (address) {\n    return owner;\n}\n\n// uses no state at all -> pure\nfunction add(uint256 a, uint256 b) public pure returns (uint256) {\n    return a + b;\n}"}
+      ]
+    },
+    {
+      "heading": "Reading a whole small contract",
+      "blocks": [
+        {"type": "p", "text": "Put the pieces together and you can read a real contract. Below is a minimal 'piggy bank': anyone can deposit ether, and a mapping records each depositor's balance. `payable` marks a function that can receive ether, and `msg.sender` and `msg.value` are built-in values giving the caller's address and the ether they sent — you'll meet these fully in the next lesson. Trace it: a deposit adds `msg.value` to the caller's stored balance; a withdrawal reduces it and sends ether back. Everything here is state, functions, types, and visibility — exactly the pieces from this lesson."},
+        {"type": "code", "lang": "solidity", "code": "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.20;\n\ncontract PiggyBank {\n    mapping(address => uint256) public balanceOf;   // state\n\n    function deposit() public payable {             // can receive ether\n        balanceOf[msg.sender] += msg.value;         // credit the sender\n    }\n\n    function withdraw(uint256 amount) public {\n        require(balanceOf[msg.sender] >= amount, \"insufficient\");\n        balanceOf[msg.sender] -= amount;            // update state first\n        payable(msg.sender).transfer(amount);       // then send ether\n    }\n}"},
+        {"type": "p", "text": "If you can follow that contract, you have the foundation. The next lesson adds the patterns that make contracts safe and expressive — events, modifiers, `require`, and the meaning of `msg.sender` — turning these building blocks into contracts you'd actually deploy."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Read and modify a contract",
+    "steps": [
+      "Write the two mandatory top lines of any Solidity file (the SPDX identifier and the pragma) from memory.",
+      "In the Counter contract, add a `decrement` function and explain why `count` can't go below zero without a check (0.8 reverts on underflow).",
+      "For three variables — a token name, an owner address, and a balances table — write the correct Solidity type for each.",
+      "Take the getOwner function and explain why marking it `view` lets others read the owner without paying gas.",
+      "Read the PiggyBank contract and trace, line by line, what happens when someone deposits 1 ether."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Every file starts with an SPDX licence line and a pragma pinning the compiler version.",
+      "Core types: uint256, bool, address, string, and mapping(key => value).",
+      "State variables live in permanent, costly on-chain storage; locals live in cheap memory.",
+      "Visibility (public/external/internal/private) says who can call a function.",
+      "Mutability: plain functions change state and cost gas; view reads only; pure uses nothing.",
+      "Since Solidity 0.8, overflowing arithmetic reverts automatically."
+    ],
+    "groups": [
+      {"title": "File skeleton", "items": [
+        {"syntax": "// SPDX-License-Identifier", "desc": "machine-readable licence line"},
+        {"syntax": "pragma solidity ^0.8.20;", "desc": "pins a compatible compiler"},
+        {"syntax": "contract Name { }", "desc": "the block that gets deployed"},
+        {"syntax": "public state var", "desc": "auto-creates a free getter"}
+      ]},
+      {"title": "Types", "items": [
+        {"syntax": "uint256", "desc": "non-negative integer; amounts and counts"},
+        {"syntax": "bool", "desc": "true / false"},
+        {"syntax": "address", "desc": "a 20-byte account address"},
+        {"syntax": "mapping(k => v)", "desc": "key-value store, e.g. balances"}
+      ]},
+      {"title": "Storage vs memory", "items": [
+        {"syntax": "state variable", "desc": "permanent on-chain storage; costly"},
+        {"syntax": "local variable", "desc": "temporary memory; cheap"},
+        {"syntax": "storage writes", "desc": "the expensive operation to minimise"},
+        {"syntax": "public state", "desc": "readable by anyone, forever"}
+      ]},
+      {"title": "Functions", "items": [
+        {"syntax": "public / external", "desc": "callable from outside"},
+        {"syntax": "internal / private", "desc": "restricted to the contract"},
+        {"syntax": "view", "desc": "reads state; free from outside"},
+        {"syntax": "pure", "desc": "touches no state at all"}
+      ]}
+    ],
+    "pitfalls": [
+      "Omitting the SPDX line or pragma, drawing a compiler warning or a version mismatch.",
+      "Storing in a state variable what only needs to live for one call, wasting gas.",
+      "Leaving a function public when it should be internal — a common vulnerability.",
+      "Forgetting that public state variables are readable by everyone, so nothing on-chain is secret.",
+      "Assuming pre-0.8 overflow behaviour; modern Solidity reverts instead of wrapping around."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "What do the first two lines of a Solidity file specify?",
+      "options": [
+        "The contract's name and its starting balance in ether",
+        "An SPDX licence identifier and a compiler-version pragma",
+        "The gas limit and the deployer's wallet address",
+        "The list of every user allowed to call the contract"
+      ],
+      "answer": 1,
+      "explain": "Files begin with an SPDX licence comment and a pragma that pins the compiler version, before the contract block itself."
+    },
+    {
+      "q": "Which type is best for tracking each address's token balance?",
+      "options": [
+        "A single bool shared by every account",
+        "mapping(address => uint256)",
+        "One long string of all the balances",
+        "A separate contract deployed for each user"
+      ],
+      "answer": 1,
+      "explain": "A mapping from address to uint256 is a key-value store that associates each account with its balance — the standard pattern for balances."
+    },
+    {
+      "q": "What is the key difference between a state variable and a local variable?",
+      "options": [
+        "State variables can only ever hold numbers, not text",
+        "State variables persist on-chain; locals live only during a call",
+        "Local variables are visible to everyone on the network",
+        "There is no real difference other than where you write them"
+      ],
+      "answer": 1,
+      "explain": "State variables live in permanent, costly on-chain storage and persist between transactions; local variables exist only during a single function call in cheap memory."
+    },
+    {
+      "q": "Why mark a read-only function as `view`?",
+      "options": [
+        "It makes the function run noticeably faster on all nodes",
+        "It signals it only reads state and can be called for free",
+        "It automatically encrypts the value being returned",
+        "It allows the function to receive ether from callers"
+      ],
+      "answer": 1,
+      "explain": "A view function promises not to change state, so it can be queried from outside without a transaction and without paying gas."
+    },
+    {
+      "q": "In Solidity 0.8+, what happens if an arithmetic operation overflows?",
+      "options": [
+        "The number silently wraps around to a small value",
+        "The transaction reverts automatically",
+        "The contract is permanently deleted from the chain",
+        "The result is rounded down to the nearest whole number"
+      ],
+      "answer": 1,
+      "explain": "Since version 0.8, Solidity checks arithmetic and reverts on overflow or underflow, rather than silently wrapping as older versions did."
+    }
+  ]
+}
