@@ -86,7 +86,7 @@ PAGE = """<!DOCTYPE html>
   <a href="../../index.html" class="nav-logo"><img class="nav-logo-icon" src="../../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
   <div class="nav-links" id="navLinks">
     <a href="../../education.html">Tracks</a>
-    <a href="../../index.html#projects" class="active">Projects</a>
+    <a href="../../engineering.html#projects" class="active">Projects</a>
     <a href="../../education.html#certs">Certifications</a>
     <a href="../../index.html#apps">Apps</a>
     <a href="../../feedback.html?page=/education/projects/{id}.html&amp;title={title_q}">Feedback</a>

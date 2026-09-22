@@ -329,7 +329,7 @@ def main():
         "STAT_PROJECTS": sum(p["live"] for tr in tracks for p in tr["projects"]),
         "STAT_CERTS": sum(m["live"] for tr in tracks if tr["id"] == "certs" for m in tr["modules"]),
     }
-    index = fill((SRC / "site" / "index.html").read_text(), {
+    eng = fill((SRC / "site" / "engineering.html").read_text(), {
         **stats,
         "HERO_DIAGRAM": svg_only("devops-k8s", "k8s-traffic"),
         "MOCK_DIAGRAM": svg_only("devops-gitops", json.load(open(EDU / "diagrams" / "devops-gitops.json"))[0]["id"]),
@@ -337,7 +337,10 @@ def main():
         "PROJECT_CARDS": project_cards(tracks), "CERT_CARDS": cert_cards(tracks),
         "FOOTER_TRACKS": footer_tracks(tracks), "INTERVIEW_CARDS": interview_cards(tracks_kits, tracks),
     })
-    (DOCS / "index.html").write_text(index)
+    (DOCS / "engineering.html").write_text(eng)
+    (DOCS / "index.html").write_text(fill((SRC / "site" / "home.html").read_text(), stats))
+    (DOCS / "exams.html").write_text(fill((SRC / "site" / "exams.html").read_text(), {}))
+    (DOCS / "school.html").write_text(fill((SRC / "site" / "school.html").read_text(), {}))
     hub = fill((SRC / "site" / "hub.html").read_text(), {
         **stats,
         "TABS": tabs(tracks),
@@ -348,7 +351,7 @@ def main():
         "PLAN_DATA": plan_data(tracks),
     })
     (DOCS / "education.html").write_text(hub)
-    print(f"built docs/index.html and docs/education.html: {stats}")
+    print(f"built home, engineering, exams, school, education: {stats}")
 
 
 if __name__ == "__main__":

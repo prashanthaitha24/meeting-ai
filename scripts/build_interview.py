@@ -93,8 +93,8 @@ PAGE = """<!DOCTYPE html>
   <a href="../../index.html" class="nav-logo"><img class="nav-logo-icon" src="../../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
   <div class="nav-links" id="navLinks">
     <a href="../../education.html">Tracks</a>
-    <a href="../../index.html#projects">Projects</a>
-    <a href="../../index.html#interview" class="active">Interview prep</a>
+    <a href="../../engineering.html#projects">Projects</a>
+    <a href="../../engineering.html#interview" class="active">Interview prep</a>
     <a href="../../education.html#certs">Certifications</a>
     <a href="../../feedback.html?page=/education/interview/{id}.html&amp;title={role_q}">Feedback</a>
     <a href="../../education.html#{track}" class="nav-cta">{track_short} track</a>
@@ -104,7 +104,7 @@ PAGE = """<!DOCTYPE html>
 
 <header class="lesson-hero">
   <div class="wrap">
-    <div class="crumbs"><a href="../../education.html">Education</a> › <a href="../../index.html#interview">Interview prep</a> › {role}</div>
+    <div class="crumbs"><a href="../../education.html">Education</a> › <a href="../../engineering.html#interview">Interview prep</a> › {role}</div>
     <h1>{role} — interview prep kit</h1>
     <p class="lede">{summary}</p>
     <div class="meta">
