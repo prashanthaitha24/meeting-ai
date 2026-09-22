@@ -341,7 +341,7 @@ def main():
     (DOCS / "index.html").write_text(fill((SRC / "site" / "home.html").read_text(), stats))
     # Static world/guide pages: no template substitutions, copied verbatim through fill().
     STATIC_PAGES = [
-        "exams.html", "school.html", "careers.html",
+        "exams.html", "careers.html",
         "skillmatch.html", "acadverify.html", "certify.html",
         "sat-practice.html", "sat-guide.html",
         "sat-reading-writing.html", "sat-math.html",
