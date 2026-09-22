@@ -342,7 +342,7 @@ def main():
     # Static world/guide pages: no template substitutions, copied verbatim through fill().
     STATIC_PAGES = [
         "exams.html", "school.html", "careers.html",
-        "skillmatch.html",
+        "skillmatch.html", "acadverify.html", "certify.html",
         "sat-practice.html", "sat-guide.html",
         "sat-reading-writing.html", "sat-math.html",
         "admissions-what-colleges-look-for.html", "admissions-application.html",
