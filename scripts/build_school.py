@@ -24,6 +24,9 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import school_diagrams  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "site-src" / "school"
 SITE = ROOT / "site-src" / "site"
@@ -61,6 +64,15 @@ def validate(lid, lesson, subject_ids):
         if ex:
             need(ex.get("problem") and isinstance(ex.get("steps"), list) and ex["steps"] and ex.get("answer"),
                  f"sections[{i}].example: needs problem, steps, answer")
+        diags = s.get("diagrams") or ([s["diagram"]] if s.get("diagram") else [])
+        for di, d in enumerate(diags):
+            need(isinstance(d, dict) and d.get("kind") in school_diagrams.KINDS,
+                 f"sections[{i}].diagram[{di}]: kind must be one of {sorted(school_diagrams.KINDS)}")
+            if isinstance(d, dict) and d.get("kind") in school_diagrams.KINDS:
+                try:
+                    school_diagrams.render(d)
+                except Exception as e:  # noqa: BLE001
+                    need(False, f"sections[{i}].diagram[{di}]: failed to render -> {e}")
     need(words >= 250, f"lesson is thin: {words} words (need >= 250)")
     pr = lesson.get("practice", [])
     need(isinstance(pr, list) and 2 <= len(pr) <= 8, "'practice' needs 2-8 questions")
@@ -102,6 +114,10 @@ LESSON_PAGE = """<!DOCTYPE html>
     .doc .example .prob {{ font-weight: 700; color: var(--text); margin-bottom: 8px; }}
     .doc .example ol {{ margin: 0 0 8px 0; }}
     .doc .example .ans {{ font-weight: 700; color: var(--text); }}
+    .doc .sc-fig {{ margin: 20px auto; max-width: 400px; text-align: center; }}
+    .doc .sc-fig svg {{ max-width: 100%; height: auto; display: block; margin: 0 auto; background: #fff; border: 1px solid var(--border); border-radius: 16px; padding: 16px; box-sizing: border-box; }}
+    .doc .sc-fig svg text {{ font-family: Inter, system-ui, sans-serif; }}
+    .doc .sc-fig figcaption {{ font-size: 13px; color: var(--text3); margin-top: 9px; line-height: 1.5; }}
     .sc-q {{ background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; margin-bottom: 12px; }}
     .sc-q .qt {{ font-weight: 600; margin-bottom: 10px; }}
     .sc-opt {{ display: block; width: 100%; text-align: left; font: inherit; font-size: 14.5px; color: var(--text); background: var(--bg); border: 1.5px solid var(--border); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; cursor: pointer; }}
@@ -240,6 +256,10 @@ def render_sections(sections):
         parts = [f'  <h2>{esc(s["heading"])}</h2>']
         for p in s.get("body", []):
             parts.append(f"  <p>{inline(p)}</p>")
+        for d in (s.get("diagrams") or ([s["diagram"]] if s.get("diagram") else [])):
+            svg = school_diagrams.render(d)
+            cap = f'<figcaption>{inline(d["caption"])}</figcaption>' if d.get("caption") else ""
+            parts.append(f'  <figure class="sc-fig">{svg}{cap}</figure>')
         ex = s.get("example")
         if ex:
             steps = "".join(f"<li>{inline(st)}</li>" for st in ex["steps"])
