@@ -339,11 +339,16 @@ def main():
     })
     (DOCS / "engineering.html").write_text(eng)
     (DOCS / "index.html").write_text(fill((SRC / "site" / "home.html").read_text(), stats))
-    (DOCS / "exams.html").write_text(fill((SRC / "site" / "exams.html").read_text(), {}))
-    (DOCS / "sat-practice.html").write_text(fill((SRC / "site" / "sat-practice.html").read_text(), {}))
-    (DOCS / "sat-guide.html").write_text(fill((SRC / "site" / "sat-guide.html").read_text(), {}))
-    (DOCS / "school.html").write_text(fill((SRC / "site" / "school.html").read_text(), {}))
-    (DOCS / "careers.html").write_text(fill((SRC / "site" / "careers.html").read_text(), {}))
+    # Static world/guide pages: no template substitutions, copied verbatim through fill().
+    STATIC_PAGES = [
+        "exams.html", "school.html", "careers.html",
+        "sat-practice.html", "sat-guide.html",
+        "sat-reading-writing.html", "sat-math.html",
+        "admissions-what-colleges-look-for.html", "admissions-application.html",
+        "admissions-essay.html", "admissions-timeline.html",
+    ]
+    for page in STATIC_PAGES:
+        (DOCS / page).write_text(fill((SRC / "site" / page).read_text(), {}))
     hub = fill((SRC / "site" / "hub.html").read_text(), {
         **stats,
         "TABS": tabs(tracks),
