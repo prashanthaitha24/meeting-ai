@@ -1,0 +1,96 @@
+{
+  "id": "proj-robotics-linefollower",
+  "track": "robotics",
+  "title": "Build a line-following robot",
+  "summary": "Take a bare Arduino, two motors and two infrared sensors and turn them into a robot that follows a line around a track — starting from a blink, through motor control and sensor calibration, to a smooth proportional controller you tune yourself.",
+  "outcome": "A two-wheeled robot that reliably follows a black line on a white floor, steering proportionally to how far off the line it is, and coping sensibly when it loses the line.",
+  "hours": 6,
+  "level": "Beginner",
+  "prereqs": [
+    "The Robotics lessons through **Control and PID** — you will use the setup/loop model, PWM, non-blocking timing, H-bridge driving and the idea of proportional control",
+    "An Arduino Uno (or clone) with the Arduino IDE installed and able to upload the Blink example",
+    "A 2-wheel chassis with two DC gear motors, an L298N (or TB6612) motor driver, a 2-sensor IR line-sensor module, a battery pack for the motors, and jumper wires"
+  ],
+  "tools": [
+    {"name": "Arduino IDE", "why": "write, compile and upload the sketch, and read the Serial Monitor while tuning", "url": "https://www.arduino.cc/en/software"},
+    {"name": "L298N / TB6612 motor driver", "why": "switches the motor current from the battery under the Arduino's low-power control signals", "url": "https://lastminuteengineers.com/l298n-dc-stepper-driver-arduino-tutorial/"},
+    {"name": "IR line sensors", "why": "read the reflectance under the robot so it knows where the line is", "url": "https://en.wikipedia.org/wiki/Line-following_robot"},
+    {"name": "A multimeter", "why": "check battery voltage under load and confirm wiring before you power the motors", "url": "https://learn.sparkfun.com/tutorials/how-to-use-a-multimeter"}
+  ],
+  "phases": [
+    {
+      "title": "Bench-test the board",
+      "goal": "Before any motors, confirm the Arduino, the toolchain and the Serial Monitor all work — the foundation you will debug everything else against.",
+      "steps": [
+        {"text": "Install the Arduino IDE, connect the Uno by USB, select the correct board and port, and upload the built-in Blink example. Seeing the on-board LED blink proves your whole upload path works.", "check": "The on-board LED blinks once per second after upload with no error in the IDE."},
+        {"text": "Open the Serial Monitor at 9600 baud and upload a sketch that prints a counter, so you have a working way to see what the board is thinking — your main debugging tool for the rest of the build.", "code": {"lang": "cpp", "code": "void setup() {\n  Serial.begin(9600);\n}\n\nvoid loop() {\n  static int n = 0;\n  Serial.println(n++);   // watch numbers climb in the Serial Monitor\n  delay(500);\n}"}, "check": "Numbers count up in the Serial Monitor once every half second."},
+        {"text": "Decide your pin plan now and write it in a comment block at the top of your sketch: which pins drive the motor driver's direction and enable inputs, and which analog pins read the two line sensors. Planning pins up front prevents most wiring confusion later.", "note": "A common plan: motor A on IN1=7, IN2=8, ENA=9 (PWM); motor B on IN3=5, IN4=4, ENB=6 (PWM); left sensor on A0, right sensor on A1. Keep the two ENA/ENB pins on PWM-capable (~) pins."}
+      ]
+    },
+    {
+      "title": "Wire and test the motors",
+      "goal": "Get both motors driving under the Arduino's command through the H-bridge, with a separate battery — proving power and actuation before adding any sensing.",
+      "steps": [
+        {"text": "Power off. Wire the L298N: motor outputs to the two motors, the battery pack to the driver's motor supply and ground, and — critically — join the battery ground to the Arduino ground so they share a reference. Connect IN1/IN2/ENA and IN3/IN4/ENB to your planned pins.", "note": "Never power the motors from the Arduino's 5V pin. The motors draw far more current than the board can supply; they get their own battery through the driver."},
+        {"text": "Before powering the motors, check the battery voltage under load with a multimeter and confirm every ground is common. A five-minute wiring check here saves fried parts.", "check": "The battery reads its expected voltage and the driver's ground, battery ground and Arduino ground are all connected together."},
+        {"text": "Write a `drive` helper for each motor that takes a signed speed (negative = reverse) and sets the two direction pins plus the PWM enable pin. This is the same H-bridge pattern from the Motors lesson.", "code": {"lang": "cpp", "code": "const int IN1 = 7, IN2 = 8, ENA = 9;    // left motor\nconst int IN3 = 5, IN4 = 4, ENB = 6;    // right motor\n\nvoid setupMotors() {\n  int pins[] = {IN1, IN2, ENA, IN3, IN4, ENB};\n  for (int p : pins) pinMode(p, OUTPUT);\n}\n\nvoid driveMotor(int in1, int in2, int en, int speed) {\n  bool fwd = speed >= 0;\n  digitalWrite(in1, fwd ? HIGH : LOW);\n  digitalWrite(in2, fwd ? LOW : HIGH);\n  analogWrite(en, constrain(abs(speed), 0, 255));\n}\n\nvoid drive(int left, int right) {\n  driveMotor(IN1, IN2, ENA, left);\n  driveMotor(IN3, IN4, ENB, right);\n}"}},
+        {"text": "In `loop`, exercise the motors: forward, stop, reverse, then spin in place by driving the wheels opposite ways. Confirm each wheel turns the direction you expect — if one is backwards, swap that motor's two output wires (or its IN pins).", "code": {"lang": "cpp", "code": "void loop() {\n  drive(180, 180);  delay(1000);  // forward\n  drive(0, 0);      delay(400);   // stop\n  drive(-180, -180); delay(1000); // reverse\n  drive(0, 0);      delay(400);\n  drive(180, -180); delay(800);   // spin in place\n  drive(0, 0);      delay(1000);\n}"}, "check": "Both wheels drive forward together, reverse together, and spin the robot in place — matching the commands."},
+        {"text": "Find each motor's minimum moving speed: many cheap gear motors will not turn below a PWM of roughly 60–90, they just whine. Ramp the PWM up slowly and note the value where each wheel actually starts turning, so later you never command a 'moving' speed the motor ignores.", "note": "If the two motors start at different PWM values, remember the higher one as your practical floor. Commanding below it is the same as commanding zero, which breaks gentle steering."}
+      ]
+    },
+    {
+      "title": "Read and calibrate the sensors",
+      "goal": "Turn the two IR sensors into a reliable black/white reading in the actual light and surface you will run on — the single most common cause of a line follower that 'just won't work'.",
+      "steps": [
+        {"text": "Wire the two IR sensors: power, ground, and each analog output to your planned analog pins. Mount them a few millimetres above the floor, side by side, straddling where the line will pass.", "note": "Analog sensors give you a value you threshold yourself, which is more robust than a module's built-in digital threshold. If yours only output digital, you can still follow this — the calibration step just picks the sensor's onboard trimpot instead."},
+        {"text": "Print both raw sensor values continuously and watch them in the Serial Monitor while you slide the robot over black line and white floor. Note the value over black and the value over white — they should be clearly different.", "code": {"lang": "cpp", "code": "const int SENS_L = A0, SENS_R = A1;\n\nvoid loop() {\n  int l = analogRead(SENS_L);\n  int r = analogRead(SENS_R);\n  Serial.print(l); Serial.print('\\t'); Serial.println(r);\n  delay(80);\n}"}, "check": "The printed values change markedly between black and white for both sensors."},
+        {"text": "Pick a threshold halfway between the black and white readings and write a helper that reports, for each sensor, whether it is over the line. Calibrate in the same room and lighting you will run in — a threshold tuned under different light often fails.", "code": {"lang": "cpp", "code": "int THRESHOLD = 500;  // set from your measured black/white midpoint\n\nbool overLine(int pin) {\n  // black absorbs IR -> higher analog reading on most modules\n  return analogRead(pin) > THRESHOLD;\n}"}, "note": "If your module reads LOWER over black, just flip the comparison. The Serial values from the previous step tell you which way round yours works."},
+        {"text": "Add a quick self-test: print `L` when only the left sensor sees the line, `R` for only the right, `both` when both do, and `none` when neither. Slide the robot across the line by hand and confirm the labels match reality before you let it drive itself.", "check": "Moving the robot left of the line prints the correct sensor as 'on the line', and centred prints 'both' or alternates cleanly."}
+      ]
+    },
+    {
+      "title": "First following: bang-bang",
+      "goal": "Close the loop with the simplest possible controller so the robot follows the line at all — then you have something working to improve.",
+      "steps": [
+        {"text": "Write the simplest line-following logic: if the left sensor is off the line, steer left; if the right is off, steer right; if both are on, go straight. This 'bang-bang' controller only ever hard-turns or goes straight, but it follows a gentle line.", "code": {"lang": "cpp", "code": "const int BASE = 150;   // straight-ahead speed\n\nvoid loop() {\n  bool l = overLine(SENS_L);\n  bool r = overLine(SENS_R);\n  if (l && r)       drive(BASE, BASE);      // centred: straight\n  else if (l && !r) drive(0, BASE);         // drifted right: turn left\n  else if (!l && r) drive(BASE, 0);         // drifted left: turn right\n  else              drive(BASE, BASE);      // both off: keep going\n}"}},
+        {"text": "Put the robot on the track and let it run. Expect it to wobble along the line — bang-bang is jerky by nature because it always turns fully or not at all. That wobble is exactly the problem proportional control will fix next.", "check": "The robot follows the line around gentle curves, even if it visibly zig-zags."},
+        {"text": "Lower `BASE` if the robot overshoots curves and loses the line — a slower robot forgives a cruder controller. Note the fastest speed at which bang-bang still holds the line; you will beat it with the next controller.", "note": "Tuning by slowing down is always available. A reliable slow robot is worth far more than a fast one that flies off the track."},
+        {"text": "Add a short start delay so the robot does not lurch the instant you upload — a couple of seconds in `setup()` after power-on gives you time to place it on the line and take your hands away. A predictable start makes every test run comparable.", "code": {"lang": "cpp", "code": "void setup() {\n  Serial.begin(9600);\n  setupMotors();\n  pinMode(SENS_L, INPUT);\n  pinMode(SENS_R, INPUT);\n  delay(2000);   // time to set the robot on the line\n}"}}
+      ]
+    },
+    {
+      "title": "Smooth it with proportional control",
+      "goal": "Replace the jerky bang-bang with a controller that steers gently when near the line and hard when far — the proportional idea from the Control lesson, applied to a two-sensor robot.",
+      "steps": [
+        {"text": "Compute an `error` from the two analog sensor readings: the difference (left minus right) is positive when the robot has drifted one way and negative the other, and near zero when centred. This continuous error is what proportional control needs, instead of the on/off booleans.", "code": {"lang": "cpp", "code": "int lineError() {\n  int l = analogRead(SENS_L);\n  int r = analogRead(SENS_R);\n  return l - r;   // 0 when balanced over the line; sign shows drift direction\n}"}},
+        {"text": "Steer proportionally to the error: a gain `Kp` times the error becomes a turn amount you add to one wheel and subtract from the other, so a small error gives a gentle correction and a large error a strong one.", "code": {"lang": "cpp", "code": "float Kp = 0.15;   // start small; tune upward\n\nvoid loop() {\n  int error = lineError();\n  int turn = (int)(Kp * error);\n  int left  = constrain(BASE - turn, 0, 255);\n  int right = constrain(BASE + turn, 0, 255);\n  drive(left, right);\n}"}},
+        {"text": "Run it and watch the difference: the robot should track the line far more smoothly than bang-bang, easing back to centre instead of snapping. If it barely reacts, raise `Kp`; if it oscillates and wobbles, lower it. Change `Kp` in small steps and re-test — this is exactly the tuning loop from the Control lesson.", "check": "The robot follows the line noticeably more smoothly than the bang-bang version, without violent zig-zagging."},
+        {"text": "Once it tracks smoothly, raise `BASE` gradually to go faster, re-tuning `Kp` down a little as speed rises (a faster robot needs gentler gains to stay stable). Find the fastest speed that still holds the line cleanly.", "note": "This trade-off — more speed needs careful gains — is the same one real autonomous vehicles face. You are tuning a genuine control system."}
+      ]
+    },
+    {
+      "title": "Handle the edge cases",
+      "goal": "Make the robot robust to the situations that trip up every line follower: losing the line entirely, and sharp turns or gaps.",
+      "steps": [
+        {"text": "Add a 'line lost' behaviour: when both sensors read white (the robot has run off the line), keep turning in the direction it last saw the line instead of driving straight off the track. Remember the last non-zero error to know which way to search.", "code": {"lang": "cpp", "code": "int lastError = 0;\n\nvoid loop() {\n  bool l = overLine(SENS_L), r = overLine(SENS_R);\n  int error = lineError();\n  if (!l && !r) {                 // line lost: search toward last-seen side\n    if (lastError > 0) drive(0, BASE);      // was drifting one way -> turn back\n    else               drive(BASE, 0);\n    return;\n  }\n  lastError = error;\n  int turn = (int)(Kp * error);\n  drive(constrain(BASE - turn, 0, 255), constrain(BASE + turn, 0, 255));\n}"}},
+        {"text": "Test the robot on a track with a sharp corner. If it overshoots the corner, either slow `BASE` for the whole lap or increase `Kp` so it turns harder — corners are where a line follower is most likely to fail, so tune specifically against your tightest corner.", "check": "The robot makes it around the sharpest corner on your track without permanently losing the line."},
+        {"text": "Add a simple non-blocking status blink using `millis()` so an LED flashes while the robot runs — a habit that lets you tell at a glance whether the loop is still running or has hung, without a serial cable attached.", "code": {"lang": "cpp", "code": "const int LED = 13;\nunsigned long lastBlink = 0;\nbool ledOn = false;\n\nvoid heartbeat() {\n  if (millis() - lastBlink >= 250) {\n    ledOn = !ledOn;\n    digitalWrite(LED, ledOn);\n    lastBlink = millis();\n  }\n}"}, "note": "Call heartbeat() every loop. If the LED stops blinking, your loop is blocked somewhere — usually a stray delay()."},
+        {"text": "Run several full laps and note any spot where it struggles. Adjust the sensor mounting height, the threshold, or the gains for that spot. A line follower that completes laps reliably — not just once — is the real goal.", "check": "The robot completes at least three full laps of your track in a row without human help."},
+        {"text": "Write your final tuned numbers — THRESHOLD, BASE, Kp, and the sensor mounting height — into the comment block at the top of the sketch. Recording what worked means you can rebuild or re-tune quickly after a battery change or a knock, instead of rediscovering everything.", "note": "These four numbers are your robot's 'personality'. A fresh battery or a different floor can shift them, so keep the record and adjust from it rather than from scratch."}
+      ]
+    }
+  ],
+  "troubleshooting": [
+    {"symptom": "One wheel spins the wrong way, so the robot turns when it should go straight.", "fix": "That motor's polarity is reversed relative to your code. Either swap the two output wires from the driver to that motor, or swap that motor's IN1/IN2 pin assignments in the sketch, then re-run the motor-test phase until forward is forward for both wheels."},
+    {"symptom": "The robot follows in a room but fails in another, or near a window.", "fix": "Ambient infrared (sunlight especially) shifts the sensor readings and your threshold no longer separates black from white. Re-run the calibration step in the actual run location, and consider shrouding the sensors so they see mostly the floor, not the room."},
+    {"symptom": "The board resets or behaves randomly when the motors start.", "fix": "The motors are sagging or spiking the shared power. Confirm the motors run from their own battery through the driver (never the Arduino 5V), that all grounds are common, and that the battery holds voltage under load — measure it with the motors running, not at rest."},
+    {"symptom": "With proportional control the robot oscillates worse than bang-bang.", "fix": "Kp is too high, so small errors produce large steering. Lower Kp in steps until the wobble disappears, and reduce BASE — a faster robot needs a gentler gain. If it still oscillates at low Kp, check the two sensors are level and equally spaced from the line."},
+    {"symptom": "The robot drives straight off the line at the first curve.", "fix": "Either it is too fast for the controller (lower BASE), the gain is too low to turn hard enough (raise Kp), or the 'line lost' search is missing — add the last-error search behaviour so it turns back toward the line instead of continuing straight."}
+  ],
+  "next": [
+    "Upgrade to a 5-sensor IR array so the robot senses a weighted position along the line, giving a much smoother error signal and letting you add the I and D terms for full PID control.",
+    "Add a push-button start and a lap counter that lights an LED each time the robot crosses a marker line, turning the follower into a timed race robot.",
+    "Port the same control logic onto an ESP32 and add the obstacle-avoiding rover project's Wi-Fi telemetry, so you can watch the error and speed live from your phone while it laps.",
+    "Replace the fixed BASE speed with a curve-aware speed: slow down when the error is large (a corner) and speed up on the straights, the way real racing lines work."
+  ]
+}

@@ -1,0 +1,96 @@
+{
+  "id": "proj-robotics-rover",
+  "track": "robotics",
+  "title": "An obstacle-avoiding rover",
+  "summary": "Build a rover on an ESP32 that senses what is ahead with an ultrasonic sensor, avoids obstacles on its own, and can be driven from your phone over Wi-Fi — combining sensing, non-blocking control and a tiny web server into one robot with two modes.",
+  "outcome": "A rover that roams a room avoiding walls and furniture in autonomous mode, and switches to manual control from a web page it serves on your phone — with a safety stop that overrides you if you steer into something.",
+  "hours": 8,
+  "level": "Intermediate",
+  "prereqs": [
+    "The line-following project, or equivalent comfort with wiring a motor driver and driving two DC motors from code",
+    "The Robotics lessons through **Sensors** and **Control** — you will use non-blocking `millis()` timing, a median filter, and the sense–think–act loop",
+    "An ESP32 dev board (with the ESP32 core installed in the Arduino IDE), a 2-motor chassis, an L298N/TB6612 driver, an HC-SR04 ultrasonic sensor, and a motor battery pack"
+  ],
+  "tools": [
+    {"name": "ESP32 dev board", "why": "a microcontroller with built-in Wi-Fi, so the rover can serve a control page with no extra hardware", "url": "https://randomnerdtutorials.com/getting-started-with-esp32/"},
+    {"name": "Arduino IDE with the ESP32 core", "why": "compile and upload ESP32 sketches, including the WiFi and WebServer libraries", "url": "https://docs.espressif.com/projects/arduino-esp32/en/latest/installing.html"},
+    {"name": "HC-SR04 ultrasonic sensor", "why": "measures the distance to whatever is ahead so the rover can avoid it", "url": "https://lastminuteengineers.com/arduino-sr04-ultrasonic-sensor-tutorial/"},
+    {"name": "L298N / TB6612 motor driver", "why": "drives the two DC motors from the battery under the ESP32's control", "url": "https://lastminuteengineers.com/l298n-dc-stepper-driver-arduino-tutorial/"}
+  ],
+  "phases": [
+    {
+      "title": "Bring up the ESP32",
+      "goal": "Get the ESP32 toolchain working and understand its 3.3 V logic before wiring anything to it — the ESP32 is not 5 V-tolerant, and that catches people out.",
+      "steps": [
+        {"text": "Install the ESP32 board support in the Arduino IDE, select your ESP32 board and port, and upload a Blink to confirm the upload path. ESP32 uploads sometimes need you to hold the BOOT button as it connects — learn your board's routine now.", "check": "The on-board LED blinks and the IDE reports a successful upload."},
+        {"text": "Note the critical difference from an Uno: the ESP32's pins are 3.3 V logic and are NOT 5 V-tolerant. The HC-SR04's echo pin outputs 5 V, so plan a voltage divider (two resistors) on that one line to protect the board.", "note": "Trigger can be driven at 3.3 V (the HC-SR04 accepts it). Only the ECHO line coming back needs dividing down to ~3.3 V before it reaches an ESP32 input pin."},
+        {"text": "Write your pin plan into a comment block: two direction pins plus a PWM pin per motor, the ultrasonic trigger and (divided) echo pins, and note that on the ESP32 you drive PWM with `ledcWrite` channels rather than `analogWrite`. Planning avoids a rewire later.", "code": {"lang": "cpp", "code": "// Pin plan (ESP32)\n// Left motor:  IN1=26, IN2=27, ENA=14 (PWM ch 0)\n// Right motor: IN3=25, IN4=33, ENB=32 (PWM ch 1)\n// Ultrasonic:  TRIG=5, ECHO=18 (through a divider to ~3.3V)\n// All grounds common with the motor battery."}},
+        {"text": "Prove the Wi-Fi radio works in isolation before it matters: upload a sketch that starts a soft access point and prints the IP, and confirm your phone can see the network. Verifying the ESP32's headline feature now means that when you add it late in the build, you already trust it.", "code": {"lang": "cpp", "code": "#include <WiFi.h>\nvoid setup() {\n  Serial.begin(115200);\n  WiFi.softAP(\"rover-test\", \"test1234\");\n  Serial.println(WiFi.softAPIP());   // expect 192.168.4.1\n}\nvoid loop() {}"}, "check": "Your phone lists a 'rover-test' Wi-Fi network and the Serial Monitor prints an IP address."}
+      ]
+    },
+    {
+      "title": "Motors and a drive API",
+      "goal": "Get both motors driving from the ESP32 through the driver, using the ESP32's LEDC PWM, wrapped in a clean drive() you will reuse in both modes.",
+      "steps": [
+        {"text": "Wire the driver and motors exactly as in the line follower — motors to outputs, battery to the driver's motor supply, and all grounds common with the ESP32 ground. Double-check the shared ground; a floating ground makes the whole thing behave randomly.", "note": "As always: motors from their own battery through the driver, never from the ESP32's regulator."},
+        {"text": "Set up two LEDC PWM channels for the enable pins and configure the direction pins as outputs. The ESP32 uses `ledcSetup`/`ledcAttachPin`/`ledcWrite` for PWM instead of `analogWrite`.", "code": {"lang": "cpp", "code": "const int IN1=26, IN2=27, ENA=14;\nconst int IN3=25, IN4=33, ENB=32;\nconst int CH_L=0, CH_R=1;\n\nvoid setupMotors() {\n  for (int p : {IN1, IN2, IN3, IN4}) pinMode(p, OUTPUT);\n  ledcSetup(CH_L, 1000, 8);   // 1 kHz, 8-bit (0-255)\n  ledcSetup(CH_R, 1000, 8);\n  ledcAttachPin(ENA, CH_L);\n  ledcAttachPin(ENB, CH_R);\n}"}},
+        {"text": "Write the `drive(left, right)` API with signed speeds, setting direction pins and writing PWM to the channels. This mirrors the line follower's helper but uses LEDC — keep the same signature so your control code reads the same.", "code": {"lang": "cpp", "code": "void motor(int in1, int in2, int ch, int speed) {\n  bool fwd = speed >= 0;\n  digitalWrite(in1, fwd ? HIGH : LOW);\n  digitalWrite(in2, fwd ? LOW : HIGH);\n  ledcWrite(ch, constrain(abs(speed), 0, 255));\n}\n\nvoid drive(int left, int right) {\n  motor(IN1, IN2, CH_L, left);\n  motor(IN3, IN4, CH_R, right);\n}"}},
+        {"text": "Test forward, reverse and spin, exactly as before, and fix any reversed wheel. Confirm the rover drives predictably before you add sensing on top.", "check": "The rover drives forward, reverses, and spins in place on command with both wheels correct."}
+      ]
+    },
+    {
+      "title": "Sense what's ahead",
+      "goal": "Get a clean, trustworthy distance reading from the ultrasonic sensor — noisy distance readings are the number-one cause of a twitchy avoider.",
+      "steps": [
+        {"text": "Wire the HC-SR04: VCC to 5 V, ground common, trigger to its pin, and echo through your voltage divider to the ESP32 echo pin. Confirm the divider outputs about 3.3 V, not 5 V, with a multimeter before connecting it to the board.", "check": "The echo line measures roughly 3.3 V (not 5 V) at the ESP32 pin when the sensor fires."},
+        {"text": "Write a single-reading distance function using a trigger pulse and `pulseIn`, with a timeout so a missing echo does not hang the loop. Print it and wave your hand to confirm the numbers make sense.", "code": {"lang": "cpp", "code": "const int TRIG=5, ECHO=18;\n\nlong readCmOnce() {\n  digitalWrite(TRIG, LOW); delayMicroseconds(2);\n  digitalWrite(TRIG, HIGH); delayMicroseconds(10);\n  digitalWrite(TRIG, LOW);\n  long us = pulseIn(ECHO, HIGH, 25000);  // 25 ms timeout\n  if (us == 0) return 400;               // no echo -> treat as 'far'\n  return us / 58;                        // us to centimetres\n}"}},
+        {"text": "Wrap it in a median-of-three filter so an occasional spurious reading cannot make the rover flinch. Taking the middle of three reads is a cheap, effective way to kill the isolated spikes ultrasonic sensors are prone to, straight from the Sensors lesson.", "code": {"lang": "cpp", "code": "long readCm() {\n  long a = readCmOnce(), b = readCmOnce(), c = readCmOnce();\n  // median of three\n  if (a > b) { long t=a; a=b; b=t; }\n  if (b > c) { long t=b; b=c; c=t; }\n  if (a > b) { long t=a; a=b; b=t; }\n  return b;\n}"}, "check": "Waving a hand in and out gives smooth distance changes with no wild single-reading jumps."},
+        {"text": "Read the distance on a non-blocking schedule with `millis()` rather than every loop, so the sensor's timing does not stall the rest of the rover. Store the latest distance in a variable the control code reads.", "code": {"lang": "cpp", "code": "long lastDist = 400;\nunsigned long lastPing = 0;\n\nvoid updateDistance() {\n  if (millis() - lastPing >= 60) {   // ~16 reads/sec, non-blocking\n    lastDist = readCm();\n    lastPing = millis();\n  }\n}"}}
+      ]
+    },
+    {
+      "title": "Autonomous avoidance",
+      "goal": "Give the rover a behaviour of its own: roam forward, and when something is close, back off and turn to a clearer direction.",
+      "steps": [
+        {"text": "Write the core avoid behaviour as a state you can reason about: if the way ahead is clear, drive forward; if an obstacle is within a threshold, stop, reverse briefly, then turn. Keep it non-blocking by tracking a state and a timer rather than using long delays.", "code": {"lang": "cpp", "code": "enum Mode { ROAM, BACK, TURN };\nMode mode = ROAM;\nunsigned long modeStart = 0;\nconst int STOP_CM = 20;\n\nvoid setMode(Mode m) { mode = m; modeStart = millis(); }\n\nvoid avoidStep() {\n  unsigned long t = millis() - modeStart;\n  switch (mode) {\n    case ROAM: drive(160, 160);\n               if (lastDist < STOP_CM) setMode(BACK);\n               break;\n    case BACK: drive(-150, -150);\n               if (t > 350) setMode(TURN);\n               break;\n    case TURN: drive(170, -170);           // spin to look for a gap\n               if (t > 450 && lastDist > STOP_CM + 10) setMode(ROAM);\n               break;\n  }\n}"}},
+        {"text": "In `loop`, call `updateDistance()` and `avoidStep()` every pass. Because both are non-blocking, the rover keeps sensing while it manoeuvres — the whole point of the millis() pattern.", "code": {"lang": "cpp", "code": "void loop() {\n  updateDistance();\n  avoidStep();\n}"}},
+        {"text": "Run the rover in a cluttered area. Tune STOP_CM (how close before it reacts) and the BACK/TURN durations until it moves confidently without either clipping obstacles or spinning forever looking for a gap.", "check": "The rover roams for a minute in a cluttered room without hitting anything, backing and turning away from obstacles."},
+        {"text": "Add a hard safety floor: if the distance drops below a very small value at any time (about to touch), cut the motors immediately regardless of mode. A last-resort stop protects the rover and whatever it is about to hit.", "code": {"lang": "cpp", "code": "void safety() {\n  if (lastDist < 8) drive(0, 0);   // imminent contact: stop now\n}"}, "note": "Call safety() after avoidStep() so it can override the behaviour. This same idea returns in manual mode, where it protects the rover from you."}
+      ]
+    },
+    {
+      "title": "Drive it from your phone",
+      "goal": "Serve a tiny control page from the ESP32 so you can steer the rover from any phone on the same Wi-Fi — turning the ESP32's headline feature into a real remote.",
+      "steps": [
+        {"text": "Start the ESP32 as its own Wi-Fi access point so no router is needed — the rover creates a network your phone joins directly. Print the IP address to the Serial Monitor.", "code": {"lang": "cpp", "code": "#include <WiFi.h>\n#include <WebServer.h>\nWebServer server(80);\n\nvoid setupWifi() {\n  WiFi.softAP(\"rover-ai\", \"rover1234\");   // network name + password\n  Serial.println(WiFi.softAPIP());          // usually 192.168.4.1\n}"}, "check": "Your phone sees a 'rover-ai' network; joining it and visiting the printed IP loads a page."},
+        {"text": "Register command endpoints the page will call — forward, back, left, right, stop — each setting a manual command the control loop will act on. Keep the handlers tiny: they only record intent, they do not drive directly.", "code": {"lang": "cpp", "code": "volatile int cmdL = 0, cmdR = 0;\nunsigned long lastCmd = 0;\n\nvoid setCmd(int l, int r) { cmdL = l; cmdR = r; lastCmd = millis(); server.send(200, \"text/plain\", \"ok\"); }\n\nvoid setupRoutes() {\n  server.on(\"/fwd\",  [](){ setCmd( 180,  180); });\n  server.on(\"/back\", [](){ setCmd(-160, -160); });\n  server.on(\"/left\", [](){ setCmd(-150,  150); });\n  server.on(\"/right\",[](){ setCmd( 150, -150); });\n  server.on(\"/stop\", [](){ setCmd(0, 0); });\n}"}},
+        {"text": "Serve a minimal HTML control page with five buttons that call those endpoints. Keep it simple — the goal is a working remote, not a pretty one. Register it on the root path.", "code": {"lang": "cpp", "code": "const char* PAGE =\n  \"<!doctype html><meta name=viewport content='width=device-width'>\"\n  \"<style>button{font-size:2rem;margin:6px;padding:18px}</style>\"\n  \"<div style=text-align:center>\"\n  \"<button onclick=f('/fwd')>Up</button><br>\"\n  \"<button onclick=f('/left')>Left</button>\"\n  \"<button onclick=f('/stop')>Stop</button>\"\n  \"<button onclick=f('/right')>Right</button><br>\"\n  \"<button onclick=f('/back')>Down</button>\"\n  \"<script>function f(u){fetch(u)}</script></div>\";\n\nvoid setupRoot() { server.on(\"/\", [](){ server.send(200, \"text/html\", PAGE); }); }"}},
+        {"text": "Call `server.handleClient()` every loop and drive the motors from the latest command. Add a command timeout: if no command arrives for a second (you walked out of range or the tab closed), stop — a rover that keeps its last command forever is a runaway.", "code": {"lang": "cpp", "code": "void manualStep() {\n  server.handleClient();\n  if (millis() - lastCmd > 1000) { cmdL = 0; cmdR = 0; }  // dead-man timeout\n  drive(cmdL, cmdR);\n}"}, "check": "Tapping the phone buttons moves the rover, and it stops on its own about a second after you stop tapping."}
+      ]
+    },
+    {
+      "title": "Two modes, safely combined",
+      "goal": "Bring autonomous and manual together into one rover with a mode switch, where the obstacle safety still protects it even when you are driving.",
+      "steps": [
+        {"text": "Add a mode flag (autonomous vs manual) and a `/mode` endpoint or a physical button that toggles it. In `loop`, run the avoidance behaviour or the manual driver depending on the flag — but always call `updateDistance()` and `safety()` so sensing never stops.", "code": {"lang": "cpp", "code": "bool autonomous = true;\n\nvoid loop() {\n  updateDistance();\n  server.handleClient();\n  if (autonomous) avoidStep();\n  else            manualStep();\n  safety();               // overrides both when about to hit something\n}"}},
+        {"text": "Test the safety override in manual mode: deliberately drive the rover toward a wall from your phone and confirm the safety floor stops it before contact, even though you are commanding forward. Sensing that protects the human driver is what makes the rover trustworthy.", "check": "Driving manually straight at a wall, the rover halts itself before touching it."},
+        {"text": "Add a status line to the web page (or the Serial Monitor) showing the current mode and the latest distance, so you can see what the rover senses while you drive. Visibility into its state makes tuning and debugging far quicker.", "note": "You can serve a /status endpoint returning the distance and mode as text, and have the page poll it every half second — reusing the exact idea from the line follower's telemetry extension."},
+        {"text": "Run a full session: let it roam autonomously, switch to manual and drive it back, and confirm it never hits anything in either mode over several minutes. A rover that is safe in both modes, for minutes at a time, is the finished project.", "check": "Over a multi-minute session the rover avoids obstacles autonomously and is drivable manually, with no collisions in either mode."},
+        {"text": "Record your tuned constants — STOP_CM, the BACK/TURN durations, the safety floor, the PWM speeds and the command timeout — in the sketch header, and note the battery you tuned against. As with the line follower, these numbers are the rover's behaviour, and a fresh battery or a bigger room will shift them; keep the record so you re-tune from it, not from scratch.", "note": "A rover feels very different on a full versus a half battery, because motor speed follows voltage. If it starts clipping obstacles after a while, suspect the battery before the code."}
+      ]
+    }
+  ],
+  "troubleshooting": [
+    {"symptom": "The ESP32 resets or crashes as soon as the motors run.", "fix": "The motor supply is browning out the board, or a 5 V line is feeding a 3.3 V pin. Confirm the motors run from their own battery through the driver with a common ground, that the ESP32 is powered from a stable source, and that the HC-SR04 echo goes through a divider — a raw 5 V echo into a GPIO can crash or damage the ESP32."},
+    {"symptom": "Distance readings are wildly noisy or often read 0 or 400.", "fix": "A 0 means no echo returned (out of range, or the pulse missed); the code already maps that to 'far'. For jitter, confirm the median filter is in use, add the ~60 ms spacing between reads so echoes do not overlap, and make sure the sensor is not aimed at a soft or angled surface that scatters the echo."},
+    {"symptom": "The web page loads but the buttons do nothing.", "fix": "Your phone may have dropped off the rover's access point onto mobile data, or the endpoint paths do not match. Confirm the phone is still on the 'rover-ai' network, check the Serial Monitor for incoming requests, and verify the fetch() URLs in the page exactly match the server.on() paths."},
+    {"symptom": "The rover keeps driving after you stop tapping, or after the phone locks.", "fix": "The dead-man timeout is missing or too long. Ensure manualStep() zeroes the command when millis()-lastCmd exceeds your timeout, so a lost connection or a locked phone stops the rover instead of leaving it on its last command."},
+    {"symptom": "In autonomous mode the rover spins in place forever.", "fix": "Its TURN state never finds a clear direction because STOP_CM is too large for the space or the turn is too short to sweep past the obstacle. Lower STOP_CM, lengthen the TURN duration, or require a larger clear margin before returning to ROAM so it commits to a genuinely open direction."}
+  ],
+  "next": [
+    "Mount the ultrasonic sensor on a servo that sweeps left and right, so the rover measures several directions and turns toward the most open one instead of guessing.",
+    "Add wheel encoders and the odometry from the Kinematics lesson, so the rover can estimate how far it has travelled and drive a set distance or return roughly to its start.",
+    "Replace the softAP with joining your home Wi-Fi and serving a richer dashboard that live-plots the distance, giving you real telemetry like the interview-grade projects in other tracks.",
+    "Swap the ultrasonic sensor for a small time-of-flight or a simple camera on a Raspberry Pi and bring in the Vision lesson to follow a coloured target instead of merely avoiding walls."
+  ]
+}
