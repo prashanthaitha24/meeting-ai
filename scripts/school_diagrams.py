@@ -298,6 +298,13 @@ def icon(kind, cx, cy, s=15):
             px, py = cx + s * 0.62 * math.cos(a), cy + s * 0.62 * math.sin(a)
             out += f'<circle cx="{px:.0f}" cy="{py:.0f}" r="{s*0.46:.0f}" fill="{COLORS["rose"][0]}" stroke="{COLORS["rose"][1]}" stroke-width="1.6"/>'
         return out + f'<circle cx="{cx:.0f}" cy="{cy:.0f}" r="{s*0.42:.0f}" fill="{COLORS["amber"][0]}" stroke="{COLORS["amber"][1]}" stroke-width="1.6"/>'
+    if kind == "banana":
+        d = (f"M{cx-s*0.9:.1f} {cy-s*0.3:.1f} Q{cx:.1f} {cy+s*1.15:.1f} {cx+s*0.95:.1f} {cy-s*0.35:.1f} "
+             f"Q{cx:.1f} {cy+s*0.55:.1f} {cx-s*0.9:.1f} {cy-s*0.3:.1f} Z")
+        return f'<path d="{d}" fill="#f7e08a" stroke="#e0b83c" stroke-width="1.8" stroke-linejoin="round"/>'
+    if kind == "orange":
+        return (f'<circle cx="{cx:.0f}" cy="{cy:.0f}" r="{s*0.9:.0f}" fill="#ffcf87" stroke="#e8933a" stroke-width="2"/>'
+                f'<ellipse cx="{cx+s*0.3:.0f}" cy="{cy-s*0.78:.0f}" rx="{s*0.28:.0f}" ry="{s*0.16:.0f}" fill="{COLORS["green"][0]}" stroke="{COLORS["green"][1]}" stroke-width="1.2"/>')
     return f'<circle cx="{cx:.0f}" cy="{cy:.0f}" r="{s*0.8:.0f}" fill="{COLORS["blue"][0]}" stroke="{COLORS["blue"][1]}" stroke-width="2"/>'
 
 

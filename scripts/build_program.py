@@ -104,29 +104,102 @@ def p_small_illus(rnd, op):
     return {"t": "arith", "a": a, "b": b, "op": op, "illus": True, "ic": rnd.choice(ICONS)}
 
 
+# Math is everywhere: story templates across many parts of life.
+# Each: (text with {n1}{n2}{a}{b}, optional icon to illustrate small ones).
+STORY = {
+    "add": [
+        ("{n1} and {n2} meet at school. {n1} brings {a} apples and {n2} brings {b}. How many apples do they have altogether?", "apple"),
+        ("There are {a} birds on a branch. {b} more birds fly over. How many birds are on the branch now?", None),
+        ("A flower has {a} red petals and {b} yellow petals. How many petals does it have in all?", "flower"),
+        ("{n1} takes {a} steps to the door, then {b} more steps to the gate. How many steps in all?", None),
+        ("{n1} reads {a} pages before dinner and {b} pages after. How many pages did {n1} read?", None),
+        ("There are {a} red cars and {b} blue cars in the car park. How many cars are there?", None),
+        ("A bag has {a} kg of rice. {n1} adds {b} kg of flour. How many kg are in the bag now?", None),
+        ("{n1} counts {a} fingers, then {b} toes. How many did {n1} count in all?", None),
+        ("A tree has {a} apples. {n1} picks {b} more from another tree. How many apples in all?", "apple"),
+        ("{n1} has {a} balloons and {n2} gives {b} more. How many balloons does {n1} have now?", "balloon"),
+        ("There are {a} ducks in the pond and {b} ducks on the grass. How many ducks in all?", None),
+        ("{n1} watches {a} minutes of a show, then {b} more minutes. How many minutes in all?", None),
+        ("A shelf has {a} books. {n1} puts {b} more books on it. How many books are on the shelf?", None),
+        ("{n1} hops {a} times, then {b} more times. How many hops in all?", None),
+        ("There are {a} stars in one picture and {b} stars in another. How many stars altogether?", "star"),
+        ("{n1} has {a} stickers and earns {b} more at school. How many stickers now?", "star"),
+        ("A cake has {a} candles. {n1} adds {b} more candles. How many candles are on the cake?", "cake"),
+        ("{a} ants are on a leaf and {b} more come along. How many ants are on the leaf?", None),
+        ("{n1} has {a} rupees and finds {b} more. How many rupees does {n1} have?", None),
+        ("A garden has {a} flowers. {b} new flowers bloom. How many flowers are there now?", "flower"),
+        ("{n1} skips for {a} minutes and {n2} skips for {b} minutes. How many minutes did they skip in all?", None),
+        ("A snail crawls {a} cm, then {b} cm more. How far did it crawl in all?", None),
+    ],
+    "sub": [
+        ("{n1} has {a} apples and gives {b} to {n2}. How many apples does {n1} have left?", "apple"),
+        ("There are {a} birds on a wire. {b} birds fly away. How many birds are left?", None),
+        ("{n1} has {a} balloons, but {b} float away. How many balloons are left?", "balloon"),
+        ("A plate has {a} cakes. {n1} eats {b} of them. How many cakes are left?", "cake"),
+        ("The shop is {a} blocks away. {n1} has walked {b} blocks. How many blocks are left?", None),
+        ("A book has {a} pages. {n1} has read {b} pages. How many pages are left to read?", None),
+        ("There are {a} ducks on the pond. {b} ducks swim away. How many ducks are left?", None),
+        ("{n1} had {a} rupees and spends {b}. How many rupees are left?", None),
+        ("A bag has {a} kg of apples. {n1} takes out {b} kg. How many kg are left?", None),
+        ("The film is {a} hours long. {n1} has watched {b} hours. How many hours are left?", None),
+        ("A tree has {a} apples. {b} apples fall down. How many apples are still on the tree?", "apple"),
+        ("{n1} has {a} stickers and gives {b} to a friend. How many stickers are left?", "star"),
+        ("There are {a} flowers in a vase. {b} of them wilt. How many fresh flowers are left?", "flower"),
+        ("{n1} has {a} marbles and loses {b}. How many marbles are left?", "ball"),
+        ("A box has {a} toys. {n1} gives {b} away. How many toys are left in the box?", "gift"),
+        ("There are {a} children in the park. {b} of them go home. How many children are left?", None),
+        ("{n1} had {a} sweets and eats {b}. How many sweets are left?", None),
+        ("A branch has {a} leaves. {b} leaves blow away in the wind. How many leaves are left?", None),
+        ("{n1} takes {a} steps forward and {b} steps back. How many steps ahead is {n1} now?", None),
+        ("There are {a} stars in the sky. {b} are hidden by a cloud. How many stars can you still see?", "star"),
+        ("A caterpillar has {a} spots. {b} fade away. How many spots are left?", None),
+        ("{n1} has {a} minutes to play. {b} minutes go by. How many minutes are left?", None),
+    ],
+}
+
+
 def p_story(rnd, op, hi):
     n1, n2 = rnd.sample(NAMES, 2)
-    _sing, plur, ic = rnd.choice(ITEMS)
     a, b = gab(rnd, op, hi)
-    if op == "add":
-        tpl = rnd.choice([
-            "{n1} has {a} {plur}. {n2} gives {n1} {b} more. How many {plur} does {n1} have now?",
-            "{a} {plur} are on the plate. {n1} puts {b} more {plur} on it. How many {plur} are there now?",
-            "{n1} and {n2} meet at school. {n1} brings {a} {plur} and {n2} brings {b} {plur}. How many {plur} do they have altogether?",
-            "{n1} sees {a} {plur} in the garden, then {b} more grow. How many {plur} are there in all?",
-        ])
-        ans = a + b
-    else:
-        tpl = rnd.choice([
-            "{n1} has {a} {plur}. {n1} gives {b} {plur} to {n2}. How many {plur} are left?",
-            "There are {a} {plur} in the basket. {n1} takes {b} out. How many {plur} are left?",
-            "{n1} had {a} {plur} and ate {b} of them. How many {plur} are left?",
-            "{n1} had {a} {plur}, but {b} floated away. How many {plur} does {n1} have now?",
-        ])
-        ans = a - b
-    text = tpl.format(n1=n1, n2=n2, a=a, b=b, plur=plur)
+    text, ic = rnd.choice(STORY[op])
+    text = text.format(n1=n1, n2=n2, a=a, b=b)
+    ans = a + b if op == "add" else a - b
     return {"t": "story", "text": text, "a": a, "b": b, "op": op,
-            "illus": (a <= 6 and b <= 6), "ic": ic, "ans": ans}
+            "illus": (ic is not None and a <= 6 and b <= 6), "ic": ic or "apple", "ans": ans}
+
+
+DAY_INTROS = [
+    "Today, {n1} and {n2} spend the day at the park. There are birds to count, petals to add and snacks to share — maths is all around them. Grab a pencil and help!",
+    "It's a busy morning at {n1}'s house. Cakes on the table, balloons in the air, toys everywhere. Let's do the maths together, one sheet at a time.",
+    "{n1} and {n2} go on a nature walk. Ducks on the pond, apples on the trees, flowers in the grass — can you find the maths hiding everywhere?",
+    "It's a school day! {n1} and {n2} count books, share stickers and read pages. Every little thing has a number in it. Ready to solve them?",
+    "{n1} is helping in the kitchen and the garden today. Counting, adding and taking away pop up in everything. Let's help {n1} work it out!",
+    "A trip to the shop with {n1} and {n2}! Coins to count, steps to walk, things to carry home. Maths really is everywhere — let's practise it.",
+    "{n1} is having a birthday party! Friends arrive, presents pile up and cakes get shared. There's a lot of maths in one happy day.",
+    "Rainy-day fun indoors for {n1} and {n2}: board games, marbles and drawing. Count, add and take away as you play along.",
+]
+
+
+def day_intro(rnd):
+    n1, n2 = rnd.sample(NAMES, 2)
+    return rnd.choice(DAY_INTROS).format(n1=n1, n2=n2)
+
+
+FRUITS = [("apples", "apple"), ("bananas", "banana"), ("oranges", "orange")]
+
+
+def p_scene(rnd, hi):
+    n1, n2 = rnd.sample(NAMES, 2)
+    (pa, ica), (pb, icb) = rnd.sample(FRUITS, 2)
+    cap = min(hi, 6)
+    a, b = rnd.randint(1, cap), rnd.randint(1, cap)
+    tpl = rnd.choice([
+        "{n1} carries {a} {pa} and {n2} carries {b} {pb}. They drop them all into the same basket. How many fruits are in the basket now?",
+        "{n1} picks {a} {pa} and {n2} picks {b} {pb}. They put every fruit into one basket. How many fruits are in the basket altogether?",
+        "{n1} brings {a} {pa} to the picnic and {n2} brings {b} {pb}. They tip them into one basket to share. How many fruits are in the basket?",
+    ])
+    return {"t": "scene", "a": a, "b": b, "ica": ica, "icb": icb,
+            "text": tpl.format(n1=n1, n2=n2, a=a, b=b, pa=pa, pb=pb), "ans": a + b}
 
 
 def practice_block(rnd, kind, hi, count):
@@ -155,58 +228,93 @@ def story_op(kind):
     return None  # mixed picks per-problem
 
 
+HEADS = {"count": "Count the pictures and write the number",
+         "trace": "Trace the numbers, then write your own",
+         "compare": "Write &gt;, &lt; or = in the box",
+         "order": "Fill in the missing number",
+         "add": "Add", "sub": "Subtract", "addstory": "Add", "substory": "Subtract",
+         "mixed": "Add and subtract"}
+ARITH = ("add", "sub", "addstory", "substory", "mixed")
+
+
+def count_for(kind):
+    return 10 if kind == "order" else (12 if kind in ("count", "trace", "compare") else 16)
+
+
+def skill_sheet(rnd, kind, hi, count, label):
+    g, probs = practice_block(rnd, kind, hi, count)
+    return (label, [(HEADS[kind], g, probs)])
+
+
+def warmup_sheet(rnd, kind, hi):
+    so = story_op(kind)
+    small = [p_small_illus(rnd, so if so else rnd.choice(["add", "sub"])) for _ in range(6)]
+    g, probs = practice_block(rnd, kind, hi, 8)
+    return ("Warm up with pictures", [("Count the pictures", "illus", small), (HEADS[kind], g, probs)])
+
+
+def story_sheet(rnd, kind, hi, count, label):
+    so = story_op(kind)
+    probs = []
+    if so in (None, "add"):  # lead with a picture-scene when adding is in play
+        probs.append(p_scene(rnd, hi))
+        count -= 1
+    for _ in range(count):
+        probs.append(p_story(rnd, so if so else rnd.choice(["add", "sub"]), hi))
+    return (label, [("Maths all around us — read and solve", "story", probs)])
+
+
+def challenge_sheet(rnd, kind, hi, label):
+    so = story_op(kind)
+    def op():
+        return so if so else rnd.choice(["add", "sub"])
+    drills = [p_arith(rnd, op(), hi) for _ in range(10)]
+    stories = [p_story(rnd, op(), hi) for _ in range(3)]
+    return (label, [("Practice", "num", drills), ("Story problems", "story", stories)])
+
+
+def pick_earlier(wk_ix):
+    return [e for e in sorted({max(0, wk_ix - 1), wk_ix // 2}) if e < wk_ix][:2]
+
+
 def build_day(level, wk_ix, day):
-    """Return (subtitle, [ (section_title, grid_class, [problem dicts]) ])."""
+    """Return (subtitle, [ (sheet_label, [ (section_title, grid_class, [probs]) ]) ]) — five sheets."""
     _lid, _lname, _ldesc, weeks = level
     title, kind, hi = weeks[wk_ix]
-    seed = 100000 + wk_ix * 1000 + day * 37
-    rnd = random.Random(seed)
-    secs = []
+    rnd = random.Random(100000 + wk_ix * 1000 + day * 37)
+    arithmetic = kind in ARITH
 
-    if day == 7:  # revision
-        sub = "Revision — this week and earlier weeks"
-        g, probs = practice_block(rnd, kind, hi, 6)
-        secs.append((f"This week: {title}", g, probs))
-        earlier = sorted({max(0, wk_ix - 1), wk_ix // 2, max(0, wk_ix - 3)})
-        earlier = [e for e in earlier if e < wk_ix][:2]
+    if day == 7:  # revision packet
+        sheets = [skill_sheet(rnd, kind, hi, count_for(kind), f"This week: {title}")]
+        earlier = pick_earlier(wk_ix)
         for e in earlier:
             et, ek, eh = weeks[e]
-            g2, p2 = practice_block(rnd, ek, eh, 5)
-            secs.append((f"Revision: {et}", g2, p2))
-        if kind in ("add", "sub", "mixed", "addstory", "substory"):
-            op = story_op(kind) or "add"
-            secs.append(("Story problems", "story", [p_story(rnd, op, hi) for _ in range(2)]))
-        return sub, secs
+            sheets.append(skill_sheet(rnd, ek, eh, count_for(ek), f"Revision: {et}"))
+        if arithmetic:
+            sheets.append(story_sheet(rnd, kind, hi, 7, "Maths all around us"))
+            sheets.append(challenge_sheet(rnd, kind, hi, "Mixed challenge"))
+        else:
+            sheets.append(skill_sheet(rnd, kind, hi, count_for(kind), "More practice"))
+            if earlier:
+                et, ek, eh = weeks[earlier[0]]
+                sheets.append(skill_sheet(rnd, ek, eh, count_for(ek), f"Revision: {et}"))
+        while len(sheets) < 5:
+            sheets.append(skill_sheet(rnd, kind, hi, count_for(kind), "Extra practice"))
+        return "Revision — this week and earlier weeks", sheets[:5]
 
-    sub = title
-    if kind in ("count", "trace", "compare", "order"):
-        g, probs = practice_block(rnd, kind, hi, 12 if kind != "order" else 10)
-        head = {"count": "Count the pictures and write the number",
-                "trace": "Trace the numbers, then write your own",
-                "compare": "Write &gt;, &lt; or = in the box",
-                "order": "Fill in the missing number"}[kind]
-        secs.append((head, g, probs))
-        return sub, secs
+    if arithmetic:
+        sheets = [
+            warmup_sheet(rnd, kind, hi),
+            skill_sheet(rnd, kind, hi, 16, "Number practice"),
+            skill_sheet(rnd, kind, hi, 16, "More number practice"),
+            story_sheet(rnd, kind, hi, 7, "Maths all around us"),
+            story_sheet(rnd, kind, hi, 6, "Story challenge"),
+        ]
+        return title, sheets
 
-    # arithmetic weeks
-    if kind in ("addstory", "substory"):
-        op = "add" if kind == "addstory" else "sub"
-        secs.append(("Warm up — count the pictures", "illus", [p_small_illus(rnd, op) for _ in range(3)]))
-        secs.append(("Practice", "num", [p_arith(rnd, op, hi) for _ in range(8)]))
-        secs.append(("Story problems", "story", [p_story(rnd, op, hi) for _ in range(5)]))
-        return sub, secs
-    if kind == "mixed":
-        secs.append(("Practice — add and subtract", "num",
-                     [p_arith(rnd, rnd.choice(["add", "sub"]), hi) for _ in range(14)]))
-        secs.append(("Story problems", "story",
-                     [p_story(rnd, rnd.choice(["add", "sub"]), hi) for _ in range(3)]))
-        return sub, secs
-    # plain add / sub
-    op = "add" if kind == "add" else "sub"
-    secs.append(("Warm up — count the pictures", "illus", [p_small_illus(rnd, op) for _ in range(4)]))
-    secs.append(("Practice", "num", [p_arith(rnd, op, hi) for _ in range(12)]))
-    secs.append(("Story problems", "story", [p_story(rnd, op, hi) for _ in range(3)]))
-    return sub, secs
+    # count / trace / compare / order — five varied practice sheets
+    sheets = [skill_sheet(rnd, kind, hi, count_for(kind), f"Practice — set {i+1}") for i in range(5)]
+    return title, sheets
 
 
 # ---------------------------------------------------------------- rendering
@@ -234,6 +342,46 @@ def illus_two(a, b, op, ic):
             parts.append(sd.icon(ic, x + s, y, s)); x += cw
     w, h = x + 6, y + s + 8
     return f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="pictures" style="max-width:100%">{"".join(parts)}</svg>'
+
+
+def _child(cx, base, color, girl):
+    hr = 11
+    hy = base - 44
+    p = [f'<circle cx="{cx}" cy="{hy}" r="{hr}" fill="#ffe0bd" stroke="{INK}" stroke-width="1.6"/>',
+         f'<circle cx="{cx-4}" cy="{hy-1}" r="1.5" fill="{INK}"/><circle cx="{cx+4}" cy="{hy-1}" r="1.5" fill="{INK}"/>',
+         f'<path d="M{cx-4} {hy+4} Q{cx} {hy+8} {cx+4} {hy+4}" fill="none" stroke="{INK}" stroke-width="1.4" stroke-linecap="round"/>',
+         f'<path d="M{cx-hr} {hy-1} A{hr} {hr} 0 0 1 {cx+hr} {hy-1}" fill="{color}"/>']
+    if girl:
+        p.append(f'<polygon points="{cx},{hy+hr-1} {cx-16},{base} {cx+16},{base}" fill="{color}" stroke="{INK}" stroke-width="1.4" stroke-linejoin="round"/>')
+    else:
+        p.append(f'<rect x="{cx-11}" y="{hy+hr-1}" width="22" height="22" rx="5" fill="{color}" stroke="{INK}" stroke-width="1.4"/>')
+        p.append(f'<line x1="{cx-5}" y1="{base-6}" x2="{cx-5}" y2="{base}" stroke="{INK}" stroke-width="2.6" stroke-linecap="round"/>'
+                 f'<line x1="{cx+5}" y1="{base-6}" x2="{cx+5}" y2="{base}" stroke="{INK}" stroke-width="2.6" stroke-linecap="round"/>')
+    ay = hy + hr + 5
+    p.append(f'<line x1="{cx-10}" y1="{ay}" x2="{cx-22}" y2="{ay+12}" stroke="{INK}" stroke-width="2.2" stroke-linecap="round"/>'
+             f'<line x1="{cx+10}" y1="{ay}" x2="{cx+22}" y2="{ay+12}" stroke="{INK}" stroke-width="2.2" stroke-linecap="round"/>')
+    return "".join(p)
+
+
+def _basket(cx, cy):
+    return (f'<path d="M{cx-27} {cy} L{cx-21} {cy+26} L{cx+21} {cy+26} L{cx+27} {cy} Z" fill="#e6c79c" stroke="#b98b4e" stroke-width="2" stroke-linejoin="round"/>'
+            f'<line x1="{cx-27}" y1="{cy}" x2="{cx+27}" y2="{cy}" stroke="#b98b4e" stroke-width="2.5"/>'
+            f'<path d="M{cx-19} {cy} A19 15 0 0 1 {cx+19} {cy}" fill="none" stroke="#b98b4e" stroke-width="2"/>')
+
+
+def scene(a, ica, b, icb):
+    W, base = 320, 118
+    p = [_child(46, base, sd.COLORS["blue"][1], girl=False),
+         _child(274, base, sd.COLORS["rose"][1], girl=True)]
+    for i in range(a):
+        p.append(sd.icon(ica, 24 + (i % 3) * 20, 34 + (i // 3) * 19, 8))
+    for i in range(b):
+        p.append(sd.icon(icb, 252 + (i % 3) * 20, 34 + (i // 3) * 19, 8))
+    p.append(_basket(160, 92))
+    p.append(f'<path d="M74 52 Q120 64 146 90" fill="none" stroke="{sd.FAINT}" stroke-width="1.6" stroke-dasharray="4 3"/>')
+    p.append(f'<path d="M246 52 Q200 64 174 90" fill="none" stroke="{sd.FAINT}" stroke-width="1.6" stroke-dasharray="4 3"/>')
+    h = base + 24
+    return f'<svg viewBox="0 0 {W} {h}" width="{W}" height="{h}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="two children putting fruit in a basket" style="max-width:100%">{"".join(p)}</svg>'
 
 
 def trace_strip(num):
@@ -279,6 +427,9 @@ def render_problem(idx, p):
     if t == "story":
         art = '<div class="art">' + illus_two(p["a"], p["b"], p["op"], p["ic"]) + "</div>" if p["illus"] else ""
         return f'<div class="prob story"><span class="n">{idx})</span><p class="stx">{esc(p["text"])}</p>{art}<div class="eq">Answer: <span class="abox"></span></div></div>'
+    if t == "scene":
+        art = '<div class="art">' + scene(p["a"], p["ica"], p["b"], p["icb"]) + "</div>"
+        return f'<div class="prob story"><span class="n">{idx})</span><p class="stx">{esc(p["text"])}</p>{art}<div class="eq">Answer: <span class="abox"></span></div></div>'
     return ""
 
 
@@ -292,7 +443,7 @@ def answer_of(p):
         return p["terms"][p["blank"]]
     if t == "arith":
         return p["a"] + p["b"] if p["op"] == "add" else p["a"] - p["b"]
-    if t == "story":
+    if t in ("story", "scene"):
         return p["ans"]
     return None
 
@@ -304,8 +455,18 @@ PROGRAM_CSS = """
     .ws-hero h1 { font-size: clamp(24px, 4vw, 34px); font-weight: 800; letter-spacing: -0.8px; margin: 6px 0 8px; }
     .ws-hero p { color: var(--text2); font-size: 15px; }
     .ws-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; align-items: center; }
-    .ws-section { margin-top: 26px; }
-    .ws-section h2 { font-size: 16px; font-weight: 800; color: var(--text); border-bottom: 2px solid var(--border); padding-bottom: 6px; margin-bottom: 12px; }
+    .today { display: flex; gap: 12px; align-items: flex-start; background: rgba(22,163,74,0.07); border: 1px solid rgba(22,163,74,0.22); border-radius: 14px; padding: 16px 18px; margin-top: 14px; }
+    .today .ic { font-size: 24px; line-height: 1; }
+    .today b { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: #15803d; margin-bottom: 3px; }
+    .today p { margin: 0; font-size: 15px; color: var(--text); line-height: 1.55; }
+    .sheet { margin-top: 26px; }
+    .sheet.brk { border-top: 3px dashed var(--border2); padding-top: 22px; }
+    .sheet-head { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+    .sheet-head .sh-num { font-size: 11px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); background: rgba(22,163,74,0.10); border-radius: 6px; padding: 3px 8px; }
+    .sheet-head .sh-lbl { font-size: 17px; font-weight: 800; color: var(--text); flex: 1; }
+    .sheet-head .sh-print { padding: 5px 12px; font-size: 12px; }
+    .ws-section { margin-top: 16px; }
+    .ws-section h2 { font-size: 15px; font-weight: 700; color: var(--text2); border-bottom: 1px solid var(--border); padding-bottom: 5px; margin-bottom: 11px; }
     .grid { display: grid; gap: 11px; }
     .grid.illus { grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
     .grid.num { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
@@ -335,7 +496,10 @@ PROGRAM_CSS = """
       .site-nav, .site-footer, .no-print { display: none !important; }
       body { background: #fff; }
       .ws { padding: 0; max-width: none; }
-      .prob { break-inside: avoid; } .answers { break-before: page; }
+      .prob { break-inside: avoid; }
+      .sheet.brk { break-before: page; }
+      .answers { break-before: page; }
+      .sheet-head { border-bottom: 2px solid #000; padding-bottom: 6px; }
     }
 """
 
@@ -390,12 +554,13 @@ DAY_PAGE = """<!DOCTYPE html>
     <div class="crumbs no-print" style="font-size:13px;color:var(--text3)"><a href="../../index.html" style="color:var(--text2)">Home</a> › <a href="../../school.html" style="color:var(--text2)">School</a> › <a href="index.html" style="color:var(--text2)">Program</a> › <a href="{lid}.html" style="color:var(--text2)">{lname}</a> › Week {letter}</div>
     <div class="tag">{lname} · Week {letter} · Day {day} of 7</div>
     <h1>{sub}</h1>
-    <p class="no-print">Practice sheet {count} problems. Trace or write the answers in the boxes. Grown-ups: the answer key is at the end.</p>
+    <p class="no-print">{nsheets} sheets today · {count} problems in all. Print all {nsheets} pages, or do one sheet at a time. Grown-ups: the answer key is at the end.</p>
     <div class="ws-actions no-print">
-      <button class="btn btn-primary" onclick="window.print()">\U0001f5a8️ Print this sheet</button>
+      <button class="btn btn-primary" onclick="window.print()">\U0001f5a8️ Print all {nsheets} sheets</button>
       <a class="btn btn-secondary" href="{lid}.html">All weeks</a>
     </div>
   </section>
+  <div class="today"><span class="ic">\U0001f4d6</span><div><b>Today's story</b><p>{intro}</p></div></div>
 {sections}
   <section class="answers">
     <h2 style="font-size:15px;font-weight:800">Answer key <span style="font-weight:500;color:var(--text3);font-size:12px">(for grown-ups)</span></h2>
@@ -413,27 +578,38 @@ DAY_PAGE = """<!DOCTYPE html>
 def render_day(level, wk_ix, day, prev_href, next_href):
     lid, lname, _ldesc, weeks = level
     letter = LETTERS[wk_ix]
-    sub, secs = build_day(level, wk_ix, day)
-    idx = 0
-    sec_html, akey_parts = [], []
-    for title, gcls, probs in secs:
-        cells, keys = [], []
-        for p in probs:
-            idx += 1
-            cells.append(render_problem(idx, p))
-            av = answer_of(p)
-            if av is not None:
-                keys.append(f'<span>{idx}) {av}</span>')
-        sec_html.append(f'<section class="ws-section"><h2>{title}</h2><div class="grid {gcls}">{"".join(cells)}</div></section>')
+    sub, sheets = build_day(level, wk_ix, day)
+    total = 0
+    sheet_html, akey_parts = [], []
+    for si, (sheet_label, sections) in enumerate(sheets, 1):
+        idx = 0
+        sec_html, keys = [], []
+        for title, gcls, probs in sections:
+            cells = []
+            for p in probs:
+                idx += 1
+                total += 1
+                cells.append(render_problem(idx, p))
+                av = answer_of(p)
+                if av is not None:
+                    keys.append(f'<span>{idx}) {av}</span>')
+            sec_html.append(f'<section class="ws-section"><h2>{title}</h2><div class="grid {gcls}">{"".join(cells)}</div></section>')
+        brk = "" if si == 1 else " brk"
+        sheet_html.append(
+            f'<section class="sheet{brk}"><div class="sheet-head no-print-border"><span class="sh-num">Sheet {si} of {len(sheets)}</span>'
+            f'<span class="sh-lbl">{esc(sheet_label)}</span>'
+            f'<button class="btn btn-secondary sh-print no-print" onclick="window.print()">\U0001f5a8️ Print</button></div>'
+            + "\n".join(sec_html) + "</section>")
         if keys:
-            akey_parts.append(f'<div style="margin-bottom:8px"><b style="font-size:12.5px">{esc(title)}</b><div class="akey">{"".join(keys)}</div></div>')
+            akey_parts.append(f'<div style="margin-bottom:8px"><b style="font-size:12.5px">Sheet {si}: {esc(sheet_label)}</b><div class="akey">{"".join(keys)}</div></div>')
     prev_btn = f'<a class="btn btn-secondary" href="{prev_href}">← Previous</a>' if prev_href else '<span></span>'
     next_btn = f'<a class="btn btn-primary" href="{next_href}">Next →</a>' if next_href else '<span></span>'
+    intro = day_intro(random.Random(200000 + wk_ix * 1000 + day))
     page = DAY_PAGE.format(
         css=PROGRAM_CSS, nav=NAV, footer=FOOTER, script=SCRIPT,
         lid=lid, lname=lname, letter=letter, lletter=letter.lower(), day=day,
-        sub=esc(sub), count=idx, sections="\n".join(sec_html),
-        answers="".join(akey_parts), prev=prev_btn, next=next_btn,
+        sub=esc(sub), count=total, nsheets=len(sheets), sections="\n".join(sheet_html),
+        answers="".join(akey_parts), prev=prev_btn, next=next_btn, intro=esc(intro),
     )
     (OUT / f"{lid}-{letter.lower()}-{day}.html").write_text(page)
 
