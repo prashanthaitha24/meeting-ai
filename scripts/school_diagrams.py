@@ -293,6 +293,21 @@ def equation_dots(a, b, op="add", color="green", **_):
     return _svg(w, y + 50, "".join(parts), label)
 
 
+def array(rows, cols, color="blue", **_):
+    fillc, strokec = COLORS[color]
+    r, gap, pad = 11, 8, 14
+    parts = []
+    for row in range(rows):
+        for col in range(cols):
+            cx = pad + r + col * (2 * r + gap)
+            cy = pad + r + row * (2 * r + gap)
+            parts.append(f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="{fillc}" stroke="{strokec}" stroke-width="2"/>')
+    w = pad * 2 + cols * (2 * r + gap) - gap
+    h = pad * 2 + rows * (2 * r + gap) - gap
+    parts.append(_text(w / 2, h + 22, f"{rows} × {cols} = {rows * cols}", 15, INK, weight="700"))
+    return _svg(max(w, 110), h + 34, "".join(parts), f"{rows} rows of {cols} = {rows * cols}")
+
+
 def compare(a, b, **_):
     r, gap = 13, 8
     fa, fb = COLORS["blue"], COLORS["amber"]
@@ -414,6 +429,7 @@ KINDS = {
     "phrase": labeled_phrase,
     "blocks": blocks,
     "equation_dots": equation_dots,
+    "array": array,
     "compare": compare,
     "pattern": pattern,
     "place_value": place_value,
