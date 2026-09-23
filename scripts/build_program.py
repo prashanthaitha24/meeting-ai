@@ -2,7 +2,8 @@
 """The Home Practice Program — a free, Kumon/BestBrains-style structured workbook.
 
 Levels ramp slowly (Basic -> Medium -> Advanced -> Pro). Each level has 26 weeks
-(A-Z); each week has 7 day-worksheets (Days 1-6 new practice, Day 7 revision).
+(A-Z); each week has 7 days, and each day is 5 printable sheets (Days 1-6 new
+practice, Day 7 a revision) — about 35 sheets a week.
 Problems are intuitive and story-based ("Mia and Leo meet at school...") with soft
 pictures for small numbers, generated deterministically so builds are reproducible.
 
@@ -652,9 +653,9 @@ LEVEL_PAGE = """<!DOCTYPE html>
 <div class="lv">
   <section class="lv-hero">
     <div class="crumbs" style="font-size:13px;color:var(--text3)"><a href="../../index.html" style="color:var(--text2)">Home</a> › <a href="../../school.html" style="color:var(--text2)">School</a> › <a href="index.html" style="color:var(--text2)">Program</a> › {lname}</div>
-    <span class="chip"><span class="dot"></span> Free · 26 weeks · 7 sheets a week</span>
+    <span class="chip"><span class="dot"></span> Free · 26 weeks · 7 days · 5 sheets a day</span>
     <h1>{lname} level</h1>
-    <p>{ldesc} Each week has 6 new practice sheets and a revision (Day 7). Do about one sheet a day. Pick a week, open a day, and print.</p>
+    <p>{ldesc} Each week has 7 days (Day 7 is a revision), and each day is 5 printable sheets — about 35 sheets a week. Do a day at a time, or a sheet or two a sitting. Pick a week, open a day, and print.</p>
   </section>
 {weeks}
 </div>
@@ -678,7 +679,7 @@ def render_level(level):
             for d in range(1, 8))
         rows.append(
             f'<div class="wk"><div class="lt">{letter}</div>'
-            f'<div class="info"><b>Week {letter}: {esc(title)}</b><span>7 sheets · Day 7 is revision</span></div>'
+            f'<div class="info"><b>Week {letter}: {esc(title)}</b><span>7 days \u00b7 5 sheets each \u00b7 Day 7 is revision</span></div>'
             f'<div class="days">{days}</div></div>')
     (OUT / f"{lid}.html").write_text(LEVEL_PAGE.format(lid=lid, lname=lname, ldesc=esc(ldesc), weeks="\n".join(rows)))
 
@@ -691,7 +692,7 @@ INDEX_PAGE = """<!DOCTYPE html>
   <link rel="icon" href="../../assets/favicon.ico" sizes="any" />
   <link rel="icon" type="image/png" sizes="32x32" href="../../assets/logo-32.png" />
   <title>Free home-practice program — like Kumon, but free | ThavionAI School</title>
-  <meta name="description" content="A free, structured maths practice program you can print at home: levels that ramp slowly, 26 weeks each, 7 worksheets a week, with intuitive story problems and pictures. No sign-up." />
+  <meta name="description" content="A free, structured maths practice program you can print at home: levels that ramp slowly, 26 weeks each, 5 printable sheets a day, with intuitive story problems and pictures. No sign-up." />
   <link rel="canonical" href="https://thavionai.com/school/program/index.html" />
   <link rel="preconnect" href="https://fonts.googleapis.com" /><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
@@ -730,7 +731,7 @@ INDEX_PAGE = """<!DOCTYPE html>
   </section>
   <div class="how">
     <div><b>Levels that ramp slowly</b><p>Basic, then Medium, Advanced and Pro. Each level is 26 weeks, so difficulty creeps up gently, never in big jumps.</p></div>
-    <div><b>7 sheets a week</b><p>Six new practice sheets plus a revision on Day 7 — about one sheet a day, just like the paid programs.</p></div>
+    <div><b>5 sheets a day</b><p>Seven days a week, five printable sheets each day (Day 7 is a revision) — that is about 35 sheets a week, far more than the paid programs.</p></div>
     <div><b>Story problems &amp; pictures</b><p>Friends sharing cakes, apples in a basket — problems that make sense to a child, with soft pictures to count.</p></div>
   </div>
   <div class="lvls">
@@ -756,7 +757,7 @@ def render_index(built_levels):
             ("pro", "Pro", "Decimals, ratios, and pre-algebra thinking.")]
     for lid, name, desc in plan:
         if lid in live_ids:
-            cards.append(f'<div class="lvl"><h3>{name}</h3><p>{esc(desc)}</p><div class="st">26 weeks · 7 sheets a week · live</div><a class="go" href="{lid}.html">Start {name} →</a></div>')
+            cards.append(f'<div class="lvl"><h3>{name}</h3><p>{esc(desc)}</p><div class="st">26 weeks · 5 sheets a day · live</div><a class="go" href="{lid}.html">Start {name} →</a></div>')
         else:
             cards.append(f'<div class="lvl soon"><h3>{name}</h3><p>{esc(desc)}</p><div class="st">Coming soon</div><a class="go">Coming soon</a></div>')
     (OUT / "index.html").write_text(INDEX_PAGE.format(levels="\n".join(cards)))
