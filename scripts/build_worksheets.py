@@ -96,6 +96,26 @@ def gen_division():
             ("Bigger numbers", twod, False)]
 
 
+WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+         "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
+         "seventeen", "eighteen", "nineteen", "twenty"]
+
+
+def gen_tracing():
+    return [("Trace the numbers 0 to 9", list(range(0, 10)), True),
+            ("Trace the teen numbers", list(range(10, 21)), True),
+            ("Trace again — more practice", list(range(0, 10)) + [10, 12, 15, 18, 20], True)]
+
+
+def gen_skip():
+    by2 = [(s, 2, 6, (2, 4)) for s in (2, 4, 6, 8, 10, 0, 12, 14, 16, 20, 18, 22)]
+    by5 = [(s, 5, 6, (1, 3, 5)) for s in (5, 10, 15, 20, 0, 25, 30, 35, 40, 45, 50, 55)]
+    by10 = [(s, 10, 6, (2, 4)) for s in (10, 20, 0, 30, 40, 50, 60, 70, 80, 90, 100, 110)]
+    by3 = [(s, 3, 6, (1, 4)) for s in (3, 6, 9, 0, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39)]
+    return [("Count by 2s", by2, False), ("Count by 5s", by5, False),
+            ("Count by 10s", by10, False), ("Count by 3s", by3, False)]
+
+
 def gen_counting():
     def sec(nums):
         return [(n, 0) for n in nums]
@@ -121,6 +141,12 @@ CONCEPTS = {
     "counting": {"title": "Counting", "op": "count", "emoji": "\U0001f522",
                  "intro": "Count how many pictures there are and write the number in the box. The groups get bigger as you go, arranged in rows of ten to make them easy to count.",
                  "gen": gen_counting},
+    "number-tracing": {"title": "Number tracing", "op": "trace", "emoji": "✏️",
+                       "intro": "Trace the light grey numbers to practise writing them, then write each one yourself in the empty boxes. A gentle first step for little hands.",
+                       "gen": gen_tracing},
+    "skip-counting": {"title": "Skip counting", "op": "seq", "emoji": "\U0001f51f",
+                      "intro": "Count in steps — by 2s, 5s, 10s and 3s. Fill in the missing numbers in each sequence to spot the pattern.",
+                      "gen": gen_skip},
 }
 
 
@@ -182,6 +208,64 @@ def problem_cell(n, a, b, op, illustrate, ic):
     return f'<div class="{cls}"><span class="n">{n})</span>{art}<div class="eq">{eq}</div></div>'
 
 
+def trace_strip(num):
+    s = str(num)
+    dw = 30 * len(s) + 8
+    parts, x, y = [], 6, 46
+    blue = sd.COLORS["blue"][1]
+    for _ in range(5):
+        parts.append(f'<text x="{x + dw/2:.0f}" y="{y}" text-anchor="middle" font-size="44" font-weight="800" fill="#eef2f7" stroke="{blue}" stroke-width="1.3" stroke-dasharray="3 3">{s}</text>')
+        x += dw + 6
+    for _ in range(3):
+        parts.append(f'<rect x="{x}" y="10" width="{dw-4}" height="46" rx="6" fill="none" stroke="#d5dde6" stroke-width="1.4" stroke-dasharray="4 4"/>')
+        x += dw + 6
+    w = x + 6
+    return f'<svg viewBox="0 0 {w} 66" width="{w}" height="66" role="img" aria-label="trace {num}" xmlns="http://www.w3.org/2000/svg" style="max-width:100%">{"".join(parts)}</svg>'
+
+
+def trace_cell(n, num, ic):
+    word = WORDS[num] if 0 <= num < len(WORDS) else str(num)
+    cnt = ""
+    if num <= 10:
+        cnt = '<div class="cnt">' + illus_group(num, ic, per_row=10) + "</div>" if num > 0 else ""
+    head = f'<div class="tracehead"><span class="bignum">{num}</span><span class="word">{esc(word)}</span>{cnt}</div>'
+    return f'<div class="prob pic tracep"><span class="n">{n})</span>{head}<div class="art">{trace_strip(num)}</div></div>'
+
+
+def seq_cell(n, start, step, length, blanks):
+    terms = [start + i * step for i in range(length)]
+    chips = []
+    for i, t in enumerate(terms):
+        chips.append('<span class="seqbox"></span>' if i in blanks else f'<span class="seqn">{t}</span>')
+    body = ' <span class="arr">→</span> '.join(chips)
+    return f'<div class="prob seqp"><span class="n">{n})</span><div class="seq">{body}</div></div>'
+
+
+def grid_class(op, illustrate):
+    if op == "trace":
+        return "trace"
+    if op == "seq":
+        return "seq"
+    return "illus" if illustrate else "num"
+
+
+def render_cell(n, item, op, illustrate, ic):
+    if op == "trace":
+        return trace_cell(n, item, ic)
+    if op == "seq":
+        return seq_cell(n, *item)
+    a, b = item
+    return problem_cell(n, a, b, op, illustrate, ic)
+
+
+def answer_of(item, op):
+    if op == "seq":
+        start, step, _length, blanks = item
+        return ", ".join(str(start + i * step) for i in blanks)
+    a, b = item
+    return answer(a, b, op)
+
+
 # ---------------------------------------------------------------- page render
 
 PAGE = """<!DOCTYPE html>
@@ -213,6 +297,17 @@ PAGE = """<!DOCTYPE html>
     .grid {{ display: grid; gap: 12px; }}
     .grid.illus {{ grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }}
     .grid.num {{ grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }}
+    .grid.trace {{ grid-template-columns: 1fr; }}
+    .grid.seq {{ grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }}
+    .tracehead {{ display: flex; align-items: center; gap: 10px; width: 100%; }}
+    .tracehead .bignum {{ font-size: 30px; font-weight: 800; color: var(--accent); }}
+    .tracehead .word {{ font-size: 15px; font-weight: 700; color: var(--text2); text-transform: capitalize; }}
+    .tracehead .cnt {{ margin-left: auto; }}
+    .seqp {{ align-items: center; }}
+    .seq {{ display: flex; flex-wrap: wrap; align-items: center; gap: 7px; font-size: 20px; font-weight: 700; color: var(--text); }}
+    .seqn {{ min-width: 26px; text-align: center; }}
+    .seqbox {{ display: inline-block; width: 40px; height: 30px; border: 2px solid var(--text3); border-radius: 6px; }}
+    .arr {{ color: var(--text3); font-weight: 400; }}
     .prob {{ display: flex; align-items: center; gap: 10px; border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; background: #fff; break-inside: avoid; }}
     .prob.pic {{ flex-direction: column; align-items: flex-start; gap: 8px; position: relative; }}
     .prob.pic .n {{ position: absolute; top: 8px; right: 8px; background: rgba(255,255,255,0.88); padding: 0 4px; border-radius: 5px; }}
@@ -313,23 +408,25 @@ PAGE = """<!DOCTYPE html>
 def build_book(cid, cfg):
     op = cfg["op"]
     sections = cfg["gen"]()
+    show_answers = op != "trace"
     n = 0
     sec_html, ans_html = [], []
-    for title, pairs, illustrate in sections:
-        cells = []
-        akey = []
-        for a, b in pairs:
+    for title, items, illustrate in sections:
+        cells, akey = [], []
+        for item in items:
             n += 1
             ic = ICONS[n % len(ICONS)]
-            cells.append(problem_cell(n, a, b, op, illustrate, ic))
-            akey.append(f'<span>{n}) {answer(a, b, op)}</span>')
-        grid_cls = "illus" if illustrate else "num"
-        sec_html.append(f'<section class="ws-section"><h2>{esc(title)}</h2><div class="grid {grid_cls}">{"".join(cells)}</div></section>')
-        ans_html.append(f'<div style="margin-bottom:10px"><b style="font-size:13px">{esc(title)}</b><div class="akey">{"".join(akey)}</div></div>')
+            cells.append(render_cell(n, item, op, illustrate, ic))
+            if show_answers:
+                akey.append(f'<span>{n}) {answer_of(item, op)}</span>')
+        sec_html.append(f'<section class="ws-section"><h2>{esc(title)}</h2><div class="grid {grid_class(op, illustrate)}">{"".join(cells)}</div></section>')
+        if show_answers:
+            ans_html.append(f'<div style="margin-bottom:10px"><b style="font-size:13px">{esc(title)}</b><div class="akey">{"".join(akey)}</div></div>')
+    answers = "".join(ans_html) if show_answers else '<p style="font-size:13px;color:var(--text3)">These are tracing pages — there is nothing to mark. Just trace and write.</p>'
     page = PAGE.format(
         id=cid, title=cfg["title"], emoji=cfg["emoji"], intro=esc(cfg["intro"]),
         intro_attr=esc(cfg["intro"]), count=n,
-        sections="\n".join(sec_html), answers="".join(ans_html),
+        sections="\n".join(sec_html), answers=answers,
     )
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / f"{cid}.html").write_text(page)
