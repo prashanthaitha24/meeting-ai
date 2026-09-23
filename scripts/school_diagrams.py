@@ -305,6 +305,25 @@ def icon(kind, cx, cy, s=15):
     if kind == "orange":
         return (f'<circle cx="{cx:.0f}" cy="{cy:.0f}" r="{s*0.9:.0f}" fill="#ffcf87" stroke="#e8933a" stroke-width="2"/>'
                 f'<ellipse cx="{cx+s*0.3:.0f}" cy="{cy-s*0.78:.0f}" rx="{s*0.28:.0f}" ry="{s*0.16:.0f}" fill="{COLORS["green"][0]}" stroke="{COLORS["green"][1]}" stroke-width="1.2"/>')
+    if kind == "dog":
+        return (f'<ellipse cx="{cx}" cy="{cy+s*0.18:.1f}" rx="{s:.1f}" ry="{s*0.6:.1f}" fill="#d9b38c" stroke="#a9835a" stroke-width="1.8"/>'
+                f'<circle cx="{cx+s*0.9:.1f}" cy="{cy-s*0.18:.1f}" r="{s*0.5:.1f}" fill="#d9b38c" stroke="#a9835a" stroke-width="1.8"/>'
+                f'<path d="M{cx+s*0.6:.1f} {cy-s*0.55:.1f} l {-s*0.18:.1f} {-s*0.42:.1f} l {s*0.4:.1f} {s*0.22:.1f} z" fill="#a9835a"/>'
+                f'<circle cx="{cx+s*1.02:.1f}" cy="{cy-s*0.22:.1f}" r="1.6" fill="{INK}"/>'
+                f'<circle cx="{cx+s*1.38:.1f}" cy="{cy-s*0.02:.1f}" r="{s*0.12:.1f}" fill="{INK}"/>'
+                f'<path d="M{cx-s*0.95:.1f} {cy:.1f} q {-s*0.4:.1f} {-s*0.35:.1f} {-s*0.15:.1f} {-s*0.65:.1f}" fill="none" stroke="#a9835a" stroke-width="2.4" stroke-linecap="round"/>'
+                f'<line x1="{cx-s*0.4:.1f}" y1="{cy+s*0.7:.1f}" x2="{cx-s*0.4:.1f}" y2="{cy+s:.1f}" stroke="#a9835a" stroke-width="2.6" stroke-linecap="round"/>'
+                f'<line x1="{cx+s*0.35:.1f}" y1="{cy+s*0.72:.1f}" x2="{cx+s*0.35:.1f}" y2="{cy+s:.1f}" stroke="#a9835a" stroke-width="2.6" stroke-linecap="round"/>')
+    if kind == "book":
+        return (f'<rect x="{cx-s*0.8:.1f}" y="{cy-s*0.9:.1f}" width="{s*1.6:.1f}" height="{s*1.8:.1f}" rx="3" fill="{COLORS["blue"][0]}" stroke="{COLORS["blue"][1]}" stroke-width="2"/>'
+                f'<line x1="{cx:.1f}" y1="{cy-s*0.9:.1f}" x2="{cx:.1f}" y2="{cy+s*0.9:.1f}" stroke="{COLORS["blue"][1]}" stroke-width="1.6"/>'
+                f'<line x1="{cx-s*0.55:.1f}" y1="{cy-s*0.4:.1f}" x2="{cx-s*0.15:.1f}" y2="{cy-s*0.4:.1f}" stroke="{COLORS["blue"][1]}" stroke-width="1.2"/>')
+    if kind == "sun":
+        rays = "".join(
+            f'<line x1="{cx+s*0.9*math.cos(math.radians(k*45)):.1f}" y1="{cy+s*0.9*math.sin(math.radians(k*45)):.1f}" '
+            f'x2="{cx+s*1.35*math.cos(math.radians(k*45)):.1f}" y2="{cy+s*1.35*math.sin(math.radians(k*45)):.1f}" '
+            f'stroke="#f0b64a" stroke-width="2" stroke-linecap="round"/>' for k in range(8))
+        return rays + f'<circle cx="{cx:.0f}" cy="{cy:.0f}" r="{s*0.7:.0f}" fill="#fde6b8" stroke="#f0b64a" stroke-width="2"/>'
     return f'<circle cx="{cx:.0f}" cy="{cy:.0f}" r="{s*0.8:.0f}" fill="{COLORS["blue"][0]}" stroke="{COLORS["blue"][1]}" stroke-width="2"/>'
 
 
@@ -402,7 +421,7 @@ def two_bars(a, b, a_label="A", b_label="B", **_):
     return _svg(W + 28, total_h + 16, "".join(parts), "comparing lengths")
 
 
-def clock(hour=3, minute=0, **_):
+def clock(hour=3, minute=0, show_time=True, **_):
     cx, cy, r = 90, 90, 78
     parts = [f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="#fff" stroke="{INK}" stroke-width="2.5"/>']
     for n in range(1, 13):
@@ -417,8 +436,10 @@ def clock(hour=3, minute=0, **_):
     ha = math.radians(-90 + (hour % 12) * 30 + minute * 0.5)
     parts.append(f'<line x1="{cx}" y1="{cy}" x2="{cx + (r-40)*math.cos(ha):.1f}" y2="{cy + (r-40)*math.sin(ha):.1f}" stroke="{INK}" stroke-width="4" stroke-linecap="round"/>')
     parts.append(f'<circle cx="{cx}" cy="{cy}" r="4" fill="{INK}"/>')
-    parts.append(_text(cx, 2 * cy + 24, f"{hour}:{minute:02d}", 15, INK, weight="700"))
-    return _svg(180, 2 * cy + 36, "".join(parts), f"clock showing {hour}:{minute:02d}")
+    if show_time:
+        parts.append(_text(cx, 2 * cy + 24, f"{hour}:{minute:02d}", 15, INK, weight="700"))
+        return _svg(180, 2 * cy + 36, "".join(parts), f"clock showing {hour}:{minute:02d}")
+    return _svg(180, 2 * cy + 8, "".join(parts), "clock")
 
 
 def coins(values, symbol="¢", **_):
