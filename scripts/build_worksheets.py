@@ -24,11 +24,19 @@ import school_diagrams as sd  # noqa: E402
 esc = html.escape
 INK = sd.INK
 ICONS = ["gift", "apple", "balloon", "star", "ball"]
-OP_SYM = {"add": "+", "sub": "−", "mul": "×"}
+OP_SYM = {"add": "+", "sub": "−", "mul": "×", "div": "÷"}
 
 
 def answer(a, b, op):
-    return a + b if op == "add" else (a - b if op == "sub" else a * b)
+    if op == "add":
+        return a + b
+    if op == "sub":
+        return a - b
+    if op == "mul":
+        return a * b
+    if op == "div":
+        return a // b
+    return a  # count
 
 
 # ---------------------------------------------------------------- problem sets
@@ -76,6 +84,27 @@ def gen_multiplication():
             ("Bigger numbers", twod, False)]
 
 
+def gen_division():
+    illus = [(4, 2), (6, 2), (6, 3), (8, 2), (8, 4), (9, 3), (10, 2), (10, 5),
+             (12, 3), (12, 4), (12, 6), (14, 2), (15, 3), (16, 4), (15, 5), (16, 8)]
+    facts = [(24, 6), (28, 4), (35, 5), (36, 6), (42, 7), (48, 8), (54, 9), (56, 7), (63, 9),
+             (64, 8), (72, 8), (81, 9), (45, 5), (49, 7), (40, 8), (30, 6), (32, 4), (27, 3)]
+    twod = [(84, 4), (96, 8), (72, 6), (90, 5), (88, 4), (99, 9), (78, 6), (92, 4),
+            (75, 5), (96, 6), (85, 5), (98, 7), (91, 7), (80, 5), (87, 3), (76, 4)]
+    return [("Share the pictures into groups", illus, True),
+            ("Division facts", facts, False),
+            ("Bigger numbers", twod, False)]
+
+
+def gen_counting():
+    def sec(nums):
+        return [(n, 0) for n in nums]
+    return [("Count to 10", sec([3, 5, 2, 7, 4, 9, 6, 10, 8, 1]), True),
+            ("Count to 20", sec([12, 15, 11, 18, 14, 20, 13, 17, 16, 19]), True),
+            ("Count to 30", sec([22, 25, 21, 28, 24, 30, 23, 27, 26, 29]), True),
+            ("More counting practice", sec([6, 9, 13, 16, 8, 11, 14, 19, 7, 12, 17, 5, 10, 15, 18, 20, 4, 22, 24, 26]), True)]
+
+
 CONCEPTS = {
     "addition": {"title": "Addition", "op": "add", "emoji": "➕",
                  "intro": "Add the two groups together and write how many there are altogether. The first problems have pictures to count; later ones use bigger numbers.",
@@ -86,6 +115,12 @@ CONCEPTS = {
     "multiplication": {"title": "Multiplication", "op": "mul", "emoji": "✖️",
                        "intro": "Multiplication is equal groups. Count the rows and columns of pictures, then write the total. Later problems use bigger numbers.",
                        "gen": gen_multiplication},
+    "division": {"title": "Division", "op": "div", "emoji": "➗",
+                 "intro": "Division is sharing into equal groups. Share the pictures into the number of groups, then write how many are in each group. Later problems use bigger numbers.",
+                 "gen": gen_division},
+    "counting": {"title": "Counting", "op": "count", "emoji": "\U0001f522",
+                 "intro": "Count how many pictures there are and write the number in the box. The groups get bigger as you go, arranged in rows of ten to make them easy to count.",
+                 "gen": gen_counting},
 }
 
 
@@ -114,11 +149,35 @@ def illus_mul(a, b, ic):
     return f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img" aria-label="{a} rows of {b}" xmlns="http://www.w3.org/2000/svg" style="max-width:100%">{"".join(parts)}</svg>'
 
 
+def illus_group(n, ic, per_row=8):
+    s, cw, pad = 13, 26, 8
+    parts = []
+    for i in range(n):
+        r, c = divmod(i, per_row)
+        parts.append(sd.icon(ic, pad + s + c * cw, pad + s + r * cw, s))
+    cols = min(n, per_row)
+    rows = (n + per_row - 1) // per_row
+    w = pad * 2 + cols * cw - (cw - 2 * s)
+    h = pad * 2 + rows * cw - (cw - 2 * s)
+    return f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img" aria-label="{n} things" xmlns="http://www.w3.org/2000/svg" style="max-width:100%">{"".join(parts)}</svg>'
+
+
 def problem_cell(n, a, b, op, illustrate, ic):
     art = ""
     if illustrate:
-        art = '<div class="art">' + (illus_mul(a, b, ic) if op == "mul" else illus_addsub(a, b, op, ic)) + "</div>"
-    eq = f'{a} {OP_SYM[op]} {b} = <span class="box"></span>'
+        if op == "mul":
+            svg = illus_mul(a, b, ic)
+        elif op == "count":
+            svg = illus_group(a, ic, per_row=10)
+        elif op == "div":
+            svg = illus_group(a, ic, per_row=8)
+        else:
+            svg = illus_addsub(a, b, op, ic)
+        art = '<div class="art">' + svg + "</div>"
+    if op == "count":
+        eq = 'How many? <span class="box"></span>'
+    else:
+        eq = f'{a} {OP_SYM[op]} {b} = <span class="box"></span>'
     cls = "prob pic" if illustrate else "prob"
     return f'<div class="{cls}"><span class="n">{n})</span>{art}<div class="eq">{eq}</div></div>'
 
@@ -156,7 +215,7 @@ PAGE = """<!DOCTYPE html>
     .grid.num {{ grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }}
     .prob {{ display: flex; align-items: center; gap: 10px; border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; background: #fff; break-inside: avoid; }}
     .prob.pic {{ flex-direction: column; align-items: flex-start; gap: 8px; position: relative; }}
-    .prob.pic .n {{ position: absolute; top: 10px; right: 12px; }}
+    .prob.pic .n {{ position: absolute; top: 8px; right: 8px; background: rgba(255,255,255,0.88); padding: 0 4px; border-radius: 5px; }}
     .prob .n {{ font-weight: 700; color: var(--text3); font-size: 13px; min-width: 24px; }}
     .prob .art {{ flex: 0 0 auto; }}
     .prob .art svg {{ display: block; }}
