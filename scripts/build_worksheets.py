@@ -201,9 +201,9 @@ def problem_cell(n, a, b, op, illustrate, ic):
             svg = illus_addsub(a, b, op, ic)
         art = '<div class="art">' + svg + "</div>"
     if op == "count":
-        eq = 'How many? <span class="box"></span>'
+        eq = 'How many? <span class="abox"></span>'
     else:
-        eq = f'{a} {OP_SYM[op]} {b} = <span class="box"></span>'
+        eq = f'{a} {OP_SYM[op]} {b} = <span class="abox"></span>'
     cls = "prob pic" if illustrate else "prob"
     return f'<div class="{cls}"><span class="n">{n})</span>{art}<div class="eq">{eq}</div></div>'
 
@@ -315,7 +315,7 @@ PAGE = """<!DOCTYPE html>
     .prob .art {{ flex: 0 0 auto; }}
     .prob .art svg {{ display: block; }}
     .prob .eq {{ font-size: 20px; font-weight: 700; color: var(--text); white-space: nowrap; }}
-    .box {{ display: inline-block; width: 42px; height: 26px; border: 2px solid var(--text3); border-radius: 6px; vertical-align: middle; }}
+    .abox {{ display: inline-block; width: 42px; height: 26px; border: 2px solid var(--text3); border-radius: 6px; vertical-align: middle; }}
     .answers {{ margin-top: 40px; border-top: 2px dashed var(--border); padding-top: 18px; }}
     .answers h2 {{ font-size: 16px; font-weight: 800; }}
     .akey {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 4px 12px; font-size: 13px; color: var(--text2); }}

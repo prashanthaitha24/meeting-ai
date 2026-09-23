@@ -286,6 +286,18 @@ def icon(kind, cx, cy, s=15):
             a = math.radians(-90 + k * 36)
             pts.append(f"{cx+rr*math.cos(a):.1f},{cy+rr*math.sin(a):.1f}")
         return f'<polygon points="{" ".join(pts)}" fill="{COLORS["amber"][0]}" stroke="{COLORS["amber"][1]}" stroke-width="2" stroke-linejoin="round"/>'
+    if kind == "cake":
+        return (f'<rect x="{cx-s:.0f}" y="{cy-s*0.15:.0f}" width="{2*s:.0f}" height="{s*1.05:.0f}" rx="3" fill="#f7d9c4" stroke="#dca878" stroke-width="2"/>'
+                f'<rect x="{cx-s:.0f}" y="{cy-s*0.15:.0f}" width="{2*s:.0f}" height="{s*0.4:.0f}" rx="3" fill="#fbe0ea" stroke="#dca878" stroke-width="1.4"/>'
+                f'<line x1="{cx:.0f}" y1="{cy-s*0.15:.0f}" x2="{cx:.0f}" y2="{cy-s*0.85:.0f}" stroke="#efb44e" stroke-width="2"/>'
+                f'<circle cx="{cx:.0f}" cy="{cy-s*0.95:.0f}" r="{s*0.17:.0f}" fill="{COLORS["rose"][1]}"/>')
+    if kind == "flower":
+        out = ""
+        for k in range(5):
+            a = math.radians(-90 + k * 72)
+            px, py = cx + s * 0.62 * math.cos(a), cy + s * 0.62 * math.sin(a)
+            out += f'<circle cx="{px:.0f}" cy="{py:.0f}" r="{s*0.46:.0f}" fill="{COLORS["rose"][0]}" stroke="{COLORS["rose"][1]}" stroke-width="1.6"/>'
+        return out + f'<circle cx="{cx:.0f}" cy="{cy:.0f}" r="{s*0.42:.0f}" fill="{COLORS["amber"][0]}" stroke="{COLORS["amber"][1]}" stroke-width="1.6"/>'
     return f'<circle cx="{cx:.0f}" cy="{cy:.0f}" r="{s*0.8:.0f}" fill="{COLORS["blue"][0]}" stroke="{COLORS["blue"][1]}" stroke-width="2"/>'
 
 
