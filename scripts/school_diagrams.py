@@ -261,6 +261,66 @@ def blocks(items, **_):
     return _svg(left + w + 12, y - gap + pad, "".join(body), "structure: " + ", ".join(i.get("label", "") for i in items))
 
 
+def icon(kind, cx, cy, s=15):
+    """A small, soft, kid-friendly object icon centred at (cx, cy)."""
+    if kind == "gift":
+        return (f'<rect x="{cx-s:.0f}" y="{cy-s*0.55:.0f}" width="{2*s:.0f}" height="{s*1.5:.0f}" rx="3" fill="{COLORS["amber"][0]}" stroke="{COLORS["amber"][1]}" stroke-width="2"/>'
+                f'<rect x="{cx-s*1.15:.0f}" y="{cy-s*0.8:.0f}" width="{2.3*s:.0f}" height="{s*0.5:.0f}" rx="2" fill="{COLORS["amber"][0]}" stroke="{COLORS["amber"][1]}" stroke-width="2"/>'
+                f'<line x1="{cx:.0f}" y1="{cy-s*0.8:.0f}" x2="{cx:.0f}" y2="{cy+s*0.9:.0f}" stroke="{COLORS["rose"][1]}" stroke-width="2.5"/>'
+                f'<circle cx="{cx-s*0.32:.0f}" cy="{cy-s*0.9:.0f}" r="{s*0.26:.0f}" fill="none" stroke="{COLORS["rose"][1]}" stroke-width="2"/>'
+                f'<circle cx="{cx+s*0.32:.0f}" cy="{cy-s*0.9:.0f}" r="{s*0.26:.0f}" fill="none" stroke="{COLORS["rose"][1]}" stroke-width="2"/>')
+    if kind == "apple":
+        return (f'<circle cx="{cx:.0f}" cy="{cy+s*0.15:.0f}" r="{s*0.9:.0f}" fill="#f7b3b3" stroke="#e06d6d" stroke-width="2"/>'
+                f'<line x1="{cx:.0f}" y1="{cy-s*0.65:.0f}" x2="{cx:.0f}" y2="{cy-s*1.0:.0f}" stroke="#7a5230" stroke-width="2" stroke-linecap="round"/>'
+                f'<ellipse cx="{cx+s*0.35:.0f}" cy="{cy-s*0.9:.0f}" rx="{s*0.3:.0f}" ry="{s*0.17:.0f}" fill="{COLORS["green"][0]}" stroke="{COLORS["green"][1]}" stroke-width="1.4"/>')
+    if kind == "balloon":
+        return (f'<ellipse cx="{cx:.0f}" cy="{cy-s*0.2:.0f}" rx="{s*0.8:.0f}" ry="{s*1.0:.0f}" fill="{COLORS["blue"][0]}" stroke="{COLORS["blue"][1]}" stroke-width="2"/>'
+                f'<line x1="{cx:.0f}" y1="{cy+s*0.8:.0f}" x2="{cx:.0f}" y2="{cy+s*1.35:.0f}" stroke="{INK}" stroke-width="1.3"/>')
+    if kind == "ball":
+        return (f'<circle cx="{cx:.0f}" cy="{cy:.0f}" r="{s*0.9:.0f}" fill="{COLORS["green"][0]}" stroke="{COLORS["green"][1]}" stroke-width="2"/>'
+                f'<path d="M{cx-s*0.85:.0f} {cy:.0f} Q{cx:.0f} {cy-s*0.7:.0f} {cx+s*0.85:.0f} {cy:.0f}" fill="none" stroke="{COLORS["green"][1]}" stroke-width="1.3"/>')
+    if kind == "star":
+        pts = []
+        for k in range(10):
+            rr = s if k % 2 == 0 else s * 0.45
+            a = math.radians(-90 + k * 36)
+            pts.append(f"{cx+rr*math.cos(a):.1f},{cy+rr*math.sin(a):.1f}")
+        return f'<polygon points="{" ".join(pts)}" fill="{COLORS["amber"][0]}" stroke="{COLORS["amber"][1]}" stroke-width="2" stroke-linejoin="round"/>'
+    return f'<circle cx="{cx:.0f}" cy="{cy:.0f}" r="{s*0.8:.0f}" fill="{COLORS["blue"][0]}" stroke="{COLORS["blue"][1]}" stroke-width="2"/>'
+
+
+def objects(a, b, op="add", icon_kind="gift", **_):
+    """Two groups of real object icons showing an add/take-away story."""
+    s = 15
+    cw = 2 * s + 6
+    y = 36
+    parts, x = [], 12
+
+    def group(n, cross_from=None):
+        nonlocal x
+        for i in range(n):
+            parts.append(icon(icon_kind, x + s, y, s))
+            if cross_from is not None and i >= cross_from:
+                parts.append(f'<line x1="{x+2:.0f}" y1="{y-s:.0f}" x2="{x+2*s-2:.0f}" y2="{y+s:.0f}" stroke="{COLORS["rose"][1]}" stroke-width="3" stroke-linecap="round"/>')
+            x += cw
+        x += 12
+
+    def sign(t):
+        nonlocal x
+        parts.append(_text(x + 5, y + 7, t, 22, INK, weight="700"))
+        x += 26
+
+    if op == "add":
+        group(a); sign("+"); group(b); sign("="); group(a + b)
+        label = f"{a} + {b} = {a + b}"
+    else:
+        group(a, cross_from=a - b); sign("="); group(a - b)
+        label = f"{a} take away {b} = {a - b}"
+    w = x + 8
+    parts.append(_text(w / 2, y + s + 30, label, 16, INK, weight="700"))
+    return _svg(w, y + s + 44, "".join(parts), label)
+
+
 def equation_dots(a, b, op="add", color="green", **_):
     fillc, strokec = COLORS[color]
     r, gap, sgap = 12, 7, 22
@@ -475,6 +535,7 @@ KINDS = {
     "phrase": labeled_phrase,
     "blocks": blocks,
     "equation_dots": equation_dots,
+    "objects": objects,
     "array": array,
     "two_bars": two_bars,
     "clock": clock,
