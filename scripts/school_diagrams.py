@@ -308,6 +308,52 @@ def array(rows, cols, color="blue", **_):
     return _svg(max(w, 110), h + 34, "".join(parts), f"{rows} rows of {cols} = {rows * cols}")
 
 
+def two_bars(a, b, a_label="A", b_label="B", **_):
+    maxv = max(a, b) or 1
+    W = 210
+    parts = []
+    for i, (val, label, color) in enumerate([(a, a_label, "blue"), (b, b_label, "amber")]):
+        y = 26 + i * 56
+        col = COLORS[color]
+        parts.append(_text(14, y - 6, label, 12.5, INK, anchor="start", weight="600"))
+        parts.append(f'<rect x="14" y="{y}" width="{max(12, (val/maxv)*W):.1f}" height="24" rx="8" fill="{col[0]}" stroke="{col[1]}" stroke-width="2"/>')
+    total_h = 26 + 2 * 56
+    msg = f"{a_label} is longer" if a > b else (f"{b_label} is longer" if b > a else "same length")
+    parts.append(_text((14 + W) / 2, total_h + 4, msg, 13, INK, weight="600"))
+    return _svg(W + 28, total_h + 16, "".join(parts), "comparing lengths")
+
+
+def clock(hour=3, minute=0, **_):
+    cx, cy, r = 90, 90, 78
+    parts = [f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="#fff" stroke="{INK}" stroke-width="2.5"/>']
+    for n in range(1, 13):
+        a = math.radians(-90 + n * 30)
+        x1, y1 = cx + (r - 7) * math.cos(a), cy + (r - 7) * math.sin(a)
+        x2, y2 = cx + r * math.cos(a), cy + r * math.sin(a)
+        parts.append(f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" stroke="{INK}" stroke-width="1.6"/>')
+        nx, ny = cx + (r - 18) * math.cos(a), cy + (r - 18) * math.sin(a)
+        parts.append(_text(nx, ny + 5, n, 14, INK, weight="600"))
+    ma = math.radians(-90 + minute * 6)
+    parts.append(f'<line x1="{cx}" y1="{cy}" x2="{cx + (r-20)*math.cos(ma):.1f}" y2="{cy + (r-20)*math.sin(ma):.1f}" stroke="{COLORS["blue"][1]}" stroke-width="3" stroke-linecap="round"/>')
+    ha = math.radians(-90 + (hour % 12) * 30 + minute * 0.5)
+    parts.append(f'<line x1="{cx}" y1="{cy}" x2="{cx + (r-40)*math.cos(ha):.1f}" y2="{cy + (r-40)*math.sin(ha):.1f}" stroke="{INK}" stroke-width="4" stroke-linecap="round"/>')
+    parts.append(f'<circle cx="{cx}" cy="{cy}" r="4" fill="{INK}"/>')
+    parts.append(_text(cx, 2 * cy + 24, f"{hour}:{minute:02d}", 15, INK, weight="700"))
+    return _svg(180, 2 * cy + 36, "".join(parts), f"clock showing {hour}:{minute:02d}")
+
+
+def coins(values, symbol="¢", **_):
+    r, gap, pad = 22, 12, 14
+    parts = []
+    for i, v in enumerate(values):
+        cx = pad + r + i * (2 * r + gap)
+        parts.append(f'<circle cx="{cx}" cy="{pad+r}" r="{r}" fill="{COLORS["amber"][0]}" stroke="{COLORS["amber"][1]}" stroke-width="2.5"/>')
+        parts.append(_text(cx, pad + r + 5, f"{v}{symbol}", 12.5, INK, weight="700"))
+    w = pad * 2 + len(values) * (2 * r + gap) - gap
+    parts.append(_text(w / 2, pad + 2 * r + 28, f"total = {sum(values)}{symbol}", 14, INK, weight="700"))
+    return _svg(max(w, 120), pad + 2 * r + 40, "".join(parts), f"coins totalling {sum(values)}{symbol}")
+
+
 def compare(a, b, **_):
     r, gap = 13, 8
     fa, fb = COLORS["blue"], COLORS["amber"]
@@ -430,6 +476,9 @@ KINDS = {
     "blocks": blocks,
     "equation_dots": equation_dots,
     "array": array,
+    "two_bars": two_bars,
+    "clock": clock,
+    "coins": coins,
     "compare": compare,
     "pattern": pattern,
     "place_value": place_value,
