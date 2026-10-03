@@ -1,0 +1,132 @@
+{
+  "id": "oss-kubeflow",
+  "minutes": 35,
+  "intro": "Kubeflow is not one program. The `kubeflow/kubeflow` repository now holds little more than a README, because Kubeflow is a family of subprojects, each with its own repository, that together cover the ML lifecycle on Kubernetes: notebooks, pipelines, distributed training, hyperparameter search, a model registry, and serving through KServe. This lesson maps the subprojects to the lifecycle, shows the resources and Python APIs you actually use, and explains how to install only the parts you need.",
+  "objectives": [
+    "Map each Kubeflow subproject to a stage of the ML lifecycle",
+    "Write and compile a Kubeflow Pipelines v2 pipeline in Python",
+    "Launch distributed training as a TrainJob, from YAML or the Kubeflow SDK",
+    "Explain what Katib, Kubeflow Hub and KServe add after training",
+    "Decide between the full platform install and individual components"
+  ],
+  "sections": [
+    {
+      "heading": "A platform made of subprojects",
+      "blocks": [
+        {"type": "p", "text": "Kubeflow describes itself as the cloud-native AI platform: modular open-source projects that form a Kubernetes-native stack for data and AI work. Each subproject is maintained by a working group and released on its own schedule. You can adopt one, such as only Pipelines, without the rest."},
+        {"type": "table", "headers": ["Lifecycle stage", "Subproject", "What you get"], "rows": [
+          ["Data preparation", "Spark Operator", "Spark applications as Kubernetes resources"],
+          ["Development", "Notebooks / Workspaces", "Jupyter, VS Code or RStudio in the cluster, next to data and GPUs"],
+          ["Training", "Trainer", "Distributed training and LLM fine-tuning as a `TrainJob`"],
+          ["Optimization", "Katib", "Hyperparameter search and AutoML as an `Experiment`"],
+          ["Model management", "Kubeflow Hub", "Model Registry (versions, artifacts, metadata) and Model Catalog"],
+          ["Orchestration", "Pipelines (KFP)", "Multi-step workflows defined in Python, with tracked artifacts"],
+          ["Serving", "KServe", "`InferenceService` for predictive and generative models"]
+        ]},
+        {"type": "p", "text": "Names have shifted recently, so expect older blog posts to differ. The Model Registry is now part of **Kubeflow Hub**. The Training Operator v1 (PyTorchJob, TFJob) was replaced by **Kubeflow Trainer** v2 and its single `TrainJob` resource. **Workspaces** (beta) is the next generation of Notebooks. **KServe** started inside Kubeflow, now lives in its own `kserve/kserve` repository, and the Kubeflow manifests still ship it. On top sits the **Kubeflow SDK**, one Python package that drives Trainer, Katib and Spark without writing YAML."}
+      ]
+    },
+    {
+      "heading": "Kubeflow Pipelines: workflows as Python",
+      "blocks": [
+        {"type": "p", "text": "A **pipeline** is a graph of **components**, and each component runs in its own container. With the KFP v2 SDK you write components as decorated Python functions, wire them together in a pipeline function, and compile the result to a YAML intermediate representation that the KFP backend runs. Outputs that are passed between steps (datasets, models, metrics) are stored as **artifacts**, so every run records exactly what went in and what came out."},
+        {"type": "code", "lang": "python", "caption": "Two-step pipeline: train, then evaluate", "code": "from kfp import compiler, dsl\nfrom kfp.dsl import Input, Metrics, Model, Output\n\n\n@dsl.component(base_image=\"python:3.12\", packages_to_install=[\"scikit-learn\"])\ndef train(alpha: float, model: Output[Model]):\n    import pickle\n    from sklearn.datasets import load_diabetes\n    from sklearn.linear_model import Ridge\n    X, y = load_diabetes(return_X_y=True)\n    with open(model.path, \"wb\") as f:\n        pickle.dump(Ridge(alpha=alpha).fit(X, y), f)\n\n\n@dsl.component(base_image=\"python:3.12\", packages_to_install=[\"scikit-learn\"])\ndef evaluate(model: Input[Model], metrics: Output[Metrics]):\n    import pickle\n    from sklearn.datasets import load_diabetes\n    X, y = load_diabetes(return_X_y=True)\n    with open(model.path, \"rb\") as f:\n        metrics.log_metric(\"r2\", pickle.load(f).score(X, y))\n\n\n@dsl.pipeline(name=\"ridge-train-eval\")\ndef pipeline(alpha: float = 1.0):\n    trained = train(alpha=alpha)\n    evaluate(model=trained.outputs[\"model\"])\n\n\ncompiler.Compiler().compile(pipeline, \"pipeline.yaml\")"},
+        {"type": "p", "text": "Upload `pipeline.yaml` in the Pipelines UI or submit it with `kfp.Client().create_run_from_pipeline_package(...)`. Steps whose inputs have not changed can be served from the cache, which saves a lot of time while you iterate on the last step. If your team works in notebooks, **Kale** compiles a tagged notebook into the same KFP v2 pipeline without writing the decorators by hand."},
+        {"type": "callout", "kind": "tip", "text": "Keep components small and pure: inputs in, artifacts out, no hidden reads from a shared disk. That is what makes caching, retries and lineage trustworthy."}
+      ]
+    },
+    {
+      "heading": "Trainer: distributed training as one resource",
+      "blocks": [
+        {"type": "p", "text": "Kubeflow Trainer separates two concerns. Platform engineers publish **runtimes** (`ClusterTrainingRuntime` or namespaced `TrainingRuntime`) that encode how to launch a framework: the image, torchrun or MPI setup, and the JobSet that creates the pods. The repository ships runtimes for PyTorch, DeepSpeed, JAX, MLX, XGBoost and torchtune. Data scientists then write a short **TrainJob** that references a runtime and says how many nodes and what to run."},
+        {"type": "code", "lang": "yaml", "caption": "Three-node PyTorch job on the built-in torch-distributed runtime", "code": "apiVersion: trainer.kubeflow.org/v1alpha1\nkind: TrainJob\nmetadata:\n  name: fine-tune-demo\nspec:\n  runtimeRef:\n    apiGroup: trainer.kubeflow.org\n    kind: ClusterTrainingRuntime\n    name: torch-distributed\n  trainer:\n    numNodes: 3\n    image: ghcr.io/example/trainer:0.4.0\n    command: [\"torchrun\", \"train.py\"]\n    resourcesPerNode:\n      limits:\n        nvidia.com/gpu: 1"},
+        {"type": "p", "text": "Trainer injects the rendezvous settings (master address, node rank, number of nodes) so torchrun finds its peers. The same job can be submitted from Python with the SDK's `TrainerClient().train(...)`, passing a function plus `num_nodes` and `resources_per_node`, which is how most notebook users will meet it. For GPU fairness across teams, pair Trainer with **Kueue**, which queues TrainJobs until quota is free."}
+      ]
+    },
+    {
+      "heading": "After training: Katib, Hub and KServe",
+      "blocks": [
+        {"type": "p", "text": "**Katib** runs an **Experiment**: an objective metric to maximise or minimise, a search algorithm (random, grid, Bayesian optimisation, Hyperband and others), a search space of parameters, and a trial template that is launched once per parameter set. It stops early when a goal is reached or the trial budget is spent. The Kubeflow SDK exposes this as `OptimizerClient().optimize(...)` over the same template you used for training."},
+        {"type": "p", "text": "**Kubeflow Hub** holds the Model Registry: registered models, their versions, where the artifacts live, and metadata such as metrics and the training run that produced them. It is the hand-off point between \"we trained something good\" and \"this version is what production serves\". The Model Catalog alongside it is a read-only view of curated external models you can browse before registering one."},
+        {"type": "code", "lang": "yaml", "caption": "KServe: serve a registered model version", "code": "apiVersion: serving.kserve.io/v1beta1\nkind: InferenceService\nmetadata:\n  name: ridge\nspec:\n  predictor:\n    model:\n      modelFormat:\n        name: sklearn\n      storageUri: s3://models/ridge/v3"},
+        {"type": "p", "text": "**KServe** turns that into a scalable endpoint with a standard inference protocol, and for LLMs it can run vLLM as the runtime. Scale-to-zero relies on Knative, which is one reason a full Kubeflow install pulls in Knative and Istio."}
+      ]
+    },
+    {
+      "heading": "Installing: full platform or just the parts",
+      "blocks": [
+        {"type": "p", "text": "The Kubeflow manifests repository (the community distribution) installs everything with Kustomize: the applications above plus common services, namely Istio for networking and auth, Knative for KServe, cert-manager, Dex and oauth2-proxy for login, and the Central Dashboard that stitches the UIs together with per-user **profiles** (namespaces). The documented one-liner retries until all CRDs are established."},
+        {"type": "code", "lang": "bash", "caption": "Full platform from a checkout of the manifests repo (needs a large cluster)", "code": "while ! kustomize build example | kubectl apply --server-side --force-conflicts -f -; do\n  echo \"Retrying to apply resources\"\n  sleep 20\ndone"},
+        {"type": "list", "items": [
+          "The full platform needs real capacity; the README suggests excluding components to fit into 4 to 8 GB of memory on a laptop.",
+          "If you only need pipelines, install Kubeflow Pipelines standalone; if you only need distributed training, install Trainer alone. Each subproject documents a standalone install.",
+          "Managed distributions from cloud and platform vendors package the same components with their own auth and storage; pick one if you do not want to run Istio yourself.",
+          "Upgrades are per component: read each subproject's release notes, because CRD versions move independently."
+        ]}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Run a pipeline and a TrainJob on a laptop",
+    "steps": [
+      "Create a kind cluster with at least 8 GB of memory available to Docker.",
+      "Install Kubeflow Pipelines standalone by following the KFP docs for your version, then port-forward the `ml-pipeline-ui` service and open the UI.",
+      "Run `pip install kfp`, save the pipeline from this lesson as `pipeline.py`, run it, and upload the generated `pipeline.yaml`.",
+      "Start a run with `alpha=1.0`, then another with `alpha=10.0`, and compare the logged `r2` metrics in the UI.",
+      "Re-run with the same parameters and confirm the train step is served from the cache.",
+      "Install Kubeflow Trainer standalone, apply a TrainJob that uses `torch-distributed` with `numNodes: 2` and a CPU-only script, and watch the pods with `kubectl get pods -w`.",
+      "Delete the cluster when you are done with `kind delete cluster`."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Kubeflow is a set of independently released subprojects; adopt only what you need.",
+      "Pipelines: components are containers, artifacts are tracked, steps are cached.",
+      "Trainer v2: platform publishes runtimes, users submit a short TrainJob.",
+      "Katib searches hyperparameters; Hub records which model version is which; KServe serves it.",
+      "Older docs say Training Operator, PyTorchJob and Model Registry: the current names are Trainer, TrainJob and Kubeflow Hub.",
+      "The full install brings Istio, Knative, Dex and cert-manager: budget for them."
+    ],
+    "groups": [
+      {"title": "KFP v2 SDK", "items": [
+        {"syntax": "@dsl.component(base_image=..., packages_to_install=[...])", "desc": "A Python function that runs as its own container step"},
+        {"syntax": "@dsl.pipeline(name=...)", "desc": "Wire components together; return values become task outputs"},
+        {"syntax": "Output[Model] / Input[Dataset] / Output[Metrics]", "desc": "Typed artifacts passed between steps"},
+        {"syntax": "compiler.Compiler().compile(pipeline, \"p.yaml\")", "desc": "Compile to the IR YAML the backend runs"},
+        {"syntax": "task.set_caching_options(False)", "desc": "Force a step to re-run every time"}
+      ]},
+      {"title": "Trainer", "items": [
+        {"syntax": "kind: TrainJob  runtimeRef: {name: torch-distributed}", "desc": "Training job on a published runtime"},
+        {"syntax": "trainer.numNodes / trainer.resourcesPerNode", "desc": "Scale out and request GPUs per node"},
+        {"syntax": "kubectl get clustertrainingruntimes", "desc": "Runtimes the platform offers"},
+        {"syntax": "TrainerClient().train(**template)", "desc": "Submit from Python with the Kubeflow SDK"},
+        {"syntax": "TrainerClient().get_job_logs(name=job_id)", "desc": "Fetch training logs from Python"}
+      ]},
+      {"title": "Katib and KServe", "items": [
+        {"syntax": "kind: Experiment  objective / algorithm / parameters", "desc": "Hyperparameter search definition"},
+        {"syntax": "maxTrialCount / parallelTrialCount", "desc": "Search budget and concurrency"},
+        {"syntax": "kind: InferenceService  predictor.model.storageUri", "desc": "Serve a model from object storage"},
+        {"syntax": "kubectl get inferenceservice", "desc": "Endpoint URL and READY state"}
+      ]},
+      {"title": "Install", "items": [
+        {"syntax": "kustomize build example | kubectl apply --server-side -f -", "desc": "Whole platform from the manifests repo (retry until CRDs settle)"},
+        {"syntax": "kubectl port-forward svc/istio-ingressgateway -n istio-system 8080:80", "desc": "Reach the Central Dashboard locally"},
+        {"syntax": "applications/ and common/", "desc": "Manifests layout: Kubeflow components vs shared services"}
+      ]}
+    ],
+    "pitfalls": [
+      "Installing the whole platform on a small cluster when you only needed Pipelines.",
+      "Following a tutorial for PyTorchJob or the v1 SDK and wondering why the CRDs do not exist.",
+      "Components that read and write a shared volume instead of artifacts, which breaks caching and lineage.",
+      "Letting several teams submit GPU TrainJobs without a queue such as Kueue, so jobs half-start and deadlock.",
+      "Treating the model registry as optional and losing track of which artifact production serves."
+    ]
+  },
+  "quiz": [
+    {"q": "Your team only needs reproducible multi-step training workflows with tracked artifacts. What is the leanest Kubeflow choice?", "options": ["Install Kubeflow Pipelines standalone", "Install the full platform from the manifests repo", "Install Katib and write Experiments", "Install KServe and its Knative dependency"], "answer": 0, "explain": "Subprojects can be installed on their own. Pipelines alone provides workflows, artifacts and caching without Istio, Knative and the rest of the platform."},
+    {"q": "A blog post tells you to create a PyTorchJob, but the CRD does not exist in your new Kubeflow install. Why?", "options": ["Trainer v2 replaced it with the TrainJob resource", "PyTorchJob is only available inside Kubeflow Pipelines", "PyTorchJob needs KServe to be installed first", "PyTorchJob was moved into Katib as a trial type"], "answer": 0, "explain": "The Training Operator v1 resources such as PyTorchJob were superseded by Kubeflow Trainer, which uses one TrainJob resource plus training runtimes."},
+    {"q": "In Kubeflow Trainer, who usually writes the ClusterTrainingRuntime and who writes the TrainJob?", "options": ["Platform engineers write runtimes; data scientists write TrainJobs", "Data scientists write both for every experiment", "The SDK generates runtimes; platform engineers write TrainJobs", "KServe generates runtimes when a model is registered"], "answer": 0, "explain": "The design splits concerns: runtimes encode how to launch a framework and are curated by the platform team, while TrainJobs reference a runtime and add only the job-specific parts."},
+    {"q": "You re-run a pipeline after changing only the evaluation step, and the training step finishes in seconds. What happened?", "options": ["KFP served the train step from the cache because its inputs were unchanged", "Katib skipped training because the objective was already met", "The Trainer reused a running TrainJob from the previous run", "The compiler removed the training step from the YAML"], "answer": 0, "explain": "Pipelines caches step results keyed by the component and its inputs. With identical inputs, the stored artifact is reused instead of re-running the container."},
+    {"q": "Where should the answer to 'which model version is production serving, and which run produced it?' live?", "options": ["In the Model Registry in Kubeflow Hub", "In the Katib Experiment status", "In the notebook that trained the model", "In the Central Dashboard's profile settings"], "answer": 0, "explain": "The registry records models, versions, artifact locations and metadata such as the producing run, which is exactly the hand-off between training and serving."}
+  ]
+}

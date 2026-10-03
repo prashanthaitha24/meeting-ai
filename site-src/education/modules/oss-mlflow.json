@@ -1,0 +1,118 @@
+{
+  "id": "oss-mlflow",
+  "minutes": 30,
+  "intro": "MLflow started as experiment tracking for data scientists and has grown into a general AI engineering platform: tracking and a model registry for classical models, and tracing, evaluation and a prompt registry for LLM applications and agents. It is a Python package plus a server, both from `mlflow/mlflow`, and it runs on a laptop with one command. This lesson covers the MLflow 3 data model, how to run the server properly for a team, promoting models with aliases, and the GenAI features you will reach for when an LLM app misbehaves.",
+  "objectives": [
+    "Log parameters, metrics and models to an MLflow tracking server",
+    "Run a team MLflow server with a database backend and object-storage artifacts",
+    "Register model versions and promote them with aliases instead of stages",
+    "Trace an LLM application and evaluate it with built-in and custom scorers",
+    "Version prompts in the prompt registry and load them by URI"
+  ],
+  "sections": [
+    {
+      "heading": "The data model: experiments, runs, models",
+      "blocks": [
+        {"type": "p", "text": "An **experiment** groups related work, such as \"churn model\". A **run** is one execution inside it, recording **parameters** (inputs you chose), **metrics** (numbers you measured, optionally per step), **tags**, and **artifacts** (files such as plots or a dataset sample). MLflow 3 adds the **LoggedModel** as a first-class object: a model can be logged with a `name` and no active run, and later runs, evaluations and traces link back to it."},
+        {"type": "code", "lang": "python", "caption": "Track a training run and log the model", "code": "import mlflow\nfrom sklearn.datasets import load_diabetes\nfrom sklearn.linear_model import Ridge\nfrom sklearn.metrics import mean_squared_error\n\nmlflow.set_tracking_uri(\"http://localhost:5000\")\nmlflow.set_experiment(\"diabetes\")\n\nX, y = load_diabetes(return_X_y=True)\nwith mlflow.start_run():\n    alpha = 0.5\n    model = Ridge(alpha=alpha).fit(X, y)\n    mlflow.log_param(\"alpha\", alpha)\n    mlflow.log_metric(\"mse\", mean_squared_error(y, model.predict(X)))\n    mlflow.sklearn.log_model(model, name=\"model\", registered_model_name=\"diabetes-ridge\")"},
+        {"type": "p", "text": "**Autologging** (`mlflow.sklearn.autolog()`, `mlflow.pytorch.autolog()` and friends) records parameters, metrics and the model for supported libraries without explicit calls. Models are saved with a **flavor** (sklearn, pytorch, transformers) plus the generic **pyfunc** flavor, so anything you log can be loaded with `mlflow.pyfunc.load_model(uri)` and called with `.predict()`, whatever library trained it."},
+        {"type": "callout", "kind": "note", "text": "Upgrading from MLflow 2? `log_model` takes `name=` instead of `artifact_path=`, and a run is no longer required to log a model. Old code still runs with deprecation warnings, but fix it before they become errors."}
+      ]
+    },
+    {
+      "heading": "Running the server for a team",
+      "blocks": [
+        {"type": "p", "text": "`mlflow server` (or `uvx mlflow server` without installing anything) starts the tracking server and UI on port 5000. It has two storage halves. The **backend store** holds metadata: experiments, runs, params, metrics, registry entries. SQLite (`mlflow.db` in the current directory) is now the default; the older `./mlruns` file store is in maintenance mode. The **artifact store** holds the large files: models, plots, datasets."},
+        {"type": "code", "lang": "bash", "caption": "A shared server: Postgres for metadata, S3 for artifacts", "code": "mlflow server \\\n  --backend-store-uri postgresql://mlflow:CHANGE_ME@db.internal:5432/mlflow \\\n  --artifacts-destination s3://acme-mlflow-artifacts \\\n  --host 0.0.0.0 \\\n  --port 5000"},
+        {"type": "list", "items": [
+          "With `--artifacts-destination`, the server **proxies** artifact uploads and downloads, so clients need only the server URL, not cloud credentials.",
+          "SQLite is fine for one person; for a team use Postgres or MySQL, which handle concurrent writers and survive a pod restart.",
+          "The open-source server ships basic authentication and workspaces, but put it behind your SSO proxy and TLS before exposing it beyond a VPN.",
+          "On Kubernetes, run the server as a stateless Deployment (there is a Helm chart in the repo's `charts/` folder); all state lives in the database and the bucket."
+        ]}
+      ]
+    },
+    {
+      "heading": "The model registry: versions and aliases",
+      "blocks": [
+        {"type": "p", "text": "A **registered model** is a name, such as `diabetes-ridge`, holding numbered **versions**. Each version points at a logged model and remembers which run produced it, so you can always answer \"what data and parameters made the thing in production?\""},
+        {"type": "p", "text": "Promote with **aliases**: mutable, named pointers to one version, such as `champion` or `challenger`. Your serving code loads `models:/diabetes-ridge@champion`; promoting a new version is a single API call that moves the alias, and rolling back moves it back. The older fixed stages (Staging, Production) are deprecated in favour of aliases and tags."},
+        {"type": "code", "lang": "python", "caption": "Promote version 7 and load whatever champion points at", "code": "import mlflow\nfrom mlflow import MlflowClient\n\nclient = MlflowClient()\nclient.set_registered_model_alias(\"diabetes-ridge\", \"champion\", 7)\nclient.set_model_version_tag(\"diabetes-ridge\", \"7\", \"validated_by\", \"ci\")\n\nmodel = mlflow.pyfunc.load_model(\"models:/diabetes-ridge@champion\")"},
+        {"type": "p", "text": "To serve, `mlflow models serve -m models:/diabetes-ridge@champion -p 8080` starts a local REST endpoint, and `mlflow models build-docker` packages a model into an image you can run anywhere, including KServe."}
+      ]
+    },
+    {
+      "heading": "GenAI: tracing, evaluation and prompts",
+      "blocks": [
+        {"type": "p", "text": "For LLM applications the questions change: not \"what was the loss?\" but \"what did the agent retrieve, which tool did it call, why was the answer wrong, and did my prompt change make things better?\" MLflow answers with **traces**: a tree of spans per request, recording inputs, outputs, latency and token usage. One line, such as `mlflow.openai.autolog()`, instruments a supported client library; the `@mlflow.trace` decorator instruments your own functions. Traces are OpenTelemetry-compatible."},
+        {"type": "code", "lang": "python", "caption": "Trace an app and evaluate it on a small dataset", "code": "import mlflow\nfrom mlflow.genai import scorer\nfrom mlflow.genai.scorers import Correctness, Guidelines\n\n\n@mlflow.trace\ndef answer(question: str) -> str:\n    return call_llm(f\"Answer briefly: {question}\")  # your model call\n\n\n@scorer\ndef is_short(outputs: str) -> bool:\n    return len(outputs.split()) <= 30\n\n\ndata = [\n    {\"inputs\": {\"question\": \"What does SLO stand for?\"},\n     \"expectations\": {\"expected_response\": \"Service level objective\"}},\n]\nmlflow.genai.evaluate(\n    data=data,\n    predict_fn=answer,\n    scorers=[Correctness(), Guidelines(name=\"plain\", guidelines=\"No jargon.\"), is_short],\n)"},
+        {"type": "p", "text": "`Correctness` and `Guidelines` are **LLM-judge** scorers: they ask a judge model, which you configure, to grade each output. Custom `@scorer` functions are plain code and cost nothing to run. Every evaluation run is stored with its traces, so you can open a failing example and see exactly which step went wrong."},
+        {"type": "p", "text": "The **prompt registry** gives prompts the same treatment as models: `mlflow.genai.register_prompt(name=..., template=...)` creates a new version on each call, `mlflow.genai.load_prompt(\"prompts:/summarize/3\")` loads one, and aliases work here too, so a prompt change can be reviewed, evaluated and rolled back without a code deploy."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Track, register, promote, and evaluate",
+    "steps": [
+      "Run `pip install mlflow scikit-learn`, then start a server with `mlflow server --port 5000` and open the UI.",
+      "Run the training script from this lesson three times with `alpha` values 0.1, 0.5 and 2.0, and compare the runs side by side in the UI.",
+      "In the registry, check that `diabetes-ridge` has three versions; set the `champion` alias on the best one with `MlflowClient`.",
+      "Serve it with `mlflow models serve -m models:/diabetes-ridge@champion -p 8080 --env-manager local` and send it a request with curl.",
+      "Move `champion` to another version, restart the server, and confirm the predictions change without any code change.",
+      "Wrap any function in `@mlflow.trace`, call it a few times, and inspect the spans in the Traces tab.",
+      "Write one custom `@scorer` and run `mlflow.genai.evaluate` on a five-row dataset; open a failing row's trace."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Experiment > run > params, metrics, artifacts; MLflow 3 adds LoggedModel as a first-class object.",
+      "Backend store holds metadata (database), artifact store holds files (object storage).",
+      "Promote with aliases (`models:/name@champion`), not deprecated stages.",
+      "Every model loads as pyfunc and serves through the same predict interface.",
+      "Traces explain LLM failures; evaluation with scorers measures whether a change helped.",
+      "Version prompts in the registry so prompt changes are reviewable and reversible."
+    ],
+    "groups": [
+      {"title": "Tracking", "items": [
+        {"syntax": "mlflow.set_tracking_uri(\"http://host:5000\")", "desc": "Point the client at a server"},
+        {"syntax": "mlflow.set_experiment(\"name\")", "desc": "Create or select an experiment"},
+        {"syntax": "with mlflow.start_run(): ...", "desc": "Open a run; params and metrics attach to it"},
+        {"syntax": "mlflow.log_param / log_metric / log_artifact", "desc": "Record inputs, numbers and files"},
+        {"syntax": "mlflow.sklearn.autolog()", "desc": "Log everything automatically for a library"}
+      ]},
+      {"title": "Models and registry", "items": [
+        {"syntax": "mlflow.sklearn.log_model(m, name=\"model\", registered_model_name=\"x\")", "desc": "Log and register in one call"},
+        {"syntax": "client.set_registered_model_alias(\"x\", \"champion\", 7)", "desc": "Point an alias at a version"},
+        {"syntax": "mlflow.pyfunc.load_model(\"models:/x@champion\")", "desc": "Load by alias, version or run URI"},
+        {"syntax": "mlflow models serve -m models:/x@champion -p 8080", "desc": "Local REST scoring server"},
+        {"syntax": "mlflow models build-docker -m models:/x/7 -n img:tag", "desc": "Package a model as a container image"}
+      ]},
+      {"title": "Server", "items": [
+        {"syntax": "mlflow server --port 5000", "desc": "Local server, SQLite backend by default"},
+        {"syntax": "--backend-store-uri postgresql://...", "desc": "Shared metadata database"},
+        {"syntax": "--artifacts-destination s3://bucket", "desc": "Proxied artifact storage"}
+      ]},
+      {"title": "GenAI", "items": [
+        {"syntax": "@mlflow.trace", "desc": "Record a function as a span in a trace"},
+        {"syntax": "mlflow.openai.autolog()", "desc": "Trace a supported client library automatically"},
+        {"syntax": "mlflow.genai.evaluate(data=, predict_fn=, scorers=[...])", "desc": "Score an app on a dataset"},
+        {"syntax": "@scorer def name(outputs) -> bool", "desc": "Custom, code-based scorer"},
+        {"syntax": "mlflow.genai.load_prompt(\"prompts:/name/3\")", "desc": "Load a versioned prompt"}
+      ]}
+    ],
+    "pitfalls": [
+      "Running a team server on SQLite inside a container with no volume, and losing every run on restart.",
+      "Hard-coding `models:/x/7` in serving code, so every promotion needs a deploy.",
+      "Logging huge artifacts on every step and filling the bucket.",
+      "Judging an LLM change by reading three outputs instead of running an evaluation.",
+      "Exposing the tracking server publicly with no authentication in front of it."
+    ]
+  },
+  "quiz": [
+    {"q": "Your team server runs in a container with the default SQLite backend and no volume. After a node restart every experiment is gone. What is the fix?", "options": ["Use Postgres or MySQL as the backend store and object storage for artifacts", "Switch to the ./mlruns file store, which is restart-safe", "Enable autologging so runs are re-created automatically", "Increase the container's memory so the database stays cached"], "answer": 0, "explain": "The backend store holds all metadata; SQLite on the container filesystem disappears with the container. A real database plus an artifact bucket keeps state outside the server, which can then be stateless."},
+    {"q": "Serving code loads `models:/fraud@champion`. How do you promote version 12 to production?", "options": ["Move the champion alias to version 12", "Edit the serving code to load models:/fraud/12", "Transition version 12 to the Production stage", "Delete older versions so 12 becomes the latest"], "answer": 0, "explain": "Aliases are mutable pointers; reassigning champion changes what the serving code loads with no code change, and moving it back is the rollback. Stages are deprecated."},
+    {"q": "An agent gives a wrong answer for one user question. Which MLflow feature shows which retrieval and tool calls led to it?", "options": ["The trace for that request, with its tree of spans", "The run's metrics chart for that experiment", "The registered model's version tags", "The prompt registry's version history"], "answer": 0, "explain": "A trace records each step of a request as a span with inputs, outputs and timing, so you can see where the agent went wrong."},
+    {"q": "You want to check that answers stay under 30 words on every evaluation, cheaply and deterministically. What do you use?", "options": ["A custom @scorer function that counts words", "The Correctness LLM-judge scorer", "A Guidelines scorer saying 'be brief'", "Autologging on the client library"], "answer": 0, "explain": "A code-based scorer is deterministic and costs nothing to run. LLM-judge scorers are for qualities code cannot check, and they call a judge model each time."},
+    {"q": "Clients on laptops can log runs but fail to upload model files, with cloud credential errors. The server uses an S3 artifact store. What would remove the need for client credentials?", "options": ["Start the server with --artifacts-destination so it proxies artifact traffic", "Switch the backend store from Postgres to SQLite", "Call mlflow.set_experiment before logging", "Log models with artifact_path instead of name"], "answer": 0, "explain": "With proxied artifact access, clients send artifacts through the tracking server, which alone holds the bucket credentials."}
+  ]
+}

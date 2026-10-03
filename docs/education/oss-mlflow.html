@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MLflow: tracking, registry and GenAI — OSS Deep Dives | ThavionAI Education</title>
+  <meta name="description" content="Runs, experiments, artifacts and the tracking server; the model registry with aliases; tracing and evaluation for LLM apps." />
+  <meta property="og:title" content="MLflow: tracking, registry and GenAI — ThavionAI Education" />
+  <meta property="og:description" content="Runs, experiments, artifacts and the tracking server; the model registry with aliases; tracing and evaluation for LLM apps." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/oss-mlflow.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-oss" data-module="oss-mlflow">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=oss-mlflow&amp;page=/education/oss-mlflow.html&amp;title=MLflow%3A%20tracking%2C%20registry%20and%20GenAI">Feedback</a>
+    <a href="../education.html#oss" class="nav-cta">All OSS Deep Dives modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#oss">OSS Deep Dives</a> › Stage 2: MLOps platforms</div>
+    <h1>MLflow: tracking, registry and GenAI</h1>
+    <p class="lede">Runs, experiments, artifacts and the tracking server; the model registry with aliases; tracing and evaluation for LLM apps.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">~30 min read</span>
+      <span class="chip">Module 4 of 10</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">MLflow started as experiment tracking for data scientists and has grown into a general AI engineering platform: tracking and a model registry for classical models, and tracing, evaluation and a prompt registry for LLM applications and agents. It is a Python package plus a server, both from <code>mlflow/mlflow</code>, and it runs on a laptop with one command. This lesson covers the MLflow 3 data model, how to run the server properly for a team, promoting models with aliases, and the GenAI features you will reach for when an LLM app misbehaves.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Log parameters, metrics and models to an MLflow tracking server</li><li>Run a team MLflow server with a database backend and object-storage artifacts</li><li>Register model versions and promote them with aliases instead of stages</li><li>Trace an LLM application and evaluate it with built-in and custom scorers</li><li>Version prompts in the prompt registry and load them by URI</li></ul>
+    </div>
+    <section id="the-data-model-experiments-runs-models"><h2>The data model: experiments, runs, models</h2>
+    <p>An <strong>experiment</strong> groups related work, such as "churn model". A <strong>run</strong> is one execution inside it, recording <strong>parameters</strong> (inputs you chose), <strong>metrics</strong> (numbers you measured, optionally per step), <strong>tags</strong>, and <strong>artifacts</strong> (files such as plots or a dataset sample). MLflow 3 adds the <strong>LoggedModel</strong> as a first-class object: a model can be logged with a <code>name</code> and no active run, and later runs, evaluations and traces link back to it.</p>
+    <div class="code"><div class="code-cap">Track a training run and log the model</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import mlflow
+from sklearn.datasets import load_diabetes
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_squared_error
+
+mlflow.set_tracking_uri("http://localhost:5000")
+mlflow.set_experiment("diabetes")
+
+X, y = load_diabetes(return_X_y=True)
+with mlflow.start_run():
+    alpha = 0.5
+    model = Ridge(alpha=alpha).fit(X, y)
+    mlflow.log_param("alpha", alpha)
+    mlflow.log_metric("mse", mean_squared_error(y, model.predict(X)))
+    mlflow.sklearn.log_model(model, name="model", registered_model_name="diabetes-ridge")</code></pre></div>
+    <p><strong>Autologging</strong> (<code>mlflow.sklearn.autolog()</code>, <code>mlflow.pytorch.autolog()</code> and friends) records parameters, metrics and the model for supported libraries without explicit calls. Models are saved with a <strong>flavor</strong> (sklearn, pytorch, transformers) plus the generic <strong>pyfunc</strong> flavor, so anything you log can be loaded with <code>mlflow.pyfunc.load_model(uri)</code> and called with <code>.predict()</code>, whatever library trained it.</p>
+    <div class="callout callout-note"><strong>Note</strong><p>Upgrading from MLflow 2? <code>log_model</code> takes <code>name=</code> instead of <code>artifact_path=</code>, and a run is no longer required to log a model. Old code still runs with deprecation warnings, but fix it before they become errors.</p></div></section>
+  <section id="running-the-server-for-a-team"><h2>Running the server for a team</h2>
+    <p><code>mlflow server</code> (or <code>uvx mlflow server</code> without installing anything) starts the tracking server and UI on port 5000. It has two storage halves. The <strong>backend store</strong> holds metadata: experiments, runs, params, metrics, registry entries. SQLite (<code>mlflow.db</code> in the current directory) is now the default; the older <code>./mlruns</code> file store is in maintenance mode. The <strong>artifact store</strong> holds the large files: models, plots, datasets.</p>
+    <div class="code"><div class="code-cap">A shared server: Postgres for metadata, S3 for artifacts</div><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>mlflow server \
+  --backend-store-uri postgresql://mlflow:CHANGE_ME@db.internal:5432/mlflow \
+  --artifacts-destination s3://acme-mlflow-artifacts \
+  --host 0.0.0.0 \
+  --port 5000</code></pre></div>
+    <figure class="diagram" id="fig-mlflow-server"><div class="diagram-scroll"><svg viewBox="0 0 740 356" role="img" aria-label="Training jobs and LLM apps log runs, metrics, models and traces to the MLflow tracking server. The server writes metadata such as runs, metrics and registry entries to a SQL backend store, and proxies artifacts such as model files to an object storage bucket. A serving process asks the server to resolve models:/name@champion to a specific version, then loads that version&#x27;s files from the bucket." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="mlflow-server-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="mlflow-server-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="mlflow-server-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="mlflow-server-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="mlflow-server-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><polyline points="171.0,70.0 271.0,70.0 271.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#mlflow-server-arrow-default)"/><rect x="206.8" y="51.0" width="28.3" height="16" rx="4" class="dg-label-bg"/><text x="221.0" y="59.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">log</text><polyline points="171.0,286.0 271.0,286.0 271.0,206.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#mlflow-server-arrow-default)"/><rect x="200.8" y="267.0" width="40.5" height="16" rx="4" class="dg-label-bg"/><text x="221.0" y="275.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">trace</text><polyline points="306.0,150.0 306.0,105.0 371.0,105.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#mlflow-server-arrow-default)"/><rect x="309.1" y="86.0" width="58.8" height="16" rx="4" class="dg-label-bg"/><text x="338.5" y="94.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">metadata</text><polyline points="306.0,206.0 306.0,321.0 371.0,321.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#mlflow-server-arrow-default)"/><rect x="309.0" y="255.5" width="89.3" height="16" rx="4" class="dg-label-bg"/><text x="313.0" y="263.5" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">proxied files</text><polyline points="541.0,178.0 341.0,178.0" fill="none" style="stroke:rgba(148,163,184,0.55)" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#mlflow-server-arrow-muted)"/><rect x="396.4" y="132.0" width="89.3" height="16" rx="4" class="dg-label-bg"/><text x="441.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">resolve alias</text><polyline points="611.0,206.0 611.0,286.0 511.0,286.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#mlflow-server-arrow-default)"/><rect x="519.4" y="267.0" width="83.2" height="16" rx="4" class="dg-label-bg"/><text x="561.0" y="275.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">load version</text><rect x="31" y="42.0" width="140" height="56" rx="28.0" class="dg-node dg-actor"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Training jobs</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">runs, models</text><rect x="31" y="258.0" width="140" height="56" rx="28.0" class="dg-node dg-actor"/><text x="101.0" y="279.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">LLM apps</text><text x="101.0" y="297.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">traces, evals</text><rect x="201" y="150.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="271.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Tracking server</text><text x="271.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">UI, REST, registry</text><path d="M371,49.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M371,49.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Backend store</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">Postgres: metadata</text><path d="M371,265.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M371,265.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="441.0" y="279.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Artifact store</text><text x="441.0" y="297.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">S3: model files</text><rect x="541" y="150.0" width="140" height="56" rx="8" class="dg-node dg-ok"/><text x="611.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#6ee7b7">Serving</text><text x="611.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">models:/x@champion</text></svg></div><figcaption>The tracking server is stateless: metadata goes to a database, files go to object storage, and serving code finds the right model through a registry alias.</figcaption></figure>
+    <ul><li>With <code>--artifacts-destination</code>, the server <strong>proxies</strong> artifact uploads and downloads, so clients need only the server URL, not cloud credentials.</li><li>SQLite is fine for one person; for a team use Postgres or MySQL, which handle concurrent writers and survive a pod restart.</li><li>The open-source server ships basic authentication and workspaces, but put it behind your SSO proxy and TLS before exposing it beyond a VPN.</li><li>On Kubernetes, run the server as a stateless Deployment (there is a Helm chart in the repo's <code>charts/</code> folder); all state lives in the database and the bucket.</li></ul></section>
+  <section id="the-model-registry-versions-and-aliases"><h2>The model registry: versions and aliases</h2>
+    <p>A <strong>registered model</strong> is a name, such as <code>diabetes-ridge</code>, holding numbered <strong>versions</strong>. Each version points at a logged model and remembers which run produced it, so you can always answer "what data and parameters made the thing in production?"</p>
+    <p>Promote with <strong>aliases</strong>: mutable, named pointers to one version, such as <code>champion</code> or <code>challenger</code>. Your serving code loads <code>models:/diabetes-ridge@champion</code>; promoting a new version is a single API call that moves the alias, and rolling back moves it back. The older fixed stages (Staging, Production) are deprecated in favour of aliases and tags.</p>
+    <div class="code"><div class="code-cap">Promote version 7 and load whatever champion points at</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import mlflow
+from mlflow import MlflowClient
+
+client = MlflowClient()
+client.set_registered_model_alias("diabetes-ridge", "champion", 7)
+client.set_model_version_tag("diabetes-ridge", "7", "validated_by", "ci")
+
+model = mlflow.pyfunc.load_model("models:/diabetes-ridge@champion")</code></pre></div>
+    <p>To serve, <code>mlflow models serve -m models:/diabetes-ridge@champion -p 8080</code> starts a local REST endpoint, and <code>mlflow models build-docker</code> packages a model into an image you can run anywhere, including KServe.</p></section>
+  <section id="genai-tracing-evaluation-and-prompts"><h2>GenAI: tracing, evaluation and prompts</h2>
+    <p>For LLM applications the questions change: not "what was the loss?" but "what did the agent retrieve, which tool did it call, why was the answer wrong, and did my prompt change make things better?" MLflow answers with <strong>traces</strong>: a tree of spans per request, recording inputs, outputs, latency and token usage. One line, such as <code>mlflow.openai.autolog()</code>, instruments a supported client library; the <code>@mlflow.trace</code> decorator instruments your own functions. Traces are OpenTelemetry-compatible.</p>
+    <div class="code"><div class="code-cap">Trace an app and evaluate it on a small dataset</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import mlflow
+from mlflow.genai import scorer
+from mlflow.genai.scorers import Correctness, Guidelines
+
+
+@mlflow.trace
+def answer(question: str) -&gt; str:
+    return call_llm(f"Answer briefly: {question}")  # your model call
+
+
+@scorer
+def is_short(outputs: str) -&gt; bool:
+    return len(outputs.split()) &lt;= 30
+
+
+data = [
+    {"inputs": {"question": "What does SLO stand for?"},
+     "expectations": {"expected_response": "Service level objective"}},
+]
+mlflow.genai.evaluate(
+    data=data,
+    predict_fn=answer,
+    scorers=[Correctness(), Guidelines(name="plain", guidelines="No jargon."), is_short],
+)</code></pre></div>
+    <p><code>Correctness</code> and <code>Guidelines</code> are <strong>LLM-judge</strong> scorers: they ask a judge model, which you configure, to grade each output. Custom <code>@scorer</code> functions are plain code and cost nothing to run. Every evaluation run is stored with its traces, so you can open a failing example and see exactly which step went wrong.</p>
+    <p>The <strong>prompt registry</strong> gives prompts the same treatment as models: <code>mlflow.genai.register_prompt(name=..., template=...)</code> creates a new version on each call, <code>mlflow.genai.load_prompt("prompts:/summarize/3")</code> loads one, and aliases work here too, so a prompt change can be reviewed, evaluated and rolled back without a code deploy.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Track, register, promote, and evaluate</h2>
+    <ol><li>Run <code>pip install mlflow scikit-learn</code>, then start a server with <code>mlflow server --port 5000</code> and open the UI.</li><li>Run the training script from this lesson three times with <code>alpha</code> values 0.1, 0.5 and 2.0, and compare the runs side by side in the UI.</li><li>In the registry, check that <code>diabetes-ridge</code> has three versions; set the <code>champion</code> alias on the best one with <code>MlflowClient</code>.</li><li>Serve it with <code>mlflow models serve -m models:/diabetes-ridge@champion -p 8080 --env-manager local</code> and send it a request with curl.</li><li>Move <code>champion</code> to another version, restart the server, and confirm the predictions change without any code change.</li><li>Wrap any function in <code>@mlflow.trace</code>, call it a few times, and inspect the spans in the Traces tab.</li><li>Write one custom <code>@scorer</code> and run <code>mlflow.genai.evaluate</code> on a five-row dataset; open a failing row's trace.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>MLflow: tracking, registry and GenAI — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Experiment &gt; run &gt; params, metrics, artifacts; MLflow 3 adds LoggedModel as a first-class object.</li><li>Backend store holds metadata (database), artifact store holds files (object storage).</li><li>Promote with aliases (<code>models:/name@champion</code>), not deprecated stages.</li><li>Every model loads as pyfunc and serves through the same predict interface.</li><li>Traces explain LLM failures; evaluation with scorers measures whether a change helped.</li><li>Version prompts in the registry so prompt changes are reviewable and reversible.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Tracking</h3><table><tbody><tr><td><code>mlflow.set_tracking_uri("http://host:5000")</code></td><td>Point the client at a server</td></tr><tr><td><code>mlflow.set_experiment("name")</code></td><td>Create or select an experiment</td></tr><tr><td><code>with mlflow.start_run(): ...</code></td><td>Open a run; params and metrics attach to it</td></tr><tr><td><code>mlflow.log_param / log_metric / log_artifact</code></td><td>Record inputs, numbers and files</td></tr><tr><td><code>mlflow.sklearn.autolog()</code></td><td>Log everything automatically for a library</td></tr></tbody></table></div><div class="cheat-group"><h3>Models and registry</h3><table><tbody><tr><td><code>mlflow.sklearn.log_model(m, name="model", registered_model_name="x")</code></td><td>Log and register in one call</td></tr><tr><td><code>client.set_registered_model_alias("x", "champion", 7)</code></td><td>Point an alias at a version</td></tr><tr><td><code>mlflow.pyfunc.load_model("models:/x@champion")</code></td><td>Load by alias, version or run URI</td></tr><tr><td><code>mlflow models serve -m models:/x@champion -p 8080</code></td><td>Local REST scoring server</td></tr><tr><td><code>mlflow models build-docker -m models:/x/7 -n img:tag</code></td><td>Package a model as a container image</td></tr></tbody></table></div><div class="cheat-group"><h3>Server</h3><table><tbody><tr><td><code>mlflow server --port 5000</code></td><td>Local server, SQLite backend by default</td></tr><tr><td><code>--backend-store-uri postgresql://...</code></td><td>Shared metadata database</td></tr><tr><td><code>--artifacts-destination s3://bucket</code></td><td>Proxied artifact storage</td></tr></tbody></table></div><div class="cheat-group"><h3>GenAI</h3><table><tbody><tr><td><code>@mlflow.trace</code></td><td>Record a function as a span in a trace</td></tr><tr><td><code>mlflow.openai.autolog()</code></td><td>Trace a supported client library automatically</td></tr><tr><td><code>mlflow.genai.evaluate(data=, predict_fn=, scorers=[...])</code></td><td>Score an app on a dataset</td></tr><tr><td><code>@scorer def name(outputs) -&gt; bool</code></td><td>Custom, code-based scorer</td></tr><tr><td><code>mlflow.genai.load_prompt("prompts:/name/3")</code></td><td>Load a versioned prompt</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Running a team server on SQLite inside a container with no volume, and losing every run on restart.</li><li>Hard-coding <code>models:/x/7</code> in serving code, so every promotion needs a deploy.</li><li>Logging huge artifacts on every step and filling the bucket.</li><li>Judging an LLM change by reading three outputs instead of running an evaluation.</li><li>Exposing the tracking server publicly with no authentication in front of it.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "Your team server runs in a container with the default SQLite backend and no volume. After a node restart every experiment is gone. What is the fix?", "options": ["Use Postgres or MySQL as the backend store and object storage for artifacts", "Switch to the ./mlruns file store, which is restart-safe", "Enable autologging so runs are re-created automatically", "Increase the container's memory so the database stays cached"], "answer": 0, "explain": "The backend store holds all metadata; SQLite on the container filesystem disappears with the container. A real database plus an artifact bucket keeps state outside the server, which can then be stateless."}, {"q": "Serving code loads `models:/fraud@champion`. How do you promote version 12 to production?", "options": ["Move the champion alias to version 12", "Edit the serving code to load models:/fraud/12", "Transition version 12 to the Production stage", "Delete older versions so 12 becomes the latest"], "answer": 0, "explain": "Aliases are mutable pointers; reassigning champion changes what the serving code loads with no code change, and moving it back is the rollback. Stages are deprecated."}, {"q": "An agent gives a wrong answer for one user question. Which MLflow feature shows which retrieval and tool calls led to it?", "options": ["The trace for that request, with its tree of spans", "The run's metrics chart for that experiment", "The registered model's version tags", "The prompt registry's version history"], "answer": 0, "explain": "A trace records each step of a request as a span with inputs, outputs and timing, so you can see where the agent went wrong."}, {"q": "You want to check that answers stay under 30 words on every evaluation, cheaply and deterministically. What do you use?", "options": ["A custom @scorer function that counts words", "The Correctness LLM-judge scorer", "A Guidelines scorer saying 'be brief'", "Autologging on the client library"], "answer": 0, "explain": "A code-based scorer is deterministic and costs nothing to run. LLM-judge scorers are for qualities code cannot check, and they call a judge model each time."}, {"q": "Clients on laptops can log runs but fail to upload model files, with cloud credential errors. The server uses an S3 artifact store. What would remove the need for client credentials?", "options": ["Start the server with --artifacts-destination so it proxies artifact traffic", "Switch the backend store from Postgres to SQLite", "Call mlflow.set_experiment before logging", "Log models with artifact_path instead of name"], "answer": 0, "explain": "With proxied artifact access, clients send artifacts through the tracking server, which alone holds the bucket credentials."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="oss-kubeflow.html"><span>← Previous</span><strong>Kubeflow: the ML platform on Kubernetes</strong></a>
+    <a class="pager-up" href="../education.html#oss">All OSS Deep Dives modules</a>
+    <span class="pager-link pager-next is-empty"></span>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=oss-mlflow&amp;page=/education/oss-mlflow.html&amp;title=MLflow%3A%20tracking%2C%20registry%20and%20GenAI">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=oss-mlflow&amp;page=/education/oss-mlflow.html&amp;title=MLflow%3A%20tracking%2C%20registry%20and%20GenAI">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>
