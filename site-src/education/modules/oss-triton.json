@@ -1,0 +1,130 @@
+{
+  "id": "oss-triton",
+  "minutes": 35,
+  "intro": "Most companies serve more than one kind of model: an image classifier exported to ONNX, a recommender in PyTorch, a gradient-boosted tree, a tokenizer in Python, and an LLM. NVIDIA Triton Inference Server, open source in `triton-inference-server/server` and now branded by NVIDIA as Dynamo-Triton, serves all of them behind one HTTP and gRPC API, with batching and concurrency handled for you. This lesson covers the model repository, backends, dynamic batching and instance groups, ensembles and Python business logic, and how to measure and tune with Perf Analyzer and Model Analyzer.",
+  "objectives": [
+    "Lay out a model repository with versions and a config.pbtxt",
+    "Pick backends and run several frameworks in one server",
+    "Raise GPU throughput with dynamic batching and instance groups",
+    "Chain pre-processing, model and post-processing with an ensemble or Python BLS",
+    "Measure latency and throughput and choose a configuration with the analyzer tools"
+  ],
+  "sections": [
+    {
+      "heading": "The model repository",
+      "blocks": [
+        {"type": "p", "text": "Triton serves whatever is in its **model repository**: a directory (local, or object storage such as S3, GCS or Azure Blob) with one folder per model, numbered version sub-folders holding the model files, and an optional `config.pbtxt` describing the model in protobuf text format."},
+        {"type": "code", "lang": "text", "caption": "Two models, one with two versions", "code": "models/\n  resnet/\n    config.pbtxt\n    1/model.onnx\n    2/model.onnx\n  tokenizer/\n    config.pbtxt\n    1/model.py"},
+        {"type": "code", "lang": "text", "caption": "resnet/config.pbtxt", "code": "name: \"resnet\"\nbackend: \"onnxruntime\"\nmax_batch_size: 32\ninput [\n  { name: \"input\", data_type: TYPE_FP32, dims: [ 3, 224, 224 ] }\n]\noutput [\n  { name: \"logits\", data_type: TYPE_FP32, dims: [ 1000 ] }\n]\nversion_policy: { latest: { num_versions: 1 } }"},
+        {"type": "p", "text": "`max_batch_size` above zero tells Triton the first dimension is a batch dimension it may fill. The **version policy** decides which versions are served: the latest N, all, or a specific list. The **model control mode** decides how changes are picked up: `none` loads everything at start, `poll` watches the repository and reloads changed models, and `explicit` loads and unloads only on API calls, which is what you want when a deployment pipeline controls rollouts."}
+      ]
+    },
+    {
+      "heading": "Backends: many frameworks, one server",
+      "blocks": [
+        {"type": "p", "text": "A **backend** is the plugin that actually executes a model. Triton ships or supports backends for TensorRT, ONNX Runtime, PyTorch, OpenVINO, Python, RAPIDS FIL for tree models, TensorRT-LLM and vLLM, and you can write your own in C++ or Python. Each model's `config.pbtxt` names its backend, so one server process can run an ONNX vision model, a PyTorch ranker and a Python tokenizer side by side, sharing GPUs."},
+        {"type": "p", "text": "The **Python backend** runs a `model.py` that defines a `TritonPythonModel` class with `initialize`, `execute` and `finalize`. It is ideal for pre- and post-processing, or for models in libraries that have no dedicated backend."},
+        {"type": "code", "lang": "python", "caption": "tokenizer/1/model.py: a minimal Python backend model", "code": "import numpy as np\nimport triton_python_backend_utils as pb_utils\n\n\nclass TritonPythonModel:\n    def initialize(self, args):\n        self.vocab = {\"hello\": 1, \"world\": 2}\n\n    def execute(self, requests):\n        responses = []\n        for request in requests:\n            text = pb_utils.get_input_tensor_by_name(request, \"TEXT\").as_numpy()\n            words = text[0].decode().lower().split()\n            ids = np.array([[self.vocab.get(w, 0) for w in words]], dtype=np.int64)\n            out = pb_utils.Tensor(\"IDS\", ids)\n            responses.append(pb_utils.InferenceResponse(output_tensors=[out]))\n        return responses"},
+        {"type": "callout", "kind": "note", "text": "The server speaks the KServe v2 inference protocol: HTTP on port 8000, gRPC on 8001, Prometheus metrics on 8002. Health checks are `/v2/health/live` and `/v2/health/ready`, and inference is a POST to `/v2/models/NAME/infer`."}
+      ]
+    },
+    {
+      "heading": "Throughput: dynamic batching and instance groups",
+      "blocks": [
+        {"type": "p", "text": "GPUs are far more efficient on a batch of 16 than on 16 requests of one. The **dynamic batcher** holds incoming requests for a very short time and combines them into larger batches before calling the model. `max_queue_delay_microseconds` caps how long a request may wait, which is the lever between latency and throughput."},
+        {"type": "code", "lang": "text", "caption": "Batch up to 32, wait at most 2 ms, run two copies on GPU 0", "code": "dynamic_batching {\n  max_queue_delay_microseconds: 2000\n}\ninstance_group [\n  { count: 2, kind: KIND_GPU, gpus: [ 0 ] }\n]"},
+        {"type": "list", "items": [
+          "**Instance groups** run several copies of a model so one can compute while another copies data; `KIND_CPU` places a model on CPU instead.",
+          "Leave `preferred_batch_size` unset unless the model performs much better at specific sizes, such as a TensorRT engine built for them.",
+          "The **sequence batcher** handles stateful models where all requests of one sequence must go to the same instance.",
+          "The **response cache** can return stored results for identical requests, useful for deterministic models with repeated inputs."
+        ]}
+      ]
+    },
+    {
+      "heading": "Pipelines: ensembles and BLS",
+      "blocks": [
+        {"type": "p", "text": "Real requests often need several steps: decode an image, run a detector, crop, run a classifier, format the answer. An **ensemble** is a model whose `config.pbtxt` declares a fixed graph of other models and how outputs map to inputs; Triton runs the steps server-side without round trips to the client. When the flow needs logic, such as loops, conditionals or calling a model only if a score is high, **Business Logic Scripting** (BLS) lets a Python backend model call other models in the same server."},
+        {"type": "p", "text": "For LLMs, Triton is usually paired with an LLM-specific backend (TensorRT-LLM or vLLM) that handles in-flight batching and the KV cache, while Triton contributes the protocol, metrics, multi-model hosting and pre- and post-processing. If you serve only LLMs, a dedicated engine or a distributed framework such as Dynamo (next lesson) may be simpler."}
+      ]
+    },
+    {
+      "heading": "Measure, then tune",
+      "blocks": [
+        {"type": "p", "text": "**Perf Analyzer** (`perf_analyzer`, in the SDK container) sends load at chosen concurrency levels and reports throughput and latency percentiles, including how much time requests spent queued versus computing. **Model Analyzer** automates the search: it tries combinations of batch sizes, instance counts and batching delays and recommends configurations that meet your latency or memory constraints."},
+        {"type": "code", "lang": "bash", "caption": "Throughput and latency at concurrency 1 to 16", "code": "perf_analyzer -m resnet -u localhost:8001 -i grpc \\\n  --concurrency-range 1:16:4 \\\n  --percentile 95"},
+        {"type": "table", "headers": ["Metric", "Watch for"], "rows": [
+          ["`nv_inference_request_success` / `_failure`", "Request rate and errors per model"],
+          ["`nv_inference_queue_duration_us`", "Time waiting for an instance: rising means add instances or GPUs"],
+          ["`nv_inference_compute_infer_duration_us`", "Pure model time: rising means a slower model or GPU contention"],
+          ["`nv_inference_pending_request_count`", "Requests waiting right now, a good autoscaling signal"],
+          ["`nv_gpu_utilization`, `nv_gpu_memory_used_bytes`", "Headroom for more instances or models"]
+        ]},
+        {"type": "p", "text": "Divide `nv_inference_count` (inferences) by `nv_inference_exec_count` (model executions) to get the average batch size actually achieved; if it stays near 1 under load, batching is not happening and your config or client is the reason."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Serve two frameworks and watch batching work",
+    "steps": [
+      "Clone the server repository at the release branch matching the container you will use, and run `docs/examples/fetch_models.sh` to download the example models.",
+      "Start the matching `tritonserver` container with the example model repository mounted at `/models` (add `--gpus=1` if you have a GPU; the quickstart also covers CPU-only).",
+      "Check readiness with `curl localhost:8000/v2/health/ready` and list models with a POST to `/v2/repository/index`.",
+      "Add the Python tokenizer model from this lesson with a config.pbtxt declaring a `TEXT` string input and an `IDS` output, and call it over HTTP.",
+      "Run `perf_analyzer` against an image model at concurrency 1 and 16 and note throughput and p95 latency.",
+      "Add `dynamic_batching { max_queue_delay_microseconds: 2000 }`, reload, rerun, and compare; compute average batch size from `nv_inference_count` over `nv_inference_exec_count`.",
+      "Stop the containers when you are done."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Model repository: model folder, numbered versions, config.pbtxt.",
+      "One server, many backends: ONNX, PyTorch, TensorRT, Python, FIL, vLLM, TensorRT-LLM.",
+      "Dynamic batching trades a little queue delay for much higher GPU throughput.",
+      "Instance groups run multiple copies to overlap compute and data movement.",
+      "Ensembles for fixed graphs, Python BLS for pipelines with logic.",
+      "Queue time rising means add capacity; compute time rising means a slower model."
+    ],
+    "groups": [
+      {"title": "Server", "items": [
+        {"syntax": "tritonserver --model-repository=/models", "desc": "Start with a local or s3:// repository"},
+        {"syntax": "--model-control-mode=explicit --load-model=NAME", "desc": "Load only what you ask for"},
+        {"syntax": "--model-control-mode=poll --repository-poll-secs=30", "desc": "Reload changed models automatically"},
+        {"syntax": "8000 / 8001 / 8002", "desc": "HTTP / gRPC / metrics ports"},
+        {"syntax": "GET /v2/health/ready", "desc": "Readiness probe"}
+      ]},
+      {"title": "config.pbtxt", "items": [
+        {"syntax": "backend: \"onnxruntime\"", "desc": "Which backend executes the model"},
+        {"syntax": "max_batch_size: 32", "desc": "Enable batching on the first dimension"},
+        {"syntax": "dynamic_batching { max_queue_delay_microseconds: 2000 }", "desc": "Batch requests, wait at most 2 ms"},
+        {"syntax": "instance_group [{ count: 2, kind: KIND_GPU }]", "desc": "Run two copies per GPU"},
+        {"syntax": "version_policy: { latest: { num_versions: 1 } }", "desc": "Serve only the newest version"}
+      ]},
+      {"title": "Inference API", "items": [
+        {"syntax": "POST /v2/models/NAME/infer", "desc": "Run inference (KServe v2 protocol)"},
+        {"syntax": "GET /v2/models/NAME/config", "desc": "The effective model configuration"},
+        {"syntax": "POST /v2/repository/models/NAME/load", "desc": "Load or reload a model in explicit mode"}
+      ]},
+      {"title": "Tools and metrics", "items": [
+        {"syntax": "perf_analyzer -m NAME --concurrency-range 1:16:4", "desc": "Load test a model"},
+        {"syntax": "model-analyzer profile --model-repository /models --profile-models NAME", "desc": "Search for the best config"},
+        {"syntax": "nv_inference_queue_duration_us", "desc": "Time spent waiting for an instance"},
+        {"syntax": "nv_inference_count / nv_inference_exec_count", "desc": "Average achieved batch size"}
+      ]}
+    ],
+    "pitfalls": [
+      "Setting max_batch_size to 0 and wondering why dynamic batching never batches.",
+      "A long max_queue_delay that quietly adds latency to every request at low traffic.",
+      "Poll mode in production, so a half-copied model file gets loaded mid-upload.",
+      "Doing pre-processing on the client and shipping huge raw tensors over the network.",
+      "Tuning by intuition instead of Perf Analyzer and Model Analyzer runs."
+    ]
+  },
+  "quiz": [
+    {"q": "Your ONNX model's GPU sits at 30% utilisation under heavy traffic, and metrics show an average batch size of 1. Which change helps most?", "options": ["Enable dynamic_batching so Triton combines concurrent requests", "Switch the model control mode from explicit to poll", "Lower max_batch_size to 1 to reduce queueing", "Move the model to KIND_CPU instances"], "answer": 0, "explain": "Without dynamic batching each request runs alone. The dynamic batcher groups concurrent requests into larger batches, which is how GPUs reach high throughput."},
+    {"q": "Request latency doubled. nv_inference_queue_duration_us rose sharply while nv_inference_compute_infer_duration_us stayed flat. What does that indicate?", "options": ["Requests are waiting for a free instance: add instances or replicas", "The model itself became slower after a version change", "The client network is dropping packets", "The response cache returns stale results"], "answer": 0, "explain": "Compute time per execution is unchanged, so the model is not slower; the extra time is spent queued. More instances, GPUs or replicas reduce the wait."},
+    {"q": "A request must run a detector, and only if it finds a face, run a second model. Which Triton feature fits?", "options": ["Business Logic Scripting from a Python backend model", "A static ensemble graph", "The sequence batcher", "An instance group with count 2"], "answer": 0, "explain": "Ensembles are fixed graphs without conditionals. BLS lets Python code call other models and decide at run time whether to call the second one."},
+    {"q": "Your CD pipeline uploads new model versions to S3 and should decide exactly when each is served. Which model control mode suits it?", "options": ["explicit, loading models through the repository API", "poll, reloading whenever files change", "none, loading everything at start-up", "poll with a one-second interval"], "answer": 0, "explain": "Explicit mode only loads and unloads on API calls, so the pipeline controls the moment a version goes live and never serves a half-uploaded file."},
+    {"q": "Which ports does a default Triton server expose?", "options": ["8000 for HTTP, 8001 for gRPC, 8002 for metrics", "8080 for HTTP, 9090 for gRPC, 9100 for metrics", "5000 for HTTP, 5001 for gRPC, 5002 for metrics", "4317 for gRPC, 4318 for HTTP, 8888 for metrics"], "answer": 0, "explain": "Triton listens on 8000 for HTTP/REST, 8001 for gRPC and 8002 for Prometheus metrics by default; the last option lists OpenTelemetry Collector ports."}
+  ]
+}

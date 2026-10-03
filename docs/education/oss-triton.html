@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NVIDIA Triton Inference Server — OSS Deep Dives | ThavionAI Education</title>
+  <meta name="description" content="The model repository, backends, dynamic batching, ensembles and model analyzer — serving many frameworks behind one API." />
+  <meta property="og:title" content="NVIDIA Triton Inference Server — ThavionAI Education" />
+  <meta property="og:description" content="The model repository, backends, dynamic batching, ensembles and model analyzer — serving many frameworks behind one API." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/oss-triton.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-oss" data-module="oss-triton">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=oss-triton&amp;page=/education/oss-triton.html&amp;title=NVIDIA%20Triton%20Inference%20Server">Feedback</a>
+    <a href="../education.html#oss" class="nav-cta">All OSS Deep Dives modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#oss">OSS Deep Dives</a> › Stage 4: LLM inference infrastructure</div>
+    <h1>NVIDIA Triton Inference Server</h1>
+    <p class="lede">The model repository, backends, dynamic batching, ensembles and model analyzer — serving many frameworks behind one API.</p>
+    <div class="meta">
+      <span class="chip">Advanced</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 9 of 10</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">Most companies serve more than one kind of model: an image classifier exported to ONNX, a recommender in PyTorch, a gradient-boosted tree, a tokenizer in Python, and an LLM. NVIDIA Triton Inference Server, open source in <code>triton-inference-server/server</code> and now branded by NVIDIA as Dynamo-Triton, serves all of them behind one HTTP and gRPC API, with batching and concurrency handled for you. This lesson covers the model repository, backends, dynamic batching and instance groups, ensembles and Python business logic, and how to measure and tune with Perf Analyzer and Model Analyzer.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Lay out a model repository with versions and a config.pbtxt</li><li>Pick backends and run several frameworks in one server</li><li>Raise GPU throughput with dynamic batching and instance groups</li><li>Chain pre-processing, model and post-processing with an ensemble or Python BLS</li><li>Measure latency and throughput and choose a configuration with the analyzer tools</li></ul>
+    </div>
+    <section id="the-model-repository"><h2>The model repository</h2>
+    <p>Triton serves whatever is in its <strong>model repository</strong>: a directory (local, or object storage such as S3, GCS or Azure Blob) with one folder per model, numbered version sub-folders holding the model files, and an optional <code>config.pbtxt</code> describing the model in protobuf text format.</p>
+    <div class="code"><div class="code-cap">Two models, one with two versions</div><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>models/
+  resnet/
+    config.pbtxt
+    1/model.onnx
+    2/model.onnx
+  tokenizer/
+    config.pbtxt
+    1/model.py</code></pre></div>
+    <div class="code"><div class="code-cap">resnet/config.pbtxt</div><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>name: "resnet"
+backend: "onnxruntime"
+max_batch_size: 32
+input [
+  { name: "input", data_type: TYPE_FP32, dims: [ 3, 224, 224 ] }
+]
+output [
+  { name: "logits", data_type: TYPE_FP32, dims: [ 1000 ] }
+]
+version_policy: { latest: { num_versions: 1 } }</code></pre></div>
+    <p><code>max_batch_size</code> above zero tells Triton the first dimension is a batch dimension it may fill. The <strong>version policy</strong> decides which versions are served: the latest N, all, or a specific list. The <strong>model control mode</strong> decides how changes are picked up: <code>none</code> loads everything at start, <code>poll</code> watches the repository and reloads changed models, and <code>explicit</code> loads and unloads only on API calls, which is what you want when a deployment pipeline controls rollouts.</p></section>
+  <section id="backends-many-frameworks-one-server"><h2>Backends: many frameworks, one server</h2>
+    <p>A <strong>backend</strong> is the plugin that actually executes a model. Triton ships or supports backends for TensorRT, ONNX Runtime, PyTorch, OpenVINO, Python, RAPIDS FIL for tree models, TensorRT-LLM and vLLM, and you can write your own in C++ or Python. Each model's <code>config.pbtxt</code> names its backend, so one server process can run an ONNX vision model, a PyTorch ranker and a Python tokenizer side by side, sharing GPUs.</p>
+    <p>The <strong>Python backend</strong> runs a <code>model.py</code> that defines a <code>TritonPythonModel</code> class with <code>initialize</code>, <code>execute</code> and <code>finalize</code>. It is ideal for pre- and post-processing, or for models in libraries that have no dedicated backend.</p>
+    <div class="code"><div class="code-cap">tokenizer/1/model.py: a minimal Python backend model</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import numpy as np
+import triton_python_backend_utils as pb_utils
+
+
+class TritonPythonModel:
+    def initialize(self, args):
+        self.vocab = {"hello": 1, "world": 2}
+
+    def execute(self, requests):
+        responses = []
+        for request in requests:
+            text = pb_utils.get_input_tensor_by_name(request, "TEXT").as_numpy()
+            words = text[0].decode().lower().split()
+            ids = np.array([[self.vocab.get(w, 0) for w in words]], dtype=np.int64)
+            out = pb_utils.Tensor("IDS", ids)
+            responses.append(pb_utils.InferenceResponse(output_tensors=[out]))
+        return responses</code></pre></div>
+    <div class="callout callout-note"><strong>Note</strong><p>The server speaks the KServe v2 inference protocol: HTTP on port 8000, gRPC on 8001, Prometheus metrics on 8002. Health checks are <code>/v2/health/live</code> and <code>/v2/health/ready</code>, and inference is a POST to <code>/v2/models/NAME/infer</code>.</p></div></section>
+  <section id="throughput-dynamic-batching-and-instance-groups"><h2>Throughput: dynamic batching and instance groups</h2>
+    <p>GPUs are far more efficient on a batch of 16 than on 16 requests of one. The <strong>dynamic batcher</strong> holds incoming requests for a very short time and combines them into larger batches before calling the model. <code>max_queue_delay_microseconds</code> caps how long a request may wait, which is the lever between latency and throughput.</p>
+    <div class="code"><div class="code-cap">Batch up to 32, wait at most 2 ms, run two copies on GPU 0</div><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>dynamic_batching {
+  max_queue_delay_microseconds: 2000
+}
+instance_group [
+  { count: 2, kind: KIND_GPU, gpus: [ 0 ] }
+]</code></pre></div>
+    <figure class="diagram" id="fig-triton-flow"><div class="diagram-scroll"><svg viewBox="0 0 570 356" role="img" aria-label="Clients send requests over HTTP on port 8000 or gRPC on port 8001 using the KServe v2 protocol. Triton routes each request to the model&#x27;s scheduler, where the dynamic batcher groups concurrent requests. Batches run on model instances: an ONNX Runtime instance group on the GPU, a Python backend for pre- and post-processing, and a vLLM backend for an LLM." style="width:100%;max-width:570px;min-width:540px;height:auto;display:block"><defs><marker id="triton-flow-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="triton-flow-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="triton-flow-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="triton-flow-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="triton-flow-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><polyline points="171.0,178.0 201.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#triton-flow-arrow-default)"/><rect x="156.6" y="132.0" width="58.8" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">requests</text><polyline points="271.0,150.0 271.0,70.0 371.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#triton-flow-arrow-default)"/><rect x="294.6" y="51.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="321.0" y="59.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">batches</text><polyline points="341.0,178.0 371.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#triton-flow-arrow-default)"/><polyline points="301.0,206.0 301.0,316.0 371.0,316.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#triton-flow-arrow-default)"/><rect x="31" y="150.0" width="140" height="56" rx="28.0" class="dg-node dg-actor"/><text x="101.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Clients</text><text x="101.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">HTTP :8000, gRPC :8001</text><rect x="201" y="150.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="271.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Dynamic batcher</text><text x="271.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">per-model queue</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">ONNX Runtime</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">2 GPU instances</text><rect x="371" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Python backend</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">pre/post, BLS</text><rect x="371" y="258.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="441.0" y="279.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">vLLM backend</text><text x="441.0" y="297.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">LLM</text></svg></div><figcaption>Triton puts a scheduler and dynamic batcher in front of every model, so concurrent requests are grouped into batches and run on whichever backend the model's config names.</figcaption></figure>
+    <ul><li><strong>Instance groups</strong> run several copies of a model so one can compute while another copies data; <code>KIND_CPU</code> places a model on CPU instead.</li><li>Leave <code>preferred_batch_size</code> unset unless the model performs much better at specific sizes, such as a TensorRT engine built for them.</li><li>The <strong>sequence batcher</strong> handles stateful models where all requests of one sequence must go to the same instance.</li><li>The <strong>response cache</strong> can return stored results for identical requests, useful for deterministic models with repeated inputs.</li></ul></section>
+  <section id="pipelines-ensembles-and-bls"><h2>Pipelines: ensembles and BLS</h2>
+    <p>Real requests often need several steps: decode an image, run a detector, crop, run a classifier, format the answer. An <strong>ensemble</strong> is a model whose <code>config.pbtxt</code> declares a fixed graph of other models and how outputs map to inputs; Triton runs the steps server-side without round trips to the client. When the flow needs logic, such as loops, conditionals or calling a model only if a score is high, <strong>Business Logic Scripting</strong> (BLS) lets a Python backend model call other models in the same server.</p>
+    <p>For LLMs, Triton is usually paired with an LLM-specific backend (TensorRT-LLM or vLLM) that handles in-flight batching and the KV cache, while Triton contributes the protocol, metrics, multi-model hosting and pre- and post-processing. If you serve only LLMs, a dedicated engine or a distributed framework such as Dynamo (next lesson) may be simpler.</p></section>
+  <section id="measure-then-tune"><h2>Measure, then tune</h2>
+    <p><strong>Perf Analyzer</strong> (<code>perf_analyzer</code>, in the SDK container) sends load at chosen concurrency levels and reports throughput and latency percentiles, including how much time requests spent queued versus computing. <strong>Model Analyzer</strong> automates the search: it tries combinations of batch sizes, instance counts and batching delays and recommends configurations that meet your latency or memory constraints.</p>
+    <div class="code"><div class="code-cap">Throughput and latency at concurrency 1 to 16</div><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>perf_analyzer -m resnet -u localhost:8001 -i grpc \
+  --concurrency-range 1:16:4 \
+  --percentile 95</code></pre></div>
+    <div class="table-wrap"><table><thead><tr><th>Metric</th><th>Watch for</th></tr></thead><tbody><tr><td><code>nv_inference_request_success</code> / <code>_failure</code></td><td>Request rate and errors per model</td></tr><tr><td><code>nv_inference_queue_duration_us</code></td><td>Time waiting for an instance: rising means add instances or GPUs</td></tr><tr><td><code>nv_inference_compute_infer_duration_us</code></td><td>Pure model time: rising means a slower model or GPU contention</td></tr><tr><td><code>nv_inference_pending_request_count</code></td><td>Requests waiting right now, a good autoscaling signal</td></tr><tr><td><code>nv_gpu_utilization</code>, <code>nv_gpu_memory_used_bytes</code></td><td>Headroom for more instances or models</td></tr></tbody></table></div>
+    <p>Divide <code>nv_inference_count</code> (inferences) by <code>nv_inference_exec_count</code> (model executions) to get the average batch size actually achieved; if it stays near 1 under load, batching is not happening and your config or client is the reason.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Serve two frameworks and watch batching work</h2>
+    <ol><li>Clone the server repository at the release branch matching the container you will use, and run <code>docs/examples/fetch_models.sh</code> to download the example models.</li><li>Start the matching <code>tritonserver</code> container with the example model repository mounted at <code>/models</code> (add <code>--gpus=1</code> if you have a GPU; the quickstart also covers CPU-only).</li><li>Check readiness with <code>curl localhost:8000/v2/health/ready</code> and list models with a POST to <code>/v2/repository/index</code>.</li><li>Add the Python tokenizer model from this lesson with a config.pbtxt declaring a <code>TEXT</code> string input and an <code>IDS</code> output, and call it over HTTP.</li><li>Run <code>perf_analyzer</code> against an image model at concurrency 1 and 16 and note throughput and p95 latency.</li><li>Add <code>dynamic_batching { max_queue_delay_microseconds: 2000 }</code>, reload, rerun, and compare; compute average batch size from <code>nv_inference_count</code> over <code>nv_inference_exec_count</code>.</li><li>Stop the containers when you are done.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>NVIDIA Triton Inference Server — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Model repository: model folder, numbered versions, config.pbtxt.</li><li>One server, many backends: ONNX, PyTorch, TensorRT, Python, FIL, vLLM, TensorRT-LLM.</li><li>Dynamic batching trades a little queue delay for much higher GPU throughput.</li><li>Instance groups run multiple copies to overlap compute and data movement.</li><li>Ensembles for fixed graphs, Python BLS for pipelines with logic.</li><li>Queue time rising means add capacity; compute time rising means a slower model.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Server</h3><table><tbody><tr><td><code>tritonserver --model-repository=/models</code></td><td>Start with a local or s3:// repository</td></tr><tr><td><code>--model-control-mode=explicit --load-model=NAME</code></td><td>Load only what you ask for</td></tr><tr><td><code>--model-control-mode=poll --repository-poll-secs=30</code></td><td>Reload changed models automatically</td></tr><tr><td><code>8000 / 8001 / 8002</code></td><td>HTTP / gRPC / metrics ports</td></tr><tr><td><code>GET /v2/health/ready</code></td><td>Readiness probe</td></tr></tbody></table></div><div class="cheat-group"><h3>config.pbtxt</h3><table><tbody><tr><td><code>backend: "onnxruntime"</code></td><td>Which backend executes the model</td></tr><tr><td><code>max_batch_size: 32</code></td><td>Enable batching on the first dimension</td></tr><tr><td><code>dynamic_batching { max_queue_delay_microseconds: 2000 }</code></td><td>Batch requests, wait at most 2 ms</td></tr><tr><td><code>instance_group [{ count: 2, kind: KIND_GPU }]</code></td><td>Run two copies per GPU</td></tr><tr><td><code>version_policy: { latest: { num_versions: 1 } }</code></td><td>Serve only the newest version</td></tr></tbody></table></div><div class="cheat-group"><h3>Inference API</h3><table><tbody><tr><td><code>POST /v2/models/NAME/infer</code></td><td>Run inference (KServe v2 protocol)</td></tr><tr><td><code>GET /v2/models/NAME/config</code></td><td>The effective model configuration</td></tr><tr><td><code>POST /v2/repository/models/NAME/load</code></td><td>Load or reload a model in explicit mode</td></tr></tbody></table></div><div class="cheat-group"><h3>Tools and metrics</h3><table><tbody><tr><td><code>perf_analyzer -m NAME --concurrency-range 1:16:4</code></td><td>Load test a model</td></tr><tr><td><code>model-analyzer profile --model-repository /models --profile-models NAME</code></td><td>Search for the best config</td></tr><tr><td><code>nv_inference_queue_duration_us</code></td><td>Time spent waiting for an instance</td></tr><tr><td><code>nv_inference_count / nv_inference_exec_count</code></td><td>Average achieved batch size</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Setting max_batch_size to 0 and wondering why dynamic batching never batches.</li><li>A long max_queue_delay that quietly adds latency to every request at low traffic.</li><li>Poll mode in production, so a half-copied model file gets loaded mid-upload.</li><li>Doing pre-processing on the client and shipping huge raw tensors over the network.</li><li>Tuning by intuition instead of Perf Analyzer and Model Analyzer runs.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "Your ONNX model's GPU sits at 30% utilisation under heavy traffic, and metrics show an average batch size of 1. Which change helps most?", "options": ["Enable dynamic_batching so Triton combines concurrent requests", "Switch the model control mode from explicit to poll", "Lower max_batch_size to 1 to reduce queueing", "Move the model to KIND_CPU instances"], "answer": 0, "explain": "Without dynamic batching each request runs alone. The dynamic batcher groups concurrent requests into larger batches, which is how GPUs reach high throughput."}, {"q": "Request latency doubled. nv_inference_queue_duration_us rose sharply while nv_inference_compute_infer_duration_us stayed flat. What does that indicate?", "options": ["Requests are waiting for a free instance: add instances or replicas", "The model itself became slower after a version change", "The client network is dropping packets", "The response cache returns stale results"], "answer": 0, "explain": "Compute time per execution is unchanged, so the model is not slower; the extra time is spent queued. More instances, GPUs or replicas reduce the wait."}, {"q": "A request must run a detector, and only if it finds a face, run a second model. Which Triton feature fits?", "options": ["Business Logic Scripting from a Python backend model", "A static ensemble graph", "The sequence batcher", "An instance group with count 2"], "answer": 0, "explain": "Ensembles are fixed graphs without conditionals. BLS lets Python code call other models and decide at run time whether to call the second one."}, {"q": "Your CD pipeline uploads new model versions to S3 and should decide exactly when each is served. Which model control mode suits it?", "options": ["explicit, loading models through the repository API", "poll, reloading whenever files change", "none, loading everything at start-up", "poll with a one-second interval"], "answer": 0, "explain": "Explicit mode only loads and unloads on API calls, so the pipeline controls the moment a version goes live and never serves a half-uploaded file."}, {"q": "Which ports does a default Triton server expose?", "options": ["8000 for HTTP, 8001 for gRPC, 8002 for metrics", "8080 for HTTP, 9090 for gRPC, 9100 for metrics", "5000 for HTTP, 5001 for gRPC, 5002 for metrics", "4317 for gRPC, 4318 for HTTP, 8888 for metrics"], "answer": 0, "explain": "Triton listens on 8000 for HTTP/REST, 8001 for gRPC and 8002 for Prometheus metrics by default; the last option lists OpenTelemetry Collector ports."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="oss-vllm.html"><span>← Previous</span><strong>vLLM: high-throughput LLM serving</strong></a>
+    <a class="pager-up" href="../education.html#oss">All OSS Deep Dives modules</a>
+    <span class="pager-link pager-next is-empty"></span>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=oss-triton&amp;page=/education/oss-triton.html&amp;title=NVIDIA%20Triton%20Inference%20Server">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=oss-triton&amp;page=/education/oss-triton.html&amp;title=NVIDIA%20Triton%20Inference%20Server">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>
