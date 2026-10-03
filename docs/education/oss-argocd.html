@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Argo CD, from the inside — OSS Deep Dives | ThavionAI Education</title>
+  <meta name="description" content="The repo server, application controller and API server; ApplicationSets, sync waves, hooks, projects and running Argo CD at scale." />
+  <meta property="og:title" content="Argo CD, from the inside — ThavionAI Education" />
+  <meta property="og:description" content="The repo server, application controller and API server; ApplicationSets, sync waves, hooks, projects and running Argo CD at scale." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/oss-argocd.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-oss" data-module="oss-argocd">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=oss-argocd&amp;page=/education/oss-argocd.html&amp;title=Argo%20CD%2C%20from%20the%20inside">Feedback</a>
+    <a href="../education.html#oss" class="nav-cta">All OSS Deep Dives modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#oss">OSS Deep Dives</a> › Stage 1: GitOps &amp; platform engineering</div>
+    <h1>Argo CD, from the inside</h1>
+    <p class="lede">The repo server, application controller and API server; ApplicationSets, sync waves, hooks, projects and running Argo CD at scale.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 1 of 10</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">The DevOps track showed you the GitOps idea and a first Argo CD Application. This lesson opens the <code>argoproj/argo-cd</code> repository itself: which process does what, how a sync is ordered, how one ApplicationSet replaces fifty hand-written Applications, how projects fence teams in, and which knobs matter when Argo CD manages hundreds of apps across many clusters.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Name the Argo CD components and say which one to look at when a sync is slow, wrong or failing</li><li>Order a deployment with sync waves and PreSync, PostSync and SyncFail hooks</li><li>Generate Applications per directory or per cluster with an ApplicationSet</li><li>Restrict a team to its repositories, clusters and resource kinds with an AppProject</li><li>Tune and shard the application controller for large installations</li></ul>
+    </div>
+    <section id="inside-the-repository-one-binary-several-jobs"><h2>Inside the repository: one binary, several jobs</h2>
+    <p>Argo CD is written in Go and ships as one container image whose entrypoint decides which component to run. The top-level folders of the repository map almost one-to-one onto the processes you see in the <code>argocd</code> namespace, which makes the code a useful map when you debug.</p>
+    <div class="table-wrap"><table><thead><tr><th>Folder</th><th>Runs as</th><th>Job</th></tr></thead><tbody><tr><td><code>server/</code></td><td>argocd-server</td><td>gRPC/REST API behind the UI and CLI: auth, RBAC, sync and rollback requests, Git webhooks</td></tr><tr><td><code>reposerver/</code></td><td>argocd-repo-server</td><td>Clones Git (or pulls Helm and OCI charts), caches them, and renders plain manifests</td></tr><tr><td><code>controller/</code></td><td>argocd-application-controller</td><td>Compares live state with rendered desired state, sets sync and health status, runs syncs</td></tr><tr><td><code>applicationset/</code></td><td>argocd-applicationset-controller</td><td>Turns one ApplicationSet into many Applications using generators</td></tr><tr><td><code>notification_controller/</code></td><td>argocd-notifications-controller</td><td>Sends Slack, email or webhook messages on triggers such as sync failed</td></tr><tr><td><code>commitserver/</code></td><td>argocd-commit-server</td><td>Optional: writes rendered manifests back to Git for the source hydrator</td></tr></tbody></table></div>
+    <figure class="diagram" id="fig-argocd-components"><div class="diagram-scroll"><svg viewBox="0 0 740 356" role="img" aria-label="A Git repository feeds the repo server, which clones, caches and renders manifests. The application controller asks the repo server for desired state, watches the live state in the target cluster, and applies changes. The ApplicationSet controller generates Application objects that the application controller then reconciles. Users and CI talk to the API server through the UI and CLI; the API server reads status from the controller&#x27;s results and requests syncs." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="argocd-components-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="argocd-components-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="argocd-components-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="argocd-components-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="argocd-components-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><polyline points="201.0,70.0 171.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#argocd-components-arrow-default)"/><rect x="165.8" y="24.0" width="40.5" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">fetch</text><polyline points="371.0,70.0 341.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#argocd-components-arrow-default)"/><rect x="332.7" y="24.0" width="46.6" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">render</text><polyline points="511.0,70.0 541.0,70.0" fill="none" style="stroke:var(--accent)" stroke-width="1.6" marker-end="url(#argocd-components-arrow-accent)"/><rect x="484.4" y="24.0" width="83.2" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--accent)">watch, apply</text><polyline points="541.0,208.0 471.0,208.0 471.0,98.0" fill="none" style="stroke:currentColor" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#argocd-components-arrow-default)"/><rect x="474.0" y="145.0" width="83.2" height="16" rx="4" class="dg-label-bg"/><text x="478.0" y="153.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">Applications</text><polyline points="341.0,286.0 371.0,286.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#argocd-components-arrow-default)"/><rect x="326.6" y="240.0" width="58.8" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="248.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">requests</text><polyline points="411.0,258.0 411.0,98.0" fill="none" style="stroke:rgba(148,163,184,0.55)" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#argocd-components-arrow-muted)"/><rect x="324.8" y="170.0" width="83.2" height="16" rx="4" class="dg-label-bg"/><text x="404.0" y="178.0" text-anchor="end" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">status, sync</text><path d="M31,49.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M31,49.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Git / Helm repo</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">desired state</text><rect x="201" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Repo server</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">clone, render</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">App controller</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">diff, sync, health</text><rect x="541" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Target cluster</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">live state</text><rect x="541" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="611.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">ApplicationSet</text><text x="611.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">generates apps</text><rect x="201" y="258.0" width="140" height="56" rx="28.0" class="dg-node dg-actor"/><text x="271.0" y="286.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">UI, CLI, CI</text><rect x="371" y="258.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="441.0" y="279.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">API server</text><text x="441.0" y="297.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">auth, RBAC, webhooks</text></svg></div><figcaption>The repo server turns Git into manifests, the application controller diffs them against the cluster and syncs, and the API server is only the front door for people and CI.</figcaption></figure>
+    <p>Two more pieces complete the picture: <strong>Redis</strong>, a cache the controller and API server share (it holds no state you cannot rebuild), and <strong>Dex</strong>, an optional identity broker for SSO. The <code>gitops-engine/</code> folder holds the reusable diff-and-sync library that the controller is built on, and <code>resource_customizations/</code> holds the Lua health checks that teach Argo CD when a custom resource counts as Healthy.</p>
+    <div class="callout callout-tip"><strong>Tip</strong><p>Debug by component. Manifests look wrong or a Helm value is ignored: read the <strong>repo server</strong> logs. Status stuck at Unknown or syncs queue up: the <strong>application controller</strong>. Login, RBAC or webhook problems: the <strong>API server</strong>.</p></div></section>
+  <section id="how-a-sync-is-ordered-phases-waves-and-hooks"><h2>How a sync is ordered: phases, waves and hooks</h2>
+    <p>A sync is not one big <code>kubectl apply</code>. Argo CD runs it in <strong>phases</strong> — PreSync, Sync, PostSync, plus SyncFail if something breaks — and inside each phase it applies resources in <strong>waves</strong>. A wave is the integer in the <code>argocd.argoproj.io/sync-wave</code> annotation. Everything defaults to wave 0, waves can be negative, and Argo CD applies the lowest wave first and waits for it to be healthy before moving on.</p>
+    <p>A <strong>hook</strong> is any resource carrying the <code>argocd.argoproj.io/hook</code> annotation, usually a Job. A PreSync hook that fails stops the sync before your Deployment is touched, which makes it the right place for a database migration or a pre-flight check. PostSync hooks run only after every resource is Healthy, so they suit smoke tests and notifications.</p>
+    <div class="code"><div class="code-cap">A migration Job that must finish before the new pods roll out</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-migrate
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: ghcr.io/example/orders:1.8.0
+          command: ["./manage", "migrate"]</code></pre></div>
+    <ul><li>Put a Namespace, CRDs or a Secret in wave <code>-1</code> so they exist before the workloads in wave 0 that need them.</li><li>When pruning, the order is reversed: higher waves are deleted first.</li><li>Hooks do not run during a selective sync (syncing only some resources from the UI).</li></ul></section>
+  <section id="applicationsets-stop-copying-applications"><h2>ApplicationSets: stop copying Applications</h2>
+    <p>Once you have a dozen services or clusters, hand-writing one Application each turns into copy-paste drift. An <strong>ApplicationSet</strong> pairs a <strong>generator</strong>, which produces a list of parameter sets, with a <strong>template</strong> that becomes one Application per parameter set. The generators in the docs include List, Cluster, Git (directories or files), Matrix and Merge (combine two generators), Pull Request, SCM Provider, Cluster Decision Resource and Plugin.</p>
+    <div class="code"><div class="code-cap">One Application per folder under addons/: add a folder, get an app</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: cluster-addons
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - git:
+        repoURL: https://github.com/example/platform.git
+        revision: HEAD
+        directories:
+          - path: addons/*
+  template:
+    metadata:
+      name: '{{.path.basename}}'
+    spec:
+      project: platform
+      source:
+        repoURL: https://github.com/example/platform.git
+        targetRevision: HEAD
+        path: '{{.path.path}}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '{{.path.basename}}'
+      syncPolicy:
+        syncOptions:
+          - CreateNamespace=true</code></pre></div>
+    <p>The Cluster generator is the multi-cluster workhorse: it emits one parameter set per cluster registered in Argo CD, optionally filtered by label, so <code>env=prod</code> clusters get the production overlay automatically. Matrix a Cluster generator with a Git generator and you get every add-on on every matching cluster from about thirty lines of YAML.</p>
+    <div class="callout callout-warning"><strong>Watch out</strong><p>Deleting an ApplicationSet deletes the Applications it generated, and with the resources finalizer those delete their workloads too. Review ApplicationSet changes as carefully as you would a production deploy.</p></div></section>
+  <section id="appprojects-guard-rails-per-team"><h2>AppProjects: guard rails per team</h2>
+    <p>Every Application belongs to an <strong>AppProject</strong>, and the <code>default</code> project allows everything. For anything shared, create one project per team that says which repositories it may deploy from, which cluster and namespace pairs it may deploy to, and which resource kinds it may create. A team that cannot create a ClusterRole through Argo CD cannot escalate its own permissions through Git either.</p>
+    <div class="code"><div class="code-cap">The payments team may deploy its own repos into payments-* namespaces only</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: payments
+  namespace: argocd
+spec:
+  sourceRepos:
+    - https://github.com/example/payments-*
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: payments-*
+  clusterResourceWhitelist: []
+  namespaceResourceBlacklist:
+    - group: ''
+      kind: ResourceQuota</code></pre></div>
+    <p>An empty <code>clusterResourceWhitelist</code> means no cluster-scoped resources at all. Projects also carry roles whose JWT tokens let a CI job trigger syncs for that project only, and <strong>sync windows</strong> that block automatic syncs during, say, a quarter-end freeze.</p></section>
+  <section id="running-argo-cd-at-scale"><h2>Running Argo CD at scale</h2>
+    <p>By default the controller re-checks Git for every Application about every three minutes (<code>timeout.reconciliation</code> in the <code>argocd-cm</code> ConfigMap) and handles work with 20 status processors and 10 operation processors. The high-availability guide suggests about 50 and 25 for roughly a thousand applications. Configure Git webhooks so a push triggers a refresh at once instead of waiting for the next poll.</p>
+    <ul><li><strong>Shard the controller</strong> when it manages many clusters: raise the replica count of <code>argocd-application-controller</code> and set <code>ARGOCD_CONTROLLER_REPLICAS</code> to the same number; clusters are spread across replicas.</li><li><strong>Scale the repo server</strong> horizontally when rendering is the bottleneck, which is common with large Helm charts or many Kustomize overlays.</li><li>Use the HA manifests (Redis with Sentinel, multiple API servers) for production, and pin a released version instead of tracking <code>stable</code>.</li><li>Install with <code>kubectl apply --server-side</code>: some CRDs, such as ApplicationSet, exceed the annotation size limit of client-side apply.</li></ul>
+    <p>Newer releases add the <strong>source hydrator</strong> (beta since v3.5): instead of rendering Helm or Kustomize in memory, Argo CD renders once, commits the plain manifests to a branch, and syncs from there, so every change to what actually runs is a reviewable diff. It is disabled by default and needs the commit server.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Waves, hooks and an ApplicationSet on a laptop cluster</h2>
+    <ol><li>Create a local cluster with kind or k3d, then install Argo CD with <code>kubectl create namespace argocd</code> and <code>kubectl apply -n argocd --server-side --force-conflicts -f</code> pointing at the install.yaml of a pinned release.</li><li>Run <code>kubectl get pods -n argocd</code> and match each pod to a folder in the table above.</li><li>In a Git repo of your own, create <code>addons/nginx</code> and <code>addons/redis</code> folders with a simple Deployment in each, then apply the ApplicationSet from this lesson pointing at your repo.</li><li>Run <code>argocd app list</code> and confirm two Applications appeared; add an <code>addons/echo</code> folder, push, and watch a third one appear.</li><li>Add a PreSync Job that runs <code>sleep 20</code> and a ConfigMap annotated with sync-wave <code>-1</code>, sync, and watch the order in the UI's sync status panel.</li><li>Make the Job fail (<code>exit 1</code>) and confirm the Deployment is not updated.</li><li>Delete the ApplicationSet in a throwaway cluster and observe what happens to the generated Applications.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Argo CD, from the inside — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Repo server renders manifests; application controller diffs and syncs; API server serves the UI, CLI and webhooks.</li><li>Sync order is phase (PreSync, Sync, PostSync) then wave (lowest integer first, default 0).</li><li>A failed PreSync hook stops the sync before workloads change: put migrations and checks there.</li><li>ApplicationSet = generator (list of parameters) + template (one Application each).</li><li>Never leave teams on the default project; restrict repos, destinations and kinds with an AppProject.</li><li>Scale by sharding the controller across clusters and adding repo server replicas.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>CLI</h3><table><tbody><tr><td><code>argocd admin initial-password -n argocd</code></td><td>Print the generated admin password</td></tr><tr><td><code>argocd app list</code></td><td>All Applications with sync and health status</td></tr><tr><td><code>argocd app diff APP</code></td><td>Show what a sync would change</td></tr><tr><td><code>argocd app sync APP --prune</code></td><td>Sync now and delete resources removed from Git</td></tr><tr><td><code>argocd app history APP</code></td><td>Past syncs and their revisions</td></tr><tr><td><code>argocd app rollback APP ID</code></td><td>Roll back to a history entry (auto-sync must be off)</td></tr><tr><td><code>argocd cluster add CONTEXT</code></td><td>Register another cluster from your kubeconfig</td></tr></tbody></table></div><div class="cheat-group"><h3>Annotations</h3><table><tbody><tr><td><code>argocd.argoproj.io/sync-wave: "-1"</code></td><td>Apply this resource before wave 0</td></tr><tr><td><code>argocd.argoproj.io/hook: PreSync</code></td><td>Run before the main sync (also Sync, PostSync, SyncFail, Skip)</td></tr><tr><td><code>argocd.argoproj.io/hook-delete-policy: BeforeHookCreation</code></td><td>Delete the previous hook before creating the new one</td></tr><tr><td><code>argocd.argoproj.io/sync-options: Prune=false</code></td><td>Never prune this resource</td></tr></tbody></table></div><div class="cheat-group"><h3>Application syncPolicy</h3><table><tbody><tr><td><code>automated: {prune: true, selfHeal: true}</code></td><td>Auto-sync, delete removed resources, revert manual drift</td></tr><tr><td><code>syncOptions: [CreateNamespace=true]</code></td><td>Create the destination namespace if missing</td></tr><tr><td><code>syncOptions: [ServerSideApply=true]</code></td><td>Use server-side apply for large or shared objects</td></tr><tr><td><code>ignoreDifferences: jsonPointers: [/spec/replicas]</code></td><td>Ignore fields another controller owns, such as HPA replicas</td></tr></tbody></table></div><div class="cheat-group"><h3>Scale and config</h3><table><tbody><tr><td><code>timeout.reconciliation: 180s</code></td><td>argocd-cm: how often apps re-check Git</td></tr><tr><td><code>ARGOCD_CONTROLLER_REPLICAS=N</code></td><td>Must equal the controller replica count when sharding</td></tr><tr><td><code>--status-processors / --operation-processors</code></td><td>Controller concurrency (defaults 20 and 10)</td></tr><tr><td><code>hydrator.enabled: "true"</code></td><td>argocd-cmd-params-cm: turn on the source hydrator (beta)</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Leaving everything in the <code>default</code> project, so any repo can deploy anything anywhere.</li><li>Fighting the HPA: Argo CD resets <code>replicas</code> on every sync unless you drop it from Git or add an ignoreDifferences rule.</li><li>Relying on three-minute polling instead of configuring Git webhooks, then wondering why deploys lag.</li><li>Deleting an ApplicationSet or an Application with the resources finalizer and taking production down with it.</li><li>Tracking the <code>stable</code> manifests in production instead of pinning a release.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "An Application shows the wrong image tag even though the Helm values file in Git is correct. Which component's logs should you read first?", "options": ["The repo server, which renders the Helm chart into manifests", "The notifications controller, which sends sync messages", "Redis, which stores the desired state for each Application", "Dex, which brokers single sign-on for the user interface"], "answer": 0, "explain": "The repo server is the component that renders Helm, Kustomize or plain YAML into manifests; a value being ignored is a rendering problem. Redis is only a rebuildable cache."}, {"q": "You need a schema migration to finish before new pods start, and the deploy must stop if the migration fails. What do you use?", "options": ["A Job annotated as a PreSync hook", "A Job annotated as a PostSync hook", "A Job placed in sync-wave 10", "A Job excluded with Prune=false"], "answer": 0, "explain": "A PreSync hook runs before the main sync phase, and if it fails the sync stops before workloads are updated. PostSync runs after everything is healthy, which is too late."}, {"q": "Your platform repo has one folder per add-on and you add new add-ons every month. Which approach avoids writing a new Application each time?", "options": ["An ApplicationSet with a Git directory generator", "One Application pointing at the repository root", "A PostSync hook that runs kubectl apply", "An AppProject with a wildcard source repo"], "answer": 0, "explain": "The Git directory generator emits one parameter set per matching folder and the template turns each into an Application, so a new folder becomes a new app automatically."}, {"q": "A team's Application tries to create a ClusterRole and the sync is refused. Their AppProject has `clusterResourceWhitelist: []`. Why?", "options": ["An empty whitelist allows no cluster-scoped resources", "ClusterRoles can only be created by Argo CD admins via the CLI", "The repo server cannot render RBAC objects", "Sync waves must be negative for RBAC resources"], "answer": 0, "explain": "The project's cluster resource whitelist lists the cluster-scoped kinds it may create; an empty list means none, which stops teams escalating permissions through Git."}, {"q": "One Argo CD instance manages 40 clusters and the application controller keeps running out of memory. What is the documented fix?", "options": ["Shard the controller: more replicas with ARGOCD_CONTROLLER_REPLICAS set to match", "Add more Redis replicas so the cache holds more clusters", "Lower timeout.reconciliation so each check finishes sooner", "Add API server replicas behind the load balancer"], "answer": 0, "explain": "Controller sharding spreads clusters across controller replicas, so each holds only part of the cluster state in memory. Redis and the API server do not do the diffing."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <span class="pager-link pager-prev is-empty"></span>
+    <a class="pager-up" href="../education.html#oss">All OSS Deep Dives modules</a>
+    <a class="pager-link pager-next" href="oss-keda.html"><span>Next →</span><strong>KEDA: event-driven autoscaling</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=oss-argocd&amp;page=/education/oss-argocd.html&amp;title=Argo%20CD%2C%20from%20the%20inside">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=oss-argocd&amp;page=/education/oss-argocd.html&amp;title=Argo%20CD%2C%20from%20the%20inside">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

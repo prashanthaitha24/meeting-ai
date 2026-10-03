@@ -1,0 +1,138 @@
+{
+  "id": "oss-argocd",
+  "minutes": 35,
+  "intro": "The DevOps track showed you the GitOps idea and a first Argo CD Application. This lesson opens the `argoproj/argo-cd` repository itself: which process does what, how a sync is ordered, how one ApplicationSet replaces fifty hand-written Applications, how projects fence teams in, and which knobs matter when Argo CD manages hundreds of apps across many clusters.",
+  "objectives": [
+    "Name the Argo CD components and say which one to look at when a sync is slow, wrong or failing",
+    "Order a deployment with sync waves and PreSync, PostSync and SyncFail hooks",
+    "Generate Applications per directory or per cluster with an ApplicationSet",
+    "Restrict a team to its repositories, clusters and resource kinds with an AppProject",
+    "Tune and shard the application controller for large installations"
+  ],
+  "sections": [
+    {
+      "heading": "Inside the repository: one binary, several jobs",
+      "blocks": [
+        {"type": "p", "text": "Argo CD is written in Go and ships as one container image whose entrypoint decides which component to run. The top-level folders of the repository map almost one-to-one onto the processes you see in the `argocd` namespace, which makes the code a useful map when you debug."},
+        {"type": "table", "headers": ["Folder", "Runs as", "Job"], "rows": [
+          ["`server/`", "argocd-server", "gRPC/REST API behind the UI and CLI: auth, RBAC, sync and rollback requests, Git webhooks"],
+          ["`reposerver/`", "argocd-repo-server", "Clones Git (or pulls Helm and OCI charts), caches them, and renders plain manifests"],
+          ["`controller/`", "argocd-application-controller", "Compares live state with rendered desired state, sets sync and health status, runs syncs"],
+          ["`applicationset/`", "argocd-applicationset-controller", "Turns one ApplicationSet into many Applications using generators"],
+          ["`notification_controller/`", "argocd-notifications-controller", "Sends Slack, email or webhook messages on triggers such as sync failed"],
+          ["`commitserver/`", "argocd-commit-server", "Optional: writes rendered manifests back to Git for the source hydrator"]
+        ]},
+        {"type": "p", "text": "Two more pieces complete the picture: **Redis**, a cache the controller and API server share (it holds no state you cannot rebuild), and **Dex**, an optional identity broker for SSO. The `gitops-engine/` folder holds the reusable diff-and-sync library that the controller is built on, and `resource_customizations/` holds the Lua health checks that teach Argo CD when a custom resource counts as Healthy."},
+        {"type": "callout", "kind": "tip", "text": "Debug by component. Manifests look wrong or a Helm value is ignored: read the **repo server** logs. Status stuck at Unknown or syncs queue up: the **application controller**. Login, RBAC or webhook problems: the **API server**."}
+      ]
+    },
+    {
+      "heading": "How a sync is ordered: phases, waves and hooks",
+      "blocks": [
+        {"type": "p", "text": "A sync is not one big `kubectl apply`. Argo CD runs it in **phases** — PreSync, Sync, PostSync, plus SyncFail if something breaks — and inside each phase it applies resources in **waves**. A wave is the integer in the `argocd.argoproj.io/sync-wave` annotation. Everything defaults to wave 0, waves can be negative, and Argo CD applies the lowest wave first and waits for it to be healthy before moving on."},
+        {"type": "p", "text": "A **hook** is any resource carrying the `argocd.argoproj.io/hook` annotation, usually a Job. A PreSync hook that fails stops the sync before your Deployment is touched, which makes it the right place for a database migration or a pre-flight check. PostSync hooks run only after every resource is Healthy, so they suit smoke tests and notifications."},
+        {"type": "code", "lang": "yaml", "caption": "A migration Job that must finish before the new pods roll out", "code": "apiVersion: batch/v1\nkind: Job\nmetadata:\n  name: db-migrate\n  annotations:\n    argocd.argoproj.io/hook: PreSync\n    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation\nspec:\n  backoffLimit: 1\n  template:\n    spec:\n      restartPolicy: Never\n      containers:\n        - name: migrate\n          image: ghcr.io/example/orders:1.8.0\n          command: [\"./manage\", \"migrate\"]"},
+        {"type": "list", "items": [
+          "Put a Namespace, CRDs or a Secret in wave `-1` so they exist before the workloads in wave 0 that need them.",
+          "When pruning, the order is reversed: higher waves are deleted first.",
+          "Hooks do not run during a selective sync (syncing only some resources from the UI)."
+        ]}
+      ]
+    },
+    {
+      "heading": "ApplicationSets: stop copying Applications",
+      "blocks": [
+        {"type": "p", "text": "Once you have a dozen services or clusters, hand-writing one Application each turns into copy-paste drift. An **ApplicationSet** pairs a **generator**, which produces a list of parameter sets, with a **template** that becomes one Application per parameter set. The generators in the docs include List, Cluster, Git (directories or files), Matrix and Merge (combine two generators), Pull Request, SCM Provider, Cluster Decision Resource and Plugin."},
+        {"type": "code", "lang": "yaml", "caption": "One Application per folder under addons/: add a folder, get an app", "code": "apiVersion: argoproj.io/v1alpha1\nkind: ApplicationSet\nmetadata:\n  name: cluster-addons\n  namespace: argocd\nspec:\n  goTemplate: true\n  goTemplateOptions: [\"missingkey=error\"]\n  generators:\n    - git:\n        repoURL: https://github.com/example/platform.git\n        revision: HEAD\n        directories:\n          - path: addons/*\n  template:\n    metadata:\n      name: '{{.path.basename}}'\n    spec:\n      project: platform\n      source:\n        repoURL: https://github.com/example/platform.git\n        targetRevision: HEAD\n        path: '{{.path.path}}'\n      destination:\n        server: https://kubernetes.default.svc\n        namespace: '{{.path.basename}}'\n      syncPolicy:\n        syncOptions:\n          - CreateNamespace=true"},
+        {"type": "p", "text": "The Cluster generator is the multi-cluster workhorse: it emits one parameter set per cluster registered in Argo CD, optionally filtered by label, so `env=prod` clusters get the production overlay automatically. Matrix a Cluster generator with a Git generator and you get every add-on on every matching cluster from about thirty lines of YAML."},
+        {"type": "callout", "kind": "warning", "text": "Deleting an ApplicationSet deletes the Applications it generated, and with the resources finalizer those delete their workloads too. Review ApplicationSet changes as carefully as you would a production deploy."}
+      ]
+    },
+    {
+      "heading": "AppProjects: guard rails per team",
+      "blocks": [
+        {"type": "p", "text": "Every Application belongs to an **AppProject**, and the `default` project allows everything. For anything shared, create one project per team that says which repositories it may deploy from, which cluster and namespace pairs it may deploy to, and which resource kinds it may create. A team that cannot create a ClusterRole through Argo CD cannot escalate its own permissions through Git either."},
+        {"type": "code", "lang": "yaml", "caption": "The payments team may deploy its own repos into payments-* namespaces only", "code": "apiVersion: argoproj.io/v1alpha1\nkind: AppProject\nmetadata:\n  name: payments\n  namespace: argocd\nspec:\n  sourceRepos:\n    - https://github.com/example/payments-*\n  destinations:\n    - server: https://kubernetes.default.svc\n      namespace: payments-*\n  clusterResourceWhitelist: []\n  namespaceResourceBlacklist:\n    - group: ''\n      kind: ResourceQuota"},
+        {"type": "p", "text": "An empty `clusterResourceWhitelist` means no cluster-scoped resources at all. Projects also carry roles whose JWT tokens let a CI job trigger syncs for that project only, and **sync windows** that block automatic syncs during, say, a quarter-end freeze."}
+      ]
+    },
+    {
+      "heading": "Running Argo CD at scale",
+      "blocks": [
+        {"type": "p", "text": "By default the controller re-checks Git for every Application about every three minutes (`timeout.reconciliation` in the `argocd-cm` ConfigMap) and handles work with 20 status processors and 10 operation processors. The high-availability guide suggests about 50 and 25 for roughly a thousand applications. Configure Git webhooks so a push triggers a refresh at once instead of waiting for the next poll."},
+        {"type": "list", "items": [
+          "**Shard the controller** when it manages many clusters: raise the replica count of `argocd-application-controller` and set `ARGOCD_CONTROLLER_REPLICAS` to the same number; clusters are spread across replicas.",
+          "**Scale the repo server** horizontally when rendering is the bottleneck, which is common with large Helm charts or many Kustomize overlays.",
+          "Use the HA manifests (Redis with Sentinel, multiple API servers) for production, and pin a released version instead of tracking `stable`.",
+          "Install with `kubectl apply --server-side`: some CRDs, such as ApplicationSet, exceed the annotation size limit of client-side apply."
+        ]},
+        {"type": "p", "text": "Newer releases add the **source hydrator** (beta since v3.5): instead of rendering Helm or Kustomize in memory, Argo CD renders once, commits the plain manifests to a branch, and syncs from there, so every change to what actually runs is a reviewable diff. It is disabled by default and needs the commit server."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Waves, hooks and an ApplicationSet on a laptop cluster",
+    "steps": [
+      "Create a local cluster with kind or k3d, then install Argo CD with `kubectl create namespace argocd` and `kubectl apply -n argocd --server-side --force-conflicts -f` pointing at the install.yaml of a pinned release.",
+      "Run `kubectl get pods -n argocd` and match each pod to a folder in the table above.",
+      "In a Git repo of your own, create `addons/nginx` and `addons/redis` folders with a simple Deployment in each, then apply the ApplicationSet from this lesson pointing at your repo.",
+      "Run `argocd app list` and confirm two Applications appeared; add an `addons/echo` folder, push, and watch a third one appear.",
+      "Add a PreSync Job that runs `sleep 20` and a ConfigMap annotated with sync-wave `-1`, sync, and watch the order in the UI's sync status panel.",
+      "Make the Job fail (`exit 1`) and confirm the Deployment is not updated.",
+      "Delete the ApplicationSet in a throwaway cluster and observe what happens to the generated Applications."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Repo server renders manifests; application controller diffs and syncs; API server serves the UI, CLI and webhooks.",
+      "Sync order is phase (PreSync, Sync, PostSync) then wave (lowest integer first, default 0).",
+      "A failed PreSync hook stops the sync before workloads change: put migrations and checks there.",
+      "ApplicationSet = generator (list of parameters) + template (one Application each).",
+      "Never leave teams on the default project; restrict repos, destinations and kinds with an AppProject.",
+      "Scale by sharding the controller across clusters and adding repo server replicas."
+    ],
+    "groups": [
+      {"title": "CLI", "items": [
+        {"syntax": "argocd admin initial-password -n argocd", "desc": "Print the generated admin password"},
+        {"syntax": "argocd app list", "desc": "All Applications with sync and health status"},
+        {"syntax": "argocd app diff APP", "desc": "Show what a sync would change"},
+        {"syntax": "argocd app sync APP --prune", "desc": "Sync now and delete resources removed from Git"},
+        {"syntax": "argocd app history APP", "desc": "Past syncs and their revisions"},
+        {"syntax": "argocd app rollback APP ID", "desc": "Roll back to a history entry (auto-sync must be off)"},
+        {"syntax": "argocd cluster add CONTEXT", "desc": "Register another cluster from your kubeconfig"}
+      ]},
+      {"title": "Annotations", "items": [
+        {"syntax": "argocd.argoproj.io/sync-wave: \"-1\"", "desc": "Apply this resource before wave 0"},
+        {"syntax": "argocd.argoproj.io/hook: PreSync", "desc": "Run before the main sync (also Sync, PostSync, SyncFail, Skip)"},
+        {"syntax": "argocd.argoproj.io/hook-delete-policy: BeforeHookCreation", "desc": "Delete the previous hook before creating the new one"},
+        {"syntax": "argocd.argoproj.io/sync-options: Prune=false", "desc": "Never prune this resource"}
+      ]},
+      {"title": "Application syncPolicy", "items": [
+        {"syntax": "automated: {prune: true, selfHeal: true}", "desc": "Auto-sync, delete removed resources, revert manual drift"},
+        {"syntax": "syncOptions: [CreateNamespace=true]", "desc": "Create the destination namespace if missing"},
+        {"syntax": "syncOptions: [ServerSideApply=true]", "desc": "Use server-side apply for large or shared objects"},
+        {"syntax": "ignoreDifferences: jsonPointers: [/spec/replicas]", "desc": "Ignore fields another controller owns, such as HPA replicas"}
+      ]},
+      {"title": "Scale and config", "items": [
+        {"syntax": "timeout.reconciliation: 180s", "desc": "argocd-cm: how often apps re-check Git"},
+        {"syntax": "ARGOCD_CONTROLLER_REPLICAS=N", "desc": "Must equal the controller replica count when sharding"},
+        {"syntax": "--status-processors / --operation-processors", "desc": "Controller concurrency (defaults 20 and 10)"},
+        {"syntax": "hydrator.enabled: \"true\"", "desc": "argocd-cmd-params-cm: turn on the source hydrator (beta)"}
+      ]}
+    ],
+    "pitfalls": [
+      "Leaving everything in the `default` project, so any repo can deploy anything anywhere.",
+      "Fighting the HPA: Argo CD resets `replicas` on every sync unless you drop it from Git or add an ignoreDifferences rule.",
+      "Relying on three-minute polling instead of configuring Git webhooks, then wondering why deploys lag.",
+      "Deleting an ApplicationSet or an Application with the resources finalizer and taking production down with it.",
+      "Tracking the `stable` manifests in production instead of pinning a release."
+    ]
+  },
+  "quiz": [
+    {"q": "An Application shows the wrong image tag even though the Helm values file in Git is correct. Which component's logs should you read first?", "options": ["The repo server, which renders the Helm chart into manifests", "The notifications controller, which sends sync messages", "Redis, which stores the desired state for each Application", "Dex, which brokers single sign-on for the user interface"], "answer": 0, "explain": "The repo server is the component that renders Helm, Kustomize or plain YAML into manifests; a value being ignored is a rendering problem. Redis is only a rebuildable cache."},
+    {"q": "You need a schema migration to finish before new pods start, and the deploy must stop if the migration fails. What do you use?", "options": ["A Job annotated as a PreSync hook", "A Job annotated as a PostSync hook", "A Job placed in sync-wave 10", "A Job excluded with Prune=false"], "answer": 0, "explain": "A PreSync hook runs before the main sync phase, and if it fails the sync stops before workloads are updated. PostSync runs after everything is healthy, which is too late."},
+    {"q": "Your platform repo has one folder per add-on and you add new add-ons every month. Which approach avoids writing a new Application each time?", "options": ["An ApplicationSet with a Git directory generator", "One Application pointing at the repository root", "A PostSync hook that runs kubectl apply", "An AppProject with a wildcard source repo"], "answer": 0, "explain": "The Git directory generator emits one parameter set per matching folder and the template turns each into an Application, so a new folder becomes a new app automatically."},
+    {"q": "A team's Application tries to create a ClusterRole and the sync is refused. Their AppProject has `clusterResourceWhitelist: []`. Why?", "options": ["An empty whitelist allows no cluster-scoped resources", "ClusterRoles can only be created by Argo CD admins via the CLI", "The repo server cannot render RBAC objects", "Sync waves must be negative for RBAC resources"], "answer": 0, "explain": "The project's cluster resource whitelist lists the cluster-scoped kinds it may create; an empty list means none, which stops teams escalating permissions through Git."},
+    {"q": "One Argo CD instance manages 40 clusters and the application controller keeps running out of memory. What is the documented fix?", "options": ["Shard the controller: more replicas with ARGOCD_CONTROLLER_REPLICAS set to match", "Add more Redis replicas so the cache holds more clusters", "Lower timeout.reconciliation so each check finishes sooner", "Add API server replicas behind the load balancer"], "answer": 0, "explain": "Controller sharding spreads clusters across controller replicas, so each holds only part of the cluster state in memory. Redis and the API server do not do the diffing."}
+  ]
+}

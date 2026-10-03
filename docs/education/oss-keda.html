@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KEDA: event-driven autoscaling — OSS Deep Dives | ThavionAI Education</title>
+  <meta name="description" content="ScaledObjects and ScaledJobs, scalers and triggers, scale to zero, and how KEDA plugs into the Horizontal Pod Autoscaler." />
+  <meta property="og:title" content="KEDA: event-driven autoscaling — ThavionAI Education" />
+  <meta property="og:description" content="ScaledObjects and ScaledJobs, scalers and triggers, scale to zero, and how KEDA plugs into the Horizontal Pod Autoscaler." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/oss-keda.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-oss" data-module="oss-keda">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=oss-keda&amp;page=/education/oss-keda.html&amp;title=KEDA%3A%20event-driven%20autoscaling">Feedback</a>
+    <a href="../education.html#oss" class="nav-cta">All OSS Deep Dives modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#oss">OSS Deep Dives</a> › Stage 1: GitOps &amp; platform engineering</div>
+    <h1>KEDA: event-driven autoscaling</h1>
+    <p class="lede">ScaledObjects and ScaledJobs, scalers and triggers, scale to zero, and how KEDA plugs into the Horizontal Pod Autoscaler.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">~30 min read</span>
+      <span class="chip">Module 2 of 10</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">The Horizontal Pod Autoscaler scales on CPU and memory, but a queue worker is busy when its queue is long, not when its CPU is hot, and an idle worker should cost nothing. KEDA, a graduated CNCF project in <code>kedacore/keda</code>, adds event-driven scaling to Kubernetes: scale on queue length, consumer lag, a Prometheus query or a schedule, all the way down to zero and back up. This lesson covers how it works, the two resources you write, and the settings that decide whether scaling is smooth or flappy.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Explain how KEDA's operator and metrics server cooperate with the HPA</li><li>Write a ScaledObject that scales a Deployment on queue lag or a Prometheus query</li><li>Choose between a ScaledObject and a ScaledJob for long-running work</li><li>Set activation thresholds, cooldown and fallback so scaling is predictable</li><li>Authenticate scalers with TriggerAuthentication instead of inline secrets</li></ul>
+    </div>
+    <section id="how-keda-works-it-feeds-the-hpa-it-does-not-replace-it"><h2>How KEDA works: it feeds the HPA, it does not replace it</h2>
+    <p>The <code>cmd/</code> folder of the repository builds three binaries. The <strong>operator</strong> watches your KEDA resources, creates a normal HPA for each one, and handles the special case the HPA cannot: scaling between <strong>zero and one</strong> replica. The <strong>metrics adapter</strong> (the KEDA metrics server) registers as a Kubernetes external metrics API, so when the HPA asks "what is the value of this metric?" the answer comes from KEDA. The <strong>admission webhooks</strong> reject invalid objects, such as two ScaledObjects targeting the same Deployment.</p>
+    <p>The knowledge of each event source lives in <code>pkg/scalers/</code>: one Go file per <strong>scaler</strong>, about seventy of them covering Kafka, RabbitMQ, SQS, Azure Service Bus, Redis streams, PostgreSQL queries, Prometheus, Cron and many more. A scaler answers two questions: is there any work at all (activation), and how much (the metric value).</p>
+    <ul><li><strong>Activation phase (0 to 1, 1 to 0):</strong> the operator decides, using the scaler's activation check.</li><li><strong>Scaling phase (1 to N):</strong> the HPA decides, using the metric KEDA exposes and the target you set.</li><li>Because the HPA does the 1-to-N maths, everything you know about HPA behaviour, stabilization windows and policies still applies.</li></ul>
+    <figure class="diagram" id="fig-keda-flow"><div class="diagram-scroll"><svg viewBox="0 0 740 248" role="img" aria-label="An event source such as a Kafka topic or a queue is polled by a KEDA scaler running in the KEDA operator. The operator creates and owns an HPA and scales the Deployment between zero and one replica directly. The KEDA metrics server exposes the same event metric through the Kubernetes external metrics API; the HPA reads it and scales the Deployment from one to N replicas." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="keda-flow-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="keda-flow-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="keda-flow-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="keda-flow-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="keda-flow-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><polyline points="201.0,70.0 171.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#keda-flow-arrow-default)"/><rect x="168.8" y="24.0" width="34.4" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">poll</text><polyline points="341.0,70.0 541.0,70.0" fill="none" style="stroke:var(--accent)" stroke-width="1.6" marker-end="url(#keda-flow-arrow-accent)"/><rect x="390.2" y="24.0" width="101.5" height="16" rx="4" class="dg-label-bg"/><text x="441.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--accent)">activate 0 to 1</text><polyline points="201.0,178.0 101.0,178.0 101.0,98.0" fill="none" style="stroke:rgba(148,163,184,0.55)" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#keda-flow-arrow-muted)"/><rect x="112.5" y="159.0" width="77.1" height="16" rx="4" class="dg-label-bg"/><text x="151.0" y="167.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">read metric</text><polyline points="371.0,178.0 341.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#keda-flow-arrow-default)"/><rect x="311.4" y="132.0" width="89.3" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">metric value?</text><polyline points="511.0,178.0 611.0,178.0 611.0,98.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#keda-flow-arrow-default)"/><rect x="519.4" y="159.0" width="83.2" height="16" rx="4" class="dg-label-bg"/><text x="561.0" y="167.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">scale 1 to N</text><path d="M31,49.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M31,49.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Event source</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">queue, lag, PromQL</text><rect x="201" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">KEDA operator</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">scalers, 0 to 1</text><rect x="541" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Deployment</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">0 .. N pods</text><rect x="201" y="150.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="271.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Metrics server</text><text x="271.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">KEDA, external API</text><rect x="371" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">HPA</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">keda-hpa-NAME</text></svg></div><figcaption>KEDA wakes a workload from zero itself, then hands one-to-N scaling to an ordinary HPA that reads the event metric through KEDA's metrics server.</figcaption></figure>
+    <div class="callout callout-note"><strong>Note</strong><p>Install with Helm: <code>helm repo add kedacore https://kedacore.github.io/charts</code>, then <code>helm install keda kedacore/keda --namespace keda --create-namespace</code>. You get the CRDs, the operator, the metrics server and the webhooks.</p></div></section>
+  <section id="scaledobject-scale-a-deployment-on-events"><h2>ScaledObject: scale a Deployment on events</h2>
+    <p>A <strong>ScaledObject</strong> points at a Deployment, StatefulSet, or any custom resource with a <code>/scale</code> subresource, and lists one or more <strong>triggers</strong>. Here an order processor scales on Kafka consumer lag: one replica per 50 pending messages, up to 30, and zero when the topic is drained.</p>
+    <div class="code"><div class="code-cap">Scale on Kafka lag, down to zero</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: orders-worker
+spec:
+  scaleTargetRef:
+    name: orders-worker
+  minReplicaCount: 0
+  maxReplicaCount: 30
+  pollingInterval: 15
+  cooldownPeriod: 300
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka.data.svc:9092
+        consumerGroup: orders
+        topic: orders
+        lagThreshold: "50"
+        activationLagThreshold: "5"</code></pre></div>
+    <p>The defaults matter: <code>pollingInterval</code> is 30 seconds (how often KEDA checks the source while idle), <code>cooldownPeriod</code> is 300 seconds (how long after the last activity before scaling back to zero), <code>minReplicaCount</code> is 0 and <code>maxReplicaCount</code> is 100. <code>cooldownPeriod</code> only governs the step to zero; scale-in between N and 1 follows the HPA's own stabilization window.</p>
+    <p>The Prometheus scaler makes KEDA useful far beyond queues. For LLM serving, the right signal is usually requests waiting in the engine's queue, not GPU utilisation, which is high whenever a GPU is in use at all.</p>
+    <div class="code"><div class="code-cap">Scale an inference Deployment on queued requests</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>triggers:
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus.monitoring.svc:9090
+      query: sum(vllm:num_requests_waiting{model_name="chat"})
+      threshold: "4"
+      activationThreshold: "1"</code></pre></div></section>
+  <section id="scaledjob-one-job-per-piece-of-work"><h2>ScaledJob: one Job per piece of work</h2>
+    <p>Scaling a Deployment down kills pods, possibly in the middle of a message. For long-running tasks such as video transcoding, batch inference or a nightly training run, that is unacceptable. A <strong>ScaledJob</strong> creates Kubernetes <strong>Jobs</strong> instead: each Job takes one or a few items, runs to completion and exits, and nothing is killed to scale in.</p>
+    <div class="code"><div class="code-cap">Spawn transcoding Jobs from an SQS queue</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>apiVersion: keda.sh/v1alpha1
+kind: ScaledJob
+metadata:
+  name: transcode
+spec:
+  jobTargetRef:
+    backoffLimit: 2
+    template:
+      spec:
+        restartPolicy: Never
+        containers:
+          - name: worker
+            image: ghcr.io/example/transcode:2.3.1
+  pollingInterval: 20
+  maxReplicaCount: 50
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 5
+  triggers:
+    - type: aws-sqs-queue
+      authenticationRef:
+        name: sqs-auth
+      metadata:
+        queueURL: https://sqs.eu-west-1.amazonaws.com/123456789012/videos
+        queueLength: "1"
+        awsRegion: eu-west-1</code></pre></div>
+    <p>Set the history limits: both default to 100, and a busy queue otherwise leaves hundreds of finished Job objects behind. The <code>scalingStrategy</code> block (default, custom, accurate, eager) controls how pending messages and already-running Jobs are counted, which matters when your Jobs take items off the queue slowly.</p></section>
+  <section id="credentials-thresholds-and-failure-modes"><h2>Credentials, thresholds and failure modes</h2>
+    <p>Scalers need to read the queue, so they need credentials. Never put them in trigger metadata. A <strong>TriggerAuthentication</strong> (namespaced) or <strong>ClusterTriggerAuthentication</strong> maps scaler parameters to Kubernetes Secrets, or better, to workload identity on your cloud so no long-lived key exists.</p>
+    <div class="code"><div class="code-cap">Credentials from a Secret, referenced by the trigger</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: rabbitmq-auth
+spec:
+  secretTargetRef:
+    - parameter: host
+      name: rabbitmq-conn
+      key: url</code></pre></div>
+    <ul><li><strong>Flapping between 0 and 1:</strong> set an activation threshold above zero so a single stray message does not wake the workload, and lengthen <code>cooldownPeriod</code>.</li><li><strong>Source unreachable:</strong> without a <code>fallback</code>, an erroring scaler leaves you at whatever count you had. With <code>fallback: {failureThreshold: 3, replicas: 6}</code>, KEDA holds a safe replica count after three failed checks.</li><li><strong>Maintenance:</strong> the <code>autoscaling.keda.sh/paused: "true"</code> annotation freezes scaling; <code>paused-replicas</code> pins a fixed count.</li><li><strong>Two autoscalers:</strong> do not also create your own HPA for the same target. KEDA owns the HPA it generates, named <code>keda-hpa-</code> plus the ScaledObject name.</li><li><strong>Cold start:</strong> scaling from zero takes pod scheduling plus image pull plus app start. If the first request must be fast, keep <code>minReplicaCount: 1</code>.</li></ul></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Scale a worker to zero and back with a Redis list</h2>
+    <ol><li>Create a kind or k3d cluster and install KEDA with the Helm commands above; check that the operator and metrics server pods are Running in the <code>keda</code> namespace.</li><li>Deploy Redis (<code>kubectl create deployment redis --image=redis:7</code> and expose it as a Service on port 6379).</li><li>Deploy a worker Deployment that runs <code>redis-cli -h redis BLPOP jobs 0</code> in a loop with <code>sleep 2</code> after each item.</li><li>Apply a ScaledObject with a <code>redis</code> trigger with <code>address: redis.default.svc:6379</code>, <code>listName: jobs</code>, <code>listLength: "5"</code>, <code>minReplicaCount: 0</code>, <code>cooldownPeriod: 60</code>.</li><li>Run <code>kubectl get deploy worker -w</code> in one terminal, push 100 items with <code>redis-cli RPUSH</code> in a loop in another, and watch replicas rise.</li><li>Run <code>kubectl get hpa</code> and find the HPA that KEDA generated for you.</li><li>Stop pushing and watch the worker drain the list, then return to zero about a minute later.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>KEDA: event-driven autoscaling — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>KEDA does 0 to 1 itself and hands 1 to N to a normal HPA it creates.</li><li>Pick the signal that measures waiting work: queue length, consumer lag, queued requests.</li><li>ScaledObject for long-lived consumers; ScaledJob when work must not be interrupted.</li><li>Activation threshold decides waking up; threshold decides how many replicas.</li><li>Keep credentials in TriggerAuthentication, ideally backed by workload identity.</li><li>Plan for the scaler failing: set fallback replicas.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Install and inspect</h3><table><tbody><tr><td><code>helm repo add kedacore https://kedacore.github.io/charts</code></td><td>Add the KEDA chart repository</td></tr><tr><td><code>helm install keda kedacore/keda -n keda --create-namespace</code></td><td>Install operator, metrics server, webhooks</td></tr><tr><td><code>kubectl get scaledobject,scaledjob -A</code></td><td>List KEDA resources and their READY/ACTIVE state</td></tr><tr><td><code>kubectl get hpa keda-hpa-NAME</code></td><td>The HPA KEDA generated for a ScaledObject</td></tr><tr><td><code>kubectl logs -n keda deploy/keda-operator</code></td><td>Scaler errors and scaling decisions</td></tr></tbody></table></div><div class="cheat-group"><h3>ScaledObject fields (defaults)</h3><table><tbody><tr><td><code>pollingInterval: 30</code></td><td>Seconds between checks of the event source</td></tr><tr><td><code>cooldownPeriod: 300</code></td><td>Seconds after last activity before scaling to zero</td></tr><tr><td><code>minReplicaCount: 0 / maxReplicaCount: 100</code></td><td>Replica bounds</td></tr><tr><td><code>fallback: {failureThreshold: 3, replicas: 6}</code></td><td>Replicas to hold when the scaler keeps failing</td></tr><tr><td><code>advanced.horizontalPodAutoscalerConfig.behavior</code></td><td>Pass HPA scale-up/scale-down policies through</td></tr></tbody></table></div><div class="cheat-group"><h3>Common triggers</h3><table><tbody><tr><td><code>type: kafka  lagThreshold: "50"</code></td><td>Consumer group lag per replica</td></tr><tr><td><code>type: rabbitmq  mode: QueueLength  value: "20"</code></td><td>Messages per replica</td></tr><tr><td><code>type: prometheus  query: ...  threshold: "4"</code></td><td>Any PromQL that returns one value</td></tr><tr><td><code>type: cron  start: 0 8 * * 1-5  end: 0 18 * * 1-5</code></td><td>Scheduled capacity (plus timezone, desiredReplicas)</td></tr></tbody></table></div><div class="cheat-group"><h3>Annotations</h3><table><tbody><tr><td><code>autoscaling.keda.sh/paused: "true"</code></td><td>Freeze scaling at the current count</td></tr><tr><td><code>autoscaling.keda.sh/paused-replicas: "0"</code></td><td>Scale to a fixed count and freeze</td></tr><tr><td><code>autoscaling.keda.sh/paused-scale-in: "true"</code></td><td>Allow scale out but block scale in</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Creating your own HPA for a workload KEDA already scales, so two controllers fight.</li><li>Scaling queue consumers on CPU, which stays low while the backlog grows.</li><li>Using a ScaledObject for hour-long tasks and killing them mid-run on scale-in.</li><li>Leaving activation thresholds at zero so a single message wakes the whole fleet.</li><li>Hard-coding broker passwords in trigger metadata instead of a TriggerAuthentication.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "A ScaledObject has minReplicaCount 0. Who decides to go from 0 to 1 replica, and who decides to go from 3 to 8?", "options": ["The KEDA operator handles 0 to 1; the HPA handles 3 to 8", "The HPA handles both, using KEDA's metrics", "The KEDA operator handles both and bypasses the HPA", "The metrics server handles 0 to 1; the operator handles 3 to 8"], "answer": 0, "explain": "The HPA cannot scale from zero, so KEDA's operator handles activation. Once at one or more replicas, the HPA KEDA generated does the 1-to-N scaling from the external metric."}, {"q": "Video transcodes take 40 minutes each and must never be interrupted. What should drive them?", "options": ["A ScaledJob that creates one Job per message", "A ScaledObject with a long cooldownPeriod", "A ScaledObject with maxReplicaCount set to 1", "A Cron trigger that scales up at night"], "answer": 0, "explain": "A ScaledJob creates Jobs that run to completion, so scaling in never kills work in progress. A ScaledObject scales a Deployment down by terminating pods, cooldown or not."}, {"q": "A worker keeps waking up from zero for a single test message every few minutes. Which change fixes it most directly?", "options": ["Raise the trigger's activation threshold above one message", "Lower pollingInterval so checks happen more often", "Raise maxReplicaCount so the work finishes faster", "Remove cooldownPeriod from the ScaledObject"], "answer": 0, "explain": "The activation threshold decides when the workload goes from zero to one. Setting it above one message stops trivial traffic from waking it; polling more often makes it worse."}, {"q": "You scale vLLM pods with KEDA. Which Prometheus signal is the better trigger?", "options": ["Requests waiting in the engine's queue", "GPU utilisation percentage across pods", "Container CPU usage of the server process", "Total requests served since startup"], "answer": 0, "explain": "Queued requests measure demand the current replicas cannot absorb. GPU utilisation is high whenever the GPU is busy at all, CPU is not the bottleneck, and a lifetime counter does not reflect current load."}, {"q": "Your RabbitMQ scaler starts failing because the broker is unreachable. With fallback configured as failureThreshold 3 and replicas 6, what happens?", "options": ["After three failed checks KEDA holds the workload at six replicas", "KEDA scales the workload to zero to protect the broker", "KEDA deletes the ScaledObject and leaves the HPA in place", "The admission webhook rejects the ScaledObject until the broker returns"], "answer": 0, "explain": "Fallback exists for exactly this case: after failureThreshold consecutive errors KEDA reports a metric that yields the fallback replica count, so the service keeps a safe capacity."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="oss-argocd.html"><span>← Previous</span><strong>Argo CD, from the inside</strong></a>
+    <a class="pager-up" href="../education.html#oss">All OSS Deep Dives modules</a>
+    <span class="pager-link pager-next is-empty"></span>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=oss-keda&amp;page=/education/oss-keda.html&amp;title=KEDA%3A%20event-driven%20autoscaling">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=oss-keda&amp;page=/education/oss-keda.html&amp;title=KEDA%3A%20event-driven%20autoscaling">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>
