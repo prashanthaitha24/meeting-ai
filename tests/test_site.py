@@ -45,6 +45,7 @@ def built_site():
         [sys.executable, str(SCRIPTS / "build_worksheets.py")],
         [sys.executable, str(SCRIPTS / "build_program.py")],
         [sys.executable, str(SCRIPTS / "build_stories.py")],
+        [sys.executable, str(SCRIPTS / "build_library.py")],
         [sys.executable, str(SCRIPTS / "build_site.py")],
     ):
         r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
