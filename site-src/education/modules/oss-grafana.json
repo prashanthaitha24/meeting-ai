@@ -1,0 +1,139 @@
+{
+  "id": "oss-grafana",
+  "minutes": 30,
+  "intro": "Grafana is where metrics, logs and traces become something a person can read during an incident. The SRE track covered building panels; this lesson looks at Grafana as software you operate, from `grafana/grafana`: how it is put together, how to run it reliably, how to keep data sources and dashboards in code instead of in someone's browser, how variables make one dashboard serve every service, and how to build a dashboard for an LLM-serving fleet.",
+  "objectives": [
+    "Describe Grafana's backend, frontend, plugin and database layers",
+    "Run Grafana with an external database and configuration from environment variables",
+    "Provision data sources and dashboards from files, or sync them with Git",
+    "Use template variables, repeats and the right interval macros in queries",
+    "Build an inference dashboard around latency, throughput, queueing and errors"
+  ],
+  "sections": [
+    {
+      "heading": "Inside the repository",
+      "blocks": [
+        {"type": "p", "text": "Grafana is a Go backend and a React frontend in one repository, licensed AGPL-3.0. `pkg/` holds the server: HTTP API, authentication, the alerting engine, query routing and the storage layer. `public/app/` is the web application. `packages/` publishes the libraries that plugin authors use, such as `@grafana/ui` and `@grafana/data`. `conf/defaults.ini` lists every setting with its default, and `conf/provisioning/` shows sample provisioning files."},
+        {"type": "list", "items": [
+          "**Data source plugins** translate Grafana queries into Prometheus, Loki, Tempo, PostgreSQL, Elasticsearch and many more. Grafana stores no metrics itself; it queries the systems that do.",
+          "**Panel plugins** draw things: time series, stat, gauge, table, heatmap, logs, traces, node graph.",
+          "**App plugins** bundle pages, data sources and dashboards into one installable product.",
+          "**The Grafana database** stores users, organisations, dashboards, folders, alert rules and settings. It is SQLite by default; MySQL and PostgreSQL are supported for production and required to run more than one Grafana replica."
+        ]},
+        {"type": "callout", "kind": "note", "text": "Every setting in `defaults.ini` can be overridden with an environment variable named `GF_<SECTION>_<KEY>`, for example `GF_DATABASE_TYPE=postgres`. That is the cleanest way to configure Grafana in containers."}
+      ]
+    },
+    {
+      "heading": "Running Grafana for real",
+      "blocks": [
+        {"type": "p", "text": "A Grafana on its default SQLite file inside a container loses every dashboard when the pod is rescheduled. For a shared instance, point it at a managed database, run two or more replicas behind a load balancer, and keep secrets out of the config file."},
+        {"type": "code", "lang": "bash", "caption": "Grafana in Docker with Postgres and admin password from the environment", "code": "docker run -d --name grafana -p 3000:3000 \\\n  -e GF_DATABASE_TYPE=postgres \\\n  -e GF_DATABASE_HOST=db.internal:5432 \\\n  -e GF_DATABASE_NAME=grafana \\\n  -e GF_DATABASE_USER=grafana \\\n  -e GF_DATABASE_PASSWORD=\"$GRAFANA_DB_PASSWORD\" \\\n  -e GF_SECURITY_ADMIN_PASSWORD=\"$GRAFANA_ADMIN_PASSWORD\" \\\n  -v \"$PWD/provisioning:/etc/grafana/provisioning\" \\\n  grafana/grafana:13.2.3"},
+        {"type": "list", "items": [
+          "Pin the image tag; the default port is 3000 and the default login is admin/admin until you change it.",
+          "Configure SSO (OAuth or SAML) and map identity-provider groups to Grafana teams and roles instead of creating local users.",
+          "Use **service accounts** with tokens for automation; personal API keys tied to people break when people leave.",
+          "Grafana-managed alerting with several replicas needs those replicas to find each other (HA alerting settings), so alerts are not sent twice."
+        ]}
+      ]
+    },
+    {
+      "heading": "Dashboards and data sources as code",
+      "blocks": [
+        {"type": "p", "text": "Dashboards clicked together in the UI drift, get deleted, and differ between staging and production. Grafana offers several ways to keep them in version control. The oldest and simplest is **file provisioning**: YAML files in `provisioning/datasources/` and `provisioning/dashboards/` that Grafana reads at start-up and, for dashboards, keeps watching."},
+        {"type": "code", "lang": "yaml", "caption": "provisioning/datasources/prometheus.yaml", "code": "apiVersion: 1\ndatasources:\n  - name: Prometheus\n    uid: prom-main\n    type: prometheus\n    access: proxy\n    url: http://prometheus.monitoring.svc:9090\n    isDefault: true\n    jsonData:\n      timeInterval: 30s"},
+        {"type": "code", "lang": "yaml", "caption": "provisioning/dashboards/files.yaml: load every JSON in a folder", "code": "apiVersion: 1\nproviders:\n  - name: platform\n    folder: Platform\n    type: file\n    allowUiUpdates: false\n    options:\n      path: /var/lib/grafana/dashboards\n      foldersFromFilesStructure: true"},
+        {"type": "p", "text": "Give data sources a fixed `uid` so dashboard JSON can reference them reliably across environments. Newer options build on the same idea: **Git Sync** (generally available since Grafana 13) connects a folder to a Git repository two ways, so saving in the UI can open a pull request and merging in Git updates Grafana; the **Foundation SDK** generates dashboard JSON from Go, TypeScript, Python, Java or PHP; and the `gcx` CLI pushes resources through Grafana's newer REST APIs from CI. Terraform's Grafana provider remains a good fit if the rest of your stack is Terraform."}
+      ]
+    },
+    {
+      "heading": "Variables: one dashboard for every service",
+      "blocks": [
+        {"type": "p", "text": "A **template variable** is a dropdown whose value is substituted into every query on the dashboard. A query variable fills itself from your data, for example `label_values(up, namespace)` for Prometheus, and variables can chain, so choosing a namespace narrows the list of services. **Repeat** a panel or row over a multi-value variable to get one per selected model, region or pod."},
+        {"type": "code", "lang": "promql", "caption": "Panel query using variables and the rate interval macro", "code": "sum by (model) (\n  rate(inference_requests_total{namespace=\"$namespace\", model=~\"$model\"}[$__rate_interval])\n)"},
+        {"type": "list", "items": [
+          "Use `$__rate_interval` in `rate()` and `increase()`: it stays at least four scrape intervals wide (from the data source's scrape interval setting), so zooming out never produces empty or jagged graphs.",
+          "`$__interval` is the time per data point for the current zoom; good for `_over_time` functions, not for `rate()`.",
+          "Use `=~` with multi-value variables, because Grafana expands several selections into a regex such as `(a|b)`.",
+          "**Filters** (formerly called ad hoc filters) add label matchers to every query without editing each panel."
+        ]}
+      ]
+    },
+    {
+      "heading": "An LLM-serving dashboard",
+      "blocks": [
+        {"type": "p", "text": "A good service dashboard answers \"is it healthy, and if not, where?\" in the top row, then lets you drill down. For an inference fleet built on vLLM or a similar engine, lay it out like this, one row per question, with `$model` as the repeat variable:"},
+        {"type": "table", "headers": ["Row", "Panels", "Query idea"], "rows": [
+          ["Is it up and fast?", "Stat: request rate, error ratio, p95 time to first token", "`histogram_quantile(0.95, ...time_to_first_token...)`"],
+          ["Is demand outrunning capacity?", "Time series: requests running vs waiting", "`vllm:num_requests_running`, `vllm:num_requests_waiting`"],
+          ["Is the GPU memory full?", "Gauge: KV cache usage per pod", "`vllm:kv_cache_usage_perc`"],
+          ["What does it cost?", "Time series: prompt and generated tokens per second", "`rate(vllm:prompt_tokens_total[$__rate_interval])`"]
+        ]},
+        {"type": "p", "text": "Add an annotation query for deploys so a latency step lines up visibly with the release that caused it, and link each panel to the matching Tempo traces or Loki logs through data links. Keep it to one screen of headline panels; anything below the fold is for investigation, not for spotting trouble."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "A provisioned Grafana you can rebuild from Git",
+    "steps": [
+      "Create a folder with `provisioning/datasources/prometheus.yaml` and `provisioning/dashboards/files.yaml` from this lesson, plus an empty `dashboards/` folder.",
+      "Start Prometheus and Grafana with Docker Compose, mounting the provisioning and dashboards folders, and log in on port 3000.",
+      "Build a dashboard with a `job` query variable (`label_values(up, job)`) and a panel showing `rate(prometheus_http_requests_total{job=~\"$job\"}[$__rate_interval])`.",
+      "Export it as JSON (Share, then Export), save it into `dashboards/`, and set `allowUiUpdates: false`.",
+      "Delete the Grafana container and its volume, start it again, and confirm the data source and dashboard come back untouched.",
+      "Change the panel title in the JSON file, wait for the provisioner to pick it up, and refresh the browser.",
+      "Commit the folder to Git: your monitoring is now reproducible."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Grafana stores dashboards and settings, not metrics: it queries data sources.",
+      "Use MySQL or Postgres, not SQLite, for any shared or multi-replica instance.",
+      "Configure with GF_SECTION_KEY environment variables; manage access with SSO and service accounts.",
+      "Keep data sources and dashboards in Git: file provisioning, Git Sync, Foundation SDK, gcx or Terraform.",
+      "Variables plus repeats turn one dashboard into one per service, model or region.",
+      "Use $__rate_interval inside rate(); headline panels first, investigation below."
+    ],
+    "groups": [
+      {"title": "Config and ops", "items": [
+        {"syntax": "GF_DATABASE_TYPE=postgres", "desc": "Override any defaults.ini key via the environment"},
+        {"syntax": "GF_SECURITY_ADMIN_PASSWORD=...", "desc": "Set the initial admin password"},
+        {"syntax": "/etc/grafana/provisioning/{datasources,dashboards}/", "desc": "Where provisioning YAML is read"},
+        {"syntax": "grafana cli plugins install PLUGIN_ID", "desc": "Install a plugin on the server"},
+        {"syntax": "GET /api/health", "desc": "Liveness and database check endpoint"}
+      ]},
+      {"title": "Provisioning YAML", "items": [
+        {"syntax": "apiVersion: 1", "desc": "Required header for every provisioning file"},
+        {"syntax": "datasources: [{name, uid, type, url, access: proxy}]", "desc": "A data source with a stable uid"},
+        {"syntax": "providers: [{type: file, options: {path: DIR}}]", "desc": "Load dashboard JSON from a folder"},
+        {"syntax": "foldersFromFilesStructure: true", "desc": "Mirror sub-folders as Grafana folders"},
+        {"syntax": "allowUiUpdates: false", "desc": "Stop UI edits that would be overwritten"}
+      ]},
+      {"title": "Variables and macros", "items": [
+        {"syntax": "label_values(METRIC, LABEL)", "desc": "Prometheus query variable values"},
+        {"syntax": "$__rate_interval", "desc": "Safe window for rate() and increase()"},
+        {"syntax": "$__interval / $__range", "desc": "Step per point / whole time range"},
+        {"syntax": "LABEL=~\"$var\"", "desc": "Match a multi-value variable"},
+        {"syntax": "${var:csv} / ${var:pipe}", "desc": "Format multi-value variables explicitly"}
+      ]},
+      {"title": "Dashboards as code", "items": [
+        {"syntax": "Git Sync", "desc": "Two-way sync of a folder with a Git repository"},
+        {"syntax": "Foundation SDK", "desc": "Generate dashboard JSON from code"},
+        {"syntax": "gcx", "desc": "CLI for Grafana's REST APIs (grafanactl is deprecated)"}
+      ]}
+    ],
+    "pitfalls": [
+      "Running a shared Grafana on SQLite in a container without persistent storage.",
+      "Hand-editing production dashboards that are also provisioned, and losing the edits on the next reload.",
+      "Using a fixed `[1m]` window in rate() so panels break when someone zooms out to 30 days.",
+      "Referencing data sources by name in dashboard JSON instead of a stable uid.",
+      "Dashboards with forty panels and no clear top row, unusable during an incident."
+    ]
+  },
+  "quiz": [
+    {"q": "Your Grafana pod was rescheduled and every dashboard disappeared. It runs the default configuration in a container. Why?", "options": ["Dashboards live in the default SQLite file inside the container", "Grafana keeps dashboards only in browser local storage", "Prometheus deleted the dashboards along with old metrics", "The provisioning folder overwrote them with empty files"], "answer": 0, "explain": "Grafana stores dashboards in its own database, SQLite on local disk by default. Without a volume or an external MySQL or Postgres database, a new pod starts empty."},
+    {"q": "A colleague edits a provisioned dashboard in the UI, and the change vanishes a minute later. What is happening?", "options": ["The file provisioner re-applies the JSON from disk, which is the source of truth", "Grafana rejected the change because the user lacked edit rights", "The browser cached the old version and never sent the save", "The data source uid changed, so the panel was reset"], "answer": 0, "explain": "Provisioned dashboards are reloaded from files. Change the JSON in Git instead, and set allowUiUpdates to false so the UI makes the rule obvious."},
+    {"q": "A panel uses `rate(x[1m])` and goes blank when zoomed out to 30 days. What is the recommended fix?", "options": ["Use $__rate_interval as the range in rate()", "Increase the panel's maximum data points", "Switch the panel to a stat visualization", "Use $__range as the range in rate()"], "answer": 0, "explain": "At wide zoom, each data point spans far more than one minute, so a fixed window misses samples. $__rate_interval adapts to the step and never drops below four scrape intervals."},
+    {"q": "You want one dashboard showing the same six panels for each model a user selects. Which feature does that?", "options": ["A multi-value variable with a repeated row", "Six separate dashboards linked by a playlist", "An annotation query per model", "A transformation that splits series by model"], "answer": 0, "explain": "Repeating a row over a multi-value variable renders the row once per selected value, with the variable substituted into every panel's queries."},
+    {"q": "For an inference fleet, which panel best shows that demand is outrunning capacity?", "options": ["Requests waiting versus requests running over time", "Total requests served since the pods started", "Average GPU temperature across nodes", "Number of models in the registry"], "answer": 0, "explain": "A growing queue of waiting requests while running requests sit at their maximum means the replicas are saturated. A lifetime counter, temperature or registry count do not measure current saturation."}
+  ]
+}
