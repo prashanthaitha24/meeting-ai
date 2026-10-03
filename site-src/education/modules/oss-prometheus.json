@@ -1,0 +1,126 @@
+{
+  "id": "oss-prometheus",
+  "minutes": 35,
+  "intro": "The SRE track taught you to scrape targets and write PromQL. This lesson goes under the hood of `prometheus/prometheus`: how service discovery and relabeling decide what gets scraped, how the TSDB turns samples into blocks on disk, why cardinality is the number that kills Prometheus servers, and how recording rules, remote write, agent mode and native histograms fit into a setup that monitors AI systems as well as web services.",
+  "objectives": [
+    "Trace a sample from service discovery through relabeling, scrape and the TSDB",
+    "Size disk and memory for a Prometheus server and spot cardinality problems",
+    "Write recording and alerting rules and test them with promtool",
+    "Choose between local storage, remote write and agent mode",
+    "Configure native histograms and explain why they help latency SLOs"
+  ],
+  "sections": [
+    {
+      "heading": "Inside the repository: the path of a sample",
+      "blocks": [
+        {"type": "p", "text": "Prometheus is one Go binary, and its top-level folders read like a pipeline. `discovery/` finds targets (Kubernetes, EC2, Consul, file and HTTP service discovery and many more). `scrape/` pulls metrics from them on an interval. `tsdb/` stores the samples. `promql/` evaluates queries. `rules/` runs recording and alerting rules on a schedule, and `notifier/` sends firing alerts to Alertmanager, which is a separate project. `web/` serves the UI and HTTP API, and `storage/remote/` implements remote write and read."},
+        {"type": "p", "text": "Between discovery and scrape sits **relabeling**, the most powerful and most misunderstood part of the configuration. Service discovery attaches metadata labels that start with `__meta_`, such as a pod's annotations. `relabel_configs` rewrite those labels before the scrape, to keep or drop targets and to build the final `job`, `instance` and other labels. Labels that still start with `__` are discarded afterwards. `metric_relabel_configs` run after the scrape, on every sample, and are your last chance to drop an expensive series before it is stored."},
+        {"type": "code", "lang": "yaml", "caption": "Scrape only pods that opt in, and label them by namespace and pod", "code": "scrape_configs:\n  - job_name: kubernetes-pods\n    kubernetes_sd_configs:\n      - role: pod\n    relabel_configs:\n      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]\n        action: keep\n        regex: \"true\"\n      - source_labels: [__meta_kubernetes_namespace]\n        target_label: namespace\n      - source_labels: [__meta_kubernetes_pod_name]\n        target_label: pod\n    metric_relabel_configs:\n      - source_labels: [__name__]\n        regex: \"go_gc_.*\"\n        action: drop"}
+      ]
+    },
+    {
+      "heading": "The TSDB: head, WAL, blocks and compaction",
+      "blocks": [
+        {"type": "p", "text": "New samples land in the **head block**, which lives in memory and covers the most recent two hours or so. To survive a crash, every write is also appended to the **write-ahead log** (`wal/`, 128 MB segment files), which is replayed on restart; this is why a large Prometheus can take minutes to start. Roughly every two hours the head is cut into an immutable **block** on disk: a directory with `chunks/`, an `index` that maps labels to series, a `meta.json` and `tombstones` for deletions. Background **compaction** merges small blocks into larger ones, up to 10% of the retention time or 31 days, whichever is smaller."},
+        {"type": "list", "items": [
+          "**Disk:** samples compress to about 1 to 2 bytes each, so disk is roughly retention seconds times samples ingested per second times 2 bytes. Keep size-based retention at 80 to 85% of the volume, because compaction briefly needs room for old and new blocks together.",
+          "**Memory:** dominated by the number of **active series** in the head, not by how many samples you store. A series is one unique combination of metric name and label values.",
+          "**Storage:** use a local disk. NFS, including network file systems such as EFS, is not supported and can corrupt the database.",
+          "**Backups:** take a snapshot through the admin API rather than copying a live data directory."
+        ]},
+        {"type": "callout", "kind": "warning", "text": "Cardinality is the classic outage. One label holding a user ID, request ID or full URL path turns one metric into millions of series, memory explodes, and the server is killed. Check `prometheus_tsdb_head_series` and run `promtool tsdb analyze` to find the worst offenders."},
+        {"type": "p", "text": "Retention is set in the configuration file now: `storage.tsdb.retention.time` and `.size` in `prometheus.yml`. The old command-line flags still work but are deprecated. With no setting, time-based retention defaults to 15 days."}
+      ]
+    },
+    {
+      "heading": "Rules: pre-compute, then alert",
+      "blocks": [
+        {"type": "p", "text": "**Recording rules** evaluate an expensive query on a schedule and store the result as a new series, so dashboards and alerts read one cheap series instead of re-aggregating thousands. The naming convention is `level:metric:operations`. **Alerting rules** evaluate a condition; when it stays true for the `for` duration, the alert fires and is sent to Alertmanager, which groups, silences and routes it."},
+        {"type": "code", "lang": "yaml", "caption": "Record per-model error ratio, then alert on it", "code": "groups:\n  - name: inference\n    interval: 30s\n    rules:\n      - record: model:request_errors:ratio_rate5m\n        expr: |\n          sum by (model) (rate(inference_requests_total{status=\"error\"}[5m]))\n          /\n          sum by (model) (rate(inference_requests_total[5m]))\n      - alert: InferenceErrorRatioHigh\n        expr: model:request_errors:ratio_rate5m > 0.05\n        for: 10m\n        labels:\n          severity: page\n        annotations:\n          summary: \"{{ $labels.model }} error ratio above 5% for 10 minutes\""},
+        {"type": "p", "text": "Treat rules like code: `promtool check rules` validates syntax, and `promtool test rules` runs unit tests that feed synthetic series into your rules and assert which alerts fire and when. Put both in CI next to the rule files."}
+      ]
+    },
+    {
+      "heading": "Beyond one server: remote write, agent mode, OTLP",
+      "blocks": [
+        {"type": "p", "text": "Local storage is a single-node database: not clustered, not replicated. For long retention, a global view across clusters, or high availability, Prometheus **remote writes** samples to a system built for that, such as Thanos, Cortex, Mimir or a managed service. Remote write streams from the WAL, so a short outage of the receiver does not lose data while the WAL still holds it."},
+        {"type": "list", "items": [
+          "**Agent mode** (`--agent`) keeps service discovery, relabeling and scraping, but disables local querying, rules and alerting and uses a slim WAL. Run it in each cluster as a collector that only forwards.",
+          "**Receiving:** `--web.enable-remote-write-receiver` lets another Prometheus or agent push to this one, and `--web.enable-otlp-receiver` accepts OTLP metrics directly from OpenTelemetry SDKs or Collectors.",
+          "**Federation** (`/federate`) still exists for pulling a few aggregated series upward, but remote write is the usual answer for scale."
+        ]}
+      ]
+    },
+    {
+      "heading": "Native histograms for latency",
+      "blocks": [
+        {"type": "p", "text": "A classic histogram stores one series per bucket boundary you chose in advance, plus `_sum` and `_count`. Pick the wrong buckets and your p99 is a guess; add more buckets and cardinality grows. A **native histogram** stores the whole distribution as one series with exponential buckets chosen automatically, at much higher resolution for less cost, and you can aggregate them across instances correctly."},
+        {"type": "code", "lang": "yaml", "caption": "Opt a job into native histograms", "code": "scrape_configs:\n  - job_name: llm-gateway\n    scrape_native_histograms: true\n    static_configs:\n      - targets: [\"gateway.ai.svc:9090\"]"},
+        {"type": "p", "text": "Query them with the same functions: `histogram_quantile(0.99, sum(rate(request_duration_seconds[5m])))`, without a `_bucket` suffix or `le` label. For LLM serving, where time to first token and time per output token span orders of magnitude, this resolution is what makes a latency SLO trustworthy."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Watch the TSDB work and break it on purpose",
+    "steps": [
+      "Run Prometheus in Docker with a volume for `/prometheus` and a config that scrapes itself every 5 seconds.",
+      "Open the UI and query `prometheus_tsdb_head_series`; note the number.",
+      "Run a small exporter (any language) that emits a counter with a label set to a random ID on every request, hit it a few thousand times, and watch head series and memory climb.",
+      "Add a `metric_relabel_configs` rule with `action: labeldrop` for that label, reload with `curl -X POST localhost:9090/-/reload` (start with `--web.enable-lifecycle`), and confirm growth stops.",
+      "Write the recording and alerting rules from this lesson for a metric you have, then write a `promtool test rules` file that proves the alert fires after 10 minutes.",
+      "Leave it running for a few hours, then look inside the data volume and find the WAL, `chunks_head` and your first block directory."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Discovery adds `__meta_*` labels; relabel_configs pick targets and labels; metric_relabel_configs filter samples.",
+      "Memory scales with active series; disk scales with samples per second times retention.",
+      "Head block plus WAL in memory, two-hour blocks on disk, background compaction.",
+      "Never put unbounded values (IDs, raw paths, emails) in labels.",
+      "Recording rules make dashboards and alerts cheap; test rules with promtool.",
+      "Local TSDB is single-node: use remote write for long-term, global or HA storage."
+    ],
+    "groups": [
+      {"title": "promtool", "items": [
+        {"syntax": "promtool check config prometheus.yml", "desc": "Validate the main config and referenced rule files"},
+        {"syntax": "promtool check rules rules.yml", "desc": "Validate rule syntax"},
+        {"syntax": "promtool test rules tests.yml", "desc": "Unit-test recording and alerting rules"},
+        {"syntax": "promtool tsdb analyze /prometheus", "desc": "Find the highest-cardinality metrics and labels"},
+        {"syntax": "promtool query instant http://localhost:9090 'up'", "desc": "Run a query from the shell"}
+      ]},
+      {"title": "Server flags and config", "items": [
+        {"syntax": "storage: {tsdb: {retention: {time: 30d}}}", "desc": "Retention in prometheus.yml (flags deprecated); default 15d"},
+        {"syntax": "--web.enable-lifecycle", "desc": "Allow POST /-/reload and /-/quit"},
+        {"syntax": "--agent", "desc": "Scrape and remote write only: no queries, rules or local TSDB"},
+        {"syntax": "--web.enable-remote-write-receiver", "desc": "Accept remote write pushes"},
+        {"syntax": "--web.enable-otlp-receiver", "desc": "Accept OTLP metrics"}
+      ]},
+      {"title": "Relabel actions", "items": [
+        {"syntax": "action: keep / drop", "desc": "Keep or drop targets (or samples) whose labels match regex"},
+        {"syntax": "action: replace  target_label: X", "desc": "Write a value built from source_labels into X"},
+        {"syntax": "action: labeldrop  regex: X", "desc": "Remove labels matching regex"},
+        {"syntax": "action: hashmod  modulus: N", "desc": "Shard targets across N Prometheus servers"}
+      ]},
+      {"title": "Health queries", "items": [
+        {"syntax": "prometheus_tsdb_head_series", "desc": "Active series in memory"},
+        {"syntax": "rate(prometheus_tsdb_head_samples_appended_total[5m])", "desc": "Ingestion rate, for disk sizing"},
+        {"syntax": "topk(10, count by (__name__) ({__name__=~\".+\"}))", "desc": "Metrics with the most series (expensive: run rarely)"},
+        {"syntax": "up == 0", "desc": "Targets that failed their last scrape"}
+      ]}
+    ],
+    "pitfalls": [
+      "Labels with unbounded values such as user IDs or full URLs, which explode cardinality.",
+      "Putting the data directory on NFS or EFS, which is unsupported and corrupts blocks.",
+      "Setting size retention equal to the disk size, then running out of space during compaction.",
+      "Dashboards that aggregate raw high-cardinality metrics on every refresh instead of reading recording rules.",
+      "Treating one Prometheus as durable long-term storage with no remote write or snapshots."
+    ]
+  },
+  "quiz": [
+    {"q": "Memory on a Prometheus server doubled overnight while the number of scraped targets stayed the same. What is the most likely cause?", "options": ["A new label with unbounded values multiplied the number of active series", "The scrape interval was lengthened from 15 to 30 seconds", "Retention was increased from 15 to 30 days", "Compaction merged several two-hour blocks into one"], "answer": 0, "explain": "Memory is driven by active series in the head block. A label like a request ID creates new series constantly. Retention affects disk, and a longer scrape interval reduces load."},
+    {"q": "You want to stop storing all `go_gc_*` metrics from a job but still scrape its other metrics. Where does the rule go?", "options": ["metric_relabel_configs, which run on samples after the scrape", "relabel_configs, which run on targets before the scrape", "A recording rule that filters the metric out", "An alerting rule with a drop annotation"], "answer": 0, "explain": "relabel_configs act on targets, so they can only drop the whole target. metric_relabel_configs see each scraped series and can drop specific metric names before storage."},
+    {"q": "A Prometheus server takes eight minutes to become ready after a restart. Which component explains the wait?", "options": ["Replaying the write-ahead log to rebuild the in-memory head block", "Re-compacting every block on disk to the newest format", "Re-running every recording rule over the full retention period", "Re-downloading targets from every service discovery mechanism"], "answer": 0, "explain": "Recent samples live in the head block in memory and are protected by the WAL. On restart Prometheus replays the WAL to rebuild the head, which takes longer the more series and samples it holds."},
+    {"q": "Each of your 12 clusters needs to send metrics to one central store, and nobody queries the per-cluster servers. What is the leanest per-cluster setup?", "options": ["Prometheus in agent mode with remote write to the central store", "A full Prometheus server per cluster with 30-day retention", "Federation from the central server to each cluster every minute", "An Alertmanager per cluster forwarding to the central one"], "answer": 0, "explain": "Agent mode keeps discovery and scraping but drops local querying, rules and long-term storage, and forwards everything by remote write, which is exactly the collector role."},
+    {"q": "Your p99 latency from a classic histogram jumps between 2.5 s and 5 s with nothing in between. Why, and what helps?", "options": ["The bucket boundaries are coarse; native histograms give much finer resolution", "Scrapes are too frequent; increase the scrape interval to smooth it", "The TSDB is compacting; wait until compaction finishes", "PromQL rounds quantiles; use avg instead of histogram_quantile"], "answer": 0, "explain": "histogram_quantile interpolates within buckets, so with buckets at 2.5 and 5 the estimate cannot resolve finer values. Native histograms use automatic exponential buckets at much higher resolution."}
+  ]
+}

@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Prometheus internals — OSS Deep Dives | ThavionAI Education</title>
+  <meta name="description" content="Scraping, service discovery, the TSDB and its head block, recording and alerting rules, remote write and native histograms." />
+  <meta property="og:title" content="Prometheus internals — ThavionAI Education" />
+  <meta property="og:description" content="Scraping, service discovery, the TSDB and its head block, recording and alerting rules, remote write and native histograms." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/oss-prometheus.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-oss" data-module="oss-prometheus">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=oss-prometheus&amp;page=/education/oss-prometheus.html&amp;title=Prometheus%20internals">Feedback</a>
+    <a href="../education.html#oss" class="nav-cta">All OSS Deep Dives modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#oss">OSS Deep Dives</a> › Stage 3: Observability for AI systems</div>
+    <h1>Prometheus internals</h1>
+    <p class="lede">Scraping, service discovery, the TSDB and its head block, recording and alerting rules, remote write and native histograms.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 5 of 10</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">The SRE track taught you to scrape targets and write PromQL. This lesson goes under the hood of <code>prometheus/prometheus</code>: how service discovery and relabeling decide what gets scraped, how the TSDB turns samples into blocks on disk, why cardinality is the number that kills Prometheus servers, and how recording rules, remote write, agent mode and native histograms fit into a setup that monitors AI systems as well as web services.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Trace a sample from service discovery through relabeling, scrape and the TSDB</li><li>Size disk and memory for a Prometheus server and spot cardinality problems</li><li>Write recording and alerting rules and test them with promtool</li><li>Choose between local storage, remote write and agent mode</li><li>Configure native histograms and explain why they help latency SLOs</li></ul>
+    </div>
+    <section id="inside-the-repository-the-path-of-a-sample"><h2>Inside the repository: the path of a sample</h2>
+    <p>Prometheus is one Go binary, and its top-level folders read like a pipeline. <code>discovery/</code> finds targets (Kubernetes, EC2, Consul, file and HTTP service discovery and many more). <code>scrape/</code> pulls metrics from them on an interval. <code>tsdb/</code> stores the samples. <code>promql/</code> evaluates queries. <code>rules/</code> runs recording and alerting rules on a schedule, and <code>notifier/</code> sends firing alerts to Alertmanager, which is a separate project. <code>web/</code> serves the UI and HTTP API, and <code>storage/remote/</code> implements remote write and read.</p>
+    <p>Between discovery and scrape sits <strong>relabeling</strong>, the most powerful and most misunderstood part of the configuration. Service discovery attaches metadata labels that start with <code>__meta_</code>, such as a pod's annotations. <code>relabel_configs</code> rewrite those labels before the scrape, to keep or drop targets and to build the final <code>job</code>, <code>instance</code> and other labels. Labels that still start with <code>__</code> are discarded afterwards. <code>metric_relabel_configs</code> run after the scrape, on every sample, and are your last chance to drop an expensive series before it is stored.</p>
+    <figure class="diagram" id="fig-prom-sample-path"><div class="diagram-scroll"><svg viewBox="0 0 740 356" role="img" aria-label="Service discovery produces candidate targets with __meta labels. Relabel configs keep or drop targets and set final labels. The scrape loop pulls metrics from each target; metric relabel configs filter samples. Samples are appended to the write-ahead log on disk and to the in-memory head block. About every two hours the head is cut into an immutable block on disk, and compaction merges blocks. The rule engine and PromQL read from the head and blocks; firing alerts go to Alertmanager; remote write streams samples from the WAL to long-term storage." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="prom-sample-path-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="prom-sample-path-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="prom-sample-path-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="prom-sample-path-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="prom-sample-path-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><polyline points="171.0,70.0 201.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#prom-sample-path-arrow-default)"/><rect x="159.7" y="24.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">targets</text><polyline points="341.0,70.0 371.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#prom-sample-path-arrow-default)"/><rect x="338.8" y="24.0" width="34.4" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">pull</text><polyline points="511.0,70.0 541.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#prom-sample-path-arrow-default)"/><rect x="502.7" y="24.0" width="46.6" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">append</text><polyline points="611.0,98.0 611.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#prom-sample-path-arrow-default)"/><rect x="614.0" y="116.0" width="28.3" height="16" rx="4" class="dg-label-bg"/><text x="618.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">log</text><polyline points="581.0,98.0 581.0,148.0 511.0,148.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#prom-sample-path-arrow-default)"/><rect x="531.9" y="129.0" width="28.3" height="16" rx="4" class="dg-label-bg"/><text x="546.0" y="137.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">cut</text><polyline points="341.0,178.0 371.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#prom-sample-path-arrow-default)"/><rect x="338.8" y="132.0" width="34.4" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">read</text><polyline points="201.0,178.0 171.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#prom-sample-path-arrow-default)"/><rect x="168.8" y="132.0" width="34.4" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">fire</text><polyline points="611.0,206.0 611.0,258.0" fill="none" style="stroke:currentColor" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#prom-sample-path-arrow-default)"/><rect x="614.0" y="224.0" width="46.6" height="16" rx="4" class="dg-label-bg"/><text x="618.0" y="232.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">stream</text><rect x="31" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Discovery</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">__meta_* labels</text><rect x="201" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">relabel_configs</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">keep, set labels</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Scrape loop</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">+ metric relabel</text><rect x="541" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Head block</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">memory, ~2h</text><path d="M541,157.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M541,157.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="611.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">WAL</text><text x="611.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">crash safety</text><path d="M371,157.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M371,157.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Blocks</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">2h, compacted</text><rect x="201" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="271.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Rules, PromQL</text><text x="271.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">query, alert</text><rect x="31" y="150.0" width="140" height="56" rx="8" class="dg-node dg-muted"/><text x="101.0" y="178.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text2)">Alertmanager</text><rect x="541" y="258.0" width="140" height="56" rx="8" class="dg-node dg-muted"/><text x="611.0" y="279.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text2)">Remote write</text><text x="611.0" y="297.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">long-term store</text></svg></div><figcaption>A sample's path through Prometheus: discovery and relabeling choose the targets, the scrape loop pulls, and the TSDB writes to the WAL and the in-memory head before cutting two-hour blocks to disk.</figcaption></figure>
+    <div class="code"><div class="code-cap">Scrape only pods that opt in, and label them by namespace and pod</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>scrape_configs:
+  - job_name: kubernetes-pods
+    kubernetes_sd_configs:
+      - role: pod
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: "true"
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: "go_gc_.*"
+        action: drop</code></pre></div></section>
+  <section id="the-tsdb-head-wal-blocks-and-compaction"><h2>The TSDB: head, WAL, blocks and compaction</h2>
+    <p>New samples land in the <strong>head block</strong>, which lives in memory and covers the most recent two hours or so. To survive a crash, every write is also appended to the <strong>write-ahead log</strong> (<code>wal/</code>, 128 MB segment files), which is replayed on restart; this is why a large Prometheus can take minutes to start. Roughly every two hours the head is cut into an immutable <strong>block</strong> on disk: a directory with <code>chunks/</code>, an <code>index</code> that maps labels to series, a <code>meta.json</code> and <code>tombstones</code> for deletions. Background <strong>compaction</strong> merges small blocks into larger ones, up to 10% of the retention time or 31 days, whichever is smaller.</p>
+    <ul><li><strong>Disk:</strong> samples compress to about 1 to 2 bytes each, so disk is roughly retention seconds times samples ingested per second times 2 bytes. Keep size-based retention at 80 to 85% of the volume, because compaction briefly needs room for old and new blocks together.</li><li><strong>Memory:</strong> dominated by the number of <strong>active series</strong> in the head, not by how many samples you store. A series is one unique combination of metric name and label values.</li><li><strong>Storage:</strong> use a local disk. NFS, including network file systems such as EFS, is not supported and can corrupt the database.</li><li><strong>Backups:</strong> take a snapshot through the admin API rather than copying a live data directory.</li></ul>
+    <div class="callout callout-warning"><strong>Watch out</strong><p>Cardinality is the classic outage. One label holding a user ID, request ID or full URL path turns one metric into millions of series, memory explodes, and the server is killed. Check <code>prometheus_tsdb_head_series</code> and run <code>promtool tsdb analyze</code> to find the worst offenders.</p></div>
+    <p>Retention is set in the configuration file now: <code>storage.tsdb.retention.time</code> and <code>.size</code> in <code>prometheus.yml</code>. The old command-line flags still work but are deprecated. With no setting, time-based retention defaults to 15 days.</p></section>
+  <section id="rules-pre-compute-then-alert"><h2>Rules: pre-compute, then alert</h2>
+    <p><strong>Recording rules</strong> evaluate an expensive query on a schedule and store the result as a new series, so dashboards and alerts read one cheap series instead of re-aggregating thousands. The naming convention is <code>level:metric:operations</code>. <strong>Alerting rules</strong> evaluate a condition; when it stays true for the <code>for</code> duration, the alert fires and is sent to Alertmanager, which groups, silences and routes it.</p>
+    <div class="code"><div class="code-cap">Record per-model error ratio, then alert on it</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>groups:
+  - name: inference
+    interval: 30s
+    rules:
+      - record: model:request_errors:ratio_rate5m
+        expr: |
+          sum by (model) (rate(inference_requests_total{status="error"}[5m]))
+          /
+          sum by (model) (rate(inference_requests_total[5m]))
+      - alert: InferenceErrorRatioHigh
+        expr: model:request_errors:ratio_rate5m &gt; 0.05
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.model }} error ratio above 5% for 10 minutes"</code></pre></div>
+    <p>Treat rules like code: <code>promtool check rules</code> validates syntax, and <code>promtool test rules</code> runs unit tests that feed synthetic series into your rules and assert which alerts fire and when. Put both in CI next to the rule files.</p></section>
+  <section id="beyond-one-server-remote-write-agent-mode-otlp"><h2>Beyond one server: remote write, agent mode, OTLP</h2>
+    <p>Local storage is a single-node database: not clustered, not replicated. For long retention, a global view across clusters, or high availability, Prometheus <strong>remote writes</strong> samples to a system built for that, such as Thanos, Cortex, Mimir or a managed service. Remote write streams from the WAL, so a short outage of the receiver does not lose data while the WAL still holds it.</p>
+    <ul><li><strong>Agent mode</strong> (<code>--agent</code>) keeps service discovery, relabeling and scraping, but disables local querying, rules and alerting and uses a slim WAL. Run it in each cluster as a collector that only forwards.</li><li><strong>Receiving:</strong> <code>--web.enable-remote-write-receiver</code> lets another Prometheus or agent push to this one, and <code>--web.enable-otlp-receiver</code> accepts OTLP metrics directly from OpenTelemetry SDKs or Collectors.</li><li><strong>Federation</strong> (<code>/federate</code>) still exists for pulling a few aggregated series upward, but remote write is the usual answer for scale.</li></ul></section>
+  <section id="native-histograms-for-latency"><h2>Native histograms for latency</h2>
+    <p>A classic histogram stores one series per bucket boundary you chose in advance, plus <code>_sum</code> and <code>_count</code>. Pick the wrong buckets and your p99 is a guess; add more buckets and cardinality grows. A <strong>native histogram</strong> stores the whole distribution as one series with exponential buckets chosen automatically, at much higher resolution for less cost, and you can aggregate them across instances correctly.</p>
+    <div class="code"><div class="code-cap">Opt a job into native histograms</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>scrape_configs:
+  - job_name: llm-gateway
+    scrape_native_histograms: true
+    static_configs:
+      - targets: ["gateway.ai.svc:9090"]</code></pre></div>
+    <p>Query them with the same functions: <code>histogram_quantile(0.99, sum(rate(request_duration_seconds[5m])))</code>, without a <code>_bucket</code> suffix or <code>le</code> label. For LLM serving, where time to first token and time per output token span orders of magnitude, this resolution is what makes a latency SLO trustworthy.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Watch the TSDB work and break it on purpose</h2>
+    <ol><li>Run Prometheus in Docker with a volume for <code>/prometheus</code> and a config that scrapes itself every 5 seconds.</li><li>Open the UI and query <code>prometheus_tsdb_head_series</code>; note the number.</li><li>Run a small exporter (any language) that emits a counter with a label set to a random ID on every request, hit it a few thousand times, and watch head series and memory climb.</li><li>Add a <code>metric_relabel_configs</code> rule with <code>action: labeldrop</code> for that label, reload with <code>curl -X POST localhost:9090/-/reload</code> (start with <code>--web.enable-lifecycle</code>), and confirm growth stops.</li><li>Write the recording and alerting rules from this lesson for a metric you have, then write a <code>promtool test rules</code> file that proves the alert fires after 10 minutes.</li><li>Leave it running for a few hours, then look inside the data volume and find the WAL, <code>chunks_head</code> and your first block directory.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Prometheus internals — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Discovery adds <code>__meta_*</code> labels; relabel_configs pick targets and labels; metric_relabel_configs filter samples.</li><li>Memory scales with active series; disk scales with samples per second times retention.</li><li>Head block plus WAL in memory, two-hour blocks on disk, background compaction.</li><li>Never put unbounded values (IDs, raw paths, emails) in labels.</li><li>Recording rules make dashboards and alerts cheap; test rules with promtool.</li><li>Local TSDB is single-node: use remote write for long-term, global or HA storage.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>promtool</h3><table><tbody><tr><td><code>promtool check config prometheus.yml</code></td><td>Validate the main config and referenced rule files</td></tr><tr><td><code>promtool check rules rules.yml</code></td><td>Validate rule syntax</td></tr><tr><td><code>promtool test rules tests.yml</code></td><td>Unit-test recording and alerting rules</td></tr><tr><td><code>promtool tsdb analyze /prometheus</code></td><td>Find the highest-cardinality metrics and labels</td></tr><tr><td><code>promtool query instant http://localhost:9090 'up'</code></td><td>Run a query from the shell</td></tr></tbody></table></div><div class="cheat-group"><h3>Server flags and config</h3><table><tbody><tr><td><code>storage: {tsdb: {retention: {time: 30d}}}</code></td><td>Retention in prometheus.yml (flags deprecated); default 15d</td></tr><tr><td><code>--web.enable-lifecycle</code></td><td>Allow POST /-/reload and /-/quit</td></tr><tr><td><code>--agent</code></td><td>Scrape and remote write only: no queries, rules or local TSDB</td></tr><tr><td><code>--web.enable-remote-write-receiver</code></td><td>Accept remote write pushes</td></tr><tr><td><code>--web.enable-otlp-receiver</code></td><td>Accept OTLP metrics</td></tr></tbody></table></div><div class="cheat-group"><h3>Relabel actions</h3><table><tbody><tr><td><code>action: keep / drop</code></td><td>Keep or drop targets (or samples) whose labels match regex</td></tr><tr><td><code>action: replace  target_label: X</code></td><td>Write a value built from source_labels into X</td></tr><tr><td><code>action: labeldrop  regex: X</code></td><td>Remove labels matching regex</td></tr><tr><td><code>action: hashmod  modulus: N</code></td><td>Shard targets across N Prometheus servers</td></tr></tbody></table></div><div class="cheat-group"><h3>Health queries</h3><table><tbody><tr><td><code>prometheus_tsdb_head_series</code></td><td>Active series in memory</td></tr><tr><td><code>rate(prometheus_tsdb_head_samples_appended_total[5m])</code></td><td>Ingestion rate, for disk sizing</td></tr><tr><td><code>topk(10, count by (__name__) ({__name__=~".+"}))</code></td><td>Metrics with the most series (expensive: run rarely)</td></tr><tr><td><code>up == 0</code></td><td>Targets that failed their last scrape</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Labels with unbounded values such as user IDs or full URLs, which explode cardinality.</li><li>Putting the data directory on NFS or EFS, which is unsupported and corrupts blocks.</li><li>Setting size retention equal to the disk size, then running out of space during compaction.</li><li>Dashboards that aggregate raw high-cardinality metrics on every refresh instead of reading recording rules.</li><li>Treating one Prometheus as durable long-term storage with no remote write or snapshots.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "Memory on a Prometheus server doubled overnight while the number of scraped targets stayed the same. What is the most likely cause?", "options": ["A new label with unbounded values multiplied the number of active series", "The scrape interval was lengthened from 15 to 30 seconds", "Retention was increased from 15 to 30 days", "Compaction merged several two-hour blocks into one"], "answer": 0, "explain": "Memory is driven by active series in the head block. A label like a request ID creates new series constantly. Retention affects disk, and a longer scrape interval reduces load."}, {"q": "You want to stop storing all `go_gc_*` metrics from a job but still scrape its other metrics. Where does the rule go?", "options": ["metric_relabel_configs, which run on samples after the scrape", "relabel_configs, which run on targets before the scrape", "A recording rule that filters the metric out", "An alerting rule with a drop annotation"], "answer": 0, "explain": "relabel_configs act on targets, so they can only drop the whole target. metric_relabel_configs see each scraped series and can drop specific metric names before storage."}, {"q": "A Prometheus server takes eight minutes to become ready after a restart. Which component explains the wait?", "options": ["Replaying the write-ahead log to rebuild the in-memory head block", "Re-compacting every block on disk to the newest format", "Re-running every recording rule over the full retention period", "Re-downloading targets from every service discovery mechanism"], "answer": 0, "explain": "Recent samples live in the head block in memory and are protected by the WAL. On restart Prometheus replays the WAL to rebuild the head, which takes longer the more series and samples it holds."}, {"q": "Each of your 12 clusters needs to send metrics to one central store, and nobody queries the per-cluster servers. What is the leanest per-cluster setup?", "options": ["Prometheus in agent mode with remote write to the central store", "A full Prometheus server per cluster with 30-day retention", "Federation from the central server to each cluster every minute", "An Alertmanager per cluster forwarding to the central one"], "answer": 0, "explain": "Agent mode keeps discovery and scraping but drops local querying, rules and long-term storage, and forwards everything by remote write, which is exactly the collector role."}, {"q": "Your p99 latency from a classic histogram jumps between 2.5 s and 5 s with nothing in between. Why, and what helps?", "options": ["The bucket boundaries are coarse; native histograms give much finer resolution", "Scrapes are too frequent; increase the scrape interval to smooth it", "The TSDB is compacting; wait until compaction finishes", "PromQL rounds quantiles; use avg instead of histogram_quantile"], "answer": 0, "explain": "histogram_quantile interpolates within buckets, so with buckets at 2.5 and 5 the estimate cannot resolve finer values. Native histograms use automatic exponential buckets at much higher resolution."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="oss-mlflow.html"><span>← Previous</span><strong>MLflow: tracking, registry and GenAI</strong></a>
+    <a class="pager-up" href="../education.html#oss">All OSS Deep Dives modules</a>
+    <span class="pager-link pager-next is-empty"></span>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=oss-prometheus&amp;page=/education/oss-prometheus.html&amp;title=Prometheus%20internals">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=oss-prometheus&amp;page=/education/oss-prometheus.html&amp;title=Prometheus%20internals">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>
