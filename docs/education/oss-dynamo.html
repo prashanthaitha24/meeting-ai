@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NVIDIA Dynamo: distributed inference — OSS Deep Dives | ThavionAI Education</title>
+  <meta name="description" content="Disaggregated prefill and decode, KV-aware routing, KV cache offload and the planner — serving LLMs across a datacenter." />
+  <meta property="og:title" content="NVIDIA Dynamo: distributed inference — ThavionAI Education" />
+  <meta property="og:description" content="Disaggregated prefill and decode, KV-aware routing, KV cache offload and the planner — serving LLMs across a datacenter." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/oss-dynamo.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-oss" data-module="oss-dynamo">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=oss-dynamo&amp;page=/education/oss-dynamo.html&amp;title=NVIDIA%20Dynamo%3A%20distributed%20inference">Feedback</a>
+    <a href="../education.html#oss" class="nav-cta">All OSS Deep Dives modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#oss">OSS Deep Dives</a> › Stage 4: LLM inference infrastructure</div>
+    <h1>NVIDIA Dynamo: distributed inference</h1>
+    <p class="lede">Disaggregated prefill and decode, KV-aware routing, KV cache offload and the planner — serving LLMs across a datacenter.</p>
+    <div class="meta">
+      <span class="chip">Advanced</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 10 of 10</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">vLLM, SGLang and TensorRT-LLM make one GPU, or one node, serve a model well. NVIDIA Dynamo (<code>ai-dynamo/dynamo</code>, Apache-2.0, Rust core with Python extensions) is the layer above them: it turns a cluster of engine workers into one coordinated inference system. This lesson explains the problems that only appear at multi-node scale, and the four ideas Dynamo applies to them: KV-aware routing, disaggregated prefill and decode, tiered KV cache, and an SLA-driven planner. It also shows how to run it, from one container to Kubernetes, and when you do not need it.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Explain why naive load balancing wastes prefill work across LLM replicas</li><li>Describe disaggregated serving and the KV transfer it depends on</li><li>Run a Dynamo frontend with vLLM workers, aggregated and disaggregated</li><li>Explain what the KV Block Manager and the Planner add</li><li>Decide when an engine alone is enough and when Dynamo pays off</li></ul>
+    </div>
+    <section id="problems-that-appear-at-cluster-scale"><h2>Problems that appear at cluster scale</h2>
+    <p>Put ten vLLM replicas behind a round-robin load balancer and three problems show up. First, <strong>wasted prefill</strong>: a multi-turn conversation's next message lands on a replica that has never seen it, so the whole history is prefilled again, even though another replica holds that exact prefix in its KV cache. Second, <strong>interference</strong>: prefill is compute-heavy and bursty, decode is memory-bandwidth-bound and steady, and mixing them on the same GPU makes long prompts stall everyone else's token stream. Third, <strong>static sizing</strong>: the right number of GPUs for prefill versus decode changes with traffic, prompt lengths and output lengths throughout the day.</p>
+    <p>Dynamo addresses these without replacing the engine. Its README is explicit: it does not replace SGLang, TensorRT-LLM or vLLM; it coordinates them. If you run one model on one GPU, the engine alone is probably enough.</p>
+    <div class="table-wrap"><table><thead><tr><th>Component</th><th>Role</th></tr></thead><tbody><tr><td>Frontend</td><td>OpenAI-compatible HTTP server (port 8000 by default); tokenizes and forwards</td></tr><tr><td>Router</td><td>Chooses a worker per request, optionally by KV cache overlap and load</td></tr><tr><td>Workers</td><td>Engine processes (vLLM, SGLang, TensorRT-LLM), aggregated or split into prefill and decode</td></tr><tr><td>NIXL</td><td>Transfer library that moves KV cache between GPUs and nodes over NVLink, RDMA or storage</td></tr><tr><td>KVBM</td><td>KV Block Manager: offloads cache from GPU to CPU memory, SSD and remote storage</td></tr><tr><td>Planner</td><td>Autoscaler that sizes prefill and decode pools to meet latency targets</td></tr></tbody></table></div></section>
+  <section id="kv-aware-routing"><h2>KV-aware routing</h2>
+    <p>Workers publish <strong>KV events</strong>: which cache blocks they hold, keyed by hashes of token prefixes. The router keeps a global index and, for each request, scores workers by how much of the prompt they already have cached and how loaded they are, then sends the request where the least new prefill is needed without overloading anyone. A returning conversation, an agent loop that re-sends a long tool transcript, or many users sharing one long system prompt all benefit, and the visible gain is lower time to first token.</p>
+    <div class="code"><div class="code-cap">Frontend with KV-aware routing and two aggregated vLLM workers (inside a Dynamo vLLM runtime container)</div><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>export MODEL_ID=YOUR_ORG/YOUR_MODEL
+
+python3 -m dynamo.frontend --http-port 8000 --router-mode kv &amp;
+
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model "$MODEL_ID" &amp;
+CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm --model "$MODEL_ID" &amp;
+wait</code></pre></div>
+    <p>Clients call <code>http://localhost:8000/v1/chat/completions</code> exactly as they would call vLLM. On Kubernetes, the same routing logic can run inside the standard Gateway API Inference Extension as an endpoint picker, so a cluster gateway makes KV-aware choices.</p></section>
+  <section id="disaggregated-prefill-and-decode"><h2>Disaggregated prefill and decode</h2>
+    <p><strong>Disaggregated serving</strong> runs prefill and decode on separate pools of GPUs. A request is prefilled on a prefill worker, its KV cache is transferred to a decode worker, and the decode worker streams the tokens. Each pool can be sized and configured for its own bottleneck, for example more parallelism for prefill and larger batches for decode, and long prompts no longer stall token streams.</p>
+    <figure class="diagram" id="fig-dynamo-disagg"><div class="diagram-scroll"><svg viewBox="0 0 740 248" role="img" aria-label="A client calls the Dynamo frontend&#x27;s OpenAI-compatible API. The router consults a global index of which KV blocks each worker holds and picks a prefill worker. The prefill worker computes the prompt&#x27;s KV cache and transfers it with NIXL over NVLink or RDMA to a decode worker in a separate pool, which streams tokens back to the client. The KV Block Manager can offload cache blocks to CPU memory, SSD or remote storage. The Planner watches TTFT and ITL and resizes the prefill and decode pools." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="dynamo-disagg-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="dynamo-disagg-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="dynamo-disagg-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="dynamo-disagg-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="dynamo-disagg-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><polyline points="171.0,70.0 201.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#dynamo-disagg-arrow-default)"/><rect x="159.7" y="24.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">request</text><polyline points="341.0,70.0 371.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#dynamo-disagg-arrow-default)"/><rect x="335.8" y="24.0" width="40.5" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">route</text><polyline points="511.0,70.0 541.0,70.0" fill="none" style="stroke:var(--accent)" stroke-width="1.6" marker-end="url(#dynamo-disagg-arrow-accent)"/><rect x="487.4" y="24.0" width="77.1" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--accent)">KV via NIXL</text><polyline points="611.0,98.0 611.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#dynamo-disagg-arrow-default)"/><rect x="614.0" y="116.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="618.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">offload</text><polyline points="611.0,42.0 611.0,20.0 101.0,20.0 101.0,42.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#dynamo-disagg-arrow-default)"/><rect x="311.4" y="1.0" width="89.3" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="9.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">stream tokens</text><polyline points="341.0,178.0 441.0,178.0 441.0,98.0" fill="none" style="stroke:rgba(148,163,184,0.55)" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#dynamo-disagg-arrow-muted)"/><rect x="352.4" y="159.0" width="77.1" height="16" rx="4" class="dg-label-bg"/><text x="391.0" y="167.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">scale pools</text><rect x="31" y="42.0" width="140" height="56" rx="28.0" class="dg-node dg-actor"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Client</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">OpenAI API</text><rect x="201" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Router</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">frontend, KV-aware</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Prefill worker</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">prefill pool</text><rect x="541" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Decode worker</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">decode pool</text><path d="M541,157.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M541,157.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="611.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">KVBM</text><text x="611.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">CPU, SSD, remote</text><rect x="201" y="150.0" width="140" height="56" rx="8" class="dg-node dg-muted"/><text x="271.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text2)">Planner</text><text x="271.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">TTFT, ITL targets</text></svg></div><figcaption>Dynamo's router picks a prefill worker by cached prefix and load; the prefill worker computes the KV cache and hands it to a decode worker over NIXL, which streams the tokens.</figcaption></figure>
+    <div class="code"><div class="code-cap">One decode worker and one prefill worker, KV moved with NIXL (from the repo's vLLM disagg example)</div><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>python3 -m dynamo.frontend &amp;
+
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model "$MODEL_ID" \
+  --disaggregation-mode decode \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &amp;
+
+CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm --model "$MODEL_ID" \
+  --disaggregation-mode prefill \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &amp;
+wait</code></pre></div>
+    <div class="callout callout-warning"><strong>Watch out</strong><p>Disaggregation is not free. Every request's KV cache crosses the interconnect, so it pays off with fast links (NVLink, InfiniBand or RoCE) and with workloads where prompts are long or prefill and decode contend. On slow networks, or with short prompts, aggregated serving with KV-aware routing is often better. Benchmark both.</p></div></section>
+  <section id="tiered-cache-planning-and-fast-starts"><h2>Tiered cache, planning and fast starts</h2>
+    <ul><li><strong>KV Block Manager (KVBM)</strong> extends the KV cache beyond GPU memory into CPU memory, local SSD and remote or object storage. Blocks evicted from the GPU can be brought back instead of recomputed, which matters for long contexts and many idle conversations.</li><li><strong>Planner</strong> watches time to first token and inter-token latency against targets and adds or removes prefill and decode workers, aiming to meet the SLA with the fewest GPUs.</li><li><strong>ModelExpress</strong> streams weights GPU-to-GPU to new replicas, shortening the minutes-long cold start of large models.</li><li><strong>Fault tolerance</strong> health-checks workers and migrates in-flight requests when one fails, so a crashed worker does not mean failed user requests.</li><li><strong>Grove</strong> is a Kubernetes operator for topology-aware gang scheduling, placing the pods of one model across racks and NVLink domains sensibly.</li></ul>
+    <p>Discovery and messaging are light by default: local development uses <code>--discovery-backend file</code>, and on Kubernetes Dynamo uses native resources, so etcd and NATS are optional rather than required.</p></section>
+  <section id="deploying-on-kubernetes-and-when-not-to"><h2>Deploying on Kubernetes, and when not to</h2>
+    <p>In production you install the Dynamo platform (operator and CRDs) and describe deployments declaratively. The newest path, in beta, is a <strong>DynamoGraphDeploymentRequest</strong>: you state the model, backend and latency targets, and Dynamo profiles candidate configurations, picks a topology and applies it. Ready-made <strong>recipes</strong> in the repository cover common model, engine and mode combinations.</p>
+    <div class="code"><div class="code-cap">State the SLA, let Dynamo choose the topology (beta)</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: chat
+spec:
+  model: YOUR_ORG/YOUR_MODEL
+  backend: vllm
+  sla:
+    ttft: 200.0
+    itl: 20.0
+  autoApply: true</code></pre></div>
+    <div class="table-wrap"><table><thead><tr><th>Situation</th><th>Reasonable choice</th></tr></thead><tbody><tr><td>One model, fits on one GPU, modest traffic</td><td>The engine alone (vLLM, SGLang)</td></tr><tr><td>Several replicas, repeated prefixes, multi-turn chat</td><td>Engine plus KV-aware routing</td></tr><tr><td>Long prompts, multi-node, fast interconnect, strict latency SLOs</td><td>Disaggregated serving with Planner</td></tr><tr><td>Very long contexts or many idle sessions</td><td>Add KVBM tiered cache</td></tr></tbody></table></div>
+    <p>Measure before adopting: the repository's benchmarking guide uses <strong>AIPerf</strong> to compare aggregated and disaggregated topologies on your own prompt and output lengths. Keep the comparison honest by changing one variable at a time and recording time to first token, inter-token latency and throughput per GPU.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Aggregated versus KV-routed, on two GPUs</h2>
+    <ol><li>On a machine with two NVIDIA GPUs (a cloud instance is fine), start the Dynamo vLLM runtime container from the README with <code>--gpus all --network host</code>.</li><li>Start <code>python3 -m dynamo.frontend --http-port 8000 --discovery-backend file</code> and two <code>dynamo.vllm</code> workers with a small open model and <code>--discovery-backend file</code>, one per GPU.</li><li>Send a chat request with curl to <code>/v1/chat/completions</code> and confirm it streams.</li><li>Write a small script that sends 50 multi-turn conversations, each re-sending a growing history, and records time to first token per request.</li><li>Restart the frontend with <code>--router-mode kv</code> and rerun the script; compare median and p95 time to first token.</li><li>If your GPUs are linked by NVLink, try the disaggregated launch from this lesson and repeat the measurement; write down which topology won and why.</li><li>Stop the instance when finished.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>NVIDIA Dynamo: distributed inference — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Dynamo coordinates engines; it does not replace vLLM, SGLang or TensorRT-LLM.</li><li>KV-aware routing sends requests where their prefix is already cached: lower TTFT.</li><li>Disaggregation splits prefill and decode pools and moves KV with NIXL.</li><li>Disaggregation needs fast interconnect and long prompts to pay off.</li><li>KVBM tiers the KV cache to CPU, SSD and remote storage.</li><li>Planner scales prefill and decode pools against TTFT and ITL targets.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Run locally</h3><table><tbody><tr><td><code>uv pip install --prerelease=allow "ai-dynamo[vllm]"</code></td><td>Install Dynamo with the vLLM backend</td></tr><tr><td><code>python3 -m dynamo.frontend --http-port 8000</code></td><td>OpenAI-compatible frontend</td></tr><tr><td><code>--router-mode kv</code></td><td>Frontend: route by KV cache overlap and load</td></tr><tr><td><code>python3 -m dynamo.vllm --model MODEL</code></td><td>Start a vLLM worker</td></tr><tr><td><code>--discovery-backend file</code></td><td>Local discovery without etcd or NATS</td></tr></tbody></table></div><div class="cheat-group"><h3>Disaggregation</h3><table><tbody><tr><td><code>--disaggregation-mode prefill | decode</code></td><td>Worker role in disaggregated serving</td></tr><tr><td><code>--kv-transfer-config '{"kv_connector":"NixlConnector",...}'</code></td><td>Move KV cache between workers with NIXL</td></tr><tr><td><code>CUDA_VISIBLE_DEVICES=N</code></td><td>Pin each worker to its own GPU</td></tr></tbody></table></div><div class="cheat-group"><h3>Kubernetes</h3><table><tbody><tr><td><code>kind: DynamoGraphDeploymentRequest</code></td><td>Model + backend + SLA; Dynamo picks topology (beta)</td></tr><tr><td><code>spec.sla: {ttft: 200.0, itl: 20.0}</code></td><td>Latency targets in milliseconds</td></tr><tr><td><code>recipes/</code></td><td>Ready-made deployments per model, engine and mode</td></tr><tr><td><code>Gateway API Inference Extension + EPP</code></td><td>KV-aware routing inside a cluster gateway</td></tr></tbody></table></div><div class="cheat-group"><h3>Decide and measure</h3><table><tbody><tr><td><code>TTFT = queue + prefill (+ KV transfer if disaggregated)</code></td><td>Where disaggregation adds and saves time</td></tr><tr><td><code>ITL = time between streamed tokens</code></td><td>What decode pools are sized for</td></tr><tr><td><code>AIPerf</code></td><td>Benchmark topologies on your own workload</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Adopting a distributed framework for one model on one GPU, where the engine alone is simpler.</li><li>Disaggregating over a slow network and making time to first token worse.</li><li>Round-robin load balancing across replicas, so prefixes are recomputed everywhere.</li><li>Judging topologies on someone else's benchmark instead of your own prompt and output lengths.</li><li>Changing several settings at once, so you cannot tell which one helped.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "Ten vLLM replicas sit behind round-robin load balancing, and multi-turn chats have high time to first token. What does KV-aware routing change?", "options": ["It sends each request to a worker that already caches its prefix, avoiding repeated prefill", "It moves decode to separate GPUs so prefill runs faster", "It compresses the KV cache so each replica holds more", "It retries slow requests on a second replica in parallel"], "answer": 0, "explain": "Round-robin ignores where a conversation's history is cached, so it is prefilled again elsewhere. KV-aware routing scores workers by cached prefix overlap and load."}, {"q": "In disaggregated serving, what must move from the prefill worker to the decode worker for each request?", "options": ["The request's KV cache", "The full model weights", "The tokenizer vocabulary", "The decode worker's batch queue"], "answer": 0, "explain": "Prefill produces the KV cache for the prompt; the decode worker needs it to generate tokens, so it is transferred, typically with NIXL over NVLink or RDMA."}, {"q": "A team disaggregated prefill and decode across nodes linked by ordinary 10 Gb Ethernet, and time to first token got worse. Why?", "options": ["Transferring each request's KV cache over the slow link costs more than it saves", "Disaggregation always doubles the number of tokens generated", "The Planner disables KV-aware routing in disaggregated mode", "Prefill workers cannot use tensor parallelism"], "answer": 0, "explain": "Disaggregation adds a KV transfer to every request. It pays off with fast interconnects and long prompts; over a slow network the transfer can dominate."}, {"q": "Many users keep long conversations open but idle, and GPU memory cannot hold all their caches. Which Dynamo component helps?", "options": ["The KV Block Manager, which offloads cache to CPU, SSD or remote storage", "The frontend, which shortens prompts before forwarding", "Grove, which schedules pods across racks", "The router in round-robin mode"], "answer": 0, "explain": "KVBM tiers evicted KV blocks to cheaper memory and storage so they can be reloaded instead of recomputed when the conversation resumes."}, {"q": "You serve one small model on one GPU with steady, modest traffic. What is the sensible serving choice?", "options": ["The inference engine on its own, without Dynamo", "Dynamo with disaggregated prefill and decode", "Dynamo with KVBM offloading to object storage", "Dynamo with Planner scaling separate pools"], "answer": 0, "explain": "Dynamo solves multi-GPU and multi-node coordination problems. Its own README says that for a single model on a single GPU the engine alone is probably sufficient."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="oss-triton.html"><span>← Previous</span><strong>NVIDIA Triton Inference Server</strong></a>
+    <a class="pager-up" href="../education.html#oss">All OSS Deep Dives modules</a>
+    <span class="pager-link pager-next is-empty"></span>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=oss-dynamo&amp;page=/education/oss-dynamo.html&amp;title=NVIDIA%20Dynamo%3A%20distributed%20inference">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=oss-dynamo&amp;page=/education/oss-dynamo.html&amp;title=NVIDIA%20Dynamo%3A%20distributed%20inference">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

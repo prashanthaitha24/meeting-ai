@@ -1,0 +1,133 @@
+{
+  "id": "oss-dynamo",
+  "minutes": 35,
+  "intro": "vLLM, SGLang and TensorRT-LLM make one GPU, or one node, serve a model well. NVIDIA Dynamo (`ai-dynamo/dynamo`, Apache-2.0, Rust core with Python extensions) is the layer above them: it turns a cluster of engine workers into one coordinated inference system. This lesson explains the problems that only appear at multi-node scale, and the four ideas Dynamo applies to them: KV-aware routing, disaggregated prefill and decode, tiered KV cache, and an SLA-driven planner. It also shows how to run it, from one container to Kubernetes, and when you do not need it.",
+  "objectives": [
+    "Explain why naive load balancing wastes prefill work across LLM replicas",
+    "Describe disaggregated serving and the KV transfer it depends on",
+    "Run a Dynamo frontend with vLLM workers, aggregated and disaggregated",
+    "Explain what the KV Block Manager and the Planner add",
+    "Decide when an engine alone is enough and when Dynamo pays off"
+  ],
+  "sections": [
+    {
+      "heading": "Problems that appear at cluster scale",
+      "blocks": [
+        {"type": "p", "text": "Put ten vLLM replicas behind a round-robin load balancer and three problems show up. First, **wasted prefill**: a multi-turn conversation's next message lands on a replica that has never seen it, so the whole history is prefilled again, even though another replica holds that exact prefix in its KV cache. Second, **interference**: prefill is compute-heavy and bursty, decode is memory-bandwidth-bound and steady, and mixing them on the same GPU makes long prompts stall everyone else's token stream. Third, **static sizing**: the right number of GPUs for prefill versus decode changes with traffic, prompt lengths and output lengths throughout the day."},
+        {"type": "p", "text": "Dynamo addresses these without replacing the engine. Its README is explicit: it does not replace SGLang, TensorRT-LLM or vLLM; it coordinates them. If you run one model on one GPU, the engine alone is probably enough."},
+        {"type": "table", "headers": ["Component", "Role"], "rows": [
+          ["Frontend", "OpenAI-compatible HTTP server (port 8000 by default); tokenizes and forwards"],
+          ["Router", "Chooses a worker per request, optionally by KV cache overlap and load"],
+          ["Workers", "Engine processes (vLLM, SGLang, TensorRT-LLM), aggregated or split into prefill and decode"],
+          ["NIXL", "Transfer library that moves KV cache between GPUs and nodes over NVLink, RDMA or storage"],
+          ["KVBM", "KV Block Manager: offloads cache from GPU to CPU memory, SSD and remote storage"],
+          ["Planner", "Autoscaler that sizes prefill and decode pools to meet latency targets"]
+        ]}
+      ]
+    },
+    {
+      "heading": "KV-aware routing",
+      "blocks": [
+        {"type": "p", "text": "Workers publish **KV events**: which cache blocks they hold, keyed by hashes of token prefixes. The router keeps a global index and, for each request, scores workers by how much of the prompt they already have cached and how loaded they are, then sends the request where the least new prefill is needed without overloading anyone. A returning conversation, an agent loop that re-sends a long tool transcript, or many users sharing one long system prompt all benefit, and the visible gain is lower time to first token."},
+        {"type": "code", "lang": "bash", "caption": "Frontend with KV-aware routing and two aggregated vLLM workers (inside a Dynamo vLLM runtime container)", "code": "export MODEL_ID=YOUR_ORG/YOUR_MODEL\n\npython3 -m dynamo.frontend --http-port 8000 --router-mode kv &\n\nCUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model \"$MODEL_ID\" &\nCUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm --model \"$MODEL_ID\" &\nwait"},
+        {"type": "p", "text": "Clients call `http://localhost:8000/v1/chat/completions` exactly as they would call vLLM. On Kubernetes, the same routing logic can run inside the standard Gateway API Inference Extension as an endpoint picker, so a cluster gateway makes KV-aware choices."}
+      ]
+    },
+    {
+      "heading": "Disaggregated prefill and decode",
+      "blocks": [
+        {"type": "p", "text": "**Disaggregated serving** runs prefill and decode on separate pools of GPUs. A request is prefilled on a prefill worker, its KV cache is transferred to a decode worker, and the decode worker streams the tokens. Each pool can be sized and configured for its own bottleneck, for example more parallelism for prefill and larger batches for decode, and long prompts no longer stall token streams."},
+        {"type": "code", "lang": "bash", "caption": "One decode worker and one prefill worker, KV moved with NIXL (from the repo's vLLM disagg example)", "code": "python3 -m dynamo.frontend &\n\nCUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model \"$MODEL_ID\" \\\n  --disaggregation-mode decode \\\n  --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' &\n\nCUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm --model \"$MODEL_ID\" \\\n  --disaggregation-mode prefill \\\n  --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\"}' &\nwait"},
+        {"type": "callout", "kind": "warning", "text": "Disaggregation is not free. Every request's KV cache crosses the interconnect, so it pays off with fast links (NVLink, InfiniBand or RoCE) and with workloads where prompts are long or prefill and decode contend. On slow networks, or with short prompts, aggregated serving with KV-aware routing is often better. Benchmark both."}
+      ]
+    },
+    {
+      "heading": "Tiered cache, planning and fast starts",
+      "blocks": [
+        {"type": "list", "items": [
+          "**KV Block Manager (KVBM)** extends the KV cache beyond GPU memory into CPU memory, local SSD and remote or object storage. Blocks evicted from the GPU can be brought back instead of recomputed, which matters for long contexts and many idle conversations.",
+          "**Planner** watches time to first token and inter-token latency against targets and adds or removes prefill and decode workers, aiming to meet the SLA with the fewest GPUs.",
+          "**ModelExpress** streams weights GPU-to-GPU to new replicas, shortening the minutes-long cold start of large models.",
+          "**Fault tolerance** health-checks workers and migrates in-flight requests when one fails, so a crashed worker does not mean failed user requests.",
+          "**Grove** is a Kubernetes operator for topology-aware gang scheduling, placing the pods of one model across racks and NVLink domains sensibly."
+        ]},
+        {"type": "p", "text": "Discovery and messaging are light by default: local development uses `--discovery-backend file`, and on Kubernetes Dynamo uses native resources, so etcd and NATS are optional rather than required."}
+      ]
+    },
+    {
+      "heading": "Deploying on Kubernetes, and when not to",
+      "blocks": [
+        {"type": "p", "text": "In production you install the Dynamo platform (operator and CRDs) and describe deployments declaratively. The newest path, in beta, is a **DynamoGraphDeploymentRequest**: you state the model, backend and latency targets, and Dynamo profiles candidate configurations, picks a topology and applies it. Ready-made **recipes** in the repository cover common model, engine and mode combinations."},
+        {"type": "code", "lang": "yaml", "caption": "State the SLA, let Dynamo choose the topology (beta)", "code": "apiVersion: nvidia.com/v1beta1\nkind: DynamoGraphDeploymentRequest\nmetadata:\n  name: chat\nspec:\n  model: YOUR_ORG/YOUR_MODEL\n  backend: vllm\n  sla:\n    ttft: 200.0\n    itl: 20.0\n  autoApply: true"},
+        {"type": "table", "headers": ["Situation", "Reasonable choice"], "rows": [
+          ["One model, fits on one GPU, modest traffic", "The engine alone (vLLM, SGLang)"],
+          ["Several replicas, repeated prefixes, multi-turn chat", "Engine plus KV-aware routing"],
+          ["Long prompts, multi-node, fast interconnect, strict latency SLOs", "Disaggregated serving with Planner"],
+          ["Very long contexts or many idle sessions", "Add KVBM tiered cache"]
+        ]},
+        {"type": "p", "text": "Measure before adopting: the repository's benchmarking guide uses **AIPerf** to compare aggregated and disaggregated topologies on your own prompt and output lengths. Keep the comparison honest by changing one variable at a time and recording time to first token, inter-token latency and throughput per GPU."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Aggregated versus KV-routed, on two GPUs",
+    "steps": [
+      "On a machine with two NVIDIA GPUs (a cloud instance is fine), start the Dynamo vLLM runtime container from the README with `--gpus all --network host`.",
+      "Start `python3 -m dynamo.frontend --http-port 8000 --discovery-backend file` and two `dynamo.vllm` workers with a small open model and `--discovery-backend file`, one per GPU.",
+      "Send a chat request with curl to `/v1/chat/completions` and confirm it streams.",
+      "Write a small script that sends 50 multi-turn conversations, each re-sending a growing history, and records time to first token per request.",
+      "Restart the frontend with `--router-mode kv` and rerun the script; compare median and p95 time to first token.",
+      "If your GPUs are linked by NVLink, try the disaggregated launch from this lesson and repeat the measurement; write down which topology won and why.",
+      "Stop the instance when finished."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Dynamo coordinates engines; it does not replace vLLM, SGLang or TensorRT-LLM.",
+      "KV-aware routing sends requests where their prefix is already cached: lower TTFT.",
+      "Disaggregation splits prefill and decode pools and moves KV with NIXL.",
+      "Disaggregation needs fast interconnect and long prompts to pay off.",
+      "KVBM tiers the KV cache to CPU, SSD and remote storage.",
+      "Planner scales prefill and decode pools against TTFT and ITL targets."
+    ],
+    "groups": [
+      {"title": "Run locally", "items": [
+        {"syntax": "uv pip install --prerelease=allow \"ai-dynamo[vllm]\"", "desc": "Install Dynamo with the vLLM backend"},
+        {"syntax": "python3 -m dynamo.frontend --http-port 8000", "desc": "OpenAI-compatible frontend"},
+        {"syntax": "--router-mode kv", "desc": "Frontend: route by KV cache overlap and load"},
+        {"syntax": "python3 -m dynamo.vllm --model MODEL", "desc": "Start a vLLM worker"},
+        {"syntax": "--discovery-backend file", "desc": "Local discovery without etcd or NATS"}
+      ]},
+      {"title": "Disaggregation", "items": [
+        {"syntax": "--disaggregation-mode prefill | decode", "desc": "Worker role in disaggregated serving"},
+        {"syntax": "--kv-transfer-config '{\"kv_connector\":\"NixlConnector\",...}'", "desc": "Move KV cache between workers with NIXL"},
+        {"syntax": "CUDA_VISIBLE_DEVICES=N", "desc": "Pin each worker to its own GPU"}
+      ]},
+      {"title": "Kubernetes", "items": [
+        {"syntax": "kind: DynamoGraphDeploymentRequest", "desc": "Model + backend + SLA; Dynamo picks topology (beta)"},
+        {"syntax": "spec.sla: {ttft: 200.0, itl: 20.0}", "desc": "Latency targets in milliseconds"},
+        {"syntax": "recipes/", "desc": "Ready-made deployments per model, engine and mode"},
+        {"syntax": "Gateway API Inference Extension + EPP", "desc": "KV-aware routing inside a cluster gateway"}
+      ]},
+      {"title": "Decide and measure", "items": [
+        {"syntax": "TTFT = queue + prefill (+ KV transfer if disaggregated)", "desc": "Where disaggregation adds and saves time"},
+        {"syntax": "ITL = time between streamed tokens", "desc": "What decode pools are sized for"},
+        {"syntax": "AIPerf", "desc": "Benchmark topologies on your own workload"}
+      ]}
+    ],
+    "pitfalls": [
+      "Adopting a distributed framework for one model on one GPU, where the engine alone is simpler.",
+      "Disaggregating over a slow network and making time to first token worse.",
+      "Round-robin load balancing across replicas, so prefixes are recomputed everywhere.",
+      "Judging topologies on someone else's benchmark instead of your own prompt and output lengths.",
+      "Changing several settings at once, so you cannot tell which one helped."
+    ]
+  },
+  "quiz": [
+    {"q": "Ten vLLM replicas sit behind round-robin load balancing, and multi-turn chats have high time to first token. What does KV-aware routing change?", "options": ["It sends each request to a worker that already caches its prefix, avoiding repeated prefill", "It moves decode to separate GPUs so prefill runs faster", "It compresses the KV cache so each replica holds more", "It retries slow requests on a second replica in parallel"], "answer": 0, "explain": "Round-robin ignores where a conversation's history is cached, so it is prefilled again elsewhere. KV-aware routing scores workers by cached prefix overlap and load."},
+    {"q": "In disaggregated serving, what must move from the prefill worker to the decode worker for each request?", "options": ["The request's KV cache", "The full model weights", "The tokenizer vocabulary", "The decode worker's batch queue"], "answer": 0, "explain": "Prefill produces the KV cache for the prompt; the decode worker needs it to generate tokens, so it is transferred, typically with NIXL over NVLink or RDMA."},
+    {"q": "A team disaggregated prefill and decode across nodes linked by ordinary 10 Gb Ethernet, and time to first token got worse. Why?", "options": ["Transferring each request's KV cache over the slow link costs more than it saves", "Disaggregation always doubles the number of tokens generated", "The Planner disables KV-aware routing in disaggregated mode", "Prefill workers cannot use tensor parallelism"], "answer": 0, "explain": "Disaggregation adds a KV transfer to every request. It pays off with fast interconnects and long prompts; over a slow network the transfer can dominate."},
+    {"q": "Many users keep long conversations open but idle, and GPU memory cannot hold all their caches. Which Dynamo component helps?", "options": ["The KV Block Manager, which offloads cache to CPU, SSD or remote storage", "The frontend, which shortens prompts before forwarding", "Grove, which schedules pods across racks", "The router in round-robin mode"], "answer": 0, "explain": "KVBM tiers evicted KV blocks to cheaper memory and storage so they can be reloaded instead of recomputed when the conversation resumes."},
+    {"q": "You serve one small model on one GPU with steady, modest traffic. What is the sensible serving choice?", "options": ["The inference engine on its own, without Dynamo", "Dynamo with disaggregated prefill and decode", "Dynamo with KVBM offloading to object storage", "Dynamo with Planner scaling separate pools"], "answer": 0, "explain": "Dynamo solves multi-GPU and multi-node coordination problems. Its own README says that for a single model on a single GPU the engine alone is probably sufficient."}
+  ]
+}

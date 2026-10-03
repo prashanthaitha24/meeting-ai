@@ -103,6 +103,8 @@ def showcase(tracks):
 def project_cards(tracks):
     out = []
     for tr in tracks:
+        if not tr["projects"]:
+            continue
         p = tr["projects"][0]
         badge = '<span class="badge badge-live">Available</span>' if p["live"] else '<span class="badge badge-soon">Coming soon</span>'
         body = f'''        {badge}
@@ -202,6 +204,9 @@ def panel(tr, first):
             projects.append(f'            <a class="soon-item" tabindex="-1" aria-disabled="true"><span><span class="t">{esc(p["title"])}</span><span class="d">{esc(p["desc"])}</span></span><span class="m">Coming soon</span></a>')
     resources = "\n".join(f'            <a href="{r["url"]}" target="_blank" rel="noopener">{esc(r["title"])}<span>{esc(r["note"])}</span></a>' for r in tr["resources"])
     hidden = "" if first else " hidden"
+    proj_chip = f'            <span class="chip">{len(tr["projects"])} projects</span>' if tr["projects"] else ""
+    proj_box = ('        <div class="box">\n          <div class="box-label">Guided projects</div>\n'
+                f'          <div class="proj-list">\n{chr(10).join(projects)}\n          </div>\n        </div>') if projects else ""
     return f'''    <div class="track-panel" id="{tr["id"]}" role="tabpanel" aria-labelledby="tab-{tr["id"]}" style="--tc:{tr["accent"]}"{hidden}>
       <div class="track-head">
         <div class="track-logo">{tr["emoji"]}</div>
@@ -212,7 +217,7 @@ def panel(tr, first):
             <span class="chip">{esc(level_range)}</span>
             <span class="chip">{len(tr["stages"])} stages</span>
             <span class="chip">{lessons}</span>
-            <span class="chip">{len(tr["projects"])} projects</span>
+{proj_chip}
           </div>
           <div class="progress">
             <div class="progress-row"><span>Your progress</span><span data-progress-text>0 / {tr["n_live"]} complete</span></div>
@@ -224,12 +229,7 @@ def panel(tr, first):
 {chr(10).join(stages)}
       </div>
       <div class="track-foot">
-        <div class="box">
-          <div class="box-label">Guided projects</div>
-          <div class="proj-list">
-{chr(10).join(projects)}
-          </div>
-        </div>
+{proj_box}
         <div class="box">
           <div class="box-label">Best free resources</div>
           <div class="res-list">
