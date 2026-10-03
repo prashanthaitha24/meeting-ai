@@ -1,0 +1,138 @@
+{
+  "id": "oss-vllm",
+  "minutes": 35,
+  "intro": "vLLM is the open-source inference engine most teams reach for when they self-host open-weight language models. It began as the research code behind PagedAttention and is now a large community project in `vllm-project/vllm`. This lesson explains why LLM serving is a memory-management problem, how vLLM's scheduler keeps GPUs busy, how to run its OpenAI-compatible server, which flags actually change throughput and latency, how to spread a model across GPUs, and which metrics tell you it is healthy.",
+  "objectives": [
+    "Explain the KV cache, PagedAttention and continuous batching, and why they raise throughput",
+    "Start the OpenAI-compatible server and call it with any OpenAI-style client",
+    "Tune memory, batching and context-length flags against latency and throughput goals",
+    "Choose tensor, pipeline or data parallelism for a model and a GPU budget",
+    "Monitor vLLM with its Prometheus metrics and recognise preemption and queueing"
+  ],
+  "sections": [
+    {
+      "heading": "Why LLM serving is a memory problem",
+      "blocks": [
+        {"type": "p", "text": "Generating text happens in two phases. **Prefill** processes the whole prompt in one pass and is compute-bound. **Decode** then produces one token per step for every active request and is memory-bandwidth-bound. To avoid recomputing the prompt at every step, the model keeps each layer's attention keys and values for every token so far: the **KV cache**. It grows with every token of every concurrent request, and it, not the model weights, usually decides how many requests fit on a GPU."},
+        {"type": "p", "text": "Per token, the cache holds 2 (keys and values) times layers times KV heads times head dimension times bytes per value. For a model with 32 layers, 8 KV heads of dimension 128 in 16-bit precision, that is 2 x 32 x 8 x 128 x 2 = 131,072 bytes, 128 KiB per token. One 8,192-token conversation therefore needs 1 GiB of KV cache on top of the weights."},
+        {"type": "p", "text": "Older servers reserved one contiguous slab per request sized for the maximum length, wasting most of it. **PagedAttention**, vLLM's founding idea, stores the cache in small fixed-size blocks, like virtual-memory pages, allocated on demand and shareable between requests. Little memory is wasted, so many more requests fit, and requests that share a prefix (a long system prompt, a few-shot template) can share the same blocks. That is **prefix caching**, enabled by default."},
+        {"type": "p", "text": "The scheduler adds **continuous batching**: instead of waiting for a whole batch to finish, it adds new requests and retires finished ones at every decode step, so the GPU never idles while one long answer completes. **Chunked prefill**, on by default, splits long prompts into pieces and mixes them with decode steps, so one huge prompt does not stall everyone else's token stream."}
+      ]
+    },
+    {
+      "heading": "Running the OpenAI-compatible server",
+      "blocks": [
+        {"type": "p", "text": "Install with `uv pip install vllm` (or pip) on a machine with a supported GPU, or use the official container image. `vllm serve` downloads weights from the Hugging Face Hub (or loads a local path) and exposes an HTTP server on port 8000 that speaks the OpenAI API, including chat completions, completions, embeddings and tool calling, so existing clients and frameworks work by changing the base URL."},
+        {"type": "code", "lang": "bash", "caption": "Serve a model on one GPU with an API key and a friendly name", "code": "export MODEL_ID=YOUR_ORG/YOUR_MODEL\nexport VLLM_API_KEY=CHANGE_ME\n\nvllm serve \"$MODEL_ID\" \\\n  --served-model-name chat \\\n  --max-model-len 16384 \\\n  --gpu-memory-utilization 0.90 \\\n  --api-key \"$VLLM_API_KEY\""},
+        {"type": "code", "lang": "bash", "caption": "Call it like any OpenAI-compatible endpoint", "code": "curl -s http://localhost:8000/v1/chat/completions \\\n  -H \"Authorization: Bearer $VLLM_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"model\": \"chat\", \"messages\": [{\"role\": \"user\", \"content\": \"Say hi\"}]}'"},
+        {"type": "p", "text": "Other useful endpoints: `/v1/models` lists what is served, `/health` is a liveness check for Kubernetes probes, and `/metrics` exposes Prometheus metrics. For offline batch jobs, skip the server and use the `LLM` class in Python, which runs the same engine over a list of prompts."},
+        {"type": "callout", "kind": "warning", "text": "Startup takes minutes for large models: downloading weights, loading them to GPU, compiling and capturing CUDA graphs. Give the readiness probe a long initial delay, cache weights on a persistent volume, and keep the compile cache (under `~/.cache/vllm` by default) between restarts."}
+      ]
+    },
+    {
+      "heading": "The flags that matter",
+      "blocks": [
+        {"type": "table", "headers": ["Flag", "Default", "What it trades"], "rows": [
+          ["`--gpu-memory-utilization`", "0.92", "Share of GPU memory vLLM may use; the rest after weights becomes KV cache"],
+          ["`--max-model-len`", "from model config", "Longest prompt plus output allowed; lowering it frees KV cache"],
+          ["`--max-num-seqs`", "set by vLLM", "Maximum requests decoded together: concurrency versus per-request speed"],
+          ["`--max-num-batched-tokens`", "set by vLLM", "Tokens per scheduler step; higher favours throughput, lower favours latency"],
+          ["`--quantization`, `--kv-cache-dtype`", "off / auto", "Smaller weights or cache (for example FP8) for more room, with some accuracy risk"],
+          ["`--enable-lora`, `--max-loras`", "off", "Serve many fine-tuned adapters on one base model"]
+        ]},
+        {"type": "p", "text": "When demand exceeds KV cache space, vLLM **preempts** requests: it evicts their cache and recomputes it later, which shows up as latency spikes and a rising preemption counter. The documented fixes are more cache (raise memory utilisation, add GPUs with tensor parallelism, quantize the cache) or less concurrency (lower `--max-num-seqs` or `--max-num-batched-tokens`). The docs suggest `--max-num-batched-tokens` above 8192 for throughput, especially for smaller models on large GPUs."},
+        {"type": "p", "text": "Benchmark instead of guessing: `vllm bench serve` replays a synthetic or recorded workload against a running server and reports throughput, time to first token and time per output token, so you can compare flag settings on your own prompt and output lengths."}
+      ]
+    },
+    {
+      "heading": "Bigger than one GPU",
+      "blocks": [
+        {"type": "list", "items": [
+          "**Tensor parallelism** (`--tensor-parallel-size N`) splits every layer across N GPUs in one node. Use it when the model does not fit on one GPU; it needs fast interconnect such as NVLink.",
+          "**Pipeline parallelism** (`--pipeline-parallel-size N`) puts different layers on different GPUs or nodes. Use it, usually combined with tensor parallelism, when a model spans nodes.",
+          "**Data parallelism** (`--data-parallel-size N`) runs N full copies for more throughput; for dense models, separate replicas behind a load balancer do the same job.",
+          "**Expert parallelism** spreads the experts of mixture-of-experts models across GPUs."
+        ]},
+        {"type": "p", "text": "Beyond one engine, the ecosystem adds routing and scheduling: vLLM's production stack Helm chart, KServe with a vLLM runtime, llm-d, and NVIDIA Dynamo (next lessons) all run vLLM engines underneath while adding prefix-cache-aware routing and, in some cases, disaggregated prefill and decode on separate GPUs."}
+      ]
+    },
+    {
+      "heading": "Watching it in production",
+      "blocks": [
+        {"type": "p", "text": "The `/metrics` endpoint exposes Prometheus series prefixed `vllm:` with `model_name` and `engine` labels. A useful first dashboard needs only a few:"},
+        {"type": "table", "headers": ["Metric", "Type", "Tells you"], "rows": [
+          ["`vllm:num_requests_running` / `vllm:num_requests_waiting`", "gauge", "Load, and whether a queue is forming"],
+          ["`vllm:kv_cache_usage_perc`", "gauge", "How full the KV cache is; near 1 means preemption ahead"],
+          ["`vllm:time_to_first_token_seconds`", "histogram", "Responsiveness as users feel it"],
+          ["`vllm:inter_token_latency_seconds`", "histogram", "Streaming speed once tokens flow"],
+          ["`vllm:num_preemptions_total`", "counter", "Requests evicted for lack of cache space"],
+          ["`vllm:prompt_tokens_total` / `vllm:generation_tokens_total`", "counter", "Token throughput, the basis of cost"]
+        ]},
+        {"type": "p", "text": "Autoscale on queued requests, for example with KEDA's Prometheus trigger on `vllm:num_requests_waiting`, not on GPU utilisation, which is high whenever any work is running. Alert on time-to-first-token SLOs and on a rising preemption rate."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Measure what the flags do",
+    "steps": [
+      "On a machine with one GPU (a cloud instance or a free notebook GPU), install vLLM and start `vllm serve` with a small open-weight model and `--max-model-len 4096`.",
+      "Send a chat request with curl, then point an OpenAI-style client at `http://localhost:8000/v1` and confirm it works unchanged.",
+      "Open `http://localhost:8000/metrics` and find the running, waiting and KV cache usage series.",
+      "Run `vllm bench serve` against the server with a fixed request rate and record throughput and p95 time to first token.",
+      "Restart with `--max-num-seqs 8` and rerun the benchmark; then try a larger value and compare both numbers.",
+      "Send many long prompts at once and watch `vllm:num_preemptions_total` and `vllm:kv_cache_usage_perc`; lower `--gpu-memory-utilization` to 0.6 and observe preemptions increase.",
+      "Shut the instance down when finished so it stops costing money."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "The KV cache, not the weights, usually limits how many requests fit on a GPU.",
+      "PagedAttention stores the cache in shareable blocks; prefix caching reuses shared prompt prefixes.",
+      "Continuous batching and chunked prefill keep the GPU busy without stalling streams.",
+      "Preemption means not enough KV cache: add memory or reduce concurrency.",
+      "Tensor parallelism to fit a model; data parallelism or replicas for throughput.",
+      "Scale on waiting requests, alert on time to first token and preemptions."
+    ],
+    "groups": [
+      {"title": "Run and call", "items": [
+        {"syntax": "uv pip install vllm", "desc": "Install (or use the official container image)"},
+        {"syntax": "vllm serve MODEL --served-model-name NAME", "desc": "OpenAI-compatible server on :8000"},
+        {"syntax": "--api-key KEY", "desc": "Require a bearer token on API calls"},
+        {"syntax": "POST /v1/chat/completions", "desc": "Chat endpoint; also /v1/completions, /v1/embeddings"},
+        {"syntax": "GET /health  /metrics  /v1/models", "desc": "Probe, Prometheus metrics, served models"},
+        {"syntax": "vllm bench serve", "desc": "Benchmark a running server"}
+      ]},
+      {"title": "Capacity flags", "items": [
+        {"syntax": "--gpu-memory-utilization 0.92", "desc": "Default share of GPU memory vLLM claims"},
+        {"syntax": "--max-model-len N", "desc": "Cap context length to free cache"},
+        {"syntax": "--max-num-seqs N", "desc": "Cap concurrent sequences"},
+        {"syntax": "--max-num-batched-tokens N", "desc": "Tokens per scheduler step"},
+        {"syntax": "--kv-cache-dtype fp8", "desc": "Halve KV cache memory on supported GPUs"}
+      ]},
+      {"title": "Parallelism", "items": [
+        {"syntax": "--tensor-parallel-size N", "desc": "Split each layer across N GPUs in a node"},
+        {"syntax": "--pipeline-parallel-size N", "desc": "Split layers into N stages, across nodes"},
+        {"syntax": "--data-parallel-size N", "desc": "N engine replicas for throughput"}
+      ]},
+      {"title": "Formulas", "items": [
+        {"syntax": "KV bytes/token = 2 x layers x kv_heads x head_dim x bytes", "desc": "Size the cache per token"},
+        {"syntax": "concurrent requests ~ KV cache memory / (KV bytes/token x avg tokens)", "desc": "Rough concurrency estimate"},
+        {"syntax": "TTFT ~ queue wait + prefill time", "desc": "Why queues hurt first-token latency"}
+      ]}
+    ],
+    "pitfalls": [
+      "Setting --max-model-len to the model's maximum when real requests are short, starving the KV cache.",
+      "Autoscaling on GPU utilisation, which is high as soon as anything runs.",
+      "Readiness probes that fail during the minutes-long model load, causing restart loops.",
+      "Exposing the server without --api-key or an authenticating gateway in front.",
+      "Comparing configurations by feel instead of with vllm bench serve on realistic prompt lengths."
+    ]
+  },
+  "quiz": [
+    {"q": "A GPU has plenty of memory left after loading the weights, yet vLLM logs preemptions under load. What is being exhausted?", "options": ["KV cache blocks for the concurrent requests' tokens", "Disk space for the downloaded model weights", "CPU threads available to the HTTP server", "The number of LoRA adapters that can be loaded"], "answer": 0, "explain": "Preemption happens when the KV cache cannot hold all active sequences. Memory left after weights is exactly what becomes KV cache, and it fills with concurrent tokens."},
+    {"q": "Every request starts with the same 3,000-token system prompt. Which vLLM feature cuts the repeated prefill work?", "options": ["Prefix caching, which reuses KV blocks for the shared prefix", "Tensor parallelism across two GPUs", "Lowering --max-num-seqs to one", "Pipeline parallelism across nodes"], "answer": 0, "explain": "With PagedAttention, identical prefixes map to the same cached blocks, so the shared system prompt is computed once and reused. Parallelism adds compute but does not avoid recomputation."},
+    {"q": "Per token, a model's KV cache needs 2 x 32 layers x 8 KV heads x 128 dims x 2 bytes. Roughly how much cache does one 4,096-token request need?", "options": ["About 512 MiB", "About 128 MiB", "About 4 GiB", "About 32 MiB"], "answer": 0, "explain": "2 x 32 x 8 x 128 x 2 = 131,072 bytes, which is 128 KiB per token. Times 4,096 tokens gives 512 MiB."},
+    {"q": "A model's weights are too large for one GPU, but fit across the four NVLink-connected GPUs of one node. Which setting fits?", "options": ["--tensor-parallel-size 4", "--data-parallel-size 4", "--max-num-seqs 4", "--pipeline-parallel-size 1"], "answer": 0, "explain": "Tensor parallelism splits each layer across GPUs, so the weights are divided four ways, and it benefits from the fast in-node interconnect. Data parallelism needs each copy to fit on its own."},
+    {"q": "Users complain that responses take a long time to start, while streaming speed is fine. Which metric do you check first?", "options": ["vllm:num_requests_waiting, to see if requests queue before prefill", "vllm:inter_token_latency_seconds, the gap between streamed tokens", "vllm:generation_tokens_total, all tokens generated", "vllm:num_requests_running divided by GPU count"], "answer": 0, "explain": "Time to first token is queue wait plus prefill. Fine streaming rules out decode speed, so a growing waiting queue is the most likely cause and the signal to scale out."}
+  ]
+}

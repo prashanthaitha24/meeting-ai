@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>vLLM: high-throughput LLM serving — OSS Deep Dives | ThavionAI Education</title>
+  <meta name="description" content="PagedAttention, continuous batching, the OpenAI-compatible server, parallelism, quantization and the metrics that matter." />
+  <meta property="og:title" content="vLLM: high-throughput LLM serving — ThavionAI Education" />
+  <meta property="og:description" content="PagedAttention, continuous batching, the OpenAI-compatible server, parallelism, quantization and the metrics that matter." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/oss-vllm.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-oss" data-module="oss-vllm">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=oss-vllm&amp;page=/education/oss-vllm.html&amp;title=vLLM%3A%20high-throughput%20LLM%20serving">Feedback</a>
+    <a href="../education.html#oss" class="nav-cta">All OSS Deep Dives modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#oss">OSS Deep Dives</a> › Stage 4: LLM inference infrastructure</div>
+    <h1>vLLM: high-throughput LLM serving</h1>
+    <p class="lede">PagedAttention, continuous batching, the OpenAI-compatible server, parallelism, quantization and the metrics that matter.</p>
+    <div class="meta">
+      <span class="chip">Advanced</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 8 of 10</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">vLLM is the open-source inference engine most teams reach for when they self-host open-weight language models. It began as the research code behind PagedAttention and is now a large community project in <code>vllm-project/vllm</code>. This lesson explains why LLM serving is a memory-management problem, how vLLM's scheduler keeps GPUs busy, how to run its OpenAI-compatible server, which flags actually change throughput and latency, how to spread a model across GPUs, and which metrics tell you it is healthy.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Explain the KV cache, PagedAttention and continuous batching, and why they raise throughput</li><li>Start the OpenAI-compatible server and call it with any OpenAI-style client</li><li>Tune memory, batching and context-length flags against latency and throughput goals</li><li>Choose tensor, pipeline or data parallelism for a model and a GPU budget</li><li>Monitor vLLM with its Prometheus metrics and recognise preemption and queueing</li></ul>
+    </div>
+    <section id="why-llm-serving-is-a-memory-problem"><h2>Why LLM serving is a memory problem</h2>
+    <p>Generating text happens in two phases. <strong>Prefill</strong> processes the whole prompt in one pass and is compute-bound. <strong>Decode</strong> then produces one token per step for every active request and is memory-bandwidth-bound. To avoid recomputing the prompt at every step, the model keeps each layer's attention keys and values for every token so far: the <strong>KV cache</strong>. It grows with every token of every concurrent request, and it, not the model weights, usually decides how many requests fit on a GPU.</p>
+    <p>Per token, the cache holds 2 (keys and values) times layers times KV heads times head dimension times bytes per value. For a model with 32 layers, 8 KV heads of dimension 128 in 16-bit precision, that is 2 x 32 x 8 x 128 x 2 = 131,072 bytes, 128 KiB per token. One 8,192-token conversation therefore needs 1 GiB of KV cache on top of the weights.</p>
+    <p>Older servers reserved one contiguous slab per request sized for the maximum length, wasting most of it. <strong>PagedAttention</strong>, vLLM's founding idea, stores the cache in small fixed-size blocks, like virtual-memory pages, allocated on demand and shareable between requests. Little memory is wasted, so many more requests fit, and requests that share a prefix (a long system prompt, a few-shot template) can share the same blocks. That is <strong>prefix caching</strong>, enabled by default.</p>
+    <figure class="diagram" id="fig-vllm-engine"><div class="diagram-scroll"><svg viewBox="0 0 740 248" role="img" aria-label="Clients call the OpenAI-compatible API server. Requests enter a waiting queue. At every step the scheduler admits waiting requests and retires finished ones, building a batch that mixes chunked prefill with decode. The model runner executes the batch on the GPU, reading and writing the KV cache, which is divided into fixed-size blocks allocated per request; requests with the same prompt prefix share blocks. If blocks run out, the scheduler preempts a request back to the queue." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="vllm-engine-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="vllm-engine-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="vllm-engine-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="vllm-engine-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="vllm-engine-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><polyline points="171.0,70.0 201.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#vllm-engine-arrow-default)"/><rect x="156.6" y="24.0" width="58.8" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">requests</text><polyline points="341.0,70.0 371.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#vllm-engine-arrow-default)"/><rect x="335.8" y="24.0" width="40.5" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">admit</text><polyline points="511.0,70.0 541.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#vllm-engine-arrow-default)"/><rect x="505.8" y="24.0" width="40.5" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">batch</text><polyline points="611.0,98.0 611.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#vllm-engine-arrow-default)"/><rect x="614.0" y="116.0" width="83.2" height="16" rx="4" class="dg-label-bg"/><text x="618.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">read, append</text><polyline points="441.0,98.0 441.0,178.0 541.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#vllm-engine-arrow-default)"/><rect x="440.2" y="159.0" width="101.5" height="16" rx="4" class="dg-label-bg"/><text x="491.0" y="167.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">allocate blocks</text><polyline points="441.0,42.0 441.0,20.0 271.0,20.0 271.0,42.0" fill="none" style="stroke:#f87171" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#vllm-engine-arrow-danger)"/><rect x="329.6" y="1.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="9.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:#f87171">preempt</text><rect x="31" y="42.0" width="140" height="56" rx="28.0" class="dg-node dg-actor"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Clients</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">OpenAI API</text><rect x="201" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Waiting queue</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">num_requests_waiting</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Scheduler</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">batch every step</text><rect x="541" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Model runner</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">prefill + decode</text><path d="M541,157.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M541,157.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="611.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Paged KV cache</text><text x="611.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">blocks, shared prefix</text></svg></div><figcaption>vLLM's scheduler re-forms the batch at every step, and PagedAttention hands each request KV-cache blocks on demand, so shared prefixes reuse blocks and memory runs out late instead of early.</figcaption></figure>
+    <p>The scheduler adds <strong>continuous batching</strong>: instead of waiting for a whole batch to finish, it adds new requests and retires finished ones at every decode step, so the GPU never idles while one long answer completes. <strong>Chunked prefill</strong>, on by default, splits long prompts into pieces and mixes them with decode steps, so one huge prompt does not stall everyone else's token stream.</p></section>
+  <section id="running-the-openai-compatible-server"><h2>Running the OpenAI-compatible server</h2>
+    <p>Install with <code>uv pip install vllm</code> (or pip) on a machine with a supported GPU, or use the official container image. <code>vllm serve</code> downloads weights from the Hugging Face Hub (or loads a local path) and exposes an HTTP server on port 8000 that speaks the OpenAI API, including chat completions, completions, embeddings and tool calling, so existing clients and frameworks work by changing the base URL.</p>
+    <div class="code"><div class="code-cap">Serve a model on one GPU with an API key and a friendly name</div><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>export MODEL_ID=YOUR_ORG/YOUR_MODEL
+export VLLM_API_KEY=CHANGE_ME
+
+vllm serve "$MODEL_ID" \
+  --served-model-name chat \
+  --max-model-len 16384 \
+  --gpu-memory-utilization 0.90 \
+  --api-key "$VLLM_API_KEY"</code></pre></div>
+    <div class="code"><div class="code-cap">Call it like any OpenAI-compatible endpoint</div><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>curl -s http://localhost:8000/v1/chat/completions \
+  -H "Authorization: Bearer $VLLM_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "chat", "messages": [{"role": "user", "content": "Say hi"}]}'</code></pre></div>
+    <p>Other useful endpoints: <code>/v1/models</code> lists what is served, <code>/health</code> is a liveness check for Kubernetes probes, and <code>/metrics</code> exposes Prometheus metrics. For offline batch jobs, skip the server and use the <code>LLM</code> class in Python, which runs the same engine over a list of prompts.</p>
+    <div class="callout callout-warning"><strong>Watch out</strong><p>Startup takes minutes for large models: downloading weights, loading them to GPU, compiling and capturing CUDA graphs. Give the readiness probe a long initial delay, cache weights on a persistent volume, and keep the compile cache (under <code>~/.cache/vllm</code> by default) between restarts.</p></div></section>
+  <section id="the-flags-that-matter"><h2>The flags that matter</h2>
+    <div class="table-wrap"><table><thead><tr><th>Flag</th><th>Default</th><th>What it trades</th></tr></thead><tbody><tr><td><code>--gpu-memory-utilization</code></td><td>0.92</td><td>Share of GPU memory vLLM may use; the rest after weights becomes KV cache</td></tr><tr><td><code>--max-model-len</code></td><td>from model config</td><td>Longest prompt plus output allowed; lowering it frees KV cache</td></tr><tr><td><code>--max-num-seqs</code></td><td>set by vLLM</td><td>Maximum requests decoded together: concurrency versus per-request speed</td></tr><tr><td><code>--max-num-batched-tokens</code></td><td>set by vLLM</td><td>Tokens per scheduler step; higher favours throughput, lower favours latency</td></tr><tr><td><code>--quantization</code>, <code>--kv-cache-dtype</code></td><td>off / auto</td><td>Smaller weights or cache (for example FP8) for more room, with some accuracy risk</td></tr><tr><td><code>--enable-lora</code>, <code>--max-loras</code></td><td>off</td><td>Serve many fine-tuned adapters on one base model</td></tr></tbody></table></div>
+    <p>When demand exceeds KV cache space, vLLM <strong>preempts</strong> requests: it evicts their cache and recomputes it later, which shows up as latency spikes and a rising preemption counter. The documented fixes are more cache (raise memory utilisation, add GPUs with tensor parallelism, quantize the cache) or less concurrency (lower <code>--max-num-seqs</code> or <code>--max-num-batched-tokens</code>). The docs suggest <code>--max-num-batched-tokens</code> above 8192 for throughput, especially for smaller models on large GPUs.</p>
+    <p>Benchmark instead of guessing: <code>vllm bench serve</code> replays a synthetic or recorded workload against a running server and reports throughput, time to first token and time per output token, so you can compare flag settings on your own prompt and output lengths.</p></section>
+  <section id="bigger-than-one-gpu"><h2>Bigger than one GPU</h2>
+    <ul><li><strong>Tensor parallelism</strong> (<code>--tensor-parallel-size N</code>) splits every layer across N GPUs in one node. Use it when the model does not fit on one GPU; it needs fast interconnect such as NVLink.</li><li><strong>Pipeline parallelism</strong> (<code>--pipeline-parallel-size N</code>) puts different layers on different GPUs or nodes. Use it, usually combined with tensor parallelism, when a model spans nodes.</li><li><strong>Data parallelism</strong> (<code>--data-parallel-size N</code>) runs N full copies for more throughput; for dense models, separate replicas behind a load balancer do the same job.</li><li><strong>Expert parallelism</strong> spreads the experts of mixture-of-experts models across GPUs.</li></ul>
+    <p>Beyond one engine, the ecosystem adds routing and scheduling: vLLM's production stack Helm chart, KServe with a vLLM runtime, llm-d, and NVIDIA Dynamo (next lessons) all run vLLM engines underneath while adding prefix-cache-aware routing and, in some cases, disaggregated prefill and decode on separate GPUs.</p></section>
+  <section id="watching-it-in-production"><h2>Watching it in production</h2>
+    <p>The <code>/metrics</code> endpoint exposes Prometheus series prefixed <code>vllm:</code> with <code>model_name</code> and <code>engine</code> labels. A useful first dashboard needs only a few:</p>
+    <div class="table-wrap"><table><thead><tr><th>Metric</th><th>Type</th><th>Tells you</th></tr></thead><tbody><tr><td><code>vllm:num_requests_running</code> / <code>vllm:num_requests_waiting</code></td><td>gauge</td><td>Load, and whether a queue is forming</td></tr><tr><td><code>vllm:kv_cache_usage_perc</code></td><td>gauge</td><td>How full the KV cache is; near 1 means preemption ahead</td></tr><tr><td><code>vllm:time_to_first_token_seconds</code></td><td>histogram</td><td>Responsiveness as users feel it</td></tr><tr><td><code>vllm:inter_token_latency_seconds</code></td><td>histogram</td><td>Streaming speed once tokens flow</td></tr><tr><td><code>vllm:num_preemptions_total</code></td><td>counter</td><td>Requests evicted for lack of cache space</td></tr><tr><td><code>vllm:prompt_tokens_total</code> / <code>vllm:generation_tokens_total</code></td><td>counter</td><td>Token throughput, the basis of cost</td></tr></tbody></table></div>
+    <p>Autoscale on queued requests, for example with KEDA's Prometheus trigger on <code>vllm:num_requests_waiting</code>, not on GPU utilisation, which is high whenever any work is running. Alert on time-to-first-token SLOs and on a rising preemption rate.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Measure what the flags do</h2>
+    <ol><li>On a machine with one GPU (a cloud instance or a free notebook GPU), install vLLM and start <code>vllm serve</code> with a small open-weight model and <code>--max-model-len 4096</code>.</li><li>Send a chat request with curl, then point an OpenAI-style client at <code>http://localhost:8000/v1</code> and confirm it works unchanged.</li><li>Open <code>http://localhost:8000/metrics</code> and find the running, waiting and KV cache usage series.</li><li>Run <code>vllm bench serve</code> against the server with a fixed request rate and record throughput and p95 time to first token.</li><li>Restart with <code>--max-num-seqs 8</code> and rerun the benchmark; then try a larger value and compare both numbers.</li><li>Send many long prompts at once and watch <code>vllm:num_preemptions_total</code> and <code>vllm:kv_cache_usage_perc</code>; lower <code>--gpu-memory-utilization</code> to 0.6 and observe preemptions increase.</li><li>Shut the instance down when finished so it stops costing money.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>vLLM: high-throughput LLM serving — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>The KV cache, not the weights, usually limits how many requests fit on a GPU.</li><li>PagedAttention stores the cache in shareable blocks; prefix caching reuses shared prompt prefixes.</li><li>Continuous batching and chunked prefill keep the GPU busy without stalling streams.</li><li>Preemption means not enough KV cache: add memory or reduce concurrency.</li><li>Tensor parallelism to fit a model; data parallelism or replicas for throughput.</li><li>Scale on waiting requests, alert on time to first token and preemptions.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Run and call</h3><table><tbody><tr><td><code>uv pip install vllm</code></td><td>Install (or use the official container image)</td></tr><tr><td><code>vllm serve MODEL --served-model-name NAME</code></td><td>OpenAI-compatible server on :8000</td></tr><tr><td><code>--api-key KEY</code></td><td>Require a bearer token on API calls</td></tr><tr><td><code>POST /v1/chat/completions</code></td><td>Chat endpoint; also /v1/completions, /v1/embeddings</td></tr><tr><td><code>GET /health  /metrics  /v1/models</code></td><td>Probe, Prometheus metrics, served models</td></tr><tr><td><code>vllm bench serve</code></td><td>Benchmark a running server</td></tr></tbody></table></div><div class="cheat-group"><h3>Capacity flags</h3><table><tbody><tr><td><code>--gpu-memory-utilization 0.92</code></td><td>Default share of GPU memory vLLM claims</td></tr><tr><td><code>--max-model-len N</code></td><td>Cap context length to free cache</td></tr><tr><td><code>--max-num-seqs N</code></td><td>Cap concurrent sequences</td></tr><tr><td><code>--max-num-batched-tokens N</code></td><td>Tokens per scheduler step</td></tr><tr><td><code>--kv-cache-dtype fp8</code></td><td>Halve KV cache memory on supported GPUs</td></tr></tbody></table></div><div class="cheat-group"><h3>Parallelism</h3><table><tbody><tr><td><code>--tensor-parallel-size N</code></td><td>Split each layer across N GPUs in a node</td></tr><tr><td><code>--pipeline-parallel-size N</code></td><td>Split layers into N stages, across nodes</td></tr><tr><td><code>--data-parallel-size N</code></td><td>N engine replicas for throughput</td></tr></tbody></table></div><div class="cheat-group"><h3>Formulas</h3><table><tbody><tr><td><code>KV bytes/token = 2 x layers x kv_heads x head_dim x bytes</code></td><td>Size the cache per token</td></tr><tr><td><code>concurrent requests ~ KV cache memory / (KV bytes/token x avg tokens)</code></td><td>Rough concurrency estimate</td></tr><tr><td><code>TTFT ~ queue wait + prefill time</code></td><td>Why queues hurt first-token latency</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Setting --max-model-len to the model's maximum when real requests are short, starving the KV cache.</li><li>Autoscaling on GPU utilisation, which is high as soon as anything runs.</li><li>Readiness probes that fail during the minutes-long model load, causing restart loops.</li><li>Exposing the server without --api-key or an authenticating gateway in front.</li><li>Comparing configurations by feel instead of with vllm bench serve on realistic prompt lengths.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "A GPU has plenty of memory left after loading the weights, yet vLLM logs preemptions under load. What is being exhausted?", "options": ["KV cache blocks for the concurrent requests' tokens", "Disk space for the downloaded model weights", "CPU threads available to the HTTP server", "The number of LoRA adapters that can be loaded"], "answer": 0, "explain": "Preemption happens when the KV cache cannot hold all active sequences. Memory left after weights is exactly what becomes KV cache, and it fills with concurrent tokens."}, {"q": "Every request starts with the same 3,000-token system prompt. Which vLLM feature cuts the repeated prefill work?", "options": ["Prefix caching, which reuses KV blocks for the shared prefix", "Tensor parallelism across two GPUs", "Lowering --max-num-seqs to one", "Pipeline parallelism across nodes"], "answer": 0, "explain": "With PagedAttention, identical prefixes map to the same cached blocks, so the shared system prompt is computed once and reused. Parallelism adds compute but does not avoid recomputation."}, {"q": "Per token, a model's KV cache needs 2 x 32 layers x 8 KV heads x 128 dims x 2 bytes. Roughly how much cache does one 4,096-token request need?", "options": ["About 512 MiB", "About 128 MiB", "About 4 GiB", "About 32 MiB"], "answer": 0, "explain": "2 x 32 x 8 x 128 x 2 = 131,072 bytes, which is 128 KiB per token. Times 4,096 tokens gives 512 MiB."}, {"q": "A model's weights are too large for one GPU, but fit across the four NVLink-connected GPUs of one node. Which setting fits?", "options": ["--tensor-parallel-size 4", "--data-parallel-size 4", "--max-num-seqs 4", "--pipeline-parallel-size 1"], "answer": 0, "explain": "Tensor parallelism splits each layer across GPUs, so the weights are divided four ways, and it benefits from the fast in-node interconnect. Data parallelism needs each copy to fit on its own."}, {"q": "Users complain that responses take a long time to start, while streaming speed is fine. Which metric do you check first?", "options": ["vllm:num_requests_waiting, to see if requests queue before prefill", "vllm:inter_token_latency_seconds, the gap between streamed tokens", "vllm:generation_tokens_total, all tokens generated", "vllm:num_requests_running divided by GPU count"], "answer": 0, "explain": "Time to first token is queue wait plus prefill. Fine streaming rules out decode speed, so a growing waiting queue is the most likely cause and the signal to scale out."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="oss-otel-collector.html"><span>← Previous</span><strong>The OpenTelemetry Collector</strong></a>
+    <a class="pager-up" href="../education.html#oss">All OSS Deep Dives modules</a>
+    <span class="pager-link pager-next is-empty"></span>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=oss-vllm&amp;page=/education/oss-vllm.html&amp;title=vLLM%3A%20high-throughput%20LLM%20serving">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=oss-vllm&amp;page=/education/oss-vllm.html&amp;title=vLLM%3A%20high-throughput%20LLM%20serving">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>
