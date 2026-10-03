@@ -1,0 +1,134 @@
+{
+  "id": "oss-otel-collector",
+  "minutes": 35,
+  "intro": "The OpenTelemetry Collector is a vendor-neutral pipeline for traces, metrics, logs and profiles: it receives telemetry in many formats, processes it, and exports it to one or more backends, so your applications only ever speak OTLP to a nearby Collector. This lesson works from `open-telemetry/opentelemetry-collector` and its contrib repository: the component model, how to read and write a pipeline configuration, which distribution to run, agent versus gateway deployments, and how tail sampling keeps the interesting AI-agent traces without storing all of them.",
+  "objectives": [
+    "Explain receivers, processors, exporters, connectors and extensions, and how pipelines wire them",
+    "Write a Collector configuration with memory limiting, batching and Kubernetes metadata",
+    "Choose between the core, contrib, k8s and custom-built distributions",
+    "Design an agent plus gateway deployment and load-balance traces for tail sampling",
+    "Keep the Collector itself healthy and observable"
+  ],
+  "sections": [
+    {
+      "heading": "The component model",
+      "blocks": [
+        {"type": "p", "text": "The core repository's folders are the vocabulary. A **receiver** (`receiver/`) gets data in, by listening (OTLP on gRPC port 4317 and HTTP port 4318) or by pulling (the Prometheus receiver scrapes like Prometheus does). A **processor** (`processor/`) changes data in flight: limits memory, batches, adds attributes, filters, samples. An **exporter** (`exporter/`) sends data out. A **connector** (`connector/`) is an exporter for one pipeline and a receiver for another, for example turning spans into request-rate and latency metrics. **Extensions** (`extension/`) add capabilities outside the data path, such as health checks and authentication."},
+        {"type": "p", "text": "Components are referenced as `type` or `type/name`, so you can run two OTLP exporters as `otlp_grpc/tempo` and `otlp_grpc/vendor`. Defining a component does nothing on its own: it only runs when the `service.pipelines` section uses it. Each pipeline has one signal type (traces, metrics, logs) and an ordered list of processors."},
+        {"type": "callout", "kind": "note", "text": "Component type names are moving to snake_case: `otlp_grpc` and `otlp_http` instead of `otlp` and `otlphttp` for exporters, `k8s_attributes` instead of `k8sattributes`. Older names still work as deprecated aliases, so older blog posts are not wrong, just dated."}
+      ]
+    },
+    {
+      "heading": "A production-shaped configuration",
+      "blocks": [
+        {"type": "code", "lang": "yaml", "caption": "Receive OTLP, protect memory, enrich, batch at the exporter, send to two backends", "code": "receivers:\n  otlp:\n    protocols:\n      grpc:\n        endpoint: 0.0.0.0:4317\n      http:\n        endpoint: 0.0.0.0:4318\n\nprocessors:\n  memory_limiter:\n    check_interval: 1s\n    limit_mib: 1500\n    spike_limit_mib: 300\n  k8s_attributes: {}\n\nexporters:\n  otlp_grpc/tempo:\n    endpoint: tempo.monitoring.svc:4317\n    tls:\n      insecure: true\n    sending_queue:\n      batch:\n  prometheus_remote_write:\n    endpoint: http://prometheus.monitoring.svc:9090/api/v1/write\n\nextensions:\n  health_check:\n    endpoint: 0.0.0.0:13133\n\nservice:\n  extensions: [health_check]\n  pipelines:\n    traces:\n      receivers: [otlp]\n      processors: [memory_limiter, k8s_attributes]\n      exporters: [otlp_grpc/tempo]\n    metrics:\n      receivers: [otlp]\n      processors: [memory_limiter, k8s_attributes]\n      exporters: [prometheus_remote_write]"},
+        {"type": "list", "items": [
+          "**memory_limiter first.** When the Collector nears its limit, it refuses new data so senders back off and retry, instead of the process being OOM-killed and losing everything in memory.",
+          "**Batch at the exporter.** The current docs batch through the exporter's `sending_queue` with a `batch` block; the separate `batch` processor still exists and appears in most older configs.",
+          "**Retries and queues** live in the exporter too, so a backend outage is absorbed by the queue rather than dropping data immediately.",
+          "**Bind carefully.** The Collector defaults to `localhost`; the examples use `0.0.0.0` so other pods can reach it, which is fine inside a cluster but not on a public host."
+        ]},
+        {"type": "p", "text": "`k8s_attributes` looks up the pod that sent the data and adds namespace, pod, deployment and node as resource attributes, which is what lets you filter traces by service in your backend. The `transform` processor (OpenTelemetry Transformation Language) and `filter` processor rename, redact or drop data, for example stripping prompt text from spans before it leaves the cluster."}
+      ]
+    },
+    {
+      "heading": "Distributions: which binary to run",
+      "blocks": [
+        {"type": "p", "text": "The core repository holds only the framework and a handful of components; hundreds more live in `opentelemetry-collector-contrib`. You run a **distribution**, a binary built with a chosen set of components. The releases repository publishes several:"},
+        {"type": "table", "headers": ["Distribution", "Binary", "Use it when"], "rows": [
+          ["Core", "otelcol", "You only need OTLP in and out plus the basics"],
+          ["Contrib", "otelcol-contrib", "Exploring, or you need many receivers and exporters"],
+          ["Kubernetes", "otelcol-k8s", "Running in Kubernetes with the components that setting needs"],
+          ["OTLP", "otelcol-otlp", "A minimal OTLP-only relay"],
+          ["Custom", "built with ocb", "Production: only the components you use"]
+        ]},
+        {"type": "p", "text": "Contrib is convenient but large, and every component you ship is attack surface and upgrade risk. The **OpenTelemetry Collector Builder** (`ocb`) reads a manifest listing the exact receivers, processors, exporters and extensions you want and compiles a small binary. Most teams end up there."}
+      ]
+    },
+    {
+      "heading": "Agent and gateway, and tail sampling",
+      "blocks": [
+        {"type": "p", "text": "Two deployment patterns combine well. An **agent** Collector runs next to workloads, as a DaemonSet on every node or a sidecar, receives from local apps, adds host and pod metadata, and forwards. A **gateway** Collector runs as a central, horizontally scaled Deployment that applies organisation-wide policy (redaction, sampling, routing) and holds the backend credentials, so apps and agents never do."},
+        {"type": "p", "text": "**Head sampling** decides at the start of a trace, cheaply but blindly. **Tail sampling** waits until a trace is complete, then keeps it if it matches a policy: any error, latency above a threshold, a specific attribute. For LLM agents this is the difference between keeping every slow or failed multi-step run and keeping a random 5% that is mostly successes."},
+        {"type": "code", "lang": "yaml", "caption": "Keep all errors and slow traces, plus 5% of the rest", "code": "processors:\n  tail_sampling:\n    decision_wait: 15s\n    policies:\n      - name: errors\n        type: status_code\n        status_code: {status_codes: [ERROR]}\n      - name: slow\n        type: latency\n        latency: {threshold_ms: 8000}\n      - name: baseline\n        type: probabilistic\n        probabilistic: {sampling_percentage: 5}"},
+        {"type": "callout", "kind": "warning", "text": "Tail sampling only works if every span of a trace reaches the same Collector instance. Put a first tier of Collectors with the `load_balancing` exporter, routing by trace ID, in front of the tier that runs `tail_sampling`. Without it, each replica sees fragments and makes wrong decisions."}
+      ]
+    },
+    {
+      "heading": "Operating the Collector",
+      "blocks": [
+        {"type": "list", "items": [
+          "The Collector reports on itself: internal metrics (by default on port 8888) include accepted, refused and failed items per component, queue size and memory. Alert on refused and send-failed counts rising.",
+          "Validate before deploying: `otelcol-contrib validate --config=config.yaml` catches unknown components and typos.",
+          "Use the `debug` exporter with `verbosity: detailed` temporarily to print what is actually flowing through a pipeline.",
+          "Size the gateway on throughput and on tail-sampling memory: every in-flight trace is held for `decision_wait`.",
+          "For AI workloads, the GenAI semantic conventions define attributes such as `gen_ai.request.model` and `gen_ai.usage.input_tokens`; keep them and you can chart tokens and cost per model in any backend."
+        ]}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "A local pipeline you can watch",
+    "steps": [
+      "Run the contrib Collector in Docker with a config that has an `otlp` receiver and a `debug` exporter with `verbosity: detailed`, publishing ports 4317 and 4318.",
+      "Install `telemetrygen` (from the contrib repo's cmd folder) and run `telemetrygen traces --otlp-insecure --traces 5`; watch spans print in the Collector logs.",
+      "Add `memory_limiter` and a `transform` processor that sets a resource attribute `env` to `lab`; confirm it appears on every span.",
+      "Add Jaeger or Tempo as a container, export to it with `otlp_grpc`, and find your traces in its UI.",
+      "Add the `tail_sampling` policies from this lesson, generate traces where some have errors (`telemetrygen traces --status-code Error`), and check that all error traces arrive.",
+      "Run `otelcol-contrib validate --config=config.yaml` after deliberately misspelling a component, and read the error."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Receivers in, processors change, exporters out, connectors bridge pipelines, extensions sit beside.",
+      "Nothing runs unless it is listed in service.pipelines.",
+      "memory_limiter first; batching and retry queues at the exporter.",
+      "Build a custom distribution with ocb for production instead of shipping all of contrib.",
+      "Agents add local metadata; gateways hold credentials and apply policy.",
+      "Tail sampling needs trace-ID load balancing so whole traces land on one instance."
+    ],
+    "groups": [
+      {"title": "Ports and endpoints", "items": [
+        {"syntax": "4317 / 4318", "desc": "OTLP over gRPC / OTLP over HTTP"},
+        {"syntax": "13133", "desc": "health_check extension"},
+        {"syntax": "8888", "desc": "Collector's own metrics (default)"},
+        {"syntax": "55679", "desc": "zpages extension: live pipeline debugging pages"}
+      ]},
+      {"title": "Core components", "items": [
+        {"syntax": "receivers: otlp", "desc": "Accept OTLP traces, metrics, logs"},
+        {"syntax": "processors: memory_limiter", "desc": "Refuse data before running out of memory"},
+        {"syntax": "exporters: otlp_grpc / otlp_http", "desc": "Send OTLP onward (old names: otlp / otlphttp)"},
+        {"syntax": "sending_queue: {batch: {}}", "desc": "Exporter-side queue and batching"},
+        {"syntax": "exporters: debug  verbosity: detailed", "desc": "Print data to the log for troubleshooting"}
+      ]},
+      {"title": "Contrib favourites", "items": [
+        {"syntax": "k8s_attributes", "desc": "Add pod, namespace, deployment metadata"},
+        {"syntax": "transform / filter", "desc": "Rewrite, redact or drop with OTTL"},
+        {"syntax": "tail_sampling", "desc": "Decide per complete trace using policies"},
+        {"syntax": "load_balancing", "desc": "Route spans by trace ID to a fixed Collector"},
+        {"syntax": "span_metrics (connector)", "desc": "Generate RED metrics from spans"},
+        {"syntax": "prometheus (receiver)", "desc": "Scrape Prometheus endpoints"}
+      ]},
+      {"title": "CLI", "items": [
+        {"syntax": "otelcol-contrib --config=config.yaml", "desc": "Run with a config file"},
+        {"syntax": "otelcol-contrib validate --config=config.yaml", "desc": "Check a config without running"},
+        {"syntax": "otelcol-contrib components", "desc": "List the components compiled into this binary"},
+        {"syntax": "ocb --config=builder-config.yaml", "desc": "Build a custom distribution"}
+      ]}
+    ],
+    "pitfalls": [
+      "Defining a processor but forgetting to add it to the pipeline, so it silently never runs.",
+      "Running tail sampling on several replicas without trace-ID load balancing.",
+      "No memory_limiter, so a traffic spike OOM-kills the Collector and drops buffered data.",
+      "Shipping prompts or personal data in span attributes to a third-party backend without redaction.",
+      "Running the full contrib build in production and inheriting every component's vulnerabilities."
+    ]
+  },
+  "quiz": [
+    {"q": "You added a `transform` processor to the processors section, but spans arrive unchanged. What is the most likely cause?", "options": ["It is not listed in the traces pipeline under service.pipelines", "Transform processors only work on metrics, not traces", "The exporter must be restarted separately from the Collector", "The receiver needs a transform: true setting"], "answer": 0, "explain": "Components only run when a pipeline references them. Defining a processor without adding it to service.pipelines leaves it inert."},
+    {"q": "Three gateway replicas run tail_sampling behind a round-robin load balancer, and many error traces are missing. Why?", "options": ["Spans of one trace land on different replicas, so none sees the whole trace", "Tail sampling drops all traces that contain errors by default", "decision_wait is too long, so traces expire before export", "Round-robin balancing corrupts the trace IDs"], "answer": 0, "explain": "Tail sampling decides on complete traces. Without the load_balancing exporter routing by trace ID, each replica sees fragments and may drop the part that holds the error."},
+    {"q": "Why should memory_limiter come first in a pipeline's processor list?", "options": ["So the Collector refuses data early and senders retry, instead of being OOM-killed", "Because it compresses data before the other processors run", "Because exporters cannot start until memory is reserved", "So that batches are smaller when they reach the exporter"], "answer": 0, "explain": "Refusing data near the limit applies backpressure to senders, which retry. Placing it first means no other processor has already spent memory on data that will be refused."},
+    {"q": "Security asks you to minimise the Collector's attack surface in production. What is the best approach?", "options": ["Build a custom distribution with ocb containing only the components you use", "Run the contrib distribution but leave unused components out of the pipelines", "Switch every exporter to the debug exporter", "Disable the health_check extension"], "answer": 0, "explain": "Unused components still ship in the contrib binary and must be patched. A custom build compiles in only what the configuration needs."},
+    {"q": "In an agent plus gateway design, where should the credentials for a SaaS observability backend live?", "options": ["On the gateway Collectors only", "In every application's SDK configuration", "On every node-level agent Collector", "In the OTLP receiver configuration"], "answer": 0, "explain": "The gateway is the single egress point that applies organisation-wide policy and holds backend credentials, so applications and node agents never need them."}
+  ]
+}

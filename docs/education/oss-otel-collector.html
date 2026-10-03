@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>The OpenTelemetry Collector — OSS Deep Dives | ThavionAI Education</title>
+  <meta name="description" content="Receivers, processors, exporters and connectors; pipelines, distributions, agent vs gateway, and tail sampling for AI traces." />
+  <meta property="og:title" content="The OpenTelemetry Collector — ThavionAI Education" />
+  <meta property="og:description" content="Receivers, processors, exporters and connectors; pipelines, distributions, agent vs gateway, and tail sampling for AI traces." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/oss-otel-collector.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-oss" data-module="oss-otel-collector">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=oss-otel-collector&amp;page=/education/oss-otel-collector.html&amp;title=The%20OpenTelemetry%20Collector">Feedback</a>
+    <a href="../education.html#oss" class="nav-cta">All OSS Deep Dives modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#oss">OSS Deep Dives</a> › Stage 3: Observability for AI systems</div>
+    <h1>The OpenTelemetry Collector</h1>
+    <p class="lede">Receivers, processors, exporters and connectors; pipelines, distributions, agent vs gateway, and tail sampling for AI traces.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 7 of 10</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">The OpenTelemetry Collector is a vendor-neutral pipeline for traces, metrics, logs and profiles: it receives telemetry in many formats, processes it, and exports it to one or more backends, so your applications only ever speak OTLP to a nearby Collector. This lesson works from <code>open-telemetry/opentelemetry-collector</code> and its contrib repository: the component model, how to read and write a pipeline configuration, which distribution to run, agent versus gateway deployments, and how tail sampling keeps the interesting AI-agent traces without storing all of them.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Explain receivers, processors, exporters, connectors and extensions, and how pipelines wire them</li><li>Write a Collector configuration with memory limiting, batching and Kubernetes metadata</li><li>Choose between the core, contrib, k8s and custom-built distributions</li><li>Design an agent plus gateway deployment and load-balance traces for tail sampling</li><li>Keep the Collector itself healthy and observable</li></ul>
+    </div>
+    <section id="the-component-model"><h2>The component model</h2>
+    <p>The core repository's folders are the vocabulary. A <strong>receiver</strong> (<code>receiver/</code>) gets data in, by listening (OTLP on gRPC port 4317 and HTTP port 4318) or by pulling (the Prometheus receiver scrapes like Prometheus does). A <strong>processor</strong> (<code>processor/</code>) changes data in flight: limits memory, batches, adds attributes, filters, samples. An <strong>exporter</strong> (<code>exporter/</code>) sends data out. A <strong>connector</strong> (<code>connector/</code>) is an exporter for one pipeline and a receiver for another, for example turning spans into request-rate and latency metrics. <strong>Extensions</strong> (<code>extension/</code>) add capabilities outside the data path, such as health checks and authentication.</p>
+    <p>Components are referenced as <code>type</code> or <code>type/name</code>, so you can run two OTLP exporters as <code>otlp_grpc/tempo</code> and <code>otlp_grpc/vendor</code>. Defining a component does nothing on its own: it only runs when the <code>service.pipelines</code> section uses it. Each pipeline has one signal type (traces, metrics, logs) and an ordered list of processors.</p>
+    <div class="callout callout-note"><strong>Note</strong><p>Component type names are moving to snake_case: <code>otlp_grpc</code> and <code>otlp_http</code> instead of <code>otlp</code> and <code>otlphttp</code> for exporters, <code>k8s_attributes</code> instead of <code>k8sattributes</code>. Older names still work as deprecated aliases, so older blog posts are not wrong, just dated.</p></div></section>
+  <section id="a-production-shaped-configuration"><h2>A production-shaped configuration</h2>
+    <div class="code"><div class="code-cap">Receive OTLP, protect memory, enrich, batch at the exporter, send to two backends</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 1500
+    spike_limit_mib: 300
+  k8s_attributes: {}
+
+exporters:
+  otlp_grpc/tempo:
+    endpoint: tempo.monitoring.svc:4317
+    tls:
+      insecure: true
+    sending_queue:
+      batch:
+  prometheus_remote_write:
+    endpoint: http://prometheus.monitoring.svc:9090/api/v1/write
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, k8s_attributes]
+      exporters: [otlp_grpc/tempo]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, k8s_attributes]
+      exporters: [prometheus_remote_write]</code></pre></div>
+    <ul><li><strong>memory_limiter first.</strong> When the Collector nears its limit, it refuses new data so senders back off and retry, instead of the process being OOM-killed and losing everything in memory.</li><li><strong>Batch at the exporter.</strong> The current docs batch through the exporter's <code>sending_queue</code> with a <code>batch</code> block; the separate <code>batch</code> processor still exists and appears in most older configs.</li><li><strong>Retries and queues</strong> live in the exporter too, so a backend outage is absorbed by the queue rather than dropping data immediately.</li><li><strong>Bind carefully.</strong> The Collector defaults to <code>localhost</code>; the examples use <code>0.0.0.0</code> so other pods can reach it, which is fine inside a cluster but not on a public host.</li></ul>
+    <p><code>k8s_attributes</code> looks up the pod that sent the data and adds namespace, pod, deployment and node as resource attributes, which is what lets you filter traces by service in your backend. The <code>transform</code> processor (OpenTelemetry Transformation Language) and <code>filter</code> processor rename, redact or drop data, for example stripping prompt text from spans before it leaves the cluster.</p></section>
+  <section id="distributions-which-binary-to-run"><h2>Distributions: which binary to run</h2>
+    <p>The core repository holds only the framework and a handful of components; hundreds more live in <code>opentelemetry-collector-contrib</code>. You run a <strong>distribution</strong>, a binary built with a chosen set of components. The releases repository publishes several:</p>
+    <div class="table-wrap"><table><thead><tr><th>Distribution</th><th>Binary</th><th>Use it when</th></tr></thead><tbody><tr><td>Core</td><td>otelcol</td><td>You only need OTLP in and out plus the basics</td></tr><tr><td>Contrib</td><td>otelcol-contrib</td><td>Exploring, or you need many receivers and exporters</td></tr><tr><td>Kubernetes</td><td>otelcol-k8s</td><td>Running in Kubernetes with the components that setting needs</td></tr><tr><td>OTLP</td><td>otelcol-otlp</td><td>A minimal OTLP-only relay</td></tr><tr><td>Custom</td><td>built with ocb</td><td>Production: only the components you use</td></tr></tbody></table></div>
+    <p>Contrib is convenient but large, and every component you ship is attack surface and upgrade risk. The <strong>OpenTelemetry Collector Builder</strong> (<code>ocb</code>) reads a manifest listing the exact receivers, processors, exporters and extensions you want and compiles a small binary. Most teams end up there.</p></section>
+  <section id="agent-and-gateway-and-tail-sampling"><h2>Agent and gateway, and tail sampling</h2>
+    <p>Two deployment patterns combine well. An <strong>agent</strong> Collector runs next to workloads, as a DaemonSet on every node or a sidecar, receives from local apps, adds host and pod metadata, and forwards. A <strong>gateway</strong> Collector runs as a central, horizontally scaled Deployment that applies organisation-wide policy (redaction, sampling, routing) and holds the backend credentials, so apps and agents never do.</p>
+    <p><strong>Head sampling</strong> decides at the start of a trace, cheaply but blindly. <strong>Tail sampling</strong> waits until a trace is complete, then keeps it if it matches a policy: any error, latency above a threshold, a specific attribute. For LLM agents this is the difference between keeping every slow or failed multi-step run and keeping a random 5% that is mostly successes.</p>
+    <figure class="diagram" id="fig-otel-agent-gateway"><div class="diagram-scroll"><svg viewBox="0 0 740 248" role="img" aria-label="Applications send OTLP to an agent Collector running on the same node, which adds Kubernetes attributes. Agents forward to a load-balancing Collector tier that routes spans by trace ID, so every span of a trace reaches the same gateway Collector. Gateway Collectors run tail sampling, redaction and batching, then export traces to a tracing backend and metrics to Prometheus." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="otel-agent-gateway-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="otel-agent-gateway-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="otel-agent-gateway-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="otel-agent-gateway-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="otel-agent-gateway-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><polyline points="171.0,70.0 201.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#otel-agent-gateway-arrow-default)"/><rect x="168.8" y="24.0" width="34.4" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">OTLP</text><polyline points="341.0,70.0 371.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#otel-agent-gateway-arrow-default)"/><rect x="329.6" y="24.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">forward</text><polyline points="511.0,70.0 541.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#otel-agent-gateway-arrow-default)"/><rect x="484.4" y="24.0" width="83.2" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">whole traces</text><polyline points="611.0,98.0 611.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#otel-agent-gateway-arrow-default)"/><rect x="614.0" y="116.0" width="95.4" height="16" rx="4" class="dg-label-bg"/><text x="618.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">sampled traces</text><polyline points="271.0,98.0 271.0,178.0 371.0,178.0" fill="none" style="stroke:rgba(148,163,184,0.55)" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#otel-agent-gateway-arrow-muted)"/><rect x="294.6" y="159.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="321.0" y="167.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">metrics</text><rect x="31" y="42.0" width="140" height="56" rx="28.0" class="dg-node dg-actor"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Apps, agents</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">OTel SDKs</text><rect x="201" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Agent</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">DaemonSet, k8s attrs</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Load-balancing</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">route by trace ID</text><rect x="541" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Gateway</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">tail sampling</text><path d="M541,157.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M541,157.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="611.0" y="178.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Traces backend</text><path d="M371,157.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M371,157.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Prometheus</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">metrics</text></svg></div><figcaption>Agents next to the workloads add local metadata; a load-balancing tier routes each trace to one gateway, which tail-samples and holds the backend credentials.</figcaption></figure>
+    <div class="code"><div class="code-cap">Keep all errors and slow traces, plus 5% of the rest</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>processors:
+  tail_sampling:
+    decision_wait: 15s
+    policies:
+      - name: errors
+        type: status_code
+        status_code: {status_codes: [ERROR]}
+      - name: slow
+        type: latency
+        latency: {threshold_ms: 8000}
+      - name: baseline
+        type: probabilistic
+        probabilistic: {sampling_percentage: 5}</code></pre></div>
+    <div class="callout callout-warning"><strong>Watch out</strong><p>Tail sampling only works if every span of a trace reaches the same Collector instance. Put a first tier of Collectors with the <code>load_balancing</code> exporter, routing by trace ID, in front of the tier that runs <code>tail_sampling</code>. Without it, each replica sees fragments and makes wrong decisions.</p></div></section>
+  <section id="operating-the-collector"><h2>Operating the Collector</h2>
+    <ul><li>The Collector reports on itself: internal metrics (by default on port 8888) include accepted, refused and failed items per component, queue size and memory. Alert on refused and send-failed counts rising.</li><li>Validate before deploying: <code>otelcol-contrib validate --config=config.yaml</code> catches unknown components and typos.</li><li>Use the <code>debug</code> exporter with <code>verbosity: detailed</code> temporarily to print what is actually flowing through a pipeline.</li><li>Size the gateway on throughput and on tail-sampling memory: every in-flight trace is held for <code>decision_wait</code>.</li><li>For AI workloads, the GenAI semantic conventions define attributes such as <code>gen_ai.request.model</code> and <code>gen_ai.usage.input_tokens</code>; keep them and you can chart tokens and cost per model in any backend.</li></ul></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>A local pipeline you can watch</h2>
+    <ol><li>Run the contrib Collector in Docker with a config that has an <code>otlp</code> receiver and a <code>debug</code> exporter with <code>verbosity: detailed</code>, publishing ports 4317 and 4318.</li><li>Install <code>telemetrygen</code> (from the contrib repo's cmd folder) and run <code>telemetrygen traces --otlp-insecure --traces 5</code>; watch spans print in the Collector logs.</li><li>Add <code>memory_limiter</code> and a <code>transform</code> processor that sets a resource attribute <code>env</code> to <code>lab</code>; confirm it appears on every span.</li><li>Add Jaeger or Tempo as a container, export to it with <code>otlp_grpc</code>, and find your traces in its UI.</li><li>Add the <code>tail_sampling</code> policies from this lesson, generate traces where some have errors (<code>telemetrygen traces --status-code Error</code>), and check that all error traces arrive.</li><li>Run <code>otelcol-contrib validate --config=config.yaml</code> after deliberately misspelling a component, and read the error.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>The OpenTelemetry Collector — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Receivers in, processors change, exporters out, connectors bridge pipelines, extensions sit beside.</li><li>Nothing runs unless it is listed in service.pipelines.</li><li>memory_limiter first; batching and retry queues at the exporter.</li><li>Build a custom distribution with ocb for production instead of shipping all of contrib.</li><li>Agents add local metadata; gateways hold credentials and apply policy.</li><li>Tail sampling needs trace-ID load balancing so whole traces land on one instance.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Ports and endpoints</h3><table><tbody><tr><td><code>4317 / 4318</code></td><td>OTLP over gRPC / OTLP over HTTP</td></tr><tr><td><code>13133</code></td><td>health_check extension</td></tr><tr><td><code>8888</code></td><td>Collector's own metrics (default)</td></tr><tr><td><code>55679</code></td><td>zpages extension: live pipeline debugging pages</td></tr></tbody></table></div><div class="cheat-group"><h3>Core components</h3><table><tbody><tr><td><code>receivers: otlp</code></td><td>Accept OTLP traces, metrics, logs</td></tr><tr><td><code>processors: memory_limiter</code></td><td>Refuse data before running out of memory</td></tr><tr><td><code>exporters: otlp_grpc / otlp_http</code></td><td>Send OTLP onward (old names: otlp / otlphttp)</td></tr><tr><td><code>sending_queue: {batch: {}}</code></td><td>Exporter-side queue and batching</td></tr><tr><td><code>exporters: debug  verbosity: detailed</code></td><td>Print data to the log for troubleshooting</td></tr></tbody></table></div><div class="cheat-group"><h3>Contrib favourites</h3><table><tbody><tr><td><code>k8s_attributes</code></td><td>Add pod, namespace, deployment metadata</td></tr><tr><td><code>transform / filter</code></td><td>Rewrite, redact or drop with OTTL</td></tr><tr><td><code>tail_sampling</code></td><td>Decide per complete trace using policies</td></tr><tr><td><code>load_balancing</code></td><td>Route spans by trace ID to a fixed Collector</td></tr><tr><td><code>span_metrics (connector)</code></td><td>Generate RED metrics from spans</td></tr><tr><td><code>prometheus (receiver)</code></td><td>Scrape Prometheus endpoints</td></tr></tbody></table></div><div class="cheat-group"><h3>CLI</h3><table><tbody><tr><td><code>otelcol-contrib --config=config.yaml</code></td><td>Run with a config file</td></tr><tr><td><code>otelcol-contrib validate --config=config.yaml</code></td><td>Check a config without running</td></tr><tr><td><code>otelcol-contrib components</code></td><td>List the components compiled into this binary</td></tr><tr><td><code>ocb --config=builder-config.yaml</code></td><td>Build a custom distribution</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Defining a processor but forgetting to add it to the pipeline, so it silently never runs.</li><li>Running tail sampling on several replicas without trace-ID load balancing.</li><li>No memory_limiter, so a traffic spike OOM-kills the Collector and drops buffered data.</li><li>Shipping prompts or personal data in span attributes to a third-party backend without redaction.</li><li>Running the full contrib build in production and inheriting every component's vulnerabilities.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "You added a `transform` processor to the processors section, but spans arrive unchanged. What is the most likely cause?", "options": ["It is not listed in the traces pipeline under service.pipelines", "Transform processors only work on metrics, not traces", "The exporter must be restarted separately from the Collector", "The receiver needs a transform: true setting"], "answer": 0, "explain": "Components only run when a pipeline references them. Defining a processor without adding it to service.pipelines leaves it inert."}, {"q": "Three gateway replicas run tail_sampling behind a round-robin load balancer, and many error traces are missing. Why?", "options": ["Spans of one trace land on different replicas, so none sees the whole trace", "Tail sampling drops all traces that contain errors by default", "decision_wait is too long, so traces expire before export", "Round-robin balancing corrupts the trace IDs"], "answer": 0, "explain": "Tail sampling decides on complete traces. Without the load_balancing exporter routing by trace ID, each replica sees fragments and may drop the part that holds the error."}, {"q": "Why should memory_limiter come first in a pipeline's processor list?", "options": ["So the Collector refuses data early and senders retry, instead of being OOM-killed", "Because it compresses data before the other processors run", "Because exporters cannot start until memory is reserved", "So that batches are smaller when they reach the exporter"], "answer": 0, "explain": "Refusing data near the limit applies backpressure to senders, which retry. Placing it first means no other processor has already spent memory on data that will be refused."}, {"q": "Security asks you to minimise the Collector's attack surface in production. What is the best approach?", "options": ["Build a custom distribution with ocb containing only the components you use", "Run the contrib distribution but leave unused components out of the pipelines", "Switch every exporter to the debug exporter", "Disable the health_check extension"], "answer": 0, "explain": "Unused components still ship in the contrib binary and must be patched. A custom build compiles in only what the configuration needs."}, {"q": "In an agent plus gateway design, where should the credentials for a SaaS observability backend live?", "options": ["On the gateway Collectors only", "In every application's SDK configuration", "On every node-level agent Collector", "In the OTLP receiver configuration"], "answer": 0, "explain": "The gateway is the single egress point that applies organisation-wide policy and holds backend credentials, so applications and node agents never need them."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="oss-grafana.html"><span>← Previous</span><strong>Grafana in practice</strong></a>
+    <a class="pager-up" href="../education.html#oss">All OSS Deep Dives modules</a>
+    <span class="pager-link pager-next is-empty"></span>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=oss-otel-collector&amp;page=/education/oss-otel-collector.html&amp;title=The%20OpenTelemetry%20Collector">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=oss-otel-collector&amp;page=/education/oss-otel-collector.html&amp;title=The%20OpenTelemetry%20Collector">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>
