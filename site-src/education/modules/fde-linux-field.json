@@ -1,0 +1,132 @@
+{
+  "id": "fde-linux-field",
+  "minutes": 35,
+  "intro": "On your own laptop you have root, your tools and unlimited time. At a customer site you often get a jump host, a shared account, an unfamiliar distribution, no internet, a change window that closes in forty minutes and someone watching over your shoulder. This lesson adapts core Linux skills to that reality: orienting yourself on an unknown machine in two minutes, working without root, answering the classic \"why is it broken?\" questions from processes, disks, logs and the network, and leaving a clean trail so the customer trusts you with access next time.",
+  "objectives": [
+    "Orient yourself on an unfamiliar Linux host quickly and safely",
+    "Diagnose CPU, memory, disk, process and service problems without root",
+    "Read logs with journalctl and log files to find the first real error",
+    "Test network paths from inside the customer's environment",
+    "Work in a way that is recorded, reversible and respectful of the customer's systems"
+  ],
+  "sections": [
+    {
+      "heading": "The first two minutes on a new machine",
+      "blocks": [
+        {"type": "p", "text": "Before changing anything, find out where you are and what you are allowed to do. These commands are read-only and work as an ordinary user on almost every distribution."},
+        {"type": "code", "lang": "bash", "caption": "Orientation: who, where, what, how much", "code": "whoami; id                      # your user and groups\nhostname -f; uname -r           # which machine, which kernel\ncat /etc/os-release             # distribution and version\nuptime                          # load averages and time since boot\ndf -h; free -h                  # disk and memory at a glance\nsudo -n -l 2>/dev/null || echo \"no passwordless sudo\""},
+        {"type": "list", "items": [
+          "Note the distribution family: package names, service names and log locations differ between Red Hat-style and Debian-style systems.",
+          "Check `sudo -l` (or ask): many customers grant narrow sudo rules, such as restarting one service, rather than full root.",
+          "Find the shared conventions: where applications live (`/opt`, `/srv`), where logs go, which user the service runs as.",
+          "Start `script` or a terminal recorder if the customer allows it, so you have a record of what you ran."
+        ]}
+      ]
+    },
+    {
+      "heading": "Processes, memory and disk",
+      "blocks": [
+        {"type": "code", "lang": "bash", "caption": "Who is using the machine?", "code": "ps aux --sort=-%mem | head -15       # top memory consumers\nps aux --sort=-%cpu | head -15       # top CPU consumers\ntop -b -n 1 | head -20               # snapshot, works without an interactive terminal\ndu -xh --max-depth=1 /var 2>/dev/null | sort -h | tail\nfind /tmp -xdev -size +500M 2>/dev/null"},
+        {"type": "p", "text": "Full disks cause a startling variety of symptoms: databases refusing writes, services that will not start, logins that hang. `df -h` shows space; `df -i` shows **inodes**, which can run out on systems with millions of tiny files even when space remains. A deleted file still held open by a process keeps its space until the process restarts; `lsof +L1` lists those if lsof is installed."},
+        {"type": "callout", "kind": "warning", "text": "Never delete files on a customer machine to free space without asking who owns them. Propose what to remove, get agreement, and prefer compressing or moving logs over deleting them."}
+      ]
+    },
+    {
+      "heading": "Services and logs",
+      "blocks": [
+        {"type": "p", "text": "Most long-running software on modern Linux is managed by **systemd**. You can usually read service state and logs without root, even if you cannot restart services."},
+        {"type": "code", "lang": "bash", "caption": "Is it running, and what did it say?", "code": "systemctl status myapp --no-pager          # state, PID, last log lines\nsystemctl list-units --failed --no-pager   # anything that crashed\njournalctl -u myapp --since \"1 hour ago\" --no-pager | tail -50\njournalctl -p err -b --no-pager | tail -30  # errors since boot\ntail -F /var/log/myapp/app.log             # follow a file log"},
+        {"type": "p", "text": "Find the **first** error, not the loudest. A failed database connection at 09:02 explains the hundreds of request errors that follow it. Search with `grep -n -i -m 20 'error\\|exception\\|denied\\|refused'` and then read the lines just before the first match. Permission problems often hide in the path: `namei -l /path/to/file` shows the owner and mode of every directory on the way, which is how you discover the parent directory nobody can enter."}
+      ]
+    },
+    {
+      "heading": "Network checks from inside",
+      "blocks": [
+        {"type": "p", "text": "The customer's network is the most common reason things work on your laptop and fail on their server. Test the exact path your software will use, from the machine it will run on."},
+        {"type": "code", "lang": "bash", "caption": "Can this host reach that service?", "code": "getent hosts api.internal.example        # name resolution via system resolver\nnc -zv db.internal.example 5432          # is the TCP port reachable?\ncurl -sv https://api.internal.example/health -o /dev/null 2>&1 | grep -E 'Connected|SSL|HTTP/'\nenv | grep -i proxy                      # HTTP_PROXY / HTTPS_PROXY / NO_PROXY in effect\nss -tlnp 2>/dev/null | head              # what is listening locally"},
+        {"type": "list", "items": [
+          "`getent` uses the same resolver as applications; `dig` and `nslookup` may query different servers and mislead you.",
+          "If `nc` connects but `curl` fails, the problem is above TCP: TLS, a proxy, or the application.",
+          "Corporate proxies are often required for outbound traffic and must be excluded for internal hosts with `NO_PROXY`; the next lessons cover this in depth."
+        ]}
+      ]
+    },
+    {
+      "heading": "Working like a guest",
+      "blocks": [
+        {"type": "list", "items": [
+          "**Read before you write.** Gather evidence with read-only commands first and share what you found before proposing a change.",
+          "**Change one thing at a time**, with a rollback ready: copy a config to `file.bak.YYYYMMDD` before editing it.",
+          "**Use the customer's change process.** If changes need a ticket or a window, use it, even for small ones.",
+          "**Use tmux or screen** on jump hosts so a dropped VPN does not kill a long-running command.",
+          "**Collect, do not exfiltrate.** If you need logs off the machine, agree what may leave, redact secrets and personal data, and use the customer's approved transfer method.",
+          "**Leave it as you found it**: remove temporary files and tools you installed, and write down what you changed."
+        ]},
+        {"type": "callout", "kind": "tip", "text": "End each access session with a three-line note to the customer: what you looked at, what you changed (or 'no changes'), and what happens next. It builds the trust that gets you access faster next time."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Troubleshoot a machine you did not build",
+    "steps": [
+      "Start a fresh Linux VM or container (any distribution you are less familiar with) and create an unprivileged user; log in as that user.",
+      "Run the orientation commands and write a five-line summary of the machine.",
+      "As root in another session, create a problem: fill a small filesystem, or make a service's log directory unreadable, or stop a dependency.",
+      "Back as the unprivileged user, find the cause using only read-only commands and logs, and write down the evidence.",
+      "Propose the fix as you would to a customer: what to change, the risk, and the rollback.",
+      "Apply it, verify, and write the three-line end-of-session note."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Orient first: user, host, distribution, load, disk, memory, sudo rights.",
+      "Gather evidence read-only before proposing changes.",
+      "Find the first error in the logs, not the loudest.",
+      "Test network paths from the machine the software runs on.",
+      "Check inodes and deleted-but-open files when disks look full.",
+      "Record, back up, change one thing, leave a note."
+    ],
+    "groups": [
+      {"title": "Orientation", "items": [
+        {"syntax": "whoami; id; hostname -f", "desc": "Identity and machine"},
+        {"syntax": "cat /etc/os-release; uname -r", "desc": "Distribution and kernel"},
+        {"syntax": "uptime; df -h; df -i; free -h", "desc": "Load, disk, inodes, memory"},
+        {"syntax": "sudo -n -l", "desc": "What you may run as root"}
+      ]},
+      {"title": "Processes and files", "items": [
+        {"syntax": "ps aux --sort=-%mem | head", "desc": "Memory hogs"},
+        {"syntax": "top -b -n 1", "desc": "One-shot snapshot"},
+        {"syntax": "du -xh --max-depth=1 DIR | sort -h", "desc": "What fills a directory"},
+        {"syntax": "lsof +L1", "desc": "Deleted files still held open"},
+        {"syntax": "namei -l PATH", "desc": "Permissions along a path"}
+      ]},
+      {"title": "Services and logs", "items": [
+        {"syntax": "systemctl status SVC --no-pager", "desc": "State and recent logs"},
+        {"syntax": "systemctl list-units --failed", "desc": "Crashed units"},
+        {"syntax": "journalctl -u SVC --since \"1 hour ago\"", "desc": "Service logs"},
+        {"syntax": "journalctl -p err -b", "desc": "Errors since boot"}
+      ]},
+      {"title": "Network", "items": [
+        {"syntax": "getent hosts NAME", "desc": "Resolve like applications do"},
+        {"syntax": "nc -zv HOST PORT", "desc": "TCP reachability"},
+        {"syntax": "curl -sv URL -o /dev/null", "desc": "TLS and HTTP details"},
+        {"syntax": "env | grep -i proxy", "desc": "Proxy settings in effect"},
+        {"syntax": "ss -tlnp", "desc": "Local listeners"}
+      ]}
+    ],
+    "pitfalls": [
+      "Changing configuration before collecting evidence.",
+      "Deleting files to free space without asking who owns them.",
+      "Trusting dig when the application uses the system resolver.",
+      "Running long commands on a jump host without tmux.",
+      "Copying logs with secrets or personal data off the customer's network."
+    ]
+  },
+  "quiz": [
+    {"q": "df -h shows 40% free, yet a service fails with 'No space left on device'. What should you check next?", "options": ["Inode usage with df -i", "CPU load with uptime", "The kernel version with uname -r", "Open TCP ports with ss -tlnp"], "answer": 0, "explain": "A filesystem can run out of inodes (file entries) while space remains, typically with very many small files; df -i shows inode usage."},
+    {"q": "nc -zv to an internal API succeeds, but curl to its HTTPS URL fails. Where is the problem most likely?", "options": ["Above TCP: TLS, a proxy, or the application", "Basic routing, because packets never arrive", "DNS resolution of the hostname", "A full disk on your machine"], "answer": 0, "explain": "A successful TCP connection proves routing and the port are fine. Failure afterwards points at the TLS handshake, proxy settings or the HTTP layer."},
+    {"q": "Hundreds of request errors fill the log. Which approach finds the root cause fastest?", "options": ["Find the first error in time and read what preceded it", "Count the most frequent error message", "Restart the service and watch for new errors", "Read only the last 20 lines of the log"], "answer": 0, "explain": "The first failure often causes the cascade that follows; the most frequent message is usually a symptom."},
+    {"q": "You need disk space on a customer's server and see 30 GB of old logs. What is the right move?", "options": ["Propose compressing or moving them and get the owner's agreement", "Delete them, since logs are always safe to remove", "Fill the disk elsewhere to test the alerts", "Leave without mentioning it"], "answer": 0, "explain": "Logs may be needed for audit or investigation. Agree changes with the owner and prefer reversible options such as compression or moving."},
+    {"q": "Why use getent hosts rather than dig when checking name resolution for an application?", "options": ["getent uses the same system resolver configuration as applications", "dig cannot resolve internal names at all", "getent also tests the TCP port", "dig requires root privileges"], "answer": 0, "explain": "Applications resolve through the system resolver (nsswitch, hosts file, configured DNS); dig queries DNS servers directly and can disagree with what applications see."}
+  ]
+}

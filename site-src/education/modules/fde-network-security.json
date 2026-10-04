@@ -1,0 +1,133 @@
+{
+  "id": "fde-network-security",
+  "minutes": 40,
+  "intro": "The most common FDE day-one failure has nothing to do with your code: the software that ran perfectly in your cloud account cannot reach anything inside the customer's network. Enterprises route traffic through proxies, inspect TLS with their own certificate authorities, allow outbound traffic only to approved destinations, split DNS between inside and outside, and put everything behind single sign-on. This lesson explains each of those layers, how to diagnose which one is blocking you, and how to configure software, containers and Kubernetes to work with them rather than around them.",
+  "objectives": [
+    "Configure applications and containers for explicit HTTP proxies and NO_PROXY",
+    "Diagnose TLS failures caused by inspecting proxies and private certificate authorities",
+    "Request the right firewall and egress allowlist changes with precise details",
+    "Reach internal systems through jump hosts and VPNs safely",
+    "Explain how SSO with OIDC or SAML fits into an application you deploy"
+  ],
+  "sections": [
+    {
+      "heading": "Proxies: the gate in front of the internet",
+      "blocks": [
+        {"type": "p", "text": "Many enterprises do not let servers talk to the internet directly. Outbound HTTP and HTTPS must go through an **explicit proxy**: the client connects to the proxy and, for HTTPS, asks it to open a tunnel with the HTTP `CONNECT` method. Most tools read the conventional environment variables `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` (some only the lowercase forms), and requests to internal hosts must be excluded through `NO_PROXY` or they will be sent to the proxy, which cannot reach them."},
+        {"type": "code", "lang": "bash", "caption": "Proxy settings for a shell and a test through them", "code": "export HTTPS_PROXY=http://proxy.corp.example:8080\nexport HTTP_PROXY=http://proxy.corp.example:8080\nexport NO_PROXY=localhost,127.0.0.1,.corp.example,10.0.0.0/8,.svc,.cluster.local\nexport https_proxy=$HTTPS_PROXY http_proxy=$HTTP_PROXY no_proxy=$NO_PROXY\n\ncurl -sv https://pypi.org/simple/ -o /dev/null 2>&1 | grep -E 'proxy|CONNECT|HTTP/'"},
+        {"type": "list", "items": [
+          "`NO_PROXY` syntax varies by tool: suffixes like `.corp.example` are widely understood, CIDR ranges are not supported everywhere. Test each tool you rely on.",
+          "The Docker daemon needs its own proxy configuration to pull images; containers do not inherit the host's shell variables, so pass them explicitly.",
+          "In Kubernetes, include the cluster's service and pod domains (`.svc`, `.cluster.local`) and CIDRs in `NO_PROXY`, or in-cluster calls will be sent to the proxy and fail."
+        ]}
+      ]
+    },
+    {
+      "heading": "TLS inspection and private certificate authorities",
+      "blocks": [
+        {"type": "p", "text": "Many corporate proxies **inspect TLS**: they terminate your HTTPS connection, examine it, and re-encrypt it with a certificate signed by the company's own **certificate authority** (CA). Company laptops trust that CA; your container image does not. The symptom is a certificate verification error such as \"self-signed certificate in certificate chain\" or \"unable to get local issuer certificate\" for sites that are perfectly valid outside. Internal services are often signed by a private CA too."},
+        {"type": "code", "lang": "bash", "caption": "See who actually signed the certificate you receive", "code": "openssl s_client -connect api.github.com:443 -servername api.github.com \\\n  -showcerts </dev/null 2>/dev/null | grep -E 's:|i:'\n# issuer 'i:' shows the corporate CA instead of a public one when a proxy inspects TLS"},
+        {"type": "p", "text": "The fix is to **trust the customer's CA**, never to turn verification off. Get the CA certificate (PEM) from the customer's security team, add it to the system trust store (`update-ca-certificates` on Debian-style systems, `update-ca-trust` on Red Hat-style), and make sure each runtime uses it: Python with httpx and OpenSSL honours `SSL_CERT_FILE`, the requests library uses `REQUESTS_CA_BUNDLE`, Node.js uses `NODE_EXTRA_CA_CERTS`, and Java needs the CA imported into its truststore."},
+        {"type": "code", "lang": "dockerfile", "caption": "Bake the customer CA into an image (or mount it at runtime)", "code": "FROM python:3.12-slim\nCOPY customer-root-ca.pem /usr/local/share/ca-certificates/customer-root-ca.crt\nRUN update-ca-certificates\nENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \\\n    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt"},
+        {"type": "callout", "kind": "warning", "text": "Setting verify=False, NODE_TLS_REJECT_UNAUTHORIZED=0 or curl -k to make a demo work trains everyone to accept interception and will fail any security review. Fix trust properly, even under time pressure."}
+      ]
+    },
+    {
+      "heading": "Firewalls, egress allowlists and DNS",
+      "blocks": [
+        {"type": "p", "text": "Inbound and outbound traffic is filtered. Your software may need outbound access to your company's API, a model provider, a container registry or a package index, and the customer's network team must allow each one. They will need precise information: destination hostnames (not \"the internet\"), ports, protocol, direction, source hosts or subnets, and why. Ask early; firewall change processes can take weeks."},
+        {"type": "table", "headers": ["Destination", "Port", "Purpose", "Required when"], "rows": [
+          ["api.yourproduct.example", "443/TCP", "Product API and licence check", "Always (unless fully air-gapped)"],
+          ["registry.yourproduct.example", "443/TCP", "Container image pulls", "Install and upgrades"],
+          ["llm.provider.example", "443/TCP", "Hosted model inference", "If not self-hosting models"],
+          ["telemetry.yourproduct.example", "443/TCP", "Optional usage metrics", "Only with customer approval"]
+        ]},
+        {"type": "p", "text": "**Split-horizon DNS** means the same name resolves differently inside and outside the network, and some internal names only exist on internal DNS servers. A container or pod using a different resolver than the host can fail to find internal services. When in doubt, check resolution from inside the container or pod with `getent hosts` and compare with the host."}
+      ]
+    },
+    {
+      "heading": "Getting in: VPNs, jump hosts and access",
+      "blocks": [
+        {"type": "p", "text": "Customers grant access in many forms: a VPN client, a virtual desktop, a **bastion** (jump) host you SSH through, a cloud console role, or screen-sharing where the customer types. Use exactly what is offered, and do not create side doors such as personal tunnels or reverse shells, even temporarily."},
+        {"type": "code", "lang": "bash", "caption": "SSH through a jump host without copying keys onto it", "code": "# one-off\nssh -J you@bastion.corp.example you@app01.internal.example\n\n# ~/.ssh/config so plain 'ssh app01' works\ncat >> ~/.ssh/config <<'EOF'\nHost app01\n  HostName app01.internal.example\n  User you\n  ProxyJump you@bastion.corp.example\nEOF"},
+        {"type": "list", "items": [
+          "Prefer short-lived credentials and personal accounts over shared ones, so actions are attributable.",
+          "Keep a written record of what access you have and request its removal when the engagement ends.",
+          "Port-forward with `ssh -L` only for the duration of a task, and only for ports you have been allowed to use."
+        ]}
+      ]
+    },
+    {
+      "heading": "Single sign-on and how users get in",
+      "blocks": [
+        {"type": "p", "text": "Enterprise users expect to log in with their company identity, not a new password. The application you deploy should delegate authentication to the customer's **identity provider** (IdP), such as Microsoft Entra ID, Okta or Keycloak, using **OIDC** (OpenID Connect, built on OAuth 2.0, common for modern apps) or **SAML** (older, XML-based, still widespread)."},
+        {"type": "list", "items": [
+          "You register the application with the IdP and receive a client ID and secret (OIDC) or exchange metadata (SAML), plus a redirect or callback URL you configure exactly.",
+          "Group or role claims in the token map to permissions in your app; agree the mapping with the customer.",
+          "Clock skew, redirect URL mismatches and missing claims are the usual first-day errors; the IdP's sign-in logs usually say exactly which.",
+          "Service-to-service calls use machine identities (client credentials, workload identity, mTLS), not a person's login; the integration lesson covers these."
+        ]}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Simulate an enterprise network",
+    "steps": [
+      "Run a forward proxy locally (for example a squid or tinyproxy container) and block direct outbound traffic from a test container with a Docker network that has no default route except through the proxy container.",
+      "Make `curl` and a small Python httpx script work through the proxy using HTTPS_PROXY and NO_PROXY.",
+      "Create your own CA with openssl, issue a certificate for a local HTTPS test server, and observe the verification error from your script.",
+      "Fix it properly by adding the CA to the container's trust store and setting SSL_CERT_FILE; confirm verification is on.",
+      "Write the firewall request you would send a customer for a tool that needs your API, a registry and a model provider.",
+      "Configure `ProxyJump` in your SSH config for a two-hop path between two local VMs or containers."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Outbound traffic often must use an explicit proxy; internal hosts go in NO_PROXY.",
+      "Containers and the Docker daemon need proxy settings passed explicitly.",
+      "Certificate errors on valid sites usually mean TLS inspection: trust the customer CA.",
+      "Never disable certificate verification to make something work.",
+      "Firewall requests need exact hostnames, ports, direction, source and reason, early.",
+      "Delegate user login to the customer's IdP with OIDC or SAML."
+    ],
+    "groups": [
+      {"title": "Proxy", "items": [
+        {"syntax": "HTTPS_PROXY / HTTP_PROXY / NO_PROXY", "desc": "Set both upper and lower case"},
+        {"syntax": "NO_PROXY=.corp.example,.svc,.cluster.local", "desc": "Keep internal traffic direct"},
+        {"syntax": "curl -x http://proxy:8080 URL", "desc": "Test through a specific proxy"},
+        {"syntax": "docker run -e HTTPS_PROXY -e NO_PROXY ...", "desc": "Pass proxy settings into containers"}
+      ]},
+      {"title": "TLS and CAs", "items": [
+        {"syntax": "openssl s_client -connect H:443 -servername H -showcerts", "desc": "Inspect the chain you receive"},
+        {"syntax": "update-ca-certificates / update-ca-trust", "desc": "Add a CA to the system store"},
+        {"syntax": "SSL_CERT_FILE / REQUESTS_CA_BUNDLE", "desc": "Python trust bundle"},
+        {"syntax": "NODE_EXTRA_CA_CERTS", "desc": "Node.js extra CAs"},
+        {"syntax": "keytool -importcert", "desc": "Java truststore"}
+      ]},
+      {"title": "Access", "items": [
+        {"syntax": "ssh -J user@bastion user@host", "desc": "Jump host"},
+        {"syntax": "ProxyJump in ~/.ssh/config", "desc": "Persistent jump configuration"},
+        {"syntax": "ssh -L 8443:target:443 host", "desc": "Temporary local port forward"}
+      ]},
+      {"title": "Identity", "items": [
+        {"syntax": "OIDC: client ID, secret, redirect URI, scopes", "desc": "Modern SSO"},
+        {"syntax": "SAML: IdP metadata, ACS URL, entity ID", "desc": "Older enterprise SSO"},
+        {"syntax": "group claims -> app roles", "desc": "Agree the mapping with the customer"}
+      ]}
+    ],
+    "pitfalls": [
+      "Forgetting NO_PROXY, so internal and in-cluster calls go to the proxy.",
+      "Disabling TLS verification instead of trusting the customer CA.",
+      "Asking for 'internet access' instead of specific destinations and ports.",
+      "Testing DNS on the host when the container uses a different resolver.",
+      "Creating unofficial tunnels or shared accounts to save time."
+    ]
+  },
+  "quiz": [
+    {"q": "A container fails with 'self-signed certificate in certificate chain' calling a public API that works from your laptop at home. What is the likely cause?", "options": ["A TLS-inspecting proxy re-signs traffic with the customer's CA", "The public API's certificate expired earlier this week", "DNS inside the container is returning the wrong IP address", "The container image is missing its Python interpreter"], "answer": 0, "explain": "Inspecting proxies present certificates signed by a corporate CA that your image does not trust; trusting that CA fixes it."},
+    {"q": "After setting HTTPS_PROXY, calls to an internal service at api.corp.example start failing. What did you forget?", "options": ["To add .corp.example to NO_PROXY", "To set HTTP_PROXY as well", "To restart the proxy server", "To disable TLS verification"], "answer": 0, "explain": "Without a NO_PROXY entry, internal requests are sent to the proxy, which typically cannot reach internal hosts."},
+    {"q": "Which firewall request is most likely to be approved quickly?", "options": ["Outbound 443/TCP from the app subnet to api.yourproduct.example, for API calls", "Allow the application servers full outbound internet access", "Open all ports in both directions between our cloud and yours", "Disable the firewall entirely for the duration of the pilot"], "answer": 0, "explain": "Network teams need precise, minimal rules: source, destination, port, protocol and purpose."},
+    {"q": "What is the correct way to make a Python service trust the customer's internal CA?", "options": ["Add the CA to the trust store and point SSL_CERT_FILE or REQUESTS_CA_BUNDLE at it", "Set verify=False on every outgoing request in the client", "Replace every HTTPS URL in the configuration with plain HTTP", "Ask users to click through the certificate warning in their browser"], "answer": 0, "explain": "Extending the trust store keeps certificate verification on while accepting the customer's CA."},
+    {"q": "Users should log in to your deployed app with their company accounts. What do you integrate with?", "options": ["The customer's identity provider via OIDC or SAML", "A new local username and password database", "The firewall's user list", "A shared admin account for all users"], "answer": 0, "explain": "Delegating authentication to the IdP gives users single sign-on and lets the customer control access through their own groups and policies."}
+  ]
+}

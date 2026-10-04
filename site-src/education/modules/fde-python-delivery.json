@@ -1,0 +1,123 @@
+{
+  "id": "fde-python-delivery",
+  "minutes": 40,
+  "intro": "Most FDE code is not a grand system; it is the glue that makes a customer's world work with yours: a script that pulls records nightly, a CLI that validates their data, a small service that exposes an internal system to an AI agent. That code has to be written fast, run reliably on machines you do not control, and be handed to someone else. This lesson covers the Python habits that make that possible: reproducible environments, configuration from the environment, HTTP clients that behave behind proxies, retries and idempotency, logs someone else can read, tests, and packaging that installs cleanly.",
+  "objectives": [
+    "Create reproducible Python projects with locked dependencies",
+    "Load configuration and secrets from the environment, never from code",
+    "Write HTTP clients with timeouts, retries with backoff, and proxy and CA support",
+    "Produce structured logs and clear errors that a customer team can act on",
+    "Test and package a tool so it installs and runs the same everywhere"
+  ],
+  "sections": [
+    {
+      "heading": "Reproducible environments",
+      "blocks": [
+        {"type": "p", "text": "\"It works on my machine\" is fatal at a customer site. Every project gets a `pyproject.toml`, a lock file and a pinned Python version. Tools such as **uv** create the virtual environment, resolve and lock dependencies, and run commands inside the environment in one step; pip with a requirements file and hashes works too. What matters is that a colleague or the customer can rebuild exactly what you ran."},
+        {"type": "code", "lang": "bash", "caption": "A new tool project with locked dependencies", "code": "uv init claims-sync && cd claims-sync\nuv add httpx\nuv add --dev pytest ruff\nuv run python -c \"import httpx; print(httpx.__version__)\"\nuv lock   # commit pyproject.toml and uv.lock together"},
+        {"type": "list", "items": [
+          "Pin the Python version you test on; customers' servers often have older system Pythons, which is one reason to ship a container or a self-contained environment.",
+          "Keep dependencies few. Every package is something the customer's security team may ask about.",
+          "Run a formatter and linter (ruff) and type hints from the first commit; code you hand over should look intentional."
+        ]}
+      ]
+    },
+    {
+      "heading": "Configuration from the environment",
+      "blocks": [
+        {"type": "p", "text": "The same code must run on your laptop, the customer's staging server and production, against different URLs and credentials. Follow the twelve-factor rule: configuration comes from environment variables (or files mounted by the platform), with validation at start-up so a missing value fails immediately and clearly, not on the first nightly run."},
+        {"type": "code", "lang": "python", "caption": "Typed configuration with early, readable failure", "code": "import os\nfrom dataclasses import dataclass\n\n\n@dataclass(frozen=True)\nclass Config:\n    api_url: str\n    api_token: str\n    batch_size: int = 500\n    timeout_s: float = 30.0\n\n\ndef load_config() -> Config:\n    missing = [k for k in (\"CLAIMS_API_URL\", \"CLAIMS_API_TOKEN\") if not os.environ.get(k)]\n    if missing:\n        raise SystemExit(f\"missing required environment variables: {', '.join(missing)}\")\n    return Config(\n        api_url=os.environ[\"CLAIMS_API_URL\"].rstrip(\"/\"),\n        api_token=os.environ[\"CLAIMS_API_TOKEN\"],\n        batch_size=int(os.environ.get(\"CLAIMS_BATCH_SIZE\", \"500\")),\n        timeout_s=float(os.environ.get(\"CLAIMS_TIMEOUT_S\", \"30\")),\n    )"},
+        {"type": "callout", "kind": "warning", "text": "Never commit tokens, never print them, and never put them in command-line arguments (they show up in process lists and shell history). Read them from the environment or a secrets file the platform mounts."}
+      ]
+    },
+    {
+      "heading": "HTTP clients that survive enterprise networks",
+      "blocks": [
+        {"type": "p", "text": "Calls to customer APIs fail in ordinary ways: timeouts, 429 rate limits, 502s from a load balancer during a deploy. Your client must set timeouts, retry the failures that are safe to retry with exponential backoff and jitter, and give up with a clear error. It must also honour the customer's proxy and private certificate authority: httpx reads `HTTPS_PROXY`, `NO_PROXY` and `SSL_CERT_FILE` from the environment by default."},
+        {"type": "code", "lang": "python", "caption": "Timeouts, bounded retries with backoff, and only safe retries", "code": "import random\nimport time\n\nimport httpx\n\nRETRYABLE = {429, 500, 502, 503, 504}\n\n\ndef get_json(client: httpx.Client, path: str, attempts: int = 5) -> dict:\n    for attempt in range(1, attempts + 1):\n        try:\n            r = client.get(path)\n            if r.status_code not in RETRYABLE:\n                r.raise_for_status()\n                return r.json()\n            reason = f\"HTTP {r.status_code}\"\n        except (httpx.TimeoutException, httpx.TransportError) as exc:\n            reason = type(exc).__name__\n        if attempt == attempts:\n            raise RuntimeError(f\"GET {path} failed after {attempts} attempts: {reason}\")\n        time.sleep(min(30, 2 ** attempt) * random.uniform(0.5, 1.0))\n\n\nclient = httpx.Client(base_url=\"https://claims.internal.example\",\n                      headers={\"Authorization\": \"Bearer TOKEN_FROM_ENV\"},\n                      timeout=httpx.Timeout(30.0, connect=5.0))"},
+        {"type": "p", "text": "Retrying a GET is safe. Retrying a POST that creates a record can create it twice. Make writes **idempotent**: send an idempotency key the server deduplicates on, or upsert by a natural key, so a retry after a timeout does no harm. The integration lesson goes deeper."}
+      ]
+    },
+    {
+      "heading": "Logs and errors for someone else",
+      "blocks": [
+        {"type": "p", "text": "The person reading your logs at 3 a.m. may be the customer's operator who has never seen your code. Log one event per line, with a timestamp, a level, what happened, and identifiers (batch, record count, request ID), and avoid logging personal data or secrets. JSON lines are easy for any log system to parse."},
+        {"type": "code", "lang": "python", "caption": "One JSON object per log line", "code": "import json\nimport logging\nimport sys\n\n\nclass JsonFormatter(logging.Formatter):\n    def format(self, record: logging.LogRecord) -> str:\n        payload = {\"ts\": self.formatTime(record), \"level\": record.levelname,\n                   \"msg\": record.getMessage(), **getattr(record, \"ctx\", {})}\n        return json.dumps(payload)\n\n\nhandler = logging.StreamHandler(sys.stdout)\nhandler.setFormatter(JsonFormatter())\nlog = logging.getLogger(\"claims_sync\")\nlog.addHandler(handler)\nlog.setLevel(logging.INFO)\nlog.info(\"batch synced\", extra={\"ctx\": {\"batch\": 12, \"records\": 500, \"seconds\": 4.2}})"},
+        {"type": "list", "items": [
+          "Exit with a non-zero status on failure so schedulers and monitoring notice.",
+          "Write error messages that say what to do: \"CLAIMS_API_TOKEN expired or invalid (HTTP 401): rotate it in the vault\", not a stack trace alone.",
+          "Add a `--dry-run` flag to anything that writes: customers love being able to see what would change first."
+        ]}
+      ]
+    },
+    {
+      "heading": "Tests and packaging for handover",
+      "blocks": [
+        {"type": "p", "text": "You do not need exhaustive tests for a pilot, but you need enough that the next person can change the code without fear: unit tests for parsing and transformation logic, and a test that runs the client against a fake server. **httpx's MockTransport** lets you test retry logic without a network."},
+        {"type": "code", "lang": "python", "caption": "Testing retries with a fake transport", "code": "import httpx\n\nfrom claims_sync.client import get_json\n\n\ndef test_retries_then_succeeds(monkeypatch):\n    monkeypatch.setattr(\"time.sleep\", lambda s: None)\n    calls = {\"n\": 0}\n\n    def handler(request):\n        calls[\"n\"] += 1\n        if calls[\"n\"] < 3:\n            return httpx.Response(503)\n        return httpx.Response(200, json={\"ok\": True})\n\n    client = httpx.Client(base_url=\"https://x\", transport=httpx.MockTransport(handler))\n    assert get_json(client, \"/health\") == {\"ok\": True}\n    assert calls[\"n\"] == 3"},
+        {"type": "p", "text": "Package the tool so it installs one way everywhere: a wheel with a console-script entry point for Python environments, or, more often at customer sites, a container image with the Python version and dependencies baked in. Include a README with prerequisites, configuration variables, how to run, how to test, and how to roll back."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Build a handover-ready sync tool",
+    "steps": [
+      "Create a project with uv (or pip and a lock file) named `claims-sync` with httpx, pytest and ruff.",
+      "Implement `load_config()` from this lesson and make the tool exit with a clear message when a variable is missing.",
+      "Point the client at a public test API (or a local FastAPI stub you write) and fetch paginated JSON into a local SQLite table, upserting by ID.",
+      "Add the retry function and prove it works with the MockTransport test, including the give-up case.",
+      "Emit JSON logs with batch and record counts, and add a `--dry-run` flag that prints what would be written.",
+      "Write a README covering configuration, running, testing and rollback, then build a container image and run the tool from it."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Lock dependencies and pin Python: someone else must rebuild exactly what you ran.",
+      "Configuration and secrets from the environment, validated at start-up.",
+      "Timeouts always; retry only safe failures, with backoff and jitter.",
+      "Make writes idempotent so retries cannot duplicate data.",
+      "JSON logs with identifiers, no secrets or personal data, non-zero exit on failure.",
+      "Ship with tests, a README and a container image."
+    ],
+    "groups": [
+      {"title": "Project setup (uv)", "items": [
+        {"syntax": "uv init NAME", "desc": "New project with pyproject.toml"},
+        {"syntax": "uv add PKG / uv add --dev PKG", "desc": "Add runtime / development dependency"},
+        {"syntax": "uv run CMD", "desc": "Run inside the project environment"},
+        {"syntax": "uv lock / uv sync", "desc": "Write the lock file / install from it"},
+        {"syntax": "uv build", "desc": "Build a wheel and sdist"}
+      ]},
+      {"title": "httpx", "items": [
+        {"syntax": "httpx.Client(base_url=, headers=, timeout=)", "desc": "Reusable client with defaults"},
+        {"syntax": "httpx.Timeout(30.0, connect=5.0)", "desc": "Overall and connect timeouts"},
+        {"syntax": "HTTPS_PROXY / NO_PROXY / SSL_CERT_FILE", "desc": "Proxy and CA from the environment"},
+        {"syntax": "httpx.MockTransport(handler)", "desc": "Fake server for tests"}
+      ]},
+      {"title": "Reliability patterns", "items": [
+        {"syntax": "retry on 429, 5xx, timeouts", "desc": "Not on 400, 401, 403, 404"},
+        {"syntax": "sleep = min(cap, 2**attempt) x jitter", "desc": "Exponential backoff with jitter"},
+        {"syntax": "Idempotency-Key header / upsert by key", "desc": "Safe retries for writes"},
+        {"syntax": "--dry-run", "desc": "Show changes without writing"}
+      ]},
+      {"title": "Quality", "items": [
+        {"syntax": "ruff check . && ruff format .", "desc": "Lint and format"},
+        {"syntax": "pytest -q", "desc": "Run tests"},
+        {"syntax": "sys.exit(1) on failure", "desc": "Let schedulers detect errors"}
+      ]}
+    ],
+    "pitfalls": [
+      "Relying on the customer's system Python and whatever packages it has.",
+      "Hard-coded URLs and tokens, or tokens passed as command-line arguments.",
+      "No timeouts, so one hung connection stalls a nightly job forever.",
+      "Retrying non-idempotent POSTs and creating duplicates.",
+      "Logs full of stack traces and personal data but no record counts or IDs."
+    ]
+  },
+  "quiz": [
+    {"q": "A nightly job sometimes creates duplicate records after network timeouts. What is the best fix?", "options": ["Make the write idempotent with an idempotency key or upsert by natural key", "Remove every retry from the client so nothing is ever repeated", "Increase the request timeout to ten minutes for every call", "Run the job twice and delete duplicates afterwards"], "answer": 0, "explain": "A timeout can happen after the server already wrote the record, so a retry repeats it. Idempotent writes make retries harmless."},
+    {"q": "Which responses should a client retry automatically?", "options": ["429 and 5xx responses and timeouts, with backoff", "401 and 403, since tokens may start working", "404, in case the resource appears later", "Every non-200 response immediately and forever"], "answer": 0, "explain": "Rate limits, transient server errors and timeouts are worth retrying with backoff. Authentication and not-found errors will not fix themselves."},
+    {"q": "Your tool works on your laptop but fails TLS verification on the customer's server, which uses a corporate CA. What do you configure?", "options": ["Point SSL_CERT_FILE at a bundle that includes the customer's CA", "Disable certificate verification in production", "Switch every URL from HTTPS to HTTP", "Downgrade the Python version"], "answer": 0, "explain": "httpx honours SSL_CERT_FILE; adding the customer's CA to the trusted bundle keeps verification on. Disabling verification removes protection against interception."},
+    {"q": "Why validate required environment variables at start-up?", "options": ["So a missing value fails immediately with a clear message", "Because environment variables expire about an hour after login", "To make the program start noticeably faster on every run", "Because Python cannot read environment variables after start-up"], "answer": 0, "explain": "Failing fast with a readable error is far better than discovering a missing token at 2 a.m. halfway through a run."},
+    {"q": "Where should an API token for a customer integration come from?", "options": ["An environment variable or a secrets file mounted by the platform", "A constant defined near the top of the main source file", "A command-line argument passed in by the scheduler", "A comment in the README so the next engineer can find it"], "answer": 0, "explain": "Code, arguments and documents are copied, logged and shared. Environment variables or mounted secrets keep tokens out of repositories and process lists."}
+  ]
+}
