@@ -1,0 +1,113 @@
+{
+  "id": "inf-profiling",
+  "minutes": 35,
+  "intro": "Metrics tell you a service is slow; profiling tells you why. This lesson gives you the one model that explains most GPU performance questions, the roofline, and uses it to show exactly why decode is memory-bound and prefill is compute-bound, and when batching flips decode from one to the other. Then it covers the measuring tools in order of depth: nvidia-smi for a glance, DCGM metrics for fleets, Nsight Systems for timelines, and Nsight Compute for individual kernels.",
+  "objectives": [
+    "Compute arithmetic intensity and the ridge point of a GPU",
+    "Use the roofline to classify a workload as compute-bound or memory-bound",
+    "Predict how batch size changes decode from memory-bound toward compute-bound",
+    "Choose between nvidia-smi, DCGM, Nsight Systems and Nsight Compute for a question",
+    "Read GPU timeline gaps that point to CPU, synchronisation or communication stalls"
+  ],
+  "sections": [
+    {
+      "heading": "Arithmetic intensity and the roofline",
+      "blocks": [
+        {"type": "p", "text": "Every piece of GPU work does some floating-point operations (FLOPs) and moves some bytes to and from memory. Its **arithmetic intensity** is FLOPs per byte moved. A GPU has a peak compute rate (FLOP/s) and a peak memory bandwidth (bytes/s); their ratio is the **ridge point**. Work with intensity below the ridge cannot use all the compute because memory cannot feed it fast enough: it is **memory-bound**. Work above the ridge is **compute-bound**."},
+        {"type": "code", "lang": "text", "caption": "The roofline in numbers (an example GPU, not a specific product)", "code": "peak compute   = 1,000 TFLOP/s  (dense FP16 Tensor Core)\npeak bandwidth = 3.3 TB/s\nridge point    = 1,000e12 / 3.3e12 ~ 300 FLOPs per byte\n\nattainable FLOP/s = min(peak compute, intensity x peak bandwidth)"},
+        {"type": "p", "text": "Plot attainable performance against intensity on log axes and you get a slanted line (bandwidth-limited) meeting a flat roof (compute-limited) at the ridge. Every optimisation either raises a kernel's intensity, moving it right toward the roof, or makes it run closer to the line it is already under."}
+      ]
+    },
+    {
+      "heading": "Placing prefill and decode on the roofline",
+      "blocks": [
+        {"type": "p", "text": "A forward pass costs about 2 FLOPs per parameter per token. In FP16 each parameter is 2 bytes. During **decode at batch size B**, the weights are read once and used for B tokens, so intensity is roughly 2B FLOPs over 2 bytes, about **B FLOPs per byte**. At batch 1 that is about 1, far below a ridge of around 300: the GPU uses well under 1% of its compute. At batch 64 it is about 64: much better, still memory-bound. Reading the KV cache adds bytes without many FLOPs, so long contexts push decode further toward the memory side."},
+        {"type": "p", "text": "**Prefill** of a 2,000-token prompt uses each weight for 2,000 tokens, an intensity in the thousands, well past the ridge: compute-bound. That is the roofline explanation of everything in the lifecycle lesson, and it predicts what helps: for decode, bigger batches, fewer bytes per weight (quantization) and faster memory; for prefill, more Tensor Core throughput and less redundant work (prefix caching)."},
+        {"type": "callout", "kind": "note", "text": "Quantizing weights to FP8 halves the bytes per parameter, which both halves memory traffic and doubles intensity. That is why it speeds up memory-bound decode almost proportionally, even before faster FP8 Tensor Core maths is counted."}
+      ]
+    },
+    {
+      "heading": "Measuring: from a glance to a kernel",
+      "blocks": [
+        {"type": "table", "headers": ["Tool", "Answers", "Cost"], "rows": [
+          ["nvidia-smi", "Is the GPU busy at all? Memory used? Throttling?", "Free, instant"],
+          ["DCGM + dcgm-exporter", "Per-GPU utilisation, Tensor Core and memory activity over time, across a fleet", "Always on, Prometheus"],
+          ["Nsight Systems (nsys)", "Timeline: where time goes across CPU threads, CUDA kernels, memory copies, NCCL", "Minutes, per run"],
+          ["Nsight Compute (ncu)", "Why one kernel is slow: achieved bandwidth and FLOPs versus peak", "Slow, per kernel"]
+        ]},
+        {"type": "p", "text": "DCGM's profiling metrics are the useful upgrade over nvidia-smi's coarse utilisation: `DCGM_FI_PROF_PIPE_TENSOR_ACTIVE` shows how busy the Tensor Cores really are, and `DCGM_FI_PROF_DRAM_ACTIVE` shows how busy the memory interface is. A decode-heavy server typically shows DRAM activity high and Tensor activity low, the memory-bound signature in production. Some fields, such as SM activity, are commented out in the exporter's default counter list and must be enabled."},
+        {"type": "code", "lang": "bash", "caption": "Profile a short benchmark with Nsight Systems, then one kernel with Nsight Compute", "code": "# timeline of CPU threads, CUDA kernels, memory copies and NCCL calls\nnsys profile -o decode_run --trace=cuda,nvtx,osrt python bench.py\nnsys stats decode_run.nsys-rep\n\n# detailed counters for the first 5 matmul-like kernels\nncu --kernel-name regex:gemm --launch-count 5 --set full -o gemm python bench.py"}
+      ]
+    },
+    {
+      "heading": "Reading a timeline",
+      "blocks": [
+        {"type": "list", "items": [
+          "**Gaps between kernels** on the GPU row with CPU activity at the same moment: the CPU is too slow to launch work (scheduling, tokenization, Python overhead). Engines use CUDA graphs to cut launch overhead for exactly this reason.",
+          "**Long memory copies** between host and device in the steady state: something is being moved over PCIe each step that should stay on the GPU.",
+          "**NCCL kernels taking a large share** of each step in a multi-GPU run: communication is the bottleneck, covered in the parallelism stage.",
+          "**One kernel dominating**: profile it with Nsight Compute and compare achieved memory bandwidth with the GPU's peak. Near peak means it is already as fast as the hardware allows at that intensity."
+        ]},
+        {"type": "callout", "kind": "tip", "text": "Profile short, representative runs. A few seconds of steady-state decode at your real batch size tells you more than an hour of traces, and Nsight output for long runs gets unwieldy fast."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Find the roofline in your own benchmark",
+    "steps": [
+      "Look up your GPU's dense FP16 Tensor Core TFLOPS and memory bandwidth and compute its ridge point.",
+      "Compute the decode arithmetic intensity at batch 1, 8, 32 and 128 using the B FLOPs per byte rule, and mark which side of the ridge each falls on.",
+      "Run a decode benchmark at those batch sizes (vLLM's offline LLM class or `vllm bench serve` at matching concurrency) and record tokens per second.",
+      "Plot tokens per second against batch size; note where gains start to flatten.",
+      "Run `nsys profile` on a few seconds of steady-state decode and look for gaps between kernels and the share of time in matmul kernels.",
+      "If dcgm-exporter is available, watch DRAM_ACTIVE and PIPE_TENSOR_ACTIVE during the run and relate them to your roofline prediction."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Intensity = FLOPs / bytes; ridge = peak FLOP/s / peak bytes/s.",
+      "Below the ridge: memory-bound. Above: compute-bound.",
+      "Decode intensity is about the batch size; prefill intensity is about the prompt length.",
+      "Quantization halves bytes and doubles intensity: big win for decode.",
+      "nvidia-smi for a glance, DCGM for fleets, nsys for timelines, ncu for kernels.",
+      "Timeline gaps usually mean the CPU or synchronisation, not the GPU."
+    ],
+    "groups": [
+      {"title": "Formulas", "items": [
+        {"syntax": "intensity = FLOPs / bytes_moved", "desc": "Arithmetic intensity"},
+        {"syntax": "ridge = peak_FLOPs / peak_bandwidth", "desc": "Where memory-bound becomes compute-bound"},
+        {"syntax": "attainable = min(peak_FLOPs, intensity x bandwidth)", "desc": "The roofline"},
+        {"syntax": "decode intensity ~ B (FP16)", "desc": "About batch size FLOPs per byte"},
+        {"syntax": "prefill intensity ~ prompt tokens", "desc": "Large, so compute-bound"}
+      ]},
+      {"title": "Nsight", "items": [
+        {"syntax": "nsys profile -o NAME --trace=cuda,nvtx,osrt CMD", "desc": "Capture a timeline"},
+        {"syntax": "nsys stats NAME.nsys-rep", "desc": "Summaries of kernels, copies, API calls"},
+        {"syntax": "ncu --set full --launch-count N -o NAME CMD", "desc": "Detailed per-kernel counters"},
+        {"syntax": "ncu --kernel-name regex:PATTERN", "desc": "Profile only matching kernels"},
+        {"syntax": "nvidia-smi dmon -s pucm", "desc": "Quick rolling power, utilisation, clocks, memory"}
+      ]},
+      {"title": "DCGM metrics", "items": [
+        {"syntax": "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE", "desc": "Share of cycles Tensor Cores are busy"},
+        {"syntax": "DCGM_FI_PROF_DRAM_ACTIVE", "desc": "Share of cycles memory interface is busy"},
+        {"syntax": "DCGM_FI_DEV_FB_USED", "desc": "VRAM used (MiB)"},
+        {"syntax": "DCGM_FI_DEV_GPU_UTIL", "desc": "Coarse utilisation, like nvidia-smi"},
+        {"syntax": "DCGM_FI_DEV_NVLINK_BANDWIDTH_TOTAL", "desc": "NVLink throughput"}
+      ]}
+    ],
+    "pitfalls": [
+      "Judging efficiency from nvidia-smi utilisation alone.",
+      "Expecting more TFLOPS to speed up batch-1 decode.",
+      "Profiling cold-start or warm-up instead of steady state.",
+      "Hour-long Nsight captures nobody can open, instead of short representative runs.",
+      "Ignoring KV-cache reads, which make long-context decode even more memory-bound."
+    ]
+  },
+  "quiz": [
+    {"q": "A GPU offers 800 TFLOP/s and 2 TB/s of bandwidth. What is its ridge point?", "options": ["400 FLOPs per byte", "1,600 FLOPs per byte", "40 FLOPs per byte", "2.5 FLOPs per byte"], "answer": 0, "explain": "Ridge point = peak compute / peak bandwidth = 800e12 / 2e12 = 400 FLOPs per byte."},
+    {"q": "On that GPU, FP16 decode runs at batch size 16. Which regime is it in?", "options": ["Memory-bound: intensity of about 16 is far below the ridge", "Compute-bound: Tensor Cores limit it", "Balanced exactly at the ridge", "Network-bound, because decode crosses nodes"], "answer": 0, "explain": "FP16 decode intensity is roughly the batch size, about 16 FLOPs per byte, far below a ridge of 400, so memory bandwidth limits it."},
+    {"q": "Why does FP8 weight quantization speed up decode almost proportionally?", "options": ["It halves the bytes read per token in a memory-bound workload", "It doubles the number of Tensor Cores on the GPU", "It removes the need for a KV cache", "It moves decode onto the CPU"], "answer": 0, "explain": "Decode is limited by bytes moved. Halving bytes per weight halves the traffic, so steps finish roughly twice as fast if memory was the limit."},
+    {"q": "An Nsight Systems timeline shows frequent idle gaps on the GPU row while one CPU thread is fully busy. What does that suggest?", "options": ["The CPU cannot launch work fast enough and the GPU starves", "The GPU is compute-bound on matmul kernels", "NCCL communication dominates each step", "The KV cache is full"], "answer": 0, "explain": "Idle GPU time aligned with a busy CPU thread means kernels are not being issued quickly enough, a CPU or launch-overhead bottleneck."},
+    {"q": "Which tool would you use to find out why one specific matmul kernel achieves low memory bandwidth?", "options": ["Nsight Compute", "nvidia-smi", "dcgm-exporter", "nvidia-smi topo -m"], "answer": 0, "explain": "Nsight Compute collects detailed counters for individual kernels, including achieved bandwidth and compute versus peak; the others give whole-GPU or topology views."}
+  ]
+}

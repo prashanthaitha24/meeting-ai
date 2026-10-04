@@ -1,0 +1,325 @@
+{
+  "id": "inf-metrics",
+  "minutes": 30,
+  "intro": "\"Is it fast?\" has at least five different answers for an LLM service, and optimising the wrong one is the most common mistake in inference work. This lesson defines the metrics precisely (time to first token, time per output token, inter-token latency, end-to-end latency, throughput and goodput), shows how to compute them from timestamps, explains why percentiles matter more than averages, and maps each kind of bottleneck to the metric it damages.",
+  "objectives": [
+    "Define TTFT, TPOT, ITL, end-to-end latency, throughput and goodput precisely",
+    "Compute those metrics from request and token timestamps",
+    "Explain the throughput versus latency trade-off as concurrency rises",
+    "Use percentiles and say where measurements should be taken",
+    "Map queueing, prefill, decode, memory and CPU bottlenecks to the metrics they hurt"
+  ],
+  "sections": [
+    {
+      "heading": "The latency metrics",
+      "blocks": [
+        {
+          "type": "table",
+          "headers": [
+            "Metric",
+            "Definition",
+            "Driven mostly by"
+          ],
+          "rows": [
+            [
+              "TTFT (time to first token)",
+              "Request sent to first output token received",
+              "Queue wait + prefill"
+            ],
+            [
+              "TPOT (time per output token)",
+              "(end-to-end - TTFT) / (output tokens - 1), per request",
+              "Decode step time, batch size"
+            ],
+            [
+              "ITL (inter-token latency)",
+              "Each gap between consecutive streamed tokens",
+              "Decode steps, interference from prefill"
+            ],
+            [
+              "E2E latency",
+              "Request sent to last token received",
+              "All of the above x output length"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "TPOT and ITL are close relatives. TPOT is one average number per request; ITL is the whole distribution of gaps, which exposes **stalls**: a stream that usually ticks every 20 ms but freezes for 400 ms while the engine prefills someone else's long prompt has a fine average TPOT and a terrible ITL tail. Users read that freeze as the service hanging."
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "caption": "Metrics from client-side timestamps for one streamed request",
+          "code": "def request_metrics(t_sent, token_times):\n    \"\"\"t_sent: request start; token_times: arrival time of each streamed token.\"\"\"\n    ttft = token_times[0] - t_sent\n    e2e = token_times[-1] - t_sent\n    n = len(token_times)\n    tpot = (e2e - ttft) / (n - 1) if n > 1 else 0.0\n    itl = [b - a for a, b in zip(token_times, token_times[1:])]\n    return {\"ttft\": ttft, \"tpot\": tpot, \"e2e\": e2e, \"itl\": itl}"
+        }
+      ]
+    },
+    {
+      "heading": "Throughput, goodput and the trade-off",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "**Throughput** is work per unit time: output tokens per second (the usual headline), total tokens per second, or requests per second. Per GPU is the number that maps to cost. **Goodput** is throughput that meets your latency targets, for example requests per second completed with TTFT under 500 ms and TPOT under 50 ms. A configuration that doubles throughput by blowing through the latency target has improved nothing users care about."
+        },
+        {
+          "type": "p",
+          "text": "As you raise concurrency, batches get bigger: throughput climbs because each weight read serves more requests, but every request's decode step gets slower and queues start forming, so TTFT and TPOT rise. Plotted as throughput against latency, every engine and configuration traces a curve, and the right operating point is the highest throughput that still meets the latency SLO."
+        },
+        {
+          "type": "callout",
+          "kind": "tip",
+          "text": "Never report a throughput number without the concurrency or request rate, the input and output lengths, and the latency percentiles it was measured at. Without those, the number is not comparable to anything."
+        }
+      ]
+    },
+    {
+      "heading": "Percentiles and where to measure",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Report p50, p90 and p99, not the mean. LLM latency distributions have long tails from queueing, long prompts and preemption.",
+            "**Client-side** measurement includes network and the gateway; it is what users feel and what SLOs should use.",
+            "**Server-side** engine metrics (histograms for TTFT and inter-token latency) isolate the engine, which is what you tune.",
+            "A large gap between the two points at the network, a gateway, or the client's own processing.",
+            "Measure under the real mix of input and output lengths; a benchmark of 128-token prompts says little about a RAG app with 6,000-token prompts."
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "A worked example: reading one benchmark run",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Suppose a benchmark at concurrency 16 reports p50 TTFT of 180 ms, p99 TTFT of 2.1 s, p50 TPOT of 24 ms and p99 TPOT of 31 ms, with 2,900 output tokens per second. The decode numbers are tight, so steady-state generation is healthy: at 24 ms per token each user sees roughly 40 tokens per second, faster than anyone reads. The trouble is the TTFT tail. A p99 more than ten times the median means a minority of requests waited a long time before starting."
+        },
+        {
+          "type": "p",
+          "text": "There are two usual explanations, and the other metrics tell them apart. If waiting requests climbed during the run, capacity ran short at moments of burst and requests queued: add replicas, or admit fewer requests per replica and scale out earlier. If the slow requests were the ones with the longest prompts, prefill itself is the cost: prefix caching, chunked prefill, a faster GPU for prefill, or eventually disaggregated prefill are the levers. Look at TTFT broken down by input length before choosing."
+        },
+        {
+          "type": "p",
+          "text": "Now rerun at concurrency 32. If throughput rises to 3,600 tokens per second but p99 TPOT jumps to 58 ms, you have crossed a 50 ms streaming target: the extra throughput is not goodput. The operating point for this configuration sits somewhere between 16 and 32 concurrent requests per replica, and that number, not the peak throughput, is what you feed into capacity planning and autoscaling thresholds."
+        }
+      ]
+    },
+    {
+      "heading": "Bottlenecks and their fingerprints",
+      "blocks": [
+        {
+          "type": "table",
+          "headers": [
+            "Bottleneck",
+            "Metric it hurts",
+            "Fingerprint"
+          ],
+          "rows": [
+            [
+              "Queueing (not enough capacity)",
+              "TTFT",
+              "Waiting requests grow; TTFT rises while TPOT is steady"
+            ],
+            [
+              "Prefill compute",
+              "TTFT, ITL tail",
+              "TTFT tracks prompt length; stalls in other streams during long prefills"
+            ],
+            [
+              "Decode bandwidth / large batch",
+              "TPOT",
+              "TPOT rises with concurrency; GPU memory traffic saturated"
+            ],
+            [
+              "KV-cache memory",
+              "TTFT, tail latency",
+              "Cache usage near full; preemptions"
+            ],
+            [
+              "CPU (tokenizer, scheduler, HTTP)",
+              "Everything",
+              "CPU pegged, GPU underused"
+            ],
+            [
+              "Network or gateway",
+              "Client-side only",
+              "Server metrics fine, client metrics poor"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "With these fingerprints you can read most incidents from a dashboard of four panels: TTFT and TPOT percentiles, running versus waiting requests, KV-cache usage, and throughput. The observability lesson builds exactly that."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Measure the curve yourself",
+    "steps": [
+      "Serve a small model with any OpenAI-compatible engine.",
+      "Write a client (or adapt the function above) that sends streamed requests and records TTFT, TPOT, ITL and E2E per request.",
+      "Run 50 requests at concurrency 1, 4, 16 and 32 with fixed input (about 500 tokens) and output (about 200 tokens) lengths.",
+      "For each level, compute output tokens per second and p50/p99 of TTFT and TPOT.",
+      "Plot throughput against p99 TPOT and mark the highest point under a 50 ms TPOT target: that is your goodput operating point.",
+      "Repeat one level with 4,000-token prompts and compare ITL tails."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "TTFT = queue + prefill; TPOT and ITL = decode behaviour.",
+      "ITL distribution reveals stalls that average TPOT hides.",
+      "Goodput (throughput within SLO) beats raw throughput.",
+      "More concurrency: more throughput, worse latency; pick the point on the curve.",
+      "Report percentiles with lengths and concurrency, or the number means nothing.",
+      "SLOs from the client side; tuning from engine metrics."
+    ],
+    "groups": [
+      {
+        "title": "Definitions",
+        "items": [
+          {
+            "syntax": "TTFT = t_first_token - t_sent",
+            "desc": "Responsiveness"
+          },
+          {
+            "syntax": "TPOT = (E2E - TTFT) / (n_out - 1)",
+            "desc": "Average decode speed per request"
+          },
+          {
+            "syntax": "ITL_i = t_token[i+1] - t_token[i]",
+            "desc": "Each streaming gap"
+          },
+          {
+            "syntax": "E2E = t_last_token - t_sent",
+            "desc": "Whole request"
+          },
+          {
+            "syntax": "tokens/s per user ~ 1 / TPOT",
+            "desc": "Streaming speed a user sees"
+          }
+        ]
+      },
+      {
+        "title": "Throughput",
+        "items": [
+          {
+            "syntax": "output tok/s = sum(n_out) / wall_time",
+            "desc": "Headline throughput"
+          },
+          {
+            "syntax": "tok/s per GPU",
+            "desc": "The number that maps to cost"
+          },
+          {
+            "syntax": "goodput = requests/s meeting all SLOs",
+            "desc": "Throughput users benefit from"
+          }
+        ]
+      },
+      {
+        "title": "Reporting checklist",
+        "items": [
+          {
+            "syntax": "input / output length distribution",
+            "desc": "Always state it"
+          },
+          {
+            "syntax": "concurrency or request rate",
+            "desc": "Load level of the run"
+          },
+          {
+            "syntax": "p50 / p90 / p99",
+            "desc": "Percentiles, not means"
+          },
+          {
+            "syntax": "client-side vs server-side",
+            "desc": "Where it was measured"
+          }
+        ]
+      },
+      {
+        "title": "Fingerprints",
+        "items": [
+          {
+            "syntax": "TTFT up, TPOT flat",
+            "desc": "Queueing: add capacity"
+          },
+          {
+            "syntax": "TPOT up with concurrency",
+            "desc": "Decode saturation: smaller batch or more GPUs"
+          },
+          {
+            "syntax": "ITL spikes",
+            "desc": "Prefill interference: chunked prefill or disaggregation"
+          }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Optimising average latency while p99 users wait seconds.",
+      "Quoting tokens per second without lengths, concurrency or percentiles.",
+      "Benchmarking with short synthetic prompts when production prompts are long.",
+      "Raising throughput past the point where latency targets break.",
+      "Setting SLOs on server metrics that ignore the gateway and network."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "Under peak load TTFT triples while TPOT barely changes. What is the most likely bottleneck?",
+      "options": [
+        "Requests are queueing for capacity before prefill",
+        "Decode is saturating memory bandwidth",
+        "The tokenizer is producing too many tokens",
+        "Streaming is slowed by the network"
+      ],
+      "answer": 0,
+      "explain": "TTFT includes queue wait; TPOT reflects decode once running. TTFT rising alone means requests wait to be admitted, so more capacity is needed."
+    },
+    {
+      "q": "A stream averages 22 ms per token but users report freezes of almost half a second. Which metric exposes this?",
+      "options": [
+        "The distribution of inter-token latency",
+        "Average TPOT per request",
+        "Total throughput in tokens per second",
+        "Requests per second"
+      ],
+      "answer": 0,
+      "explain": "TPOT averages the gaps, hiding rare long ones. The ITL distribution, especially its tail, shows the stalls."
+    },
+    {
+      "q": "Config A gives 30% more tokens per second than config B, but A's p99 TPOT breaks your 50 ms target while B meets it. Which is better for users?",
+      "options": [
+        "B, because goodput counts only work that meets the SLO",
+        "A, because throughput is the headline metric",
+        "Neither, because TTFT was not measured",
+        "A, because p99 only affects a few users"
+      ],
+      "answer": 0,
+      "explain": "Throughput that violates latency targets is not useful work. Goodput, throughput within SLO, favours B."
+    },
+    {
+      "q": "A request took 6.2 s end to end with TTFT 0.2 s and produced 301 tokens. What was its TPOT?",
+      "options": [
+        "20 ms",
+        "21 ms",
+        "60 ms",
+        "2 ms"
+      ],
+      "answer": 0,
+      "explain": "(6.2 - 0.2) / (301 - 1) = 6.0 / 300 = 0.02 s, or 20 ms per output token."
+    },
+    {
+      "q": "Engine metrics show p99 TTFT of 300 ms, but clients measure 1.4 s. Where do you look first?",
+      "options": [
+        "The network path and gateway between clients and the engine",
+        "The engine's prefill kernels",
+        "The KV-cache size setting",
+        "The model's tokenizer"
+      ],
+      "answer": 0,
+      "explain": "Server-side metrics isolate the engine. A large gap to client-side measurements points at what lies between them: gateways, proxies, network or client processing."
+    }
+  ]
+}

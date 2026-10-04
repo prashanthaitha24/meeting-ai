@@ -1,0 +1,122 @@
+{
+  "id": "inf-batching-benchmarking",
+  "minutes": 35,
+  "intro": "Batching is where inference throughput comes from, and the scheduler that forms the batches decides who waits and who streams. This lesson explains static, dynamic and continuous batching, how an engine's request queue, admission control and preemption work, and which knobs trade latency for throughput. The second half is a benchmarking method you can trust: realistic workloads, open versus closed load, warm-up, one variable at a time, and a write-up that records the bottleneck, the trade-off and the result.",
+  "objectives": [
+    "Contrast static, dynamic and continuous batching",
+    "Explain request queues, admission control, scheduling order and preemption",
+    "Tune batch-size knobs against latency targets",
+    "Design a benchmark with realistic lengths, open or closed load, and warm-up",
+    "Run a one-variable-at-a-time sweep and write up the result"
+  ],
+  "sections": [
+    {
+      "heading": "Three kinds of batching",
+      "blocks": [
+        {"type": "p", "text": "**Static batching** collects N requests, runs them together until the longest finishes, then starts the next batch. Short requests wait for long ones and the GPU idles as the batch drains. **Dynamic batching**, common in general model servers, waits a few milliseconds to group whatever arrived; good for fixed-size inputs such as image classification, still wasteful for generation of different lengths."},
+        {"type": "p", "text": "**Continuous batching** (also called in-flight or iteration-level batching) re-forms the batch at every decode step: finished sequences leave, waiting ones join, and the GPU always works on as many sequences as memory allows. Combined with chunked prefill, new requests' prompts are processed in slices alongside ongoing decodes. Every serious LLM engine does this; it is the single biggest throughput win over naive serving."}
+      ]
+    },
+    {
+      "heading": "Inside the scheduler",
+      "blocks": [
+        {"type": "steps", "items": [
+          "A request arrives and enters the **waiting queue**.",
+          "Each step, the scheduler admits waiting requests if two budgets allow: free KV-cache blocks for the prompt, and room in the per-step token budget.",
+          "It builds the step's batch: decode tokens for running sequences first, then prefill chunks for newly admitted ones, up to the token budget.",
+          "If running sequences need more cache than is free, it **preempts** some, freeing their cache and returning them to the queue to be recomputed later.",
+          "Finished sequences free their blocks, which lets the next waiting requests in."
+        ]},
+        {"type": "table", "headers": ["Knob (vLLM name)", "Raising it", "Lowering it"], "rows": [
+          ["`--max-num-seqs`", "More concurrency and throughput, slower decode per user", "Faster per-user streaming, more queueing"],
+          ["`--max-num-batched-tokens`", "Bigger prefill chunks, higher throughput", "Smoother inter-token latency under long prompts"],
+          ["Cache memory (utilisation, FP8 cache, lower max length)", "More requests admitted, fewer preemptions", "Earlier queueing"]
+        ]},
+        {"type": "p", "text": "Scheduling order matters too. First-come-first-served is the default; priority scheduling lets interactive traffic jump ahead of batch jobs. Some workloads benefit from separating them entirely: an interactive deployment with tight latency settings and a batch deployment run for throughput."}
+      ]
+    },
+    {
+      "heading": "A benchmarking method you can trust",
+      "blocks": [
+        {"type": "list", "items": [
+          "**Realistic workload.** Take input and output length distributions from production logs or a representative dataset. Fixed 128-in, 128-out tests flatter every engine.",
+          "**Closed versus open load.** Closed-loop (fixed concurrency: each virtual user sends the next request when the last finishes) finds capacity. Open-loop (requests arrive at a set rate, often Poisson) shows how queues build when arrivals do not wait for you, which is how real traffic behaves.",
+          "**Warm-up.** Discard the first requests: compilation, CUDA graph capture and cold caches distort them.",
+          "**Steady state and repeats.** Run long enough for percentiles to settle and repeat each point; report variation.",
+          "**One variable at a time.** Change concurrency, or batch budget, or precision, never two at once, or you cannot attribute the change.",
+          "**Record everything.** Engine version, model, precision, GPU, flags, dataset, load, and the raw results file."
+        ]},
+        {"type": "code", "lang": "bash", "caption": "A sweep with vLLM's benchmark: same workload, concurrency as the only variable", "code": "for c in 1 4 16 32 64; do\n  vllm bench serve --base-url http://localhost:8000 --model \"$MODEL_ID\" \\\n    --dataset-name random --random-input-len 2000 --random-output-len 300 \\\n    --num-prompts 400 --max-concurrency \"$c\" \\\n    --percentile-metrics ttft,tpot,itl --metric-percentiles 50,99 \\\n    --save-result --result-filename \"c${c}.json\"\ndone"},
+        {"type": "p", "text": "Engine-neutral alternatives such as AIPerf (`aiperf profile --url ... --concurrency ...`) run the same kind of sweep against any OpenAI-compatible endpoint, which is useful when comparing engines."}
+      ]
+    },
+    {
+      "heading": "Writing it up",
+      "blocks": [
+        {"type": "p", "text": "A benchmark is only portfolio proof if someone else can read it and trust it. Keep a fixed template: the question, the setup, the variable you changed, a table and one chart, the **bottleneck** you identified with evidence (for example, cache usage at 100% and preemptions rising above concurrency 32), the **trade-off** (throughput gained versus latency lost), and the **result**: the recommended setting and the conditions under which it holds."},
+        {"type": "callout", "kind": "tip", "text": "End every write-up with what you would test next. It shows you understand the limits of one experiment, and it is usually the most interesting part to an interviewer."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "A sweep and a one-page write-up",
+    "steps": [
+      "Serve a small model with vLLM on one GPU.",
+      "Run the concurrency sweep above and collect the five results files.",
+      "Tabulate output tokens per second, p50 and p99 TTFT and TPOT per concurrency level.",
+      "Pick a target (for example p99 TPOT under 50 ms) and find the highest concurrency that meets it.",
+      "Change exactly one setting (for example `--max-num-batched-tokens` or `--kv-cache-dtype fp8`), rerun only the levels around your operating point, and compare.",
+      "Write one page: question, setup, variable, results table, bottleneck with evidence, trade-off, recommendation, next test."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Continuous batching re-forms the batch every step; it is the main throughput win.",
+      "Admission needs free cache blocks and token budget; preemption frees cache under pressure.",
+      "More sequences per step: more throughput, slower per-user decode.",
+      "Benchmark with real length distributions, warm-up, steady state and repeats.",
+      "Closed-loop finds capacity; open-loop shows queueing under real arrivals.",
+      "Change one variable at a time; write up bottleneck, trade-off, result."
+    ],
+    "groups": [
+      {"title": "vllm bench serve", "items": [
+        {"syntax": "--dataset-name random --random-input-len N --random-output-len M", "desc": "Synthetic lengths"},
+        {"syntax": "--max-concurrency C", "desc": "Closed-loop load level"},
+        {"syntax": "--request-rate R", "desc": "Open-loop arrivals per second"},
+        {"syntax": "--num-prompts N", "desc": "Requests per run"},
+        {"syntax": "--percentile-metrics ttft,tpot,itl --metric-percentiles 50,99", "desc": "What to report"},
+        {"syntax": "--save-result --result-filename F", "desc": "Keep raw results"}
+      ]},
+      {"title": "Scheduler knobs", "items": [
+        {"syntax": "--max-num-seqs", "desc": "Cap on sequences per step"},
+        {"syntax": "--max-num-batched-tokens", "desc": "Tokens per step, incl. prefill chunks"},
+        {"syntax": "--scheduling-policy priority", "desc": "Let high-priority requests go first"}
+      ]},
+      {"title": "AIPerf", "items": [
+        {"syntax": "aiperf profile --url URL --model M --endpoint-type chat --streaming", "desc": "Benchmark any OpenAI-compatible server"},
+        {"syntax": "--concurrency C --request-count N", "desc": "Load level and size"},
+        {"syntax": "aiperf plot", "desc": "Chart the results of a profile run"}
+      ]},
+      {"title": "Write-up template", "items": [
+        {"syntax": "Question / Setup / Variable", "desc": "What, on what, changing what"},
+        {"syntax": "Results table + one chart", "desc": "Throughput vs latency percentiles"},
+        {"syntax": "Bottleneck + evidence", "desc": "Which resource limited it, and how you know"},
+        {"syntax": "Trade-off / Result / Next test", "desc": "What you gave up, what to set, what to try"}
+      ]}
+    ],
+    "pitfalls": [
+      "Fixed short prompts that do not resemble production.",
+      "Including warm-up requests in the results.",
+      "Changing several settings between runs.",
+      "Only closed-loop tests, missing how queues explode under bursty arrivals.",
+      "Publishing numbers without versions, flags and hardware."
+    ]
+  },
+  "quiz": [
+    {"q": "Why does continuous batching beat static batching for text generation?", "options": ["Finished sequences leave and new ones join every step, so the GPU never waits for the longest request", "It runs each request on its own dedicated GPU so that requests never interfere", "It compiles a separate copy of the model ahead of time for each possible batch size", "It skips the KV cache entirely so that more memory is left over for the weights"], "answer": 0, "explain": "Static batches drain until the longest sequence finishes, leaving slots idle. Continuous batching refills those slots at every step."},
+    {"q": "You raise max-num-seqs from 64 to 256. What do you expect?", "options": ["Higher throughput but slower decode per user, possibly more preemption", "Lower throughput overall but noticeably faster decode for each individual user", "No change at all, because the scheduler ignores that particular setting", "Shorter prompts for every request, because each one gets fewer tokens"], "answer": 0, "explain": "More sequences per step increases the batch and throughput, but each step takes longer and cache pressure rises, so per-user streaming slows."},
+    {"q": "Which load pattern best reveals how queues build when traffic arrives regardless of how fast you serve it?", "options": ["Open-loop arrivals at a set request rate", "Closed-loop load with a single virtual user sending requests back to back", "A single very long request repeated until the server runs out of memory", "Replaying requests only after the previous one completes"], "answer": 0, "explain": "Open-loop load sends requests on a schedule, as real users do, so when service is slower than arrivals the queue grows and the effect shows up in TTFT."},
+    {"q": "Between two runs you switched to FP8 cache and doubled concurrency. Throughput rose 70%. What can you conclude?", "options": ["Not which change caused the gain, because two variables changed", "FP8 cache alone gave a 70% gain", "Concurrency alone gave a 70% gain", "The engine is now compute-bound"], "answer": 0, "explain": "With two simultaneous changes the effect cannot be attributed. Rerun with one change at a time."},
+    {"q": "Which item is essential in a benchmark write-up for it to count as evidence?", "options": ["The bottleneck you identified, with the metrics that show it", "The number of GitHub stars and contributors of the engine you tested", "A screenshot of the terminal output with no further explanation", "The peak number from the single best run, with the others left out"], "answer": 0, "explain": "A write-up becomes useful when it names the limiting resource and shows the evidence, along with the trade-off and setup needed to reproduce it."}
+  ]
+}

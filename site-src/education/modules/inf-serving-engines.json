@@ -1,0 +1,292 @@
+{
+  "id": "inf-serving-engines",
+  "minutes": 35,
+  "intro": "You will rarely write an inference engine, but you will choose, deploy, tune and operate one. Three open-source engines dominate datacenter LLM serving: vLLM, SGLang and NVIDIA TensorRT-LLM. All three expose an OpenAI-compatible API and share the same core ideas, but they differ in where they shine. This lesson gets each one running locally, explains what each optimises, and gives you a way to choose that is grounded in your own benchmarks rather than someone else's chart.",
+  "objectives": [
+    "Launch vLLM, SGLang and TensorRT-LLM as OpenAI-compatible servers",
+    "Explain the features all modern engines share and where they differ",
+    "Choose an engine based on hardware, workload shape and operational needs",
+    "Run the same client against any engine by changing only the base URL",
+    "Place lighter local runtimes such as llama.cpp correctly for development"
+  ],
+  "sections": [
+    {
+      "heading": "What every modern engine does",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "The engines have converged on the same toolkit, so learn it once. **Continuous batching** adds and removes requests at every step. **Paged KV-cache management** allocates cache in blocks. **Prefix caching** reuses cache for shared prompt prefixes. **Chunked prefill** keeps long prompts from stalling decode. **CUDA graphs** and fused kernels cut launch overhead. **Quantization** (FP8 and 4-bit formats), **tensor and pipeline parallelism**, **speculative decoding**, **LoRA adapters**, **structured output** and tool-call parsing are standard features."
+        },
+        {
+          "type": "p",
+          "text": "Because all three speak the OpenAI API, your application, gateway and benchmark client do not change when you switch engines; only the base URL and model name do. That makes trying several engines on your own workload cheap, and it is the right way to decide."
+        },
+        {
+          "type": "p",
+          "text": "The differences that remain are in defaults, kernels and focus: which models and GPUs get optimised first, how aggressively each engine schedules prefill against decode, how its prefix cache is indexed, how it exposes metrics, and how often it releases. Those differences can swing results by large margins on one workload and vanish on another, which is why the comparison below ends with a benchmark rather than a verdict."
+        }
+      ]
+    },
+    {
+      "heading": "vLLM",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "vLLM is the broad, community default: the widest model and hardware support (NVIDIA, AMD, Intel, TPUs and more through plugins), PagedAttention, a large feature set and a big ecosystem that includes KServe runtimes, a production-stack Helm chart and integration in distributed frameworks such as Dynamo and llm-d. Pick it when you want the safest general choice. The open-source track's vLLM lesson covers its flags and metrics in depth."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "caption": "vLLM on port 8000",
+          "code": "export MODEL_ID=YOUR_ORG/YOUR_MODEL\nuv pip install vllm\nvllm serve \"$MODEL_ID\" --port 8000 --max-model-len 8192"
+        }
+      ]
+    },
+    {
+      "heading": "SGLang",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "SGLang is a high-performance engine whose signature is **RadixAttention**: the KV cache is kept in a radix tree keyed by token prefixes, so any request that shares a prefix with earlier work, a multi-turn conversation, an agent re-sending its scratchpad, few-shot templates, reuses it automatically. It is strong for agentic and multi-turn workloads, structured generation, and large mixture-of-experts models, and it is widely used for reinforcement-learning rollouts."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "caption": "SGLang (its docs use port 30000)",
+          "code": "uv pip install --prerelease=allow sglang\nsglang serve \"$MODEL_ID\" --host 0.0.0.0 --port 30000"
+        }
+      ]
+    },
+    {
+      "heading": "TensorRT-LLM",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "TensorRT-LLM is NVIDIA's engine, with kernels tuned for each NVIDIA GPU generation, early support for new hardware features and low-precision formats, and in-flight batching. Older versions required compiling a per-model engine ahead of time; current releases default to a PyTorch-based backend that loads checkpoints directly. `trtllm-serve` gives an OpenAI-compatible server, `trtllm-bench` benchmarks, and it also runs behind Triton or Dynamo. Pick it when you are all-in on NVIDIA and want the most from the newest GPUs."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "caption": "TensorRT-LLM with two-way tensor parallelism",
+          "code": "trtllm-serve \"$MODEL_ID\" --tp_size 2 --host 0.0.0.0 --port 8000"
+        },
+        {
+          "type": "callout",
+          "kind": "note",
+          "text": "For laptops and CPUs, llama.cpp and tools built on it run quantized GGUF models without a datacenter GPU. They are excellent for development and edge devices, not a substitute for a batching datacenter engine under heavy concurrent load."
+        }
+      ]
+    },
+    {
+      "heading": "Choosing, and the same client for all",
+      "blocks": [
+        {
+          "type": "table",
+          "headers": [
+            "If you need",
+            "Start with"
+          ],
+          "rows": [
+            [
+              "Broadest model and hardware support, biggest ecosystem",
+              "vLLM"
+            ],
+            [
+              "Heavy prefix reuse: multi-turn chat, agents, structured generation",
+              "SGLang"
+            ],
+            [
+              "Maximum performance on the newest NVIDIA GPUs and formats",
+              "TensorRT-LLM"
+            ],
+            [
+              "Laptop, CPU or edge device",
+              "llama.cpp-based runtimes"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "Treat the table as a starting hypothesis. Performance rankings change with every release, model and GPU. Run your real prompt and output length distribution through each candidate at your target latency, compare goodput per GPU, and weigh operational factors: container images, metrics, upgrade cadence, model support for what you will serve next year."
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "caption": "One client, any engine: only the base URL changes",
+          "code": "from openai import OpenAI\n\nfor base in [\"http://localhost:8000/v1\", \"http://localhost:30000/v1\"]:\n    client = OpenAI(base_url=base, api_key=\"not-needed-locally\")\n    reply = client.chat.completions.create(\n        model=client.models.list().data[0].id,\n        messages=[{\"role\": \"user\", \"content\": \"One sentence on KV caches.\"}],\n        max_tokens=60,\n    )\n    print(base, reply.choices[0].message.content)"
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Two engines, one workload",
+    "steps": [
+      "On a single-GPU machine, start vLLM on port 8000 with a small open model and `--max-model-len 8192`.",
+      "Run the client above against it and confirm it answers.",
+      "Stop vLLM, start SGLang on port 30000 with the same model, and rerun the client unchanged except for the URL.",
+      "Write a 20-turn conversation script that re-sends the growing history each turn and record TTFT per turn on each engine.",
+      "Note memory used after startup on each engine with `nvidia-smi` and the KV-cache capacity each logs.",
+      "Write down which engine you would pick for this workload and why, citing your numbers."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "All three engines share continuous batching, paged cache, prefix caching, chunked prefill and quantization.",
+      "All speak the OpenAI API: switching engines means changing a URL.",
+      "vLLM: broadest support and ecosystem. SGLang: RadixAttention prefix reuse. TensorRT-LLM: NVIDIA-tuned.",
+      "Decide with your own workload, at your latency target, per GPU.",
+      "llama.cpp for laptops and edge, not for high-concurrency serving.",
+      "Weigh operations (images, metrics, upgrades), not just speed."
+    ],
+    "groups": [
+      {
+        "title": "Launch",
+        "items": [
+          {
+            "syntax": "vllm serve MODEL --port 8000",
+            "desc": "vLLM OpenAI-compatible server"
+          },
+          {
+            "syntax": "sglang serve MODEL --port 30000",
+            "desc": "SGLang server"
+          },
+          {
+            "syntax": "trtllm-serve MODEL --tp_size 2 --port 8000",
+            "desc": "TensorRT-LLM server"
+          },
+          {
+            "syntax": "--tensor-parallel-size / --tp_size",
+            "desc": "Split across GPUs (vLLM / TRT-LLM)"
+          }
+        ]
+      },
+      {
+        "title": "OpenAI-compatible endpoints",
+        "items": [
+          {
+            "syntax": "GET /v1/models",
+            "desc": "What the server serves"
+          },
+          {
+            "syntax": "POST /v1/chat/completions",
+            "desc": "Chat"
+          },
+          {
+            "syntax": "POST /v1/completions",
+            "desc": "Raw text completion"
+          },
+          {
+            "syntax": "OpenAI(base_url=URL)",
+            "desc": "Point any OpenAI client at the engine"
+          }
+        ]
+      },
+      {
+        "title": "Shared features",
+        "items": [
+          {
+            "syntax": "Continuous batching",
+            "desc": "Batch re-formed every step"
+          },
+          {
+            "syntax": "Prefix caching / RadixAttention",
+            "desc": "Reuse cache for shared prefixes"
+          },
+          {
+            "syntax": "Chunked prefill",
+            "desc": "Mix long prefills with decode"
+          },
+          {
+            "syntax": "Speculative decoding",
+            "desc": "Draft tokens cheaply, verify in one pass"
+          },
+          {
+            "syntax": "Multi-LoRA",
+            "desc": "Many fine-tunes on one base model"
+          }
+        ]
+      },
+      {
+        "title": "Benchmark tools",
+        "items": [
+          {
+            "syntax": "vllm bench serve",
+            "desc": "vLLM's serving benchmark"
+          },
+          {
+            "syntax": "trtllm-bench",
+            "desc": "TensorRT-LLM benchmark"
+          },
+          {
+            "syntax": "aiperf",
+            "desc": "Engine-neutral benchmark against any OpenAI-compatible URL"
+          }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Choosing an engine from a vendor chart measured on someone else's workload.",
+      "Comparing engines at different max context lengths or precisions.",
+      "Ignoring operational fit: images, metrics, upgrade cadence, model support.",
+      "Using a laptop runtime for a high-concurrency production endpoint.",
+      "Tying application code to one engine's non-standard API."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "Your app moves from vLLM to SGLang. What must change in a client written with the OpenAI SDK?",
+      "options": [
+        "Only the base URL and possibly the model name",
+        "The whole request format, because SGLang uses gRPC only",
+        "The tokenizer, which the client must now run itself",
+        "Nothing at all, even the URL stays the same"
+      ],
+      "answer": 0,
+      "explain": "Both engines expose OpenAI-compatible endpoints, so the client keeps its code and points at a different base URL, with the model name the new server reports."
+    },
+    {
+      "q": "An agent re-sends a growing 10,000-token scratchpad on every step. Which engine feature matters most?",
+      "options": [
+        "Prefix reuse such as SGLang's RadixAttention",
+        "Ahead-of-time engine compilation",
+        "CPU offload of model weights",
+        "Higher sampling temperature"
+      ],
+      "answer": 0,
+      "explain": "The shared prefix can be served from cache instead of recomputed. RadixAttention indexes cache by token prefix to do this automatically; vLLM's prefix caching does the same job."
+    },
+    {
+      "q": "A team wants the best performance from the newest NVIDIA GPUs and new low-precision formats as soon as they ship. Which engine is the natural first candidate?",
+      "options": [
+        "TensorRT-LLM",
+        "llama.cpp",
+        "A CPU-only runtime",
+        "None, because engines all perform identically"
+      ],
+      "answer": 0,
+      "explain": "TensorRT-LLM is NVIDIA's engine, with kernels tuned per GPU generation and early support for new hardware features. Always confirm with your own benchmark."
+    },
+    {
+      "q": "Which statement about choosing an engine is most defensible?",
+      "options": [
+        "Benchmark candidates on your own workload at your latency target",
+        "Pick whichever engine has the most GitHub stars",
+        "Always use the engine with the highest peak tokens per second chart",
+        "Use a different engine for every model to compare them in production"
+      ],
+      "answer": 0,
+      "explain": "Rankings depend on model, GPU, release and workload shape. Goodput per GPU on your real traffic, plus operational fit, is what matters."
+    },
+    {
+      "q": "Where does a llama.cpp-based runtime fit best?",
+      "options": [
+        "Development on laptops, CPUs and edge devices",
+        "The main high-concurrency datacenter endpoint",
+        "Tensor-parallel serving across eight GPUs",
+        "Disaggregated prefill and decode clusters"
+      ],
+      "answer": 0,
+      "explain": "It runs quantized models efficiently on modest hardware, ideal locally and at the edge, but it is not built for the continuous-batching, multi-GPU scale of datacenter engines."
+    }
+  ]
+}
