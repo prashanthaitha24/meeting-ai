@@ -1,0 +1,107 @@
+{
+  "id": "proj-fde-customer-pilot",
+  "track": "fde",
+  "title": "Run a customer pilot end to end",
+  "summary": "Simulate a complete forward deployed engagement for a fictional customer, Northwind Benefits, whose case workers spend too long finding answers in a large set of policy documents. You will write the discovery summary and pilot plan, build a permission-aware question-answering service with citations over real public documents, create an evaluation set and measure against a baseline, package and deploy it with Docker Compose behind a login, prepare the security pack, run a demo, and hand it over with runbooks and an outcome report. Every artefact is something an FDE produces in a real engagement.",
+  "outcome": "A public repository containing `docs/` (discovery summary, pilot plan, design note, security pack, outcome report, runbooks), `app/` (FastAPI service with permission-filtered retrieval and citations, Streamlit UI), `evals/` (question set, harness and results), and `deploy/` (Compose stack with health checks), plus a recorded 15-minute demo. Reviewers can follow your thinking from the customer's problem to a measured result.",
+  "hours": 10,
+  "level": "Intermediate",
+  "prereqs": [
+    "Python, git and Docker basics",
+    "The stage 2 and 3 lessons of this track (discovery, scoping, customer data, communication, LLM apps, prototyping)",
+    "Access to any LLM API or a local model you can call from Python"
+  ],
+  "tools": [
+    {"name": "FastAPI", "why": "the backend API that holds retrieval and answer logic", "url": "https://fastapi.tiangolo.com/"},
+    {"name": "Streamlit", "why": "a thin prototype UI for users and demos", "url": "https://docs.streamlit.io/"},
+    {"name": "DuckDB", "why": "a local store with full-text search for the keyword half of hybrid retrieval", "url": "https://duckdb.org/docs/"},
+    {"name": "Docker Compose", "why": "package and run the stack the way a customer pilot would", "url": "https://docs.docker.com/compose/"},
+    {"name": "pytest", "why": "tests for the permission filter and parsing logic", "url": "https://docs.pytest.org/"}
+  ],
+  "layout": "northwind-pilot/\n├── docs/\n│   ├── 01-discovery-summary.md\n│   ├── 02-pilot-plan.yaml\n│   ├── 03-design-note.md\n│   ├── 04-security-pack.md\n│   ├── 05-outcome-report.md\n│   └── runbooks/\n├── data/\n│   ├── raw/                 # public documents standing in for customer policies\n│   └── acl.csv              # which group may read which document\n├── app/\n│   ├── ingest.py            # parse, chunk, index with ACLs\n│   ├── retrieve.py          # keyword search + permission filter\n│   ├── api.py               # FastAPI: /healthz /readyz /ask\n│   └── ui.py                # Streamlit front end\n├── evals/\n│   ├── questions.csv        # question, expected answer, source doc, group\n│   └── run_evals.py\n├── tests/\n└── deploy/compose.yml",
+  "phases": [
+    {
+      "title": "Set the scene and run discovery",
+      "goal": "A realistic customer context and a one-page discovery summary that defines the problem, users, data and success metric.",
+      "steps": [
+        {"text": "Create the repository and folder layout.", "code": {"lang": "bash", "code": "gh repo create northwind-pilot --public --clone && cd northwind-pilot\nmkdir -p docs/runbooks data/raw app evals tests deploy"}},
+        {"text": "Choose 40 to 80 public documents that stand in for Northwind's policies: for example a government's benefit guidance pages or public regulations saved as text or PDF. Put them in `data/raw/`.", "note": "Use documents you are allowed to republish in a public repository; government publications are usually fine. Record the source of each in a `data/SOURCES.md`."},
+        {"text": "Write the customer brief in your own words: Northwind's 60 case workers answer benefit questions by searching these documents; finding the right clause takes several minutes; mistakes cause appeals. Split the documents into two groups, `general` and `fraud-team`, and write `data/acl.csv` mapping each document to the groups allowed to read it.", "code": {"lang": "text", "code": "doc_id,groups\nhousing-support-2025,general|fraud-team\nfraud-investigation-procedures,fraud-team"}},
+        {"text": "Role-play two discovery interviews (ask a friend to be a case worker and a team lead) using the question bank from the discovery lesson, and record five facts with numbers and two quotes.", "note": "If you have nobody to interview, write the answers you would expect and mark them clearly as assumptions to validate."},
+        {"text": "Write `docs/01-discovery-summary.md` with the eight sections from the discovery lesson, ending with the decision you request: proceed to a six-week pilot for the general case-worker team.", "check": "Someone who has never heard of the project can explain the problem, the user and the metric after reading it."}
+      ]
+    },
+    {
+      "title": "Scope the pilot",
+      "goal": "A pilot plan with success criteria, boundaries, dependencies, risks and a decision date.",
+      "steps": [
+        {"text": "Write `docs/02-pilot-plan.yaml` with users, duration, primary metric (median time to answer a case question), guardrails (answer accuracy, citation correctness, no restricted-document leaks) and in-scope and out-of-scope lists.", "code": {"lang": "yaml", "code": "pilot: northwind-policy-assistant\nduration_weeks: 6\nusers: 10 general case workers\nsuccess_criteria:\n  primary: median time to answer a case question down >= 40% vs baseline\n  guardrails:\n    - correct answer on >= 90% of 60 expert-checked questions\n    - every answer cites at least one source\n    - zero answers drawn from documents the user may not read\nin_scope: [general policy documents, web UI behind login, English]\nout_of_scope: [writing to case systems, mobile, other languages]\ndecision: sponsor go/no-go at end of week 6"}},
+        {"text": "Add a dependencies table (document export, SSO registration, security review slot, expert reviewer time) with owners and dates, and a risk register with at least five risks.", "note": "Put both in the YAML or a markdown file next to it; what matters is owners and dates."},
+        {"text": "Write `docs/03-design-note.md` comparing two hosting options for the model (a hosted API with zero-retention terms versus a self-hosted open model) and recommend one with reasons.", "check": "The note ends with 'Decision needed from: ... by: ...'."}
+      ]
+    },
+    {
+      "title": "Ingest documents with permissions",
+      "goal": "Every chunk indexed with its source, heading and access groups, ready for keyword search.",
+      "steps": [
+        {"text": "Create the environment.", "code": {"lang": "bash", "code": "uv init --app . && uv add fastapi uvicorn streamlit duckdb pypdf httpx pydantic\nuv add --dev pytest ruff"}},
+        {"text": "Write the ingestion script: extract text, split by headings into chunks of at most 1,500 characters, attach `doc_id`, `heading` and `groups`, and load everything into DuckDB with a full-text index.", "code": {"lang": "python", "code": "# app/ingest.py\nimport csv\nimport pathlib\nimport re\n\nimport duckdb\nfrom pypdf import PdfReader\n\nRAW = pathlib.Path(\"data/raw\")\nacl = {r[\"doc_id\"]: r[\"groups\"] for r in csv.DictReader(open(\"data/acl.csv\"))}\n\n\ndef text_of(path: pathlib.Path) -> str:\n    if path.suffix == \".pdf\":\n        return \"\\n\".join(p.extract_text() or \"\" for p in PdfReader(path).pages)\n    return path.read_text(errors=\"ignore\")\n\n\nrows = []\nfor path in sorted(RAW.iterdir()):\n    doc_id = path.stem\n    for i, sec in enumerate(re.split(r\"\\n(?=[A-Z][^\\n]{3,80}\\n)\", text_of(path))):\n        heading = sec.strip().splitlines()[0][:100] if sec.strip() else doc_id\n        for start in range(0, len(sec), 1500):\n            rows.append((f\"{doc_id}:{i}:{start}\", doc_id, heading,\n                         acl.get(doc_id, \"\"), sec[start:start + 1500]))\n\ncon = duckdb.connect(\"data/index.duckdb\")\ncon.execute(\"CREATE OR REPLACE TABLE chunks(id TEXT, doc_id TEXT, heading TEXT, groups TEXT, body TEXT)\")\ncon.executemany(\"INSERT INTO chunks VALUES (?, ?, ?, ?, ?)\", rows)\ncon.execute(\"INSTALL fts; LOAD fts\")\ncon.execute(\"PRAGMA create_fts_index('chunks', 'id', 'heading', 'body', overwrite=1)\")\nprint(f\"indexed {len(rows)} chunks from {len(acl)} documents\")"}, "check": "The script prints a chunk count, and documents missing from acl.csv are reported rather than silently readable by everyone (add that check)."},
+        {"text": "Make documents without an ACL entry fail loudly instead of defaulting to readable: in `ingest.py`, collect any doc_id not in `acl` and exit with an error listing them.", "note": "Defaulting to open is the classic permission leak."}
+      ]
+    },
+    {
+      "title": "Retrieve with permissions and answer with citations",
+      "goal": "An API that only ever uses passages the user may read and cites them in every answer.",
+      "steps": [
+        {"text": "Write retrieval: full-text search, then filter by the user's groups before anything else happens.", "code": {"lang": "python", "code": "# app/retrieve.py\nimport duckdb\n\ncon = duckdb.connect(\"data/index.duckdb\", read_only=True)\ncon.execute(\"LOAD fts\")\n\n\ndef search(question: str, user_groups: set[str], k: int = 6) -> list[dict]:\n    rows = con.execute(\n        \"\"\"SELECT id, doc_id, heading, groups, body,\n                  fts_main_chunks.match_bm25(id, ?) AS score\n           FROM chunks WHERE score IS NOT NULL ORDER BY score DESC LIMIT 50\"\"\",\n        [question]).fetchall()\n    allowed = [r for r in rows if user_groups & set(r[3].split(\"|\"))]\n    return [{\"id\": r[0], \"doc_id\": r[1], \"heading\": r[2], \"text\": r[4]} for r in allowed[:k]]"}},
+        {"text": "Write a test proving a general user never receives a fraud-team document, even for a question that matches it exactly.", "code": {"lang": "python", "code": "# tests/test_permissions.py\nfrom app.retrieve import search\n\n\ndef test_general_user_cannot_see_fraud_docs():\n    hits = search(\"fraud investigation procedures\", {\"general\"})\n    assert all(h[\"doc_id\"] != \"fraud-investigation-procedures\" for h in hits)\n\n\ndef test_fraud_team_can_see_them():\n    hits = search(\"fraud investigation procedures\", {\"fraud-team\"})\n    assert any(h[\"doc_id\"] == \"fraud-investigation-procedures\" for h in hits)"}, "check": "`uv run pytest -q` passes."},
+        {"text": "Write the API with health, readiness and an `/ask` endpoint that builds a cited prompt from allowed passages and calls your model through one `call_llm` function.", "code": {"lang": "python", "code": "# app/api.py\nfrom fastapi import FastAPI\nfrom pydantic import BaseModel\n\nfrom app.llm import call_llm          # your provider or local model, one function\nfrom app.retrieve import search\n\napp = FastAPI(title=\"Northwind policy assistant\")\nGROUPS = {\"alice\": {\"general\"}, \"bob\": {\"general\", \"fraud-team\"}}   # stands in for SSO groups\n\n\nclass Ask(BaseModel):\n    user: str\n    question: str\n\n\n@app.get(\"/healthz\")\ndef healthz():\n    return {\"ok\": True}\n\n\n@app.post(\"/ask\")\ndef ask(req: Ask):\n    hits = search(req.question, GROUPS.get(req.user, set()))\n    if not hits:\n        return {\"answer\": \"I could not find this in documents you can access.\", \"sources\": []}\n    context = \"\\n\\n\".join(f\"[{i + 1}] ({h['doc_id']}) {h['text']}\" for i, h in enumerate(hits))\n    answer = call_llm(\"Answer only from the numbered sources and cite them like [1]. \"\n                      \"If they do not contain the answer, say so.\\n\\n\"\n                      f\"{context}\\n\\nQuestion: {req.question}\")\n    return {\"answer\": answer, \"sources\": [h[\"doc_id\"] for h in hits]}"}, "note": "Unknown users get no groups and therefore no documents: deny by default."},
+        {"text": "Add a `/readyz` endpoint that returns 503 if the index cannot be opened or the model call fails a tiny test prompt.", "check": "Stopping the model or deleting the index makes /readyz return 503."}
+      ]
+    },
+    {
+      "title": "Evaluate against a baseline",
+      "goal": "Numbers for accuracy, citations and leak-safety, plus a measured time-to-answer comparison.",
+      "steps": [
+        {"text": "Write 60 evaluation questions in `evals/questions.csv` with the expected answer, the source document and the asking group; include ten questions whose answer is not in the documents and five that would require fraud-team documents asked as a general user.", "code": {"lang": "text", "code": "question,expected,source_doc,group\nWhat is the maximum housing support period?,12 months,housing-support-2025,general\nWhat is the penalty for late renewal?,NOT_IN_DOCS,,general"}},
+        {"text": "Write `evals/run_evals.py` to call `/ask` for each question and record: whether the expected source was cited, whether the answer contains the expected fact (manual review or a calibrated judge), whether 'not found' was said when expected, and whether any restricted document appeared.", "note": "For the correctness column, a simple first pass is to review 60 answers by hand; it takes under an hour and is exactly what customer experts would do."},
+        {"text": "Measure the baseline: time yourself (or a volunteer) answering ten questions by searching the raw documents manually, then answering ten different questions with the assistant. Record times per question.", "check": "You have two lists of times and can compute medians."},
+        {"text": "Change one thing (chunk size, k, or the prompt), rerun the evaluation, and keep whichever version scores better; record both results.", "note": "One variable at a time, as in the inference track."}
+      ]
+    },
+    {
+      "title": "Package, secure and deploy",
+      "goal": "A Compose stack a customer could run, with health checks, configuration from the environment and a security pack.",
+      "steps": [
+        {"text": "Write a Dockerfile for the API (non-root user, pinned base) and one for the UI, then a Compose file with health checks and configuration from an env file.", "code": {"lang": "yaml", "code": "# deploy/compose.yml\nservices:\n  api:\n    build: {context: .., dockerfile: deploy/Dockerfile.api}\n    env_file: ../.env\n    volumes: [\"../data:/app/data:ro\"]\n    healthcheck:\n      test: [\"CMD\", \"python\", \"-c\", \"import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')\"]\n      interval: 15s\n  ui:\n    build: {context: .., dockerfile: deploy/Dockerfile.ui}\n    environment: {API_URL: \"http://api:8000\"}\n    ports: [\"8501:8501\"]\n    depends_on: {api: {condition: service_healthy}}"}},
+        {"text": "Build and start the stack and confirm the UI answers questions with sources.", "code": {"lang": "bash", "code": "cp .env.example .env   # model endpoint and key, never committed\ndocker compose -f deploy/compose.yml up -d --build\ndocker compose -f deploy/compose.yml ps"}, "check": "Both services show healthy; http://localhost:8501 works."},
+        {"text": "Write `docs/04-security-pack.md`: a data-flow table for every arrow, a STRIDE list with at least eight threats and mitigations, and answers to the seven standard and seven AI-specific questions from the security-review lesson.", "note": "Be honest about what a pilot lacks (for example real SSO) and how production would close it."}
+      ]
+    },
+    {
+      "title": "Demo, measure, hand over",
+      "goal": "A recorded demo, an outcome report with a decision request, and documentation that lets someone else run it.",
+      "steps": [
+        {"text": "Prepare a seeded demo of eight questions (six that show value, one 'not found', one permission refusal) and record a 15-minute demo following the problem, live case, evidence, limits and ask structure.", "check": "The recording shows the permission refusal working live."},
+        {"text": "Write `docs/05-outcome-report.md`: decision requested, headline result with medians, evaluation table, ROI estimate with written assumptions and a range, what did not work, and the proposed next phase.", "note": "Use the ROI template from the outcomes lesson; label any assumed numbers clearly."},
+        {"text": "Write three runbooks in `docs/runbooks/` (re-index after new documents, rotate the model API key, everything answers 'not found') in the symptoms, check, fix, verify, escalate format."},
+        {"text": "Ask a friend to follow your README and runbooks to run the stack and re-index from scratch without your help; fix every step where they stalled.", "check": "They succeed without asking you a question."},
+        {"text": "Tidy, commit and publish; delete any API keys from your environment files and rotate the key you used for testing.", "code": {"lang": "bash", "code": "docker compose -f deploy/compose.yml down\ngit add -A && git commit -m \"Northwind pilot: discovery to outcome report\" && git push"}}
+      ]
+    }
+  ],
+  "troubleshooting": [
+    {"symptom": "DuckDB says the fts extension is not installed", "fix": "Run `INSTALL fts; LOAD fts` once with network access (the ingest script does this); in an offline environment, pre-download the extension. Retrieval loads it read-only after ingestion."},
+    {"symptom": "Answers ignore the sources or invent facts", "fix": "Check whether retrieval returned the right passage (print hits). If it did, tighten the instruction and lower temperature; if not, fix chunking or add keyword variants. Add the case to the evaluation set."},
+    {"symptom": "A general user sees a fraud-team document", "fix": "Treat it as a sev-1 bug: check acl.csv for the document, confirm ingestion failed loudly on missing ACLs, and make sure filtering happens in search() before the prompt is built. Add the case to tests."},
+    {"symptom": "PDF text comes out empty or garbled", "fix": "The PDF may be scanned images; use a text version of the document or add OCR, and note it as a data-quality finding in the discovery summary."},
+    {"symptom": "The UI cannot reach the API inside Compose", "fix": "Use the service name (http://api:8000), not localhost, from the UI container, and check the API health check passes."}
+  ],
+  "next": [
+    "Replace the hard-coded user groups with a real OIDC login (for example a local Keycloak) and read groups from the token.",
+    "Add vector search and combine it with BM25 (hybrid), then measure recall@k before and after.",
+    "Deploy the stack to a local Kubernetes cluster with the Helm practices from the packaging lesson.",
+    "Run a second simulated customer with different documents and refactor customer-specific parts into configuration.",
+    "Turn the outcome report into a short case study and add it to your portfolio."
+  ]
+}

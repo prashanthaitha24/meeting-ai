@@ -1,0 +1,263 @@
+{
+  "id": "proj-fde-legacy-integration",
+  "track": "fde",
+  "title": "Integrate with a legacy customer system",
+  "summary": "Build the kind of integration FDEs write in almost every engagement. A fictional customer's policy system exposes an OAuth-protected REST API with cursor pagination, and their claims system drops a nightly CSV file on an SFTP server. You will run realistic mocks of both locally, then build a sync job that authenticates with client credentials, pages through the API incrementally with a watermark, picks up files only when they are complete, validates every record, quarantines bad ones with reasons, upserts idempotently, reconciles counts, and reports health so an operator knows when it breaks.",
+  "outcome": "A repository with `mocks/` (OAuth + REST API and an SFTP server in Docker Compose), `sync/` (the integration job with tests), a `README.md` an operator can follow, and a demo log showing a clean run, a re-run with no duplicates, a bad file quarantined, an expired token handled, and a reconciliation alert firing on a deliberate mismatch.",
+  "hours": 6,
+  "level": "Intermediate",
+  "prereqs": [
+    "Python and Docker basics",
+    "The integration and Python delivery lessons of this track"
+  ],
+  "tools": [
+    {
+      "name": "FastAPI",
+      "why": "a mock OAuth token endpoint and paginated REST API",
+      "url": "https://fastapi.tiangolo.com/"
+    },
+    {
+      "name": "atmoz/sftp",
+      "why": "a disposable SFTP server for file drops",
+      "url": "https://github.com/atmoz/sftp"
+    },
+    {
+      "name": "httpx",
+      "why": "HTTP client with timeouts",
+      "url": "https://www.python-httpx.org/"
+    },
+    {
+      "name": "paramiko",
+      "why": "SFTP client in Python",
+      "url": "https://www.paramiko.org/"
+    },
+    {
+      "name": "SQLite",
+      "why": "the target store, with upserts and a quarantine table",
+      "url": "https://www.sqlite.org/lang_upsert.html"
+    }
+  ],
+  "layout": "legacy-integration/\n├── mocks/\n│   ├── api.py              # /oauth/token + /policies with cursors\n│   └── compose.yml         # api + sftp\n├── sync/\n│   ├── config.py           # env-based config\n│   ├── auth.py             # client credentials + token cache\n│   ├── policies.py         # cursor walk, watermark\n│   ├── claims_files.py     # SFTP poller with .done markers\n│   ├── store.py            # upserts, quarantine, state\n│   ├── reconcile.py\n│   └── main.py             # one run, exit code = health\n├── tests/\n└── README.md",
+  "phases": [
+    {
+      "title": "Stand up the customer's systems",
+      "goal": "A mock OAuth API and an SFTP server running locally that behave like the real thing, including expiring tokens.",
+      "steps": [
+        {
+          "text": "Create the project and environment.",
+          "code": {
+            "lang": "bash",
+            "code": "mkdir legacy-integration && cd legacy-integration && git init\nmkdir -p mocks sync tests\nuv init --app . && uv add fastapi uvicorn httpx paramiko\nuv add --dev pytest ruff"
+          }
+        },
+        {
+          "text": "Write the mock API: a token endpoint issuing tokens valid for 60 seconds, and a policies endpoint with cursor pagination and an `updated_since` filter.",
+          "code": {
+            "lang": "python",
+            "code": "# mocks/api.py\nimport secrets\nimport time\n\nfrom fastapi import FastAPI, Form, Header, HTTPException\n\napp = FastAPI()\nTOKENS: dict[str, float] = {}\nPOLICIES = [{\"id\": f\"POL-{i:05d}\", \"holder\": f\"Customer {i}\", \"premium\": 100 + i,\n             \"updated_at\": f\"2026-09-{1 + i % 28:02d}T10:00:00Z\"} for i in range(1, 1001)]\n\n\n@app.post(\"/oauth/token\")\ndef token(grant_type: str = Form(...), client_id: str = Form(...), client_secret: str = Form(...)):\n    if grant_type != \"client_credentials\" or client_secret != \"s3cret\":\n        raise HTTPException(401, \"invalid_client\")\n    t = secrets.token_hex(16)\n    TOKENS[t] = time.time() + 60\n    return {\"access_token\": t, \"token_type\": \"Bearer\", \"expires_in\": 60}\n\n\n@app.get(\"/policies\")\ndef policies(updated_since: str = \"\", cursor: int = 0, limit: int = 100,\n             authorization: str = Header(\"\")):\n    t = authorization.removeprefix(\"Bearer \")\n    if TOKENS.get(t, 0) < time.time():\n        raise HTTPException(401, \"token expired or invalid\")\n    rows = [p for p in POLICIES if p[\"updated_at\"] >= updated_since]\n    page = rows[cursor:cursor + limit]\n    nxt = cursor + limit if cursor + limit < len(rows) else None\n    return {\"items\": page, \"next_cursor\": nxt}"
+          }
+        },
+        {
+          "text": "Write a Compose file that runs the API and an SFTP server with an `upload` folder.",
+          "code": {
+            "lang": "yaml",
+            "code": "# mocks/compose.yml\nservices:\n  api:\n    image: python:3.12-slim\n    working_dir: /app\n    volumes: [\"./:/app\"]\n    command: sh -c \"pip install -q fastapi uvicorn python-multipart && uvicorn api:app --host 0.0.0.0 --port 8080\"\n    ports: [\"8080:8080\"]\n  sftp:\n    image: atmoz/sftp\n    command: northwind:pass:::upload\n    ports: [\"2222:22\"]"
+          }
+        },
+        {
+          "text": "Start the mocks and check both respond.",
+          "code": {
+            "lang": "bash",
+            "code": "docker compose -f mocks/compose.yml up -d\ncurl -s -X POST localhost:8080/oauth/token \\\n  -d grant_type=client_credentials -d client_id=sync -d client_secret=s3cret"
+          },
+          "check": "You receive a JSON token; `sftp -P 2222 northwind@localhost` logs in with password `pass`."
+        }
+      ]
+    },
+    {
+      "title": "Configuration and authentication",
+      "goal": "Config from the environment with early failure, and a token cache that refreshes before expiry and once on 401.",
+      "steps": [
+        {
+          "text": "Write `sync/config.py` that loads API URL, client ID and secret, SFTP host, port, user and password, and the database path from environment variables, exiting with a clear list of anything missing.",
+          "note": "Reuse the load_config pattern from the Python delivery lesson. Put example values in `.env.example`, never real secrets in git."
+        },
+        {
+          "text": "Create `.env.example` with placeholder values and load your real `.env` into the shell for local runs; add `.env` and `*.db` to `.gitignore`.",
+          "code": {
+            "lang": "bash",
+            "code": "cat > .env.example <<'ENV'\nAPI_URL=http://localhost:8080\nCLIENT_ID=sync\nCLIENT_SECRET=CHANGE_ME\nSFTP_HOST=localhost\nSFTP_PORT=2222\nSFTP_USER=northwind\nSFTP_PASSWORD=CHANGE_ME\nDB_PATH=sync.db\nENV\nprintf '.env\\n*.db\\n' >> .gitignore\nset -a && . ./.env && set +a"
+          }
+        },
+        {
+          "text": "Write the token cache.",
+          "code": {
+            "lang": "python",
+            "code": "# sync/auth.py\nimport time\n\nimport httpx\n\nfrom sync.config import CFG\n\n_cache = {\"token\": None, \"exp\": 0.0}\n\n\ndef token(force: bool = False) -> str:\n    if not force and _cache[\"token\"] and time.time() < _cache[\"exp\"] - 10:\n        return _cache[\"token\"]\n    r = httpx.post(f\"{CFG.api_url}/oauth/token\", timeout=10, data={\n        \"grant_type\": \"client_credentials\",\n        \"client_id\": CFG.client_id, \"client_secret\": CFG.client_secret})\n    r.raise_for_status()\n    body = r.json()\n    _cache.update(token=body[\"access_token\"], exp=time.time() + body[\"expires_in\"])\n    return _cache[\"token\"]"
+          }
+        },
+        {
+          "text": "Write a test with httpx.MockTransport or monkeypatching that proves a cached token is reused and a forced refresh fetches a new one.",
+          "check": "`uv run pytest -q` passes."
+        }
+      ]
+    },
+    {
+      "title": "Incremental API sync",
+      "goal": "Walk the API with cursors from the last watermark, retry once on 401, and upsert idempotently.",
+      "steps": [
+        {
+          "text": "Write the store: a policies table keyed by ID, a quarantine table, and a state table for watermarks and processed files.",
+          "code": {
+            "lang": "python",
+            "code": "# sync/store.py\nimport sqlite3\n\nfrom sync.config import CFG\n\ndb = sqlite3.connect(CFG.db_path)\ndb.executescript(\"\"\"\nCREATE TABLE IF NOT EXISTS policies(id TEXT PRIMARY KEY, holder TEXT, premium REAL, updated_at TEXT);\nCREATE TABLE IF NOT EXISTS claims(id TEXT PRIMARY KEY, policy_id TEXT, amount REAL, filed_on TEXT);\nCREATE TABLE IF NOT EXISTS quarantine(source TEXT, record TEXT, reason TEXT, at TEXT DEFAULT CURRENT_TIMESTAMP);\nCREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY, value TEXT);\n\"\"\")\n\n\ndef get_state(key: str, default: str = \"\") -> str:\n    row = db.execute(\"SELECT value FROM state WHERE key = ?\", (key,)).fetchone()\n    return row[0] if row else default\n\n\ndef set_state(key: str, value: str) -> None:\n    db.execute(\"INSERT INTO state VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value\",\n               (key, value))\n    db.commit()"
+          }
+        },
+        {
+          "text": "Write the policy sync: start from the stored watermark, page with cursors, refresh the token once on 401, validate and upsert, and advance the watermark only after the whole run succeeds.",
+          "code": {
+            "lang": "python",
+            "code": "# sync/policies.py\nimport json\n\nimport httpx\n\nfrom sync.auth import token\nfrom sync.config import CFG\nfrom sync.store import db, get_state, set_state\n\n\ndef sync_policies() -> dict:\n    since, cursor, written, bad, newest = get_state(\"policies_wm\"), 0, 0, 0, \"\"\n    with httpx.Client(base_url=CFG.api_url, timeout=30) as c:\n        while cursor is not None:\n            params = {\"updated_since\": since, \"cursor\": cursor, \"limit\": 200}\n            r = c.get(\"/policies\", params=params, headers={\"Authorization\": f\"Bearer {token()}\"})\n            if r.status_code == 401:\n                r = c.get(\"/policies\", params=params,\n                          headers={\"Authorization\": f\"Bearer {token(force=True)}\"})\n            r.raise_for_status()\n            body = r.json()\n            for p in body[\"items\"]:\n                if not p.get(\"id\", \"\").startswith(\"POL-\") or p.get(\"premium\", -1) < 0:\n                    db.execute(\"INSERT INTO quarantine(source, record, reason) VALUES (?, ?, ?)\",\n                               (\"api\", json.dumps(p), \"invalid id or premium\"))\n                    bad += 1\n                    continue\n                db.execute(\"\"\"INSERT INTO policies VALUES (:id, :holder, :premium, :updated_at)\n                              ON CONFLICT(id) DO UPDATE SET holder=excluded.holder,\n                              premium=excluded.premium, updated_at=excluded.updated_at\"\"\", p)\n                written += 1\n                newest = max(newest, p[\"updated_at\"])\n            cursor = body[\"next_cursor\"]\n    db.commit()\n    if newest:\n        set_state(\"policies_wm\", newest)          # only after a successful full run\n    return {\"written\": written, \"quarantined\": bad}"
+          },
+          "note": "The watermark uses >= so the newest records are re-read next time; the upsert makes that harmless. Production code adds backoff on 429 and 5xx as in the integration lesson."
+        },
+        {
+          "text": "Run it twice and confirm the second run writes only records at or after the watermark and creates no duplicates.",
+          "code": {
+            "lang": "bash",
+            "code": "uv run python -c \"from sync.policies import sync_policies; print(sync_policies())\"\nuv run python -c \"from sync.policies import sync_policies; print(sync_policies())\"\nsqlite3 sync.db 'SELECT COUNT(*), COUNT(DISTINCT id) FROM policies'"
+          },
+          "check": "Both counts are 1000."
+        },
+        {
+          "text": "Wait more than 60 seconds between two calls (or shorten the mock's expiry) to confirm the expired token is refreshed transparently.",
+          "check": "The run succeeds and the mock logs one 401 followed by a new token request."
+        }
+      ]
+    },
+    {
+      "title": "File drops over SFTP",
+      "goal": "Process each completed CSV exactly once, validate rows, quarantine failures and archive files.",
+      "steps": [
+        {
+          "text": "Create a sample claims file with a few deliberately bad rows and upload it with a .done marker.",
+          "code": {
+            "lang": "bash",
+            "code": "cat > claims-2026-10-01.csv <<'CSV'\nclaim_id,policy_id,amount,filed_on\nCLM-1,POL-00001,250.00,2026-10-01\nCLM-2,POL-00002,-5,2026-10-01\nCLM-3,POL-99999,80.00,2026-10-01\nCLM-4,POL-00004,120.50,01/10/2026\nCSV\ntouch claims-2026-10-01.csv.done\nuv run python - <<'PY'\nimport paramiko\nt = paramiko.Transport((\"localhost\", 2222))\nt.connect(username=\"northwind\", password=\"pass\")\nsftp = paramiko.SFTPClient.from_transport(t)\nfor f in (\"claims-2026-10-01.csv\", \"claims-2026-10-01.csv.done\"):   # data first, marker last\n    sftp.put(f, f\"upload/{f}\")\nt.close()\nPY"
+          },
+          "note": "Upload the data file before its .done marker, exactly as a well-behaved sender would. Real integrations use key-based authentication with verified host keys, not passwords."
+        },
+        {
+          "text": "Write the poller: list files with a matching .done marker, skip ones already in state, parse, validate each row (positive amount, ISO date, known policy), upsert valid claims, quarantine the rest with reasons, then record the file as processed and move it to an archive folder.",
+          "code": {
+            "lang": "python",
+            "code": "# sync/claims_files.py\nimport csv\nimport io\nimport json\nfrom datetime import date\n\nimport paramiko\n\nfrom sync.config import CFG\nfrom sync.store import db, get_state, set_state\n\n\ndef reason(row: dict) -> str | None:\n    try:\n        if float(row[\"amount\"]) <= 0:\n            return \"non-positive amount\"\n        date.fromisoformat(row[\"filed_on\"])\n    except ValueError:\n        return \"unparseable amount or date\"\n    if not db.execute(\"SELECT 1 FROM policies WHERE id = ?\", (row[\"policy_id\"],)).fetchone():\n        return \"unknown policy\"\n    return None\n\n\ndef sync_claim_files() -> dict:\n    t = paramiko.Transport((CFG.sftp_host, CFG.sftp_port))\n    t.connect(username=CFG.sftp_user, password=CFG.sftp_password)\n    sftp = paramiko.SFTPClient.from_transport(t)\n    done = set(json.loads(get_state(\"claim_files\", \"[]\")))\n    stats = {\"files\": 0, \"written\": 0, \"quarantined\": 0}\n    names = sftp.listdir(\"upload\")\n    for name in sorted(n for n in names if n.endswith(\".csv\") and n + \".done\" in names):\n        if name in done:\n            continue\n        with sftp.open(f\"upload/{name}\") as fh:\n            rows = list(csv.DictReader(io.StringIO(fh.read().decode())))\n        for row in rows:\n            why = reason(row)\n            if why:\n                db.execute(\"INSERT INTO quarantine(source, record, reason) VALUES (?, ?, ?)\",\n                           (name, json.dumps(row), why))\n                stats[\"quarantined\"] += 1\n            else:\n                db.execute(\"INSERT OR REPLACE INTO claims VALUES (?, ?, ?, ?)\",\n                           (row[\"claim_id\"], row[\"policy_id\"], float(row[\"amount\"]), row[\"filed_on\"]))\n                stats[\"written\"] += 1\n        db.commit()\n        done.add(name)\n        set_state(\"claim_files\", json.dumps(sorted(done)))\n        stats[\"files\"] += 1\n    t.close()\n    return stats"
+          }
+        },
+        {
+          "text": "Run it twice: the first run writes one claim and quarantines three with reasons; the second run processes nothing.",
+          "code": {
+            "lang": "bash",
+            "code": "uv run python -c \"from sync.claims_files import sync_claim_files; print(sync_claim_files())\"\nsqlite3 sync.db 'SELECT reason, COUNT(*) FROM quarantine GROUP BY reason'"
+          },
+          "check": "Quarantine shows non-positive amount, unknown policy and unparseable date, one each."
+        },
+        {
+          "text": "Upload a file without its .done marker and confirm it is ignored until the marker arrives.",
+          "check": "No new rows until you upload the marker."
+        }
+      ]
+    },
+    {
+      "title": "Reconcile, report and run on a schedule",
+      "goal": "One command that runs everything, prints per-run counts as JSON, checks consistency and signals health through its exit code.",
+      "steps": [
+        {
+          "text": "Write a reconciliation that compares the API's total policy count (one cheap call) with the store, and fails if they differ.",
+          "code": {
+            "lang": "python",
+            "code": "# sync/reconcile.py\nimport httpx\n\nfrom sync.auth import token\nfrom sync.config import CFG\nfrom sync.store import db\n\n\ndef reconcile() -> dict:\n    total, cursor = 0, 0\n    with httpx.Client(base_url=CFG.api_url, timeout=30) as c:\n        while cursor is not None:\n            body = c.get(\"/policies\", params={\"cursor\": cursor, \"limit\": 500},\n                         headers={\"Authorization\": f\"Bearer {token()}\"}).json()\n            total += len(body[\"items\"])\n            cursor = body[\"next_cursor\"]\n    stored = db.execute(\"SELECT COUNT(*) FROM policies\").fetchone()[0]\n    return {\"source\": total, \"stored\": stored, \"ok\": total == stored}"
+          },
+          "note": "A real API often offers a count endpoint or a report you can compare against instead of re-reading everything."
+        },
+        {
+          "text": "Write `sync/main.py` that runs policies, claim files and reconciliation, prints one JSON line with all counts and timings, writes the last successful run time to state, and exits 1 if anything failed or reconciliation did not match.",
+          "check": "`uv run python -m sync.main; echo $?` prints the JSON and 0."
+        },
+        {
+          "text": "Add a staleness check: a tiny `sync/health.py` command that exits 1 if the last successful run recorded in state is older than 26 hours, so monitoring can alert even when the job silently stopped running.",
+          "check": "Setting the stored timestamp to two days ago makes the command exit 1."
+        },
+        {
+          "text": "Break it deliberately: delete ten policies from SQLite and rerun; reconciliation must report the mismatch and exit 1. Then run again (the next incremental sync will not fix deletions, so document how an operator triggers a full resync by clearing the watermark).",
+          "check": "Exit code 1 and a clear 'source 1000, stored 990' message."
+        },
+        {
+          "text": "Schedule it: a cron entry or a Kubernetes CronJob that runs nightly, with the exit code wired to an alert in whatever monitoring you use.",
+          "code": {
+            "lang": "yaml",
+            "code": "apiVersion: batch/v1\nkind: CronJob\nmetadata:\n  name: legacy-sync\nspec:\n  schedule: \"30 2 * * *\"\n  concurrencyPolicy: Forbid\n  jobTemplate:\n    spec:\n      backoffLimit: 1\n      template:\n        spec:\n          restartPolicy: Never\n          containers:\n            - name: sync\n              image: registry.example/legacy-sync:1.0.0\n              envFrom: [{secretRef: {name: legacy-sync-env}}]"
+          },
+          "note": "concurrencyPolicy: Forbid stops two runs overlapping and fighting over the watermark."
+        }
+      ]
+    },
+    {
+      "title": "Hand it to an operator",
+      "goal": "Documentation and tests that let someone else run, monitor and fix the integration.",
+      "steps": [
+        {
+          "text": "Write tests for the row validator and for idempotency (running the same file twice writes the same rows).",
+          "check": "`uv run pytest -q` passes."
+        },
+        {
+          "text": "Write the README: what it syncs, configuration variables, how to run once, how to schedule, what the JSON output means, how to read the quarantine table, and runbooks for: token rejected, SFTP unreachable, reconciliation mismatch, full resync.",
+          "note": "Follow the runbook format from the handoff lesson."
+        },
+        {
+          "text": "Record a short demo log (terminal session) showing the clean run, the no-duplicates re-run, the quarantine, the token refresh and the reconciliation failure, and commit it.",
+          "code": {
+            "lang": "bash",
+            "code": "script -q demo.log\n# ...run the scenarios...\nexit\ngit add -A && git commit -m \"Legacy integration: API + SFTP sync with quarantine and reconciliation\""
+          }
+        },
+        {
+          "text": "Tear down the mocks.",
+          "code": {
+            "lang": "bash",
+            "code": "docker compose -f mocks/compose.yml down -v"
+          }
+        }
+      ]
+    }
+  ],
+  "troubleshooting": [
+    {
+      "symptom": "The token endpoint returns 422 Unprocessable Entity",
+      "fix": "FastAPI's Form fields need the python-multipart package (installed in the mock's command) and the request must be form-encoded (`data=` in httpx, `-d` in curl), not JSON."
+    },
+    {
+      "symptom": "paramiko raises an authentication error",
+      "fix": "Check user, password and port 2222 match the sftp service command; for key-based setups ensure the key is mounted and permissions are 600."
+    },
+    {
+      "symptom": "Second run re-inserts all claims",
+      "fix": "The processed-files state is not being saved or read; check the state table and that set_state runs after commit."
+    },
+    {
+      "symptom": "Reconciliation mismatches right after a successful sync",
+      "fix": "Records may have changed between the sync and the count, or rows were quarantined; compare stored plus quarantined to source and document which counts should match."
+    },
+    {
+      "symptom": "A run overlaps with the previous one",
+      "fix": "Use concurrencyPolicy: Forbid in Kubernetes or a lock file with cron so two runs never move the watermark at once."
+    }
+  ],
+  "next": [
+    "Replace password SFTP with key-based auth and host-key verification.",
+    "Add exponential backoff with jitter for 429 and 5xx responses and test it with the mock returning errors.",
+    "Expose run metrics (records written, quarantined, last success time) to Prometheus and alert on staleness.",
+    "Handle deletions: add a soft-delete flag in the mock API and propagate it.",
+    "Package the job as a container and deploy it with the Helm practices from the packaging lesson."
+  ]
+}
