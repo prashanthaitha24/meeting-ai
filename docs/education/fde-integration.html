@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Integrating with enterprise systems — Forward Deployed | ThavionAI Education</title>
+  <meta name="description" content="APIs, OAuth and service accounts, webhooks, files over SFTP, databases and legacy SOAP — with idempotency and retries." />
+  <meta property="og:title" content="Integrating with enterprise systems — ThavionAI Education" />
+  <meta property="og:description" content="APIs, OAuth and service accounts, webhooks, files over SFTP, databases and legacy SOAP — with idempotency and retries." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/fde-integration.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-fde" data-module="fde-integration">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=fde-integration&amp;page=/education/fde-integration.html&amp;title=Integrating%20with%20enterprise%20systems">Feedback</a>
+    <a href="../education.html#fde" class="nav-cta">All Forward Deployed modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#fde">Forward Deployed</a> › Stage 3: Building &amp; integrating</div>
+    <h1>Integrating with enterprise systems</h1>
+    <p class="lede">APIs, OAuth and service accounts, webhooks, files over SFTP, databases and legacy SOAP — with idempotency and retries.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">~45 min read</span>
+      <span class="chip">Module 9 of 20</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">An FDE's software is only as useful as its connections to the customer's systems. In a single engagement you may call a modern REST API with OAuth, receive webhooks, pick up nightly CSV files from an SFTP server, read incrementally from a database, and talk to a SOAP service older than some of your colleagues. This lesson covers each of those integration styles, the machine-to-machine authentication patterns that go with them, and the reliability patterns that keep integrations correct when networks fail and messages repeat: idempotency, incremental sync with watermarks, quarantines and reconciliation.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Authenticate service-to-service with OAuth client credentials, API keys and mTLS</li><li>Consume paginated, rate-limited APIs safely</li><li>Receive webhooks securely with signature verification and idempotent handling</li><li>Integrate file drops over SFTP and incremental database reads robustly</li><li>Apply idempotency, watermarks, dead-letter queues and reconciliation</li></ul>
+    </div>
+    <section id="machine-to-machine-authentication"><h2>Machine-to-machine authentication</h2>
+    <p>Integrations run without a person present, so they authenticate as a <strong>machine identity</strong>. The customer's identity team will usually tell you which pattern they allow; know them all.</p>
+    <div class="table-wrap"><table><thead><tr><th>Pattern</th><th>How it works</th><th>Watch out for</th></tr></thead><tbody><tr><td>OAuth 2.0 client credentials</td><td>Exchange client ID and secret for a short-lived access token at the token endpoint</td><td>Cache tokens until near expiry; request minimal scopes</td></tr><tr><td>API key</td><td>Static secret sent in a header</td><td>Rotation, storage in a vault, never in URLs</td></tr><tr><td>Mutual TLS (mTLS)</td><td>Client presents a certificate the server trusts</td><td>Certificate renewal before expiry</td></tr><tr><td>Workload identity</td><td>Cloud or Kubernetes identity federated to the target</td><td>Best option when available: no static secret</td></tr><tr><td>Signed requests</td><td>Request signed with a shared secret or key (HMAC)</td><td>Clock skew and canonicalisation details</td></tr></tbody></table></div>
+    <div class="code"><div class="code-cap">OAuth client credentials with token caching</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import os
+import time
+
+import httpx
+
+_token = {"value": None, "expires": 0.0}
+
+
+def access_token() -&gt; str:
+    if _token["value"] and time.time() &lt; _token["expires"] - 60:
+        return _token["value"]
+    r = httpx.post(os.environ["TOKEN_URL"], timeout=10, data={
+        "grant_type": "client_credentials",
+        "client_id": os.environ["CLIENT_ID"],
+        "client_secret": os.environ["CLIENT_SECRET"],
+        "scope": "claims.read",
+    })
+    r.raise_for_status()
+    body = r.json()
+    _token.update(value=body["access_token"], expires=time.time() + body["expires_in"])
+    return _token["value"]</code></pre></div></section>
+  <section id="consuming-apis-pagination-and-rate-limits"><h2>Consuming APIs: pagination and rate limits</h2>
+    <p>Enterprise APIs return data in pages and limit how fast you may call them. Prefer <strong>cursor</strong> (or token) pagination, which stays correct when records change during the read, over page-number pagination, which can skip or repeat records. Respect rate limits: read <code>Retry-After</code> on 429 responses, back off, and keep concurrency low until you know the limits. A runaway integration that overloads a customer system is a fast way to lose access.</p>
+    <div class="code"><div class="code-cap">Walk a cursor-paginated endpoint</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>def fetch_all(client, path: str, page_size: int = 200):
+    cursor = None
+    while True:
+        params = {"limit": page_size, **({"cursor": cursor} if cursor else {})}
+        r = client.get(path, params=params,
+                       headers={"Authorization": f"Bearer {access_token()}"})
+        if r.status_code == 429:
+            time.sleep(int(r.headers.get("Retry-After", "5")))
+            continue
+        r.raise_for_status()
+        body = r.json()
+        yield from body["items"]
+        cursor = body.get("next_cursor")
+        if not cursor:
+            break</code></pre></div></section>
+  <section id="webhooks-receiving-events-safely"><h2>Webhooks: receiving events safely</h2>
+    <p>With <strong>webhooks</strong>, the customer's system calls you when something happens. Three rules keep them safe and correct. Verify every request's <strong>signature</strong> (usually an HMAC of the raw body with a shared secret) and reject anything unsigned or old. Respond quickly (within a few seconds) with 2xx and process asynchronously, because senders time out and retry. And make processing <strong>idempotent</strong>, because senders deliver at least once and duplicates are normal.</p>
+    <div class="code"><div class="code-cap">Verify an HMAC-signed webhook before trusting it</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import hashlib
+import hmac
+import os
+import time
+
+SECRET = os.environ["WEBHOOK_SECRET"].encode()
+
+
+def verify(raw_body: bytes, signature_hex: str, timestamp: str, max_age_s: int = 300) -&gt; bool:
+    if abs(time.time() - int(timestamp)) &gt; max_age_s:
+        return False                                   # reject replays of old requests
+    expected = hmac.new(SECRET, timestamp.encode() + b"." + raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature_hex)  # constant-time comparison</code></pre></div>
+    <p>Each provider documents its own header names and signing format; follow it exactly, and always sign over the raw bytes, not re-serialised JSON. Store the event ID of every processed event and skip ones you have seen.</p></section>
+  <section id="files-and-databases"><h2>Files and databases</h2>
+    <p>Plenty of enterprise data still moves as <strong>files</strong>: nightly CSV or XML exports dropped on an SFTP server. Robust file integrations agree a naming convention, wait for a completion signal (a <code>.done</code> marker file or an atomic rename) so you never read a half-written file, verify a checksum or row count, process each file exactly once by recording processed file names, and move processed files to an archive folder rather than deleting them.</p>
+    <p>For <strong>databases</strong>, read from a replica or reporting view, never hammer the primary, and read <strong>incrementally</strong> using a watermark: the highest <code>updated_at</code> (or a monotonically increasing ID) you have processed. Overlap the window slightly to catch late commits, and dedupe on the primary key. Where the customer supports it, <strong>change data capture</strong> (CDC) streams inserts, updates and deletes from the database log and catches deletes that watermarks miss.</p>
+    <div class="code"><div class="code-cap">Incremental read with a watermark and a safety overlap</div><div class="code-head"><span>sql</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>-- :last_watermark is the max(updated_at) from the previous successful run
+SELECT claim_id, status, amount, updated_at
+FROM claims_view
+WHERE updated_at &gt;= :last_watermark - INTERVAL '10 minutes'
+ORDER BY updated_at, claim_id;
+-- upsert by claim_id on the target, then store the new max(updated_at)</code></pre></div>
+    <div class="callout callout-note"><strong>Note</strong><p>Legacy SOAP services are still common in insurance, banking and government. Python's zeep library reads the WSDL and generates callable operations; treat the service like any other API with timeouts, retries and logging.</p></div></section>
+  <section id="patterns-that-keep-integrations-correct"><h2>Patterns that keep integrations correct</h2>
+    <ul><li><strong>Idempotency</strong>: every write keyed so repeating it has no extra effect (upserts, idempotency keys, processed-event tables).</li><li><strong>At-least-once with dedupe</strong> beats chasing exactly-once delivery: accept duplicates and make them harmless.</li><li><strong>Quarantine / dead-letter queue</strong>: records or events that fail validation go somewhere visible with the reason, instead of blocking the pipeline or vanishing.</li><li><strong>Watermarks stored only after success</strong>, so a failed run re-reads rather than skips.</li><li><strong>Reconciliation</strong>: periodically compare counts or totals between source and target and alert on drift.</li><li><strong>Contract tests</strong>: a test that checks the shape of the partner's responses, so you notice when they change.</li><li><strong>Observability</strong>: per-run counts (read, written, quarantined), last success time and lag, with alerts.</li></ul>
+    <figure class="diagram" id="fig-integration-hub"><div class="diagram-scroll"><svg viewBox="0 0 570 464" role="img" aria-label="Four sources feed an integration pipeline: a REST API using OAuth client credentials and cursor pagination, webhooks verified by HMAC signature, CSV files from SFTP with done markers, and a database read incrementally with a watermark. The pipeline validates records, upserts valid ones by key into the target store, sends invalid ones to a quarantine table with reasons, and runs reconciliation that compares counts with the sources." style="width:100%;max-width:570px;min-width:540px;height:auto;display:block"><defs><marker id="integration-hub-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="integration-hub-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="integration-hub-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="integration-hub-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="integration-hub-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><rect x="20" y="19" width="162" height="426" rx="10" class="dg-group"/><text x="30" y="438" font-size="10" font-weight="700" letter-spacing="1" class="dg-group-label">SOURCES</text><polyline points="182.0,232.0 271.0,232.0 271.0,206.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#integration-hub-arrow-default)"/><rect x="200.2" y="213.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="226.5" y="221.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">records</text><polyline points="341.0,178.0 371.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#integration-hub-arrow-default)"/><rect x="335.8" y="132.0" width="40.5" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">valid</text><polyline points="271.0,206.0 271.0,366.0" fill="none" style="stroke:#f87171" stroke-width="1.6" marker-end="url(#integration-hub-arrow-danger)"/><rect x="274.0" y="278.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="278.0" y="286.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:#f87171">invalid</text><polyline points="441.0,206.0 441.0,366.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#integration-hub-arrow-default)"/><rect x="444.0" y="278.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="448.0" y="286.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">compare</text><rect x="31" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">REST API</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">OAuth, cursors</text><rect x="31" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="101.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Webhooks</text><text x="101.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">HMAC verified</text><rect x="31" y="258.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="101.0" y="279.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">SFTP files</text><text x="101.0" y="297.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">.done markers</text><path d="M31,373.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M31,373.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="101.0" y="387.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Database</text><text x="101.0" y="405.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">watermark / CDC</text><rect x="201" y="150.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="271.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Validate, upsert</text><text x="271.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">idempotent</text><path d="M371,157.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M371,157.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="441.0" y="178.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Target store</text><rect x="201" y="366.0" width="140" height="56" rx="8" class="dg-node dg-danger"/><text x="271.0" y="387.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#fca5a5">Quarantine</text><text x="271.0" y="405.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">with reasons</text><rect x="371" y="366.0" width="140" height="56" rx="8" class="dg-node dg-ok"/><text x="441.0" y="387.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#6ee7b7">Reconcile</text><text x="441.0" y="405.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">counts vs source</text></svg></div><figcaption>Every integration style feeds the same reliable core: validate, upsert idempotently, quarantine failures, record watermarks only after success, and reconcile against the source.</figcaption></figure></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Three integrations, one reliable store</h2>
+    <ol><li>Run a mock OAuth token endpoint and paginated API locally (a small FastAPI app) that issues tokens expiring in 60 seconds and returns cursor pages.</li><li>Implement the token cache and cursor walker, and upsert results into SQLite by ID; confirm a second run creates no duplicates.</li><li>Add a webhook endpoint that verifies an HMAC signature and timestamp, returns 202 immediately, and records event IDs to skip duplicates; replay the same event twice.</li><li>Run an SFTP server container, drop CSV files with .done markers, and write a poller that processes each file once and archives it.</li><li>Add a quarantine table for rows that fail validation, with the reason, and print per-run counts.</li><li>Write a reconciliation query comparing source and target counts and make the job exit non-zero on mismatch.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Integrating with enterprise systems — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Machine identity: client credentials, API keys, mTLS, or workload identity (best).</li><li>Cursor pagination, respect Retry-After, low concurrency until limits are known.</li><li>Webhooks: verify signature and age, respond fast, process idempotently.</li><li>Files: completion markers, checksums, process once, archive.</li><li>Databases: replica or view, incremental watermarks with overlap, or CDC.</li><li>Idempotency, quarantine, reconciliation and per-run metrics everywhere.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Auth</h3><table><tbody><tr><td><code>grant_type=client_credentials</code></td><td>OAuth machine-to-machine token</td></tr><tr><td><code>cache token until expires_in - 60s</code></td><td>Avoid a token call per request</td></tr><tr><td><code>Authorization: Bearer TOKEN</code></td><td>Send the token</td></tr><tr><td><code>mTLS: client cert + key, server trusts CA</code></td><td>Certificate-based identity</td></tr></tbody></table></div><div class="cheat-group"><h3>APIs</h3><table><tbody><tr><td><code>?limit=N&amp;cursor=C</code></td><td>Cursor pagination</td></tr><tr><td><code>429 + Retry-After</code></td><td>Back off as instructed</td></tr><tr><td><code>Idempotency-Key header</code></td><td>Safe retries for POSTs</td></tr><tr><td><code>contract test on response shape</code></td><td>Detect partner changes</td></tr></tbody></table></div><div class="cheat-group"><h3>Webhooks</h3><table><tbody><tr><td><code>HMAC-SHA256(secret, ts + '.' + raw_body)</code></td><td>Typical signature scheme</td></tr><tr><td><code>hmac.compare_digest</code></td><td>Constant-time comparison</td></tr><tr><td><code>reject if |now - ts| &gt; 300s</code></td><td>Replay protection</td></tr><tr><td><code>202 then queue</code></td><td>Respond fast, process async</td></tr></tbody></table></div><div class="cheat-group"><h3>Files and DBs</h3><table><tbody><tr><td><code>FILE.csv + FILE.csv.done</code></td><td>Completion marker</td></tr><tr><td><code>processed_files table</code></td><td>Process each file once</td></tr><tr><td><code>WHERE updated_at &gt;= wm - overlap</code></td><td>Incremental read</td></tr><tr><td><code>CDC</code></td><td>Stream inserts, updates and deletes</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Fetching a new OAuth token for every request.</li><li>Page-number pagination over changing data, skipping or repeating records.</li><li>Processing webhooks synchronously and timing out, causing retries and duplicates.</li><li>Reading files while they are still being written.</li><li>Advancing the watermark before the write succeeded.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "A nightly job reads records by page number while the source keeps updating, and some records go missing. What is the better approach?", "options": ["Cursor pagination or an updated_at watermark", "Larger page sizes so the job finishes faster", "Running the same job twice every night", "Reading the pages in a random order each run"], "answer": 0, "explain": "Page offsets shift when records change mid-read. Cursors and watermarks track position by data, not by position in a moving list."}, {"q": "Your webhook handler sometimes processes the same event twice. Why, and what is the fix?", "options": ["Delivery is at-least-once; skip seen event IDs", "The signature check is failing, so disable it", "The server responds too fast, so add a delay", "Duplicates mean the customer is attacking your endpoint"], "answer": 0, "explain": "Webhook delivery is at-least-once, so duplicates are normal; idempotent processing keyed on event ID makes them harmless."}, {"q": "Why must webhook signatures be computed over the raw request body?", "options": ["Re-serialised JSON can differ byte for byte", "Raw bodies are always smaller than the parsed JSON", "Web frameworks forbid parsing any webhook bodies", "The raw body contains a copy of the secret key"], "answer": 0, "explain": "The sender signed exact bytes. Parsing and re-encoding can change whitespace or key order, so the HMAC would not match."}, {"q": "An SFTP poller occasionally imports truncated files. What prevents this?", "options": ["Wait for a .done marker or atomic rename before reading", "Poll the directory more frequently", "Read files in reverse alphabetical order", "Delete files as soon as they appear"], "answer": 0, "explain": "A completion signal guarantees the writer has finished; without it you can read a file mid-transfer."}, {"q": "When should an incremental sync store its new watermark?", "options": ["Only after the batch was written successfully", "Before reading, so the next run starts sooner", "At the start of every hour regardless of outcome", "Never, because watermarks are optional for most syncs"], "answer": 0, "explain": "Storing the watermark after success means a failed run re-reads the same window instead of silently skipping it."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="fde-communication.html"><span>← Previous</span><strong>Communicating like an FDE</strong></a>
+    <a class="pager-up" href="../education.html#fde">All Forward Deployed modules</a>
+    <a class="pager-link pager-next" href="fde-llm-apps.html"><span>Next →</span><strong>Building LLM applications for customers</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=fde-integration&amp;page=/education/fde-integration.html&amp;title=Integrating%20with%20enterprise%20systems">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=fde-integration&amp;page=/education/fde-integration.html&amp;title=Integrating%20with%20enterprise%20systems">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

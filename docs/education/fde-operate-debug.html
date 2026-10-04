@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Operating and debugging at customer sites — Forward Deployed | ThavionAI Education</title>
+  <meta name="description" content="Observability you can ship, support bundles, remote debugging without direct access, and incident communication." />
+  <meta property="og:title" content="Operating and debugging at customer sites — ThavionAI Education" />
+  <meta property="og:description" content="Observability you can ship, support bundles, remote debugging without direct access, and incident communication." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/fde-operate-debug.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-fde" data-module="fde-operate-debug">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=fde-operate-debug&amp;page=/education/fde-operate-debug.html&amp;title=Operating%20and%20debugging%20at%20customer%20sites">Feedback</a>
+    <a href="../education.html#fde" class="nav-cta">All Forward Deployed modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#fde">Forward Deployed</a> › Stage 4: Deploying in customer environments</div>
+    <h1>Operating and debugging at customer sites</h1>
+    <p class="lede">Observability you can ship, support bundles, remote debugging without direct access, and incident communication.</p>
+    <div class="meta">
+      <span class="chip">Intermediate to advanced</span>
+      <span class="chip">~45 min read</span>
+      <span class="chip">Module 16 of 20</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">Once your software runs in the customer's environment, problems arrive without you being there: a call at 8 a.m. saying "it's not working", a screen share with someone who is not allowed to give you access, logs you cannot see. Debugging at a customer site is a distinct skill: you design observability that plugs into their stack, ship tools that collect evidence safely, diagnose through other people's hands, and communicate clearly during incidents. This lesson covers all four.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Build health checks, metrics, structured logs and traces that fit the customer's tooling</li><li>Ship a support-bundle command that collects evidence without leaking secrets</li><li>Debug systematically through screen shares and customer operators</li><li>Run incident communication with severity, cadence and clear updates</li><li>Turn every incident into a runbook entry and a product improvement</li></ul>
+    </div>
+    <section id="observability-that-plugs-into-their-stack"><h2>Observability that plugs into their stack</h2>
+    <p>Customers already have monitoring: Prometheus and Grafana, Datadog, Splunk, Elastic, a cloud vendor's tools. Your software should emit standard signals they can collect, rather than requiring yet another dashboard: health endpoints for their orchestrator, Prometheus-format metrics, JSON logs to stdout, and OpenTelemetry traces they can route anywhere through a Collector.</p>
+    <ul><li><strong>Liveness</strong> (<code>/healthz</code>): the process is alive. <strong>Readiness</strong> (<code>/readyz</code>): dependencies (database, model endpoint, index) are reachable, so traffic should be sent.</li><li><strong>Metrics</strong>: request rate, errors, latency histograms, queue depth, and business counters (documents indexed, answers served, actions drafted).</li><li><strong>Logs</strong>: one JSON object per line with request IDs that also appear in traces and in error messages users see.</li><li><strong>Traces</strong>: spans for each external call (retrieval, model, integrations), so slow requests show where time went.</li></ul>
+    <div class="code"><div class="code-cap">Readiness that checks dependencies, plus Prometheus metrics</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>from fastapi import FastAPI, Response
+from prometheus_client import Counter, Histogram, make_asgi_app
+
+app = FastAPI()
+app.mount("/metrics", make_asgi_app())
+REQUESTS = Counter("assistant_requests_total", "Requests", ["route", "status"])
+LATENCY = Histogram("assistant_request_seconds", "Request latency", ["route"])
+
+
+@app.get("/healthz")
+def healthz() -&gt; dict:
+    return {"ok": True}
+
+
+@app.get("/readyz")
+def readyz(response: Response) -&gt; dict:
+    checks = {"index": index.ping(), "model": model_client.ping(), "db": db.ping()}
+    if not all(checks.values()):
+        response.status_code = 503
+    return checks</code></pre></div></section>
+  <section id="the-support-bundle"><h2>The support bundle</h2>
+    <p>When you cannot access the environment, ask the customer to run one command that collects everything you need into an archive they can inspect before sending. Build it into the product: versions, configuration with secrets redacted, recent logs, Kubernetes resource states and events, and the results of connectivity checks.</p>
+    <div class="code"><div class="code-cap">A minimal Kubernetes support bundle with redaction</div><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>#!/usr/bin/env bash
+set -euo pipefail
+NS="${1:-assistant}"
+OUT="support-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$OUT"
+kubectl version -o yaml &gt; "$OUT/versions.yaml" 2&gt;&amp;1 || true
+helm list -n "$NS" &gt; "$OUT/helm.txt" 2&gt;&amp;1 || true
+kubectl get all,ingress,pvc -n "$NS" -o wide &gt; "$OUT/resources.txt"
+kubectl get events -n "$NS" --sort-by=.lastTimestamp &gt; "$OUT/events.txt"
+for p in $(kubectl get pods -n "$NS" -o name); do
+  kubectl logs -n "$NS" "$p" --all-containers --since=6h &gt; "$OUT/$(basename "$p").log" 2&gt;&amp;1 || true
+done
+kubectl get configmap -n "$NS" -o yaml &gt; "$OUT/configmaps.yaml"
+sed -i -E 's/(password|token|secret|apikey|api_key)(["]?[:=][ ]*)[^ ,"]+/\1\2REDACTED/Ig' "$OUT"/*
+tar -czf "$OUT.tar.gz" "$OUT" &amp;&amp; echo "Review $OUT/ then send $OUT.tar.gz"</code></pre></div>
+    <div class="callout callout-warning"><strong>Watch out</strong><p>Never collect Kubernetes Secrets, environment dumps or prompt contents in a support bundle. Redaction by pattern is a safety net, not a guarantee: tell the customer to review the archive before it leaves their network.</p></div></section>
+  <section id="debugging-through-someone-else-s-hands"><h2>Debugging through someone else's hands</h2>
+    <p>Often the customer's operator drives the keyboard while you watch on a screen share. Your job is to make every minute count: be systematic, ask for one command at a time with a clear reason, and keep notes the operator can reuse.</p>
+    <figure class="diagram" id="fig-remote-debug"><div class="diagram-scroll"><svg viewBox="0 0 740 248" role="img" aria-label="Your application emits health endpoints, Prometheus metrics, JSON logs and OpenTelemetry traces into the customer&#x27;s monitoring stack, which their operators watch. When something breaks, the operator runs commands you request over a screen share and runs the support-bundle script, reviews the redacted archive and sends it to you. You analyse it, propose a fix, and the operator applies it. The incident ends with a runbook update and a product fix if needed." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="remote-debug-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="remote-debug-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="remote-debug-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="remote-debug-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="remote-debug-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><polyline points="171.0,70.0 201.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#remote-debug-arrow-default)"/><rect x="159.7" y="24.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">signals</text><polyline points="341.0,70.0 371.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#remote-debug-arrow-default)"/><rect x="332.7" y="24.0" width="46.6" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">alerts</text><polyline points="541.0,50.0 511.0,50.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#remote-debug-arrow-default)"/><rect x="456.9" y="4.0" width="138.1" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="12.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">one command at a time</text><polyline points="441.0,98.0 441.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#remote-debug-arrow-default)"/><rect x="444.0" y="116.0" width="34.4" height="16" rx="4" class="dg-label-bg"/><text x="448.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">runs</text><polyline points="511.0,178.0 611.0,178.0 611.0,98.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#remote-debug-arrow-default)"/><rect x="543.8" y="159.0" width="34.4" height="16" rx="4" class="dg-label-bg"/><text x="561.0" y="167.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">send</text><rect x="31" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Your app</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">health, metrics, logs</text><path d="M201,49.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M201,49.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Their monitoring</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">Prometheus / SIEM</text><rect x="371" y="42.0" width="140" height="56" rx="28.0" class="dg-node dg-actor"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Their operator</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">drives keyboard</text><rect x="371" y="150.0" width="140" height="56" rx="8" class="dg-node dg-muted"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text2)">Support bundle</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">redacted, reviewed</text><rect x="541" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">You (FDE)</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">hypotheses</text></svg></div><figcaption>Without direct access, debugging runs through the customer's operator and a reviewed support bundle, while your signals flow into their existing monitoring.</figcaption></figure>
+    <ol><li><strong>Define the symptom precisely</strong>: what fails, for whom, since when, what changed (deploys, certificates, network, data).</li><li><strong>Check from the outside in</strong>: can users reach the app (DNS, ingress, TLS)? Is the app ready? Are its dependencies reachable from inside the pod?</li><li><strong>Look at recent events and logs first</strong>: crash loops, OOM kills, failed pulls and probe failures explain most outages.</li><li><strong>Form one hypothesis at a time</strong> and choose the command that would confirm or reject it.</li><li><strong>Change one thing</strong>, with the customer's approval and a rollback, then verify.</li><li><strong>Write it down</strong>: symptom, cause, fix, and the check that would have caught it earlier.</li></ol>
+    <div class="code"><div class="code-cap">The first five commands to ask an operator for</div><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>kubectl get pods -n assistant -o wide
+kubectl describe pod -n assistant -l app=assistant | sed -n '/Events:/,$p'
+kubectl logs -n assistant deploy/assistant --since=30m | tail -100
+kubectl exec -n assistant deploy/assistant -- \
+  curl -s -o /dev/null -w '%{http_code}\n' localhost:8000/readyz
+kubectl get events -n assistant --sort-by=.lastTimestamp | tail -20</code></pre></div></section>
+  <section id="incident-communication"><h2>Incident communication</h2>
+    <p>During an outage the customer needs confidence more than technical detail. Agree severity levels and contacts before go-live, and when something breaks, follow a rhythm.</p>
+    <ul><li><strong>Acknowledge fast</strong> with what you know and when the next update is coming.</li><li><strong>Update on a fixed cadence</strong> (every 30 or 60 minutes for serious incidents) even if the update is "still investigating, current hypothesis is X".</li><li><strong>One channel and one incident lead</strong> on your side, so the customer is not hearing different stories.</li><li><strong>Separate mitigation from root cause</strong>: restore service first (roll back, fail over, disable a feature flag), investigate after.</li><li><strong>Close with a written summary</strong> and, for significant incidents, a blameless post-incident review with action items and owners.</li></ul>
+    <div class="callout callout-tip"><strong>Tip</strong><p>A good update template: what is affected, what we know, what we are doing, what you can do meanwhile, next update at TIME.</p></div></section>
+  <section id="from-incident-to-improvement"><h2>From incident to improvement</h2>
+    <p>Every incident is information. Add a runbook entry the customer's operators can follow next time without you. Add the missing check to the preflight script, the support bundle, or a readiness probe. Add an alert if the failure was detectable. And when the cause was a product weakness rather than this customer's environment, file it with your product team with the evidence; fixing it once in the product protects every customer.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Break it, then debug it through someone else</h2>
+    <ol><li>Deploy the chart from the packaging lesson to a local cluster with /healthz, /readyz and /metrics implemented.</li><li>Write the support-bundle script and run it; review the output and confirm no secret values appear.</li><li>Ask a friend to break the deployment secretly (wrong database password, a NetworkPolicy blocking egress, an image tag that does not exist, too little memory).</li><li>Diagnose it while they drive the keyboard and you may only ask for one command at a time, following the six steps.</li><li>Send incident updates in the template format at 15-minute intervals during the exercise.</li><li>Write the runbook entry and the preflight or readiness check that would have caught the problem earlier.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Operating and debugging at customer sites — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Emit standard signals: health endpoints, Prometheus metrics, JSON logs, OTel traces.</li><li>Readiness checks dependencies; liveness only checks the process.</li><li>Ship a support-bundle command; customers review before sending; never collect secrets.</li><li>Debug outside-in, events and logs first, one hypothesis at a time.</li><li>Incidents: acknowledge fast, fixed update cadence, mitigate before root cause.</li><li>Every incident becomes a runbook entry, a check and possibly a product fix.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>kubectl triage</h3><table><tbody><tr><td><code>kubectl get pods -n NS -o wide</code></td><td>State, restarts, node</td></tr><tr><td><code>kubectl describe pod POD -n NS</code></td><td>Events: pull errors, OOM, probes</td></tr><tr><td><code>kubectl logs deploy/APP -n NS --since=30m</code></td><td>Recent logs</td></tr><tr><td><code>kubectl logs POD --previous</code></td><td>Logs of the crashed container</td></tr><tr><td><code>kubectl get events -n NS --sort-by=.lastTimestamp</code></td><td>Timeline</td></tr><tr><td><code>kubectl exec deploy/APP -- curl localhost:PORT/readyz</code></td><td>Check from inside</td></tr></tbody></table></div><div class="cheat-group"><h3>Health and metrics</h3><table><tbody><tr><td><code>/healthz</code></td><td>Liveness: process alive</td></tr><tr><td><code>/readyz</code></td><td>Readiness: dependencies reachable</td></tr><tr><td><code>/metrics</code></td><td>Prometheus exposition</td></tr><tr><td><code>request ID in logs, traces and user errors</code></td><td>Correlate everything</td></tr><tr><td><code>support-bundle.sh NAMESPACE</code></td><td>Collect redacted evidence for review</td></tr></tbody></table></div><div class="cheat-group"><h3>Incident update template</h3><table><tbody><tr><td><code>Affected</code></td><td>Who and what</td></tr><tr><td><code>Known / Doing</code></td><td>Facts and current actions</td></tr><tr><td><code>Workaround</code></td><td>What users can do meanwhile</td></tr><tr><td><code>Next update at TIME</code></td><td>Commit to cadence</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>A readiness probe that always returns OK even when the database is down.</li><li>Support bundles that include Secrets or environment dumps.</li><li>Asking the operator to run ten commands at once with no explanation.</li><li>Hunting root cause while the service stays down instead of rolling back.</li><li>Fixing the same incident manually at every customer instead of in the product.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "The database is down but Kubernetes keeps sending traffic to your pods. What is likely wrong?", "options": ["Readiness does not check dependencies", "The liveness probe is configured too strictly", "The image tag in the chart values is wrong", "The support bundle script is missing from the image"], "answer": 0, "explain": "Readiness should fail when required dependencies are unreachable, so the pod is removed from service endpoints until they recover."}, {"q": "What must a support bundle never contain?", "options": ["Secret values or prompt contents", "Kubernetes events from the namespace", "Application and chart version numbers", "Recent pod logs from the last six hours"], "answer": 0, "explain": "Bundles leave the customer's network; secrets and sensitive content must be excluded, with redaction as a backstop and customer review before sending."}, {"q": "A pod restarts every few minutes. Which command most quickly shows why?", "options": ["kubectl describe pod (Events section)", "kubectl get nodes -o wide for the cluster", "helm list for every namespace in the cluster", "kubectl get ingress -A across all namespaces"], "answer": 0, "explain": "Pod events show OOM kills, failed probes and image pull errors, the usual causes of restarts; logs with --previous add the container's last output."}, {"q": "During a serious outage, what should come first?", "options": ["Mitigate first, then investigate the cause", "Find the full root cause before changing anything", "Wait for the next scheduled release window to fix it", "Write the post-incident review with the whole team"], "answer": 0, "explain": "Restoring service limits customer impact; root-cause analysis can follow once users are unblocked."}, {"q": "What should every incident update to the customer include?", "options": ["Impact, facts, actions and the next update time", "Only the final root cause, once it has been found", "Detailed stack traces from every affected service", "A list of everyone on your side who was paged"], "answer": 0, "explain": "A predictable, plain-language update with a committed next update time keeps the customer informed and confident."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="fde-security-review.html"><span>← Previous</span><strong>Security reviews and compliance</strong></a>
+    <a class="pager-up" href="../education.html#fde">All Forward Deployed modules</a>
+    <a class="pager-link pager-next" href="fde-outcomes.html"><span>Next →</span><strong>Measuring outcomes and ROI</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=fde-operate-debug&amp;page=/education/fde-operate-debug.html&amp;title=Operating%20and%20debugging%20at%20customer%20sites">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=fde-operate-debug&amp;page=/education/fde-operate-debug.html&amp;title=Operating%20and%20debugging%20at%20customer%20sites">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

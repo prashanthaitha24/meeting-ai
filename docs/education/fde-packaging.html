@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Packaging and deploying to customer infrastructure — Forward Deployed | ThavionAI Education</title>
+  <meta name="description" content="Containers, Helm charts and configuration that installs cleanly into a cluster you do not own." />
+  <meta property="og:title" content="Packaging and deploying to customer infrastructure — ThavionAI Education" />
+  <meta property="og:description" content="Containers, Helm charts and configuration that installs cleanly into a cluster you do not own." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/fde-packaging.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-fde" data-module="fde-packaging">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=fde-packaging&amp;page=/education/fde-packaging.html&amp;title=Packaging%20and%20deploying%20to%20customer%20infrastructure">Feedback</a>
+    <a href="../education.html#fde" class="nav-cta">All Forward Deployed modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#fde">Forward Deployed</a> › Stage 4: Deploying in customer environments</div>
+    <h1>Packaging and deploying to customer infrastructure</h1>
+    <p class="lede">Containers, Helm charts and configuration that installs cleanly into a cluster you do not own.</p>
+    <div class="meta">
+      <span class="chip">Intermediate to advanced</span>
+      <span class="chip">~45 min read</span>
+      <span class="chip">Module 13 of 20</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">Deploying into your own cloud is easy; deploying into a customer's Kubernetes cluster that you do not own, with their registry, their policies, their ingress, their secrets and their security team watching, is a skill. This lesson covers building container images that pass enterprise scanners and admission policies, writing a Helm chart that adapts to any reasonable cluster through values instead of edits, the install and upgrade workflow customers expect, and the cluster quirks, such as restricted pod security and OpenShift's random user IDs, that break naive deployments.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Build small, non-root, pinned, multi-architecture images with an SBOM</li><li>Design a Helm chart whose values cover registries, secrets, ingress and scheduling</li><li>Meet restricted pod security and least-privilege RBAC requirements</li><li>Validate, install, upgrade and roll back with Helm safely</li><li>Write installation docs and preflight checks customers can follow without you</li></ul>
+    </div>
+    <section id="images-enterprises-will-accept"><h2>Images enterprises will accept</h2>
+    <p>Customer platforms scan every image and often enforce admission policies. Images that run as root, carry hundreds of known vulnerabilities, or float on a <code>latest</code> tag get rejected or flagged. Build images as if a security reviewer will read the Dockerfile, because one will.</p>
+    <div class="code"><div class="code-cap">A small, non-root, reproducible Python service image</div><div class="code-head"><span>dockerfile</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>FROM python:3.12-slim AS build
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+RUN pip install --no-cache-dir uv &amp;&amp; uv export --frozen --no-dev -o requirements.txt \
+ &amp;&amp; pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+FROM python:3.12-slim
+RUN useradd --uid 10001 --create-home app
+COPY --from=build /install /usr/local
+COPY --chown=10001:0 src/ /app/src/
+WORKDIR /app
+USER 10001
+EXPOSE 8000
+CMD ["python", "-m", "uvicorn", "src.app:app", "--host", "0.0.0.0", "--port", "8000"]</code></pre></div>
+    <ul><li><strong>Non-root user</strong> with a fixed numeric UID, and files group-owned by 0 so platforms that assign random UIDs (OpenShift) still work.</li><li><strong>Minimal base</strong> and multi-stage builds: build tools stay out of the runtime image.</li><li><strong>Pinned versions</strong> and release tags (and digests in the chart) so what was tested is what runs.</li><li><strong>Multi-architecture</strong> builds (amd64 and arm64) with <code>docker buildx</code>, because customer fleets increasingly include ARM nodes.</li><li><strong>SBOM and signature</strong>: publish a software bill of materials and sign images (for example with cosign) so the customer can verify provenance.</li></ul></section>
+  <section id="a-helm-chart-that-adapts-instead-of-being-edited"><h2>A Helm chart that adapts instead of being edited</h2>
+    <p>If a customer has to edit your templates to install your product, every upgrade becomes a merge conflict. Expose everything that legitimately differs between clusters as <strong>values</strong> with sensible defaults, and keep templates generic.</p>
+    <figure class="diagram" id="fig-chart-to-cluster"><div class="diagram-scroll"><svg viewBox="0 0 740 248" role="img" aria-label="Your release produces a signed image and a Helm chart. The customer mirrors the image into their registry. The platform team keeps a customer values file in their own Git repository, listing registry, existing secrets, ingress class, proxy and CA bundle. helm template renders the chart for review, then helm upgrade --install --atomic deploys it into a namespace enforcing the restricted pod security standard." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="chart-to-cluster-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="chart-to-cluster-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="chart-to-cluster-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="chart-to-cluster-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="chart-to-cluster-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><polyline points="171.0,70.0 201.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#chart-to-cluster-arrow-default)"/><rect x="162.7" y="24.0" width="46.6" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">mirror</text><polyline points="341.0,178.0 371.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#chart-to-cluster-arrow-default)"/><rect x="277.8" y="132.0" width="156.4" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">registry, secrets, proxy</text><polyline points="441.0,150.0 441.0,98.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#chart-to-cluster-arrow-default)"/><rect x="444.0" y="116.0" width="46.6" height="16" rx="4" class="dg-label-bg"/><text x="448.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">render</text><polyline points="511.0,178.0 541.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#chart-to-cluster-arrow-default)"/><rect x="499.6" y="132.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">install</text><polyline points="341.0,70.0 371.0,70.0" fill="none" style="stroke:rgba(148,163,184,0.55)" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#chart-to-cluster-arrow-muted)"/><rect x="320.5" y="24.0" width="71.0" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">image refs</text><rect x="31" y="42.0" width="140" height="56" rx="8" class="dg-node dg-muted"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text2)">Your release</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">image + chart</text><path d="M201,49.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M201,49.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Their registry</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">mirrored image</text><rect x="201" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="271.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">values.yaml</text><text x="271.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">their Git repo</text><rect x="371" y="150.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Helm</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">template, upgrade</text><rect x="541" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="611.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Namespace</text><text x="611.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">restricted PSS</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Platform review</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">rendered YAML</text></svg></div><figcaption>The same chart installs anywhere because everything cluster-specific comes from the customer's values: their registry, secrets, ingress, proxy and CA.</figcaption></figure>
+    <div class="code"><div class="code-cap">values.yaml: the knobs customer clusters actually need</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>image:
+  registry: registry.yourproduct.example     # customers override with their mirror
+  repository: assistant/api
+  tag: "1.8.2"
+  pullPolicy: IfNotPresent
+imagePullSecrets: []                         # e.g. [{name: corp-registry}]
+
+replicaCount: 2
+resources:
+  requests: {cpu: 250m, memory: 512Mi}
+  limits: {memory: 1Gi}
+
+existingSecret: ""                           # use the customer's secret instead of creating one
+env:
+  LOG_LEVEL: info
+
+ingress:
+  enabled: false
+  className: ""                              # nginx, openshift-default, alb ...
+  host: assistant.corp.example
+  tlsSecretName: ""
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile: {type: RuntimeDefault}
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: {drop: ["ALL"]}
+
+proxy:
+  httpsProxy: ""
+  noProxy: ".svc,.cluster.local"
+caBundleConfigMap: ""                        # customer CA mounted into the pod</code></pre></div>
+    <p>Support <strong>existing secrets</strong> (the customer creates and rotates them, often from their vault) rather than requiring secret values in <code>values.yaml</code>. Make registry, ingress class, storage class, proxy settings and CA bundle configurable. Ship a <code>values.schema.json</code> so typos fail at install time instead of producing a silently wrong deployment.</p></section>
+  <section id="security-posture-pod-security-and-rbac"><h2>Security posture: pod security and RBAC</h2>
+    <p>Many clusters enforce the Kubernetes <strong>restricted</strong> Pod Security Standard: non-root, no privilege escalation, all capabilities dropped, a seccomp profile. The values above satisfy it; test your chart in a namespace labelled <code>pod-security.kubernetes.io/enforce: restricted</code> before any customer does.</p>
+    <ul><li>Request <strong>namespaced</strong> RBAC only: a Role and RoleBinding for what the app needs, never cluster-admin.</li><li>If you truly need cluster-scoped resources (CRDs, webhooks), separate them into an optional install step that the platform team runs and reviews.</li><li>Use a read-only root filesystem and mount writable <code>emptyDir</code> volumes only where needed (<code>/tmp</code>, caches).</li><li>Define readiness and liveness probes, resource requests and limits, and a PodDisruptionBudget so platform maintenance does not take you down.</li><li>Expect network policies: document every connection your pods make so the customer can allow them.</li></ul></section>
+  <section id="install-upgrade-and-roll-back"><h2>Install, upgrade and roll back</h2>
+    <div class="code"><div class="code-cap">The workflow customers can run themselves</div><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>helm lint ./assistant -f customer-values.yaml
+# render and review before applying
+helm template assistant ./assistant -f customer-values.yaml &gt; rendered.yaml
+helm upgrade --install assistant ./assistant -n assistant --create-namespace \
+  -f customer-values.yaml --atomic --timeout 10m
+helm history assistant -n assistant
+helm rollback assistant 3 -n assistant   # back to revision 3 if the upgrade misbehaves</code></pre></div>
+    <ul><li><code>helm template</code> lets the customer's platform team review exactly what will be applied; many require it.</li><li><code>--atomic</code> rolls back automatically if the release does not become healthy within the timeout.</li><li>Keep the customer's values file in their version control; upgrades become a chart version bump plus a diff review.</li><li>Document breaking changes and migration steps in release notes for every chart version.</li></ul></section>
+  <section id="docs-and-preflight-checks"><h2>Docs and preflight checks</h2>
+    <p>The installation guide is part of the product. It should list prerequisites (Kubernetes version range, storage class, ingress controller, GPU nodes if needed, outbound destinations), a minimal values file for a typical install, the commands above, how to verify the install, and how to uninstall cleanly. Add a <strong>preflight</strong> script or Helm test that checks the environment before installing: can pods pull the image, resolve and reach the database, trust the CA, get through the proxy? Failing early with a clear message saves days of remote debugging.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Package a service for a cluster you do not own</h2>
+    <ol><li>Write the Dockerfile from this lesson for a small FastAPI service, build it for amd64 and arm64 with buildx, and scan it with an open-source scanner (for example Trivy).</li><li>Create a Helm chart with the values from this lesson, including existingSecret, ingress, proxy and CA bundle options, and a values.schema.json.</li><li>Create a kind cluster and a namespace labelled to enforce the restricted Pod Security Standard; install the chart and fix anything rejected.</li><li>Install from a local registry mirror by overriding image.registry, using an imagePullSecret.</li><li>Upgrade to a new image tag with --atomic, then deliberately ship a broken version and watch the automatic rollback.</li><li>Write a one-page installation guide with prerequisites, minimal values, verify and uninstall steps, and have someone follow it cold.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Packaging and deploying to customer infrastructure — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Non-root, minimal, pinned, multi-arch images with SBOM and signature.</li><li>Everything cluster-specific is a value; customers never edit templates.</li><li>Support existing secrets, registry mirrors, proxies and CA bundles.</li><li>Pass the restricted Pod Security Standard; namespaced RBAC only.</li><li>helm template for review, upgrade --install --atomic, rollback ready.</li><li>Installation guide and preflight checks are part of the product.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Images</h3><table><tbody><tr><td><code>USER 10001 (files group 0)</code></td><td>Non-root, OpenShift-friendly</td></tr><tr><td><code>docker buildx build --platform linux/amd64,linux/arm64</code></td><td>Multi-arch</td></tr><tr><td><code>trivy image IMAGE</code></td><td>Vulnerability scan</td></tr><tr><td><code>cosign sign IMAGE@DIGEST</code></td><td>Sign for provenance</td></tr></tbody></table></div><div class="cheat-group"><h3>Helm</h3><table><tbody><tr><td><code>helm lint CHART -f VALUES</code></td><td>Static checks</td></tr><tr><td><code>helm template NAME CHART -f VALUES</code></td><td>Render for review</td></tr><tr><td><code>helm upgrade --install ... --atomic --timeout 10m</code></td><td>Install or upgrade safely</td></tr><tr><td><code>helm history / helm rollback NAME REV</code></td><td>Revisions and rollback</td></tr><tr><td><code>values.schema.json</code></td><td>Validate values at install</td></tr></tbody></table></div><div class="cheat-group"><h3>Restricted pod security</h3><table><tbody><tr><td><code>runAsNonRoot: true</code></td><td>No root</td></tr><tr><td><code>allowPrivilegeEscalation: false</code></td><td>No escalation</td></tr><tr><td><code>capabilities: {drop: [ALL]}</code></td><td>No extra capabilities</td></tr><tr><td><code>seccompProfile: {type: RuntimeDefault}</code></td><td>Seccomp required</td></tr><tr><td><code>readOnlyRootFilesystem: true + emptyDir</code></td><td>Writable only where needed</td></tr></tbody></table></div><div class="cheat-group"><h3>Chart values customers need</h3><table><tbody><tr><td><code>image.registry / imagePullSecrets</code></td><td>Their mirror</td></tr><tr><td><code>existingSecret</code></td><td>Their secret management</td></tr><tr><td><code>ingress.className / host / tls</code></td><td>Their ingress</td></tr><tr><td><code>nodeSelector / tolerations / affinity</code></td><td>Their scheduling rules</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Images that run as root or use the latest tag.</li><li>Requiring cluster-admin to install an application.</li><li>Secrets that must be pasted into values.yaml.</li><li>Hard-coded registry, ingress class or storage class in templates.</li><li>Never testing under the restricted Pod Security Standard or on OpenShift.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "A customer's admission controller rejects your pods with 'must not run as root'. What should change?", "options": ["Run as a non-root UID and set runAsNonRoot in the security context", "Ask the customer to disable the admission policy", "Install the app in the kube-system namespace", "Add privileged: true to the container"], "answer": 0, "explain": "Restricted policies require non-root containers. Fixing the image and security context is the only acceptable path."}, {"q": "The customer must pull images from their internal mirror. How should your chart support this?", "options": ["A configurable image.registry value plus imagePullSecrets", "Customers edit the deployment template by hand", "A hard-coded mirror URL for each customer", "Copy images into the chart archive"], "answer": 0, "explain": "Exposing the registry as a value keeps templates unchanged across customers and upgrades."}, {"q": "Why do platform teams often ask for helm template output before installation?", "options": ["To review exactly which resources will be applied", "Because helm install cannot work without it", "To make the installation faster", "To generate the container images"], "answer": 0, "explain": "Rendered manifests let reviewers check RBAC, security contexts and network needs before anything touches their cluster."}, {"q": "An upgrade's new pods never become ready. Which flag would have returned the release to its previous state automatically?", "options": ["--atomic", "--create-namespace", "--dry-run", "--reuse-values"], "answer": 0, "explain": "--atomic waits for the release to become healthy and rolls it back automatically if it does not within the timeout."}, {"q": "Your app needs a database password that the customer rotates in their vault. What should the chart do?", "options": ["Reference an existing Kubernetes secret they manage", "Require the password in values.yaml", "Bake the password into the image", "Generate a random password at install time"], "answer": 0, "explain": "Supporting an existing secret lets the customer manage and rotate credentials with their own tooling, without exposing them in your files."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="fde-prototyping.html"><span>← Previous</span><strong>Rapid prototyping and demos</strong></a>
+    <a class="pager-up" href="../education.html#fde">All Forward Deployed modules</a>
+    <a class="pager-link pager-next" href="fde-airgapped.html"><span>Next →</span><strong>On-prem, private cloud and air-gapped deployments</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=fde-packaging&amp;page=/education/fde-packaging.html&amp;title=Packaging%20and%20deploying%20to%20customer%20infrastructure">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=fde-packaging&amp;page=/education/fde-packaging.html&amp;title=Packaging%20and%20deploying%20to%20customer%20infrastructure">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

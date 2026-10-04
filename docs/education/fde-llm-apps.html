@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Building LLM applications for customers — Forward Deployed | ThavionAI Education</title>
+  <meta name="description" content="Retrieval-augmented generation over customer documents, prompts as code, structured output and evaluation from day one." />
+  <meta property="og:title" content="Building LLM applications for customers — ThavionAI Education" />
+  <meta property="og:description" content="Retrieval-augmented generation over customer documents, prompts as code, structured output and evaluation from day one." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/fde-llm-apps.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-fde" data-module="fde-llm-apps">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=fde-llm-apps&amp;page=/education/fde-llm-apps.html&amp;title=Building%20LLM%20applications%20for%20customers">Feedback</a>
+    <a href="../education.html#fde" class="nav-cta">All Forward Deployed modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#fde">Forward Deployed</a> › Stage 3: Building &amp; integrating</div>
+    <h1>Building LLM applications for customers</h1>
+    <p class="lede">Retrieval-augmented generation over customer documents, prompts as code, structured output and evaluation from day one.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">~45 min read</span>
+      <span class="chip">Module 10 of 20</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">Most FDE projects today involve putting a language model to work on a customer's own knowledge and processes. The demo version takes an afternoon; the version a regulated enterprise will trust with real users takes discipline. This lesson covers the patterns that make the difference: retrieval-augmented generation over messy customer documents, respecting document permissions, grounding answers with citations, structured output that downstream systems can rely on, prompts managed as code, choosing where the model runs, and an evaluation set built from discovery so every change is measured rather than guessed.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Design a retrieval-augmented generation pipeline for real customer documents</li><li>Enforce document permissions and cite sources in every answer</li><li>Produce validated structured output for downstream systems</li><li>Manage prompts and model choices as versioned, tested configuration</li><li>Build and run an evaluation set from day one of a project</li></ul>
+    </div>
+    <section id="rag-over-real-customer-documents"><h2>RAG over real customer documents</h2>
+    <p><strong>Retrieval-augmented generation</strong> (RAG) answers questions by first retrieving relevant passages from the customer's documents and then asking the model to answer using only those passages. It keeps answers grounded in the customer's own content and current without retraining. Every stage needs care with enterprise data.</p>
+    <ol><li><strong>Ingest</strong>: extract text from PDFs, Word files, wiki pages and tickets; scanned documents need OCR; tables and headings carry meaning, so keep them.</li><li><strong>Chunk</strong>: split by document structure (sections, clauses, headings) rather than fixed character counts, and attach metadata: source, title, section, date, and access permissions.</li><li><strong>Index</strong>: store embeddings in a vector index and the text in a keyword index; many enterprise questions use exact codes, names and numbers that keyword search finds better.</li><li><strong>Retrieve</strong>: hybrid search (keyword plus vector), filtered by the user's permissions, then optionally rerank the top candidates.</li><li><strong>Generate</strong>: prompt the model with the retrieved passages, instruct it to answer only from them and cite each claim, and to say when the answer is not in the sources.</li></ol>
+    <div class="code"><div class="code-cap">Structure-aware chunking that keeps metadata (simplified)</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import re
+
+
+def chunk_policy(doc_id: str, text: str, acl: list[str], max_chars: int = 2000):
+    sections = re.split(r"\n(?=Section \d+[.:])", text)   # split at 'Section 4.' headings
+    for i, sec in enumerate(sections):
+        heading = sec.strip().splitlines()[0][:120] if sec.strip() else ""
+        for start in range(0, len(sec), max_chars):
+            yield {
+                "id": f"{doc_id}:{i}:{start}",
+                "text": sec[start:start + max_chars],
+                "doc_id": doc_id,
+                "heading": heading,
+                "acl": acl,            # groups allowed to see this document
+            }</code></pre></div></section>
+  <section id="permissions-and-citations"><h2>Permissions and citations</h2>
+    <p>In an enterprise, not everyone may read every document. A RAG system that retrieves across all documents and lets the model summarise them will leak HR files, board papers or other customers' contracts to anyone who asks the right question. Carry each document's access control list into the index and <strong>filter retrieval by the requesting user's groups</strong>, from the identity provider, before anything reaches the model. Never rely on the prompt to keep secrets.</p>
+    <figure class="diagram" id="fig-permission-rag"><div class="diagram-scroll"><svg viewBox="0 0 740 248" role="img" aria-label="A user signs in through the identity provider, which supplies their groups. Their question goes to the app, which runs hybrid search over an index of chunks carrying access control lists. Results are filtered to chunks the user&#x27;s groups may read, then the top passages and question are sent to the model. The model returns an answer with citations, which the app shows with links to sources." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="permission-rag-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="permission-rag-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="permission-rag-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="permission-rag-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="permission-rag-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><polyline points="171.0,70.0 201.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#permission-rag-arrow-default)"/><rect x="171.8" y="24.0" width="28.3" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">ask</text><polyline points="271.0,150.0 271.0,98.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#permission-rag-arrow-default)"/><rect x="274.0" y="116.0" width="46.6" height="16" rx="4" class="dg-label-bg"/><text x="278.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">groups</text><polyline points="341.0,70.0 371.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#permission-rag-arrow-default)"/><rect x="332.7" y="24.0" width="46.6" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">search</text><polyline points="441.0,98.0 441.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#permission-rag-arrow-default)"/><rect x="444.0" y="116.0" width="71.0" height="16" rx="4" class="dg-label-bg"/><text x="448.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">candidates</text><polyline points="511.0,178.0 541.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#permission-rag-arrow-default)"/><rect x="472.2" y="132.0" width="107.6" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">allowed passages</text><polyline points="611.0,206.0 611.0,228.0 101.0,228.0 101.0,98.0" fill="none" style="stroke:#34d399" stroke-width="1.6" marker-end="url(#permission-rag-arrow-ok)"/><rect x="314.4" y="231.0" width="83.2" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="239.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:#34d399">cited answer</text><rect x="31" y="42.0" width="140" height="56" rx="28.0" class="dg-node dg-actor"/><text x="101.0" y="70.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">User</text><rect x="201" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="271.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Identity (IdP)</text><text x="271.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">groups</text><rect x="201" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">App</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">question + groups</text><path d="M371,49.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M371,49.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Hybrid index</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">chunks + ACLs</text><rect x="371" y="150.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">ACL filter</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">before the model</text><rect x="541" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="611.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Model</text><text x="611.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">answer + citations</text></svg></div><figcaption>Permission-aware RAG: the user's groups from SSO filter retrieval before anything reaches the model, and every answer cites the passages it used.</figcaption></figure>
+    <div class="code"><div class="code-cap">Permission filter applied before generation (illustrative store API)</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>def answer(question: str, user_groups: set[str]) -&gt; dict:
+    hits = index.search(question, top_k=40)                       # hybrid search
+    allowed = [h for h in hits if user_groups &amp; set(h["acl"])][:8]  # enforce ACLs first
+    if not allowed:
+        return {"answer": "I could not find this in documents you can access.", "sources": []}
+    context = "\n\n".join(f"[{i + 1}] {h['heading']}\n{h['text']}" for i, h in enumerate(allowed))
+    prompt = ("Answer using only the numbered sources. Cite like [2]. "
+              "If the sources do not contain the answer, say so.\n\n"
+              f"Sources:\n{context}\n\nQuestion: {question}")
+    return {"answer": call_llm(prompt), "sources": [h["doc_id"] for h in allowed]}</code></pre></div>
+    <p>Citations do more than build trust: they let users verify an answer in seconds, and they let you debug whether a wrong answer came from bad retrieval (the right passage was not found) or bad generation (it was found but misused). Show the cited passages in the interface, linked to the source.</p></section>
+  <section id="structured-output-for-downstream-systems"><h2>Structured output for downstream systems</h2>
+    <p>Many FDE workflows do not end in a chat answer but in data: fields extracted from a claim form, a classification routed to a queue, a draft record for a CRM. Ask the model for <strong>structured output</strong> against a schema, validate every response, and decide what happens when validation fails (retry once with the error, then send to a human queue).</p>
+    <div class="code"><div class="code-cap">Validate extracted fields before they touch a customer system</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>from pydantic import BaseModel, Field, ValidationError
+
+
+class ClaimFields(BaseModel):
+    policy_number: str = Field(pattern=r"^POL-\d{8}$")
+    incident_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    claim_type: str = Field(pattern=r"^(motor|home|travel)$")
+    amount_claimed: float = Field(ge=0)
+
+
+def extract(text: str) -&gt; ClaimFields | None:
+    raw = call_llm(f"Extract the claim fields as JSON matching this schema: "
+                   f"{ClaimFields.model_json_schema()}\n\n{text}")
+    try:
+        return ClaimFields.model_validate_json(raw)
+    except ValidationError:
+        return None          # route to human review queue</code></pre></div></section>
+  <section id="prompts-models-and-where-they-run"><h2>Prompts, models and where they run</h2>
+    <ul><li><strong>Prompts are code</strong>: keep them in version control as templates, review changes, and tie each deployed version to its evaluation results.</li><li><strong>Model choice is configuration</strong>, not hard-coded: a capable model for hard reasoning, a smaller, cheaper one for routing or extraction, selected per task through a gateway.</li><li><strong>Where the model runs is a customer decision</strong>: a hosted API (check data retention and residency terms), a model in the customer's cloud account, or a self-hosted open-weight model on their infrastructure when data cannot leave.</li><li><strong>Cost and latency</strong> scale with tokens: retrieve fewer, better passages; cache repeated prompts; set max output tokens.</li><li><strong>Prompt injection</strong>: retrieved documents and user input can contain instructions; never let model output trigger actions without validation, which the agents lesson covers.</li></ul></section>
+  <section id="evaluation-from-day-one"><h2>Evaluation from day one</h2>
+    <p>Without an evaluation set, every prompt tweak is a guess and every demo is anecdote. Build one in week one from discovery: real questions or documents from users, with expected answers or fields agreed with domain experts. Start with 50 to 200 items and grow it with every failure found in testing.</p>
+    <div class="table-wrap"><table><thead><tr><th>What to measure</th><th>How</th><th>Why</th></tr></thead><tbody><tr><td>Retrieval recall</td><td>Is the passage containing the answer in the top k?</td><td>Separates retrieval from generation problems</td></tr><tr><td>Answer correctness</td><td>Expert review, or an LLM judge calibrated against experts</td><td>The quality users feel</td></tr><tr><td>Groundedness</td><td>Is every claim supported by a cited source?</td><td>Catches hallucination</td></tr><tr><td>Refusal behaviour</td><td>Does it say 'not found' when the answer is absent?</td><td>Prevents confident wrong answers</td></tr><tr><td>Field accuracy</td><td>Exact or normalised match per extracted field</td><td>Structured-output workflows</td></tr></tbody></table></div>
+    <div class="callout callout-tip"><strong>Tip</strong><p>Run the evaluation on every change to prompts, retrieval settings or models, and put the numbers in your weekly status. 'Correct answers rose from 81% to 92% on 150 expert-reviewed questions' is the sentence that wins the go decision.</p></div></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>A permission-aware RAG assistant with evals</h2>
+    <ol><li>Collect 30 to 50 public documents with clear structure (policies, manuals, regulations) and assign each to one of two 'groups'.</li><li>Implement structure-aware chunking with metadata and ACLs, and index the chunks in a local vector store plus a keyword index.</li><li>Write the <code>answer()</code> function with permission filtering and citations, using any model you have access to as <code>call_llm</code>.</li><li>Prove the ACL filter works: a user in group A must never see content only group B may read, even when asked directly.</li><li>Write 40 evaluation questions with expected answers and source documents; measure retrieval recall at k=8 and answer correctness.</li><li>Change one thing (chunk size, hybrid versus vector-only, top_k) and rerun the evaluation; record the before and after.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Building LLM applications for customers — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>RAG: ingest, chunk by structure, hybrid index, permission-filtered retrieval, cited generation.</li><li>Filter by the user's permissions before retrieval results reach the model.</li><li>Citations let users verify and let you tell retrieval failures from generation failures.</li><li>Structured output: schema, validation, fallback to human review.</li><li>Prompts and model choices are versioned configuration tied to eval results.</li><li>Evaluation set from discovery in week one; run it on every change.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>RAG pipeline</h3><table><tbody><tr><td><code>ingest -&gt; chunk -&gt; embed + keyword index</code></td><td>Indexing</td></tr><tr><td><code>chunk metadata: source, heading, date, acl</code></td><td>Needed for filters and citations</td></tr><tr><td><code>hybrid search -&gt; ACL filter -&gt; rerank -&gt; top k</code></td><td>Retrieval</td></tr><tr><td><code>'answer only from sources; cite [n]; say if absent'</code></td><td>Generation instruction</td></tr></tbody></table></div><div class="cheat-group"><h3>Structured output</h3><table><tbody><tr><td><code>class Fields(BaseModel): ...</code></td><td>Schema in code</td></tr><tr><td><code>Fields.model_validate_json(raw)</code></td><td>Validate model output</td></tr><tr><td><code>Fields.model_json_schema()</code></td><td>Give the schema to the model</td></tr><tr><td><code>on failure: retry once, then human queue</code></td><td>Fallback</td></tr></tbody></table></div><div class="cheat-group"><h3>Evaluation</h3><table><tbody><tr><td><code>recall@k</code></td><td>Right passage retrieved?</td></tr><tr><td><code>correctness (expert or calibrated judge)</code></td><td>Right answer?</td></tr><tr><td><code>groundedness</code></td><td>Claims supported by sources?</td></tr><tr><td><code>refusal when absent</code></td><td>Admits not knowing?</td></tr><tr><td><code>field-level accuracy</code></td><td>Extraction quality</td></tr></tbody></table></div><div class="cheat-group"><h3>Deployment choices</h3><table><tbody><tr><td><code>hosted API</code></td><td>Check retention and residency terms</td></tr><tr><td><code>model in customer cloud account</code></td><td>Data stays in their tenancy</td></tr><tr><td><code>self-hosted open weights</code></td><td>When data cannot leave</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Retrieving across all documents and relying on the prompt to hide restricted content.</li><li>Fixed-size chunks that cut clauses and tables in half.</li><li>Vector-only search that misses exact codes and names.</li><li>Writing model output into customer systems without validation.</li><li>No evaluation set, so every change is judged by a few hand-picked examples.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "A user from sales asks the HR assistant about colleagues' salaries and gets an answer. What is the root cause?", "options": ["Retrieval was not filtered by the user's document permissions", "The model's temperature was too high for this question", "The chunk size was too small for salary tables", "Citations were turned off in the interface"], "answer": 0, "explain": "Access control must be enforced in retrieval using the user's groups; a prompt cannot reliably keep restricted content secret."}, {"q": "An answer is wrong. How do citations help you debug it?", "options": ["They show whether the right passage was retrieved or misused", "They make the model refuse wrong answers", "They reduce the number of tokens used", "They automatically fix the retrieval index"], "answer": 0, "explain": "If the cited passages do not contain the answer, retrieval failed; if they do, generation misused them. Each needs a different fix."}, {"q": "Users ask about policy codes such as 'MX-4471', and vector search keeps missing them. What helps most?", "options": ["Hybrid search that adds keyword matching", "A larger embedding dimension for every chunk", "Higher temperature during generation", "Removing metadata from the chunks"], "answer": 0, "explain": "Exact identifiers are matched well by keyword search and poorly by semantic embeddings; combining both covers each other's gaps."}, {"q": "Extracted claim fields will be written into the customer's claims system. What must happen first?", "options": ["Validate against a schema and route failures to a human", "Trust the model because it was given the schema", "Write them directly and fix errors in a later batch", "Convert all fields to free text"], "answer": 0, "explain": "Models can produce malformed or wrong values; schema validation with a human fallback protects the customer's system of record."}, {"q": "When should the evaluation set be built?", "options": ["In the first week, from discovery examples with experts", "After the final demo, to document the results", "Only if the customer asks for metrics", "Once the prompt is finished and frozen"], "answer": 0, "explain": "An early evaluation set makes every change measurable and turns progress reports into evidence."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="fde-integration.html"><span>← Previous</span><strong>Integrating with enterprise systems</strong></a>
+    <a class="pager-up" href="../education.html#fde">All Forward Deployed modules</a>
+    <a class="pager-link pager-next" href="fde-agents.html"><span>Next →</span><strong>Agents and tool use in the enterprise</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=fde-llm-apps&amp;page=/education/fde-llm-apps.html&amp;title=Building%20LLM%20applications%20for%20customers">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=fde-llm-apps&amp;page=/education/fde-llm-apps.html&amp;title=Building%20LLM%20applications%20for%20customers">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

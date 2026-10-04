@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Networks and security at customer sites — Forward Deployed | ThavionAI Education</title>
+  <meta name="description" content="Proxies, firewalls, DNS, TLS and private CAs, VPNs and SSO: why things that work on your laptop fail inside an enterprise." />
+  <meta property="og:title" content="Networks and security at customer sites — ThavionAI Education" />
+  <meta property="og:description" content="Proxies, firewalls, DNS, TLS and private CAs, VPNs and SSO: why things that work on your laptop fail inside an enterprise." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/fde-network-security.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-fde" data-module="fde-network-security">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=fde-network-security&amp;page=/education/fde-network-security.html&amp;title=Networks%20and%20security%20at%20customer%20sites">Feedback</a>
+    <a href="../education.html#fde" class="nav-cta">All Forward Deployed modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#fde">Forward Deployed</a> › Stage 1: The role &amp; engineering foundations</div>
+    <h1>Networks and security at customer sites</h1>
+    <p class="lede">Proxies, firewalls, DNS, TLS and private CAs, VPNs and SSO: why things that work on your laptop fail inside an enterprise.</p>
+    <div class="meta">
+      <span class="chip">Beginner</span>
+      <span class="chip">~40 min read</span>
+      <span class="chip">Module 4 of 20</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">The most common FDE day-one failure has nothing to do with your code: the software that ran perfectly in your cloud account cannot reach anything inside the customer's network. Enterprises route traffic through proxies, inspect TLS with their own certificate authorities, allow outbound traffic only to approved destinations, split DNS between inside and outside, and put everything behind single sign-on. This lesson explains each of those layers, how to diagnose which one is blocking you, and how to configure software, containers and Kubernetes to work with them rather than around them.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Configure applications and containers for explicit HTTP proxies and NO_PROXY</li><li>Diagnose TLS failures caused by inspecting proxies and private certificate authorities</li><li>Request the right firewall and egress allowlist changes with precise details</li><li>Reach internal systems through jump hosts and VPNs safely</li><li>Explain how SSO with OIDC or SAML fits into an application you deploy</li></ul>
+    </div>
+    <section id="proxies-the-gate-in-front-of-the-internet"><h2>Proxies: the gate in front of the internet</h2>
+    <p>Many enterprises do not let servers talk to the internet directly. Outbound HTTP and HTTPS must go through an <strong>explicit proxy</strong>: the client connects to the proxy and, for HTTPS, asks it to open a tunnel with the HTTP <code>CONNECT</code> method. Most tools read the conventional environment variables <code>HTTP_PROXY</code>, <code>HTTPS_PROXY</code> and <code>NO_PROXY</code> (some only the lowercase forms), and requests to internal hosts must be excluded through <code>NO_PROXY</code> or they will be sent to the proxy, which cannot reach them.</p>
+    <div class="code"><div class="code-cap">Proxy settings for a shell and a test through them</div><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>export HTTPS_PROXY=http://proxy.corp.example:8080
+export HTTP_PROXY=http://proxy.corp.example:8080
+export NO_PROXY=localhost,127.0.0.1,.corp.example,10.0.0.0/8,.svc,.cluster.local
+export https_proxy=$HTTPS_PROXY http_proxy=$HTTP_PROXY no_proxy=$NO_PROXY
+
+curl -sv https://pypi.org/simple/ -o /dev/null 2&gt;&amp;1 | grep -E 'proxy|CONNECT|HTTP/'</code></pre></div>
+    <ul><li><code>NO_PROXY</code> syntax varies by tool: suffixes like <code>.corp.example</code> are widely understood, CIDR ranges are not supported everywhere. Test each tool you rely on.</li><li>The Docker daemon needs its own proxy configuration to pull images; containers do not inherit the host's shell variables, so pass them explicitly.</li><li>In Kubernetes, include the cluster's service and pod domains (<code>.svc</code>, <code>.cluster.local</code>) and CIDRs in <code>NO_PROXY</code>, or in-cluster calls will be sent to the proxy and fail.</li></ul></section>
+  <section id="tls-inspection-and-private-certificate-authorities"><h2>TLS inspection and private certificate authorities</h2>
+    <p>Many corporate proxies <strong>inspect TLS</strong>: they terminate your HTTPS connection, examine it, and re-encrypt it with a certificate signed by the company's own <strong>certificate authority</strong> (CA). Company laptops trust that CA; your container image does not. The symptom is a certificate verification error such as "self-signed certificate in certificate chain" or "unable to get local issuer certificate" for sites that are perfectly valid outside. Internal services are often signed by a private CA too.</p>
+    <figure class="diagram" id="fig-enterprise-egress"><div class="diagram-scroll"><svg viewBox="0 0 740 248" role="img" aria-label="Your application container inside the customer network sends outbound HTTPS to the corporate proxy, which inspects TLS and re-signs it with the corporate certificate authority before reaching the internet service. The container must trust the corporate CA. Traffic to internal services such as the database goes directly, excluded from the proxy by NO_PROXY, and passes through the firewall&#x27;s allowlist only for approved destinations." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="enterprise-egress-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="enterprise-egress-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="enterprise-egress-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="enterprise-egress-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="enterprise-egress-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><rect x="20" y="19" width="502" height="210" rx="10" class="dg-group"/><text x="30" y="222" font-size="10" font-weight="700" letter-spacing="1" class="dg-group-label">CUSTOMER NETWORK</text><polyline points="171.0,70.0 201.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#enterprise-egress-arrow-default)"/><rect x="147.4" y="24.0" width="77.1" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">HTTPS_PROXY</text><polyline points="341.0,70.0 371.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#enterprise-egress-arrow-default)"/><rect x="311.4" y="24.0" width="89.3" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">re-signed TLS</text><polyline points="511.0,70.0 541.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#enterprise-egress-arrow-default)"/><rect x="481.4" y="24.0" width="89.3" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">approved only</text><polyline points="101.0,98.0 101.0,150.0" fill="none" style="stroke:#34d399" stroke-width="1.6" marker-end="url(#enterprise-egress-arrow-ok)"/><rect x="104.0" y="116.0" width="58.8" height="16" rx="4" class="dg-label-bg"/><text x="108.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:#34d399">NO_PROXY</text><rect x="31" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Your container</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">trusts corp CA</text><rect x="201" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Corporate proxy</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">TLS inspection</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Firewall</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">egress allowlist</text><rect x="541" y="42.0" width="140" height="56" rx="8" class="dg-node dg-muted"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text2)">Your API / model</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">internet</text><path d="M31,157.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M31,157.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="101.0" y="178.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Internal DB</text></svg></div><figcaption>Inside an enterprise, outbound traffic goes through an inspecting proxy that re-signs TLS with the company CA, while internal traffic must bypass the proxy via NO_PROXY.</figcaption></figure>
+    <div class="code"><div class="code-cap">See who actually signed the certificate you receive</div><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>openssl s_client -connect api.github.com:443 -servername api.github.com \
+  -showcerts &lt;/dev/null 2&gt;/dev/null | grep -E 's:|i:'
+# issuer 'i:' shows the corporate CA instead of a public one when a proxy inspects TLS</code></pre></div>
+    <p>The fix is to <strong>trust the customer's CA</strong>, never to turn verification off. Get the CA certificate (PEM) from the customer's security team, add it to the system trust store (<code>update-ca-certificates</code> on Debian-style systems, <code>update-ca-trust</code> on Red Hat-style), and make sure each runtime uses it: Python with httpx and OpenSSL honours <code>SSL_CERT_FILE</code>, the requests library uses <code>REQUESTS_CA_BUNDLE</code>, Node.js uses <code>NODE_EXTRA_CA_CERTS</code>, and Java needs the CA imported into its truststore.</p>
+    <div class="code"><div class="code-cap">Bake the customer CA into an image (or mount it at runtime)</div><div class="code-head"><span>dockerfile</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>FROM python:3.12-slim
+COPY customer-root-ca.pem /usr/local/share/ca-certificates/customer-root-ca.crt
+RUN update-ca-certificates
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt</code></pre></div>
+    <div class="callout callout-warning"><strong>Watch out</strong><p>Setting verify=False, NODE_TLS_REJECT_UNAUTHORIZED=0 or curl -k to make a demo work trains everyone to accept interception and will fail any security review. Fix trust properly, even under time pressure.</p></div></section>
+  <section id="firewalls-egress-allowlists-and-dns"><h2>Firewalls, egress allowlists and DNS</h2>
+    <p>Inbound and outbound traffic is filtered. Your software may need outbound access to your company's API, a model provider, a container registry or a package index, and the customer's network team must allow each one. They will need precise information: destination hostnames (not "the internet"), ports, protocol, direction, source hosts or subnets, and why. Ask early; firewall change processes can take weeks.</p>
+    <div class="table-wrap"><table><thead><tr><th>Destination</th><th>Port</th><th>Purpose</th><th>Required when</th></tr></thead><tbody><tr><td>api.yourproduct.example</td><td>443/TCP</td><td>Product API and licence check</td><td>Always (unless fully air-gapped)</td></tr><tr><td>registry.yourproduct.example</td><td>443/TCP</td><td>Container image pulls</td><td>Install and upgrades</td></tr><tr><td>llm.provider.example</td><td>443/TCP</td><td>Hosted model inference</td><td>If not self-hosting models</td></tr><tr><td>telemetry.yourproduct.example</td><td>443/TCP</td><td>Optional usage metrics</td><td>Only with customer approval</td></tr></tbody></table></div>
+    <p><strong>Split-horizon DNS</strong> means the same name resolves differently inside and outside the network, and some internal names only exist on internal DNS servers. A container or pod using a different resolver than the host can fail to find internal services. When in doubt, check resolution from inside the container or pod with <code>getent hosts</code> and compare with the host.</p></section>
+  <section id="getting-in-vpns-jump-hosts-and-access"><h2>Getting in: VPNs, jump hosts and access</h2>
+    <p>Customers grant access in many forms: a VPN client, a virtual desktop, a <strong>bastion</strong> (jump) host you SSH through, a cloud console role, or screen-sharing where the customer types. Use exactly what is offered, and do not create side doors such as personal tunnels or reverse shells, even temporarily.</p>
+    <div class="code"><div class="code-cap">SSH through a jump host without copying keys onto it</div><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># one-off
+ssh -J you@bastion.corp.example you@app01.internal.example
+
+# ~/.ssh/config so plain 'ssh app01' works
+cat &gt;&gt; ~/.ssh/config &lt;&lt;'EOF'
+Host app01
+  HostName app01.internal.example
+  User you
+  ProxyJump you@bastion.corp.example
+EOF</code></pre></div>
+    <ul><li>Prefer short-lived credentials and personal accounts over shared ones, so actions are attributable.</li><li>Keep a written record of what access you have and request its removal when the engagement ends.</li><li>Port-forward with <code>ssh -L</code> only for the duration of a task, and only for ports you have been allowed to use.</li></ul></section>
+  <section id="single-sign-on-and-how-users-get-in"><h2>Single sign-on and how users get in</h2>
+    <p>Enterprise users expect to log in with their company identity, not a new password. The application you deploy should delegate authentication to the customer's <strong>identity provider</strong> (IdP), such as Microsoft Entra ID, Okta or Keycloak, using <strong>OIDC</strong> (OpenID Connect, built on OAuth 2.0, common for modern apps) or <strong>SAML</strong> (older, XML-based, still widespread).</p>
+    <ul><li>You register the application with the IdP and receive a client ID and secret (OIDC) or exchange metadata (SAML), plus a redirect or callback URL you configure exactly.</li><li>Group or role claims in the token map to permissions in your app; agree the mapping with the customer.</li><li>Clock skew, redirect URL mismatches and missing claims are the usual first-day errors; the IdP's sign-in logs usually say exactly which.</li><li>Service-to-service calls use machine identities (client credentials, workload identity, mTLS), not a person's login; the integration lesson covers these.</li></ul></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Simulate an enterprise network</h2>
+    <ol><li>Run a forward proxy locally (for example a squid or tinyproxy container) and block direct outbound traffic from a test container with a Docker network that has no default route except through the proxy container.</li><li>Make <code>curl</code> and a small Python httpx script work through the proxy using HTTPS_PROXY and NO_PROXY.</li><li>Create your own CA with openssl, issue a certificate for a local HTTPS test server, and observe the verification error from your script.</li><li>Fix it properly by adding the CA to the container's trust store and setting SSL_CERT_FILE; confirm verification is on.</li><li>Write the firewall request you would send a customer for a tool that needs your API, a registry and a model provider.</li><li>Configure <code>ProxyJump</code> in your SSH config for a two-hop path between two local VMs or containers.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Networks and security at customer sites — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Outbound traffic often must use an explicit proxy; internal hosts go in NO_PROXY.</li><li>Containers and the Docker daemon need proxy settings passed explicitly.</li><li>Certificate errors on valid sites usually mean TLS inspection: trust the customer CA.</li><li>Never disable certificate verification to make something work.</li><li>Firewall requests need exact hostnames, ports, direction, source and reason, early.</li><li>Delegate user login to the customer's IdP with OIDC or SAML.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Proxy</h3><table><tbody><tr><td><code>HTTPS_PROXY / HTTP_PROXY / NO_PROXY</code></td><td>Set both upper and lower case</td></tr><tr><td><code>NO_PROXY=.corp.example,.svc,.cluster.local</code></td><td>Keep internal traffic direct</td></tr><tr><td><code>curl -x http://proxy:8080 URL</code></td><td>Test through a specific proxy</td></tr><tr><td><code>docker run -e HTTPS_PROXY -e NO_PROXY ...</code></td><td>Pass proxy settings into containers</td></tr></tbody></table></div><div class="cheat-group"><h3>TLS and CAs</h3><table><tbody><tr><td><code>openssl s_client -connect H:443 -servername H -showcerts</code></td><td>Inspect the chain you receive</td></tr><tr><td><code>update-ca-certificates / update-ca-trust</code></td><td>Add a CA to the system store</td></tr><tr><td><code>SSL_CERT_FILE / REQUESTS_CA_BUNDLE</code></td><td>Python trust bundle</td></tr><tr><td><code>NODE_EXTRA_CA_CERTS</code></td><td>Node.js extra CAs</td></tr><tr><td><code>keytool -importcert</code></td><td>Java truststore</td></tr></tbody></table></div><div class="cheat-group"><h3>Access</h3><table><tbody><tr><td><code>ssh -J user@bastion user@host</code></td><td>Jump host</td></tr><tr><td><code>ProxyJump in ~/.ssh/config</code></td><td>Persistent jump configuration</td></tr><tr><td><code>ssh -L 8443:target:443 host</code></td><td>Temporary local port forward</td></tr></tbody></table></div><div class="cheat-group"><h3>Identity</h3><table><tbody><tr><td><code>OIDC: client ID, secret, redirect URI, scopes</code></td><td>Modern SSO</td></tr><tr><td><code>SAML: IdP metadata, ACS URL, entity ID</code></td><td>Older enterprise SSO</td></tr><tr><td><code>group claims -&gt; app roles</code></td><td>Agree the mapping with the customer</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Forgetting NO_PROXY, so internal and in-cluster calls go to the proxy.</li><li>Disabling TLS verification instead of trusting the customer CA.</li><li>Asking for 'internet access' instead of specific destinations and ports.</li><li>Testing DNS on the host when the container uses a different resolver.</li><li>Creating unofficial tunnels or shared accounts to save time.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "A container fails with 'self-signed certificate in certificate chain' calling a public API that works from your laptop at home. What is the likely cause?", "options": ["A TLS-inspecting proxy re-signs traffic with the customer's CA", "The public API's certificate expired earlier this week", "DNS inside the container is returning the wrong IP address", "The container image is missing its Python interpreter"], "answer": 0, "explain": "Inspecting proxies present certificates signed by a corporate CA that your image does not trust; trusting that CA fixes it."}, {"q": "After setting HTTPS_PROXY, calls to an internal service at api.corp.example start failing. What did you forget?", "options": ["To add .corp.example to NO_PROXY", "To set HTTP_PROXY as well", "To restart the proxy server", "To disable TLS verification"], "answer": 0, "explain": "Without a NO_PROXY entry, internal requests are sent to the proxy, which typically cannot reach internal hosts."}, {"q": "Which firewall request is most likely to be approved quickly?", "options": ["Outbound 443/TCP from the app subnet to api.yourproduct.example, for API calls", "Allow the application servers full outbound internet access", "Open all ports in both directions between our cloud and yours", "Disable the firewall entirely for the duration of the pilot"], "answer": 0, "explain": "Network teams need precise, minimal rules: source, destination, port, protocol and purpose."}, {"q": "What is the correct way to make a Python service trust the customer's internal CA?", "options": ["Add the CA to the trust store and point SSL_CERT_FILE or REQUESTS_CA_BUNDLE at it", "Set verify=False on every outgoing request in the client", "Replace every HTTPS URL in the configuration with plain HTTP", "Ask users to click through the certificate warning in their browser"], "answer": 0, "explain": "Extending the trust store keeps certificate verification on while accepting the customer's CA."}, {"q": "Users should log in to your deployed app with their company accounts. What do you integrate with?", "options": ["The customer's identity provider via OIDC or SAML", "A new local username and password database", "The firewall's user list", "A shared admin account for all users"], "answer": 0, "explain": "Delegating authentication to the IdP gives users single sign-on and lets the customer control access through their own groups and policies."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="fde-python-delivery.html"><span>← Previous</span><strong>Python for fast, reliable delivery</strong></a>
+    <a class="pager-up" href="../education.html#fde">All Forward Deployed modules</a>
+    <a class="pager-link pager-next" href="fde-discovery.html"><span>Next →</span><strong>Customer discovery</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=fde-network-security&amp;page=/education/fde-network-security.html&amp;title=Networks%20and%20security%20at%20customer%20sites">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=fde-network-security&amp;page=/education/fde-network-security.html&amp;title=Networks%20and%20security%20at%20customer%20sites">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>
