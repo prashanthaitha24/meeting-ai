@@ -1,0 +1,289 @@
+{
+  "id": "inf-parallelism",
+  "minutes": 35,
+  "intro": "Some models do not fit on one GPU, and some workloads need more throughput than one GPU can give. The answer is parallelism, but there are four different ways to split the work, and each trades memory, latency, throughput and communication differently. This lesson explains tensor, pipeline, data and expert parallelism, shows the sizing arithmetic that tells you when you need them, and gives you a rule of thumb for combining them across GPUs and nodes.",
+  "objectives": [
+    "Decide when a model needs more than one GPU from its size and your context needs",
+    "Explain what tensor, pipeline, data and expert parallelism each split",
+    "Predict the communication each strategy needs and where it should run",
+    "Combine strategies for multi-GPU and multi-node deployments",
+    "Avoid the common mistake of adding parallelism that adds latency without benefit"
+  ],
+  "sections": [
+    {
+      "heading": "When one GPU isn't enough",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Start with memory. A model needs its weights plus enough KV cache for useful concurrency plus working space. A 70-billion-parameter model in FP16 is about 140 GB of weights: it cannot fit on one 80 GB GPU at all, and two would leave little room for cache, so four is the practical minimum. In FP8 the same model is about 70 GB, which technically fits on one 80 GB card but leaves almost no cache, so two GPUs is still the sensible floor. A model of around 405 billion parameters is roughly 405 GB in FP8 and 810 GB in FP16: one eight-GPU node in FP8, two nodes in FP16."
+        },
+        {
+          "type": "p",
+          "text": "The second reason is throughput: a model fits on one GPU, but you need more requests per second than one GPU serves within your latency target. That calls for copies, not splitting, and it is a different strategy entirely."
+        }
+      ]
+    },
+    {
+      "heading": "The four strategies",
+      "blocks": [
+        {
+          "type": "table",
+          "headers": [
+            "Strategy",
+            "Splits",
+            "Communication",
+            "Best for"
+          ],
+          "rows": [
+            [
+              "Tensor (TP)",
+              "Each layer's weight matrices across GPUs",
+              "All-reduce inside every layer",
+              "Fitting a model; lower latency per token; within one node"
+            ],
+            [
+              "Pipeline (PP)",
+              "Groups of layers into stages on different GPUs",
+              "Activations passed stage to stage",
+              "Spanning nodes over slower links"
+            ],
+            [
+              "Data (DP)",
+              "Nothing: full replicas",
+              "None between replicas",
+              "More throughput when the model fits"
+            ],
+            [
+              "Expert (EP)",
+              "Experts of a mixture-of-experts model",
+              "All-to-all token routing per MoE layer",
+              "Large MoE models"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "**Tensor parallelism** cuts each big matrix into slices, one per GPU; each GPU computes its slice and the partial results are combined with an **all-reduce**, typically twice per transformer layer. Every GPU holds a fraction of the weights and of the KV cache, and because work per token is split, per-token latency can drop. The price is constant, latency-sensitive communication, which is why TP belongs on NVLink inside a node, usually at 2, 4 or 8."
+        },
+        {
+          "type": "p",
+          "text": "**Pipeline parallelism** puts the first layers on one GPU, the next on another, and so on. Only activations cross between stages, once per stage, so it tolerates slower links and is the usual way to span nodes. It does not make a single token faster; each extra stage adds a hop. Throughput depends on keeping every stage busy with different micro-batches; idle stages are called **bubbles**."
+        },
+        {
+          "type": "p",
+          "text": "**Data parallelism** simply runs more copies behind a load balancer. **Expert parallelism** places the experts of a mixture-of-experts model on different GPUs and sends each token to the GPUs holding its chosen experts, an all-to-all exchange per MoE layer that needs a fast fabric and good load balancing across experts."
+        }
+      ]
+    },
+    {
+      "heading": "Combining them",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "**Fits on one GPU with room for cache:** no splitting. Add replicas (DP) for throughput.",
+            "**Needs several GPUs, fits in one node:** TP across that node's NVLink-connected GPUs, then replicate the whole TP group for throughput.",
+            "**Needs more than one node:** TP inside each node, PP across nodes (for example TP 8, PP 2 on two eight-GPU nodes).",
+            "**Large MoE model:** EP for the expert layers, often with DP or TP for the attention layers; engines expose this as a combination of flags.",
+            "**Very long contexts:** context or sequence parallelism splits the sequence itself across GPUs, an advanced option some engines provide."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "caption": "The same choices expressed as engine flags",
+          "code": "# one node, 4 GPUs, model split four ways\nvllm serve \"$MODEL_ID\" --tensor-parallel-size 4\n\n# two nodes of 8 GPUs: TP inside each node, PP across nodes\nvllm serve \"$MODEL_ID\" --tensor-parallel-size 8 --pipeline-parallel-size 2\n\n# TensorRT-LLM equivalents\ntrtllm-serve \"$MODEL_ID\" --tp_size 8 --pp_size 2"
+        },
+        {
+          "type": "callout",
+          "kind": "warning",
+          "text": "More parallelism is not automatically better. TP 8 on a model that fits comfortably on 2 GPUs spends most of its time communicating; four TP-2 replicas usually deliver far more throughput from the same eight GPUs. Use the smallest split that fits your model and cache, then replicate."
+        }
+      ]
+    },
+    {
+      "heading": "Choosing with numbers",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A reliable procedure: compute weight memory at your precision; decide the KV cache you need from your concurrency and context targets (the KV-cache lesson's formula); add about 10% for overhead; divide by usable memory per GPU and round up to a power of two for TP. If that exceeds one node, add pipeline stages across nodes. Then benchmark the candidate layouts, for example TP 4 with two replicas versus TP 8 with one, on your workload, and pick the higher goodput per GPU."
+        },
+        {
+          "type": "p",
+          "text": "Remember what each choice does to the KV cache: TP splits it across GPUs too, so a TP 4 group holds four times the cache of one GPU minus the weights, which is often why moving from TP 2 to TP 4 increases concurrency more than you expect."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Plan, then measure, a multi-GPU layout",
+    "steps": [
+      "Pick a model too large for one of your target GPUs and compute its weight memory in FP16 and FP8.",
+      "Choose concurrency and context targets and compute the KV cache needed; add 10% overhead and work out the minimum TP size.",
+      "On a multi-GPU instance, serve a smaller model at TP 1, TP 2 and TP 4 (if available) and record per-token latency at concurrency 1.",
+      "At a fixed total of four GPUs, compare one TP 4 server with two TP 2 servers behind a simple load balancer at high concurrency; record total throughput.",
+      "Explain the results using communication cost and KV-cache capacity.",
+      "Write a recommendation for your original large model: TP, PP, DP sizes and why."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Split only when memory (weights + cache) or latency demands it; otherwise replicate.",
+      "TP splits layers, all-reduces every layer, belongs on NVLink inside a node.",
+      "PP splits layers into stages, tolerates slow links, adds per-hop latency.",
+      "DP is replicas: throughput without communication.",
+      "EP spreads MoE experts with all-to-all routing.",
+      "Smallest TP that fits, then replicate; benchmark layouts by goodput per GPU."
+    ],
+    "groups": [
+      {
+        "title": "Sizing",
+        "items": [
+          {
+            "syntax": "weights = params x bytes",
+            "desc": "70B FP16 ~ 140 GB; FP8 ~ 70 GB"
+          },
+          {
+            "syntax": "need = weights + KV(target) + 10%",
+            "desc": "Total memory for the deployment"
+          },
+          {
+            "syntax": "TP = next power of 2 >= need / usable_per_GPU",
+            "desc": "Minimum tensor-parallel size"
+          },
+          {
+            "syntax": "PP = nodes needed when TP exceeds one node",
+            "desc": "Pipeline stages across nodes"
+          }
+        ]
+      },
+      {
+        "title": "Flags",
+        "items": [
+          {
+            "syntax": "vllm: --tensor-parallel-size N",
+            "desc": "TP"
+          },
+          {
+            "syntax": "vllm: --pipeline-parallel-size N",
+            "desc": "PP"
+          },
+          {
+            "syntax": "vllm: --data-parallel-size N",
+            "desc": "DP inside one engine"
+          },
+          {
+            "syntax": "trtllm-serve: --tp_size --pp_size --ep_size",
+            "desc": "TensorRT-LLM equivalents"
+          }
+        ]
+      },
+      {
+        "title": "Communication",
+        "items": [
+          {
+            "syntax": "TP: all-reduce, ~2 per layer",
+            "desc": "Latency-critical, needs NVLink"
+          },
+          {
+            "syntax": "PP: send/recv of activations per stage",
+            "desc": "Tolerates inter-node links"
+          },
+          {
+            "syntax": "EP: all-to-all per MoE layer",
+            "desc": "Bandwidth-heavy, load-balance experts"
+          },
+          {
+            "syntax": "DP: none between replicas",
+            "desc": "Only a load balancer"
+          }
+        ]
+      },
+      {
+        "title": "Decision rules",
+        "items": [
+          {
+            "syntax": "fits on 1 GPU with cache room -> DP only",
+            "desc": "Replicate for throughput"
+          },
+          {
+            "syntax": "fits in 1 node -> TP within node, then DP",
+            "desc": "Smallest TP that fits"
+          },
+          {
+            "syntax": "spans nodes -> TP in node x PP across nodes",
+            "desc": "e.g. TP 8, PP 2"
+          },
+          {
+            "syntax": "MoE -> EP for experts (+ DP/TP for attention)",
+            "desc": "Fast fabric needed"
+          }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "TP across nodes over slow links, so every layer waits on the network.",
+      "Huge TP for a small model, wasting GPUs on communication.",
+      "Forgetting KV cache when deciding the minimum GPU count.",
+      "Expecting pipeline parallelism to cut per-token latency.",
+      "Choosing a layout without benchmarking alternatives on the same GPU budget."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A model has 34B parameters and you serve it in FP16 on 80 GB GPUs with a large KV-cache target. What is the sensible starting layout?",
+      "options": [
+        "TP 2, then replicate for throughput",
+        "TP 8 on a single node",
+        "PP 4 across four nodes",
+        "One GPU with CPU offload of half the weights"
+      ],
+      "answer": 0,
+      "explain": "34B in FP16 is about 68 GB of weights, leaving too little cache on one 80 GB GPU. TP 2 gives room for cache; more throughput comes from more TP-2 replicas."
+    },
+    {
+      "q": "Why should tensor parallelism usually stay inside one node?",
+      "options": [
+        "It all-reduces inside every layer, which needs NVLink-class bandwidth and latency",
+        "It only works with pipeline parallelism disabled",
+        "Kubernetes cannot schedule it across nodes",
+        "It requires every GPU to hold the full weights"
+      ],
+      "answer": 0,
+      "explain": "TP exchanges partial results in every layer for every step, so slow inter-node links would stall each token. Pipeline parallelism is the usual cross-node choice."
+    },
+    {
+      "q": "Eight GPUs serve a model that fits on two. Which layout probably gives the most throughput?",
+      "options": [
+        "Four TP-2 replicas behind a load balancer",
+        "One TP-8 server",
+        "One TP-2 server with PP 4",
+        "Eight single-GPU servers with CPU offload"
+      ],
+      "answer": 0,
+      "explain": "TP 8 spends much of each step communicating. Using the smallest split that fits and replicating it gives more independent capacity from the same GPUs."
+    },
+    {
+      "q": "What does pipeline parallelism do to the latency of a single token compared with one GPU (if the model fit)?",
+      "options": [
+        "It adds a hop per stage, so it does not reduce it",
+        "It divides it by the number of stages",
+        "It removes all communication from the critical path",
+        "It halves it regardless of the number of stages"
+      ],
+      "answer": 0,
+      "explain": "Each token still passes through every layer in order; stages run sequentially for one token and add transfer hops. PP improves fit and throughput, not single-token latency."
+    },
+    {
+      "q": "Which strategy is specific to mixture-of-experts models?",
+      "options": [
+        "Expert parallelism with all-to-all token routing",
+        "Tensor parallelism with all-reduce",
+        "Data parallelism with replicas",
+        "Pipeline parallelism with stages"
+      ],
+      "answer": 0,
+      "explain": "Expert parallelism places different experts on different GPUs and routes each token to the GPUs holding its chosen experts, which only applies to MoE layers."
+    }
+  ]
+}

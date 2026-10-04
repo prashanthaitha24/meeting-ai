@@ -1,0 +1,115 @@
+{
+  "id": "inf-disaggregation",
+  "minutes": 35,
+  "intro": "Prefill is compute-bound and bursty; decode is memory-bound and steady. Running both on the same GPUs means they interfere: a long prompt arriving stalls every stream in the batch, and you cannot tune for time to first token and for streaming speed separately. Disaggregated serving puts them on different GPU pools and moves the KV cache between them. This lesson explains how it works, what the KV transfer costs, how to size the two pools, how vLLM, SGLang and Dynamo implement it, and the cases where it does not pay off.",
+  "objectives": [
+    "Explain the interference problem that disaggregation solves",
+    "Trace a request through prefill pool, KV transfer and decode pool",
+    "Estimate KV transfer size and time for a link",
+    "Size prefill and decode pools from workload shape",
+    "Decide when aggregated serving with chunked prefill is the better choice"
+  ],
+  "sections": [
+    {
+      "heading": "The interference problem",
+      "blocks": [
+        {"type": "p", "text": "In an aggregated server, every scheduler step mixes decode tokens for running requests with prefill work for new ones. When an 8,000-token prompt arrives, its prefill takes a long, compute-heavy chunk of time, and every request in the batch waits for its next token. Chunked prefill softens this by slicing long prompts, but the two phases still share one GPU and one set of tuning knobs: batch sizes that favour decode throughput hurt TTFT, and vice versa."},
+        {"type": "p", "text": "**Disaggregated serving** separates them. A **prefill pool** of GPUs only runs prefills; a **decode pool** only runs decode. Each pool gets the batch sizes, parallelism and even GPU type that suit its phase. vLLM's documentation states the two benefits plainly: tune TTFT and inter-token latency separately, and control tail inter-token latency. It also states that disaggregation by itself does not improve throughput; the gain is in meeting both latency targets at once, which can improve goodput."}
+      ]
+    },
+    {
+      "heading": "How a request flows",
+      "blocks": [
+        {"type": "steps", "items": [
+          "A router or gateway receives the request and picks a prefill worker, ideally one that already caches the prompt's prefix.",
+          "The prefill worker computes the KV cache for the prompt and the first output token.",
+          "The KV cache is transferred to a chosen decode worker, over NVLink inside a node or RDMA between nodes, using a transfer library such as NIXL or Mooncake.",
+          "The decode worker continues generation from that cache and streams tokens to the client.",
+          "Both workers free or keep the cache according to their caching policy."
+        ]},
+        {"type": "code", "lang": "bash", "caption": "SGLang: one prefill worker, one decode worker, and its router", "code": "python -m sglang.launch_server --model-path \"$MODEL_ID\" \\\n  --disaggregation-mode prefill --port 30000 \\\n  --disaggregation-ib-device mlx5_roce0\n\npython -m sglang.launch_server --model-path \"$MODEL_ID\" \\\n  --disaggregation-mode decode --port 30001 --base-gpu-id 1 \\\n  --disaggregation-ib-device mlx5_roce0\n\npython -m sglang_router.launch_router --pd-disaggregation \\\n  --prefill http://127.0.0.1:30000 --decode http://127.0.0.1:30001 --port 8000"},
+        {"type": "p", "text": "vLLM implements the same pattern through **KV connectors** set with `--kv-transfer-config` (NIXL, LMCache, Mooncake and others) and marks the feature experimental. NVIDIA Dynamo wraps vLLM, SGLang or TensorRT-LLM workers with `--disaggregation-mode prefill|decode` and adds KV-aware routing and automatic pool scaling, as covered in the open-source track."}
+      ]
+    },
+    {
+      "heading": "The cost: moving the KV cache",
+      "blocks": [
+        {"type": "code", "lang": "text", "caption": "Transfer size and time (illustrative model, 128 KiB of KV per token)", "code": "4,000-token prompt x 128 KiB/token = 500 MiB to move per request\n\nat ~50 GB/s (fast RDMA or NVLink path) -> ~10 ms\nat ~1.25 GB/s (10 Gb Ethernet)        -> ~420 ms"},
+        {"type": "p", "text": "The transfer adds directly to time to first token unless it overlaps with computation (engines stream layers as they finish). On a fast fabric it is a small price for removing interference; on ordinary Ethernet it can cost more than the prefill itself. Disaggregation therefore assumes high-bandwidth, RDMA-capable links between pools, and it favours models with compact caches (grouped-query attention, FP8 cache)."},
+        {"type": "callout", "kind": "warning", "text": "If your prompts are short, your decode batches small, or your network slow, disaggregation mostly adds complexity and transfer latency. Aggregated serving with chunked prefill and KV-aware routing is often the better answer. Measure both before committing."}
+      ]
+    },
+    {
+      "heading": "Sizing the two pools",
+      "blocks": [
+        {"type": "p", "text": "Deployments are often described as **xPyD**: x prefill workers, y decode workers. The right ratio comes from the workload. Prefill load scales with input tokens per second; decode load scales with concurrent sequences and output tokens per second. A RAG service with long prompts and short answers needs relatively more prefill capacity; a writing assistant with short prompts and long answers needs more decode capacity."},
+        {"type": "list", "items": [
+          "Measure one prefill worker's input-token throughput at your TTFT target, and one decode worker's sequence capacity at your ITL target.",
+          "Divide expected peak input tokens per second by the first, and peak concurrent sequences by the second, to get starting values for x and y.",
+          "Let an autoscaler adjust each pool independently; that independence is one of the main operational gains. Dynamo's Planner does exactly this against TTFT and ITL targets.",
+          "Watch both pools' queues: a growing prefill queue raises TTFT; a full decode pool blocks KV handoffs."
+        ]}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Aggregated versus disaggregated on two GPUs",
+    "steps": [
+      "On a two-GPU machine (NVLink if possible), run one aggregated engine on GPU 0 and benchmark a mix of 6,000-token and 200-token prompts at moderate concurrency; record TTFT and p99 ITL.",
+      "Launch the SGLang prefill and decode workers and router from this lesson (or the Dynamo vLLM disaggregated example) using one GPU each.",
+      "Run the identical benchmark against the router and record the same metrics.",
+      "Compute the KV transfer size for your average prompt with the KV-cache formula and estimate transfer time on your link.",
+      "Compare p99 ITL between the two setups; explain any change in TTFT using the transfer estimate.",
+      "Write a recommendation: which setup, for which workload, and what you would test at larger scale."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Prefill and decode interfere when they share GPUs; disaggregation separates them.",
+      "Gain: tune TTFT and ITL independently and control ITL tails, not raw throughput.",
+      "Cost: moving each request's KV cache between pools.",
+      "Needs fast RDMA or NVLink links and benefits from compact caches.",
+      "Size xPyD from input-token load (prefill) and concurrency (decode).",
+      "Short prompts or slow networks: stay aggregated with chunked prefill."
+    ],
+    "groups": [
+      {"title": "Formulas", "items": [
+        {"syntax": "KV transfer = prompt_tokens x KV_bytes_per_token", "desc": "Bytes moved per request"},
+        {"syntax": "t_transfer ~ bytes / link_bandwidth", "desc": "Added to TTFT unless overlapped"},
+        {"syntax": "x ~ peak input tok/s / prefill worker capacity", "desc": "Prefill workers"},
+        {"syntax": "y ~ peak concurrent seqs / decode worker capacity", "desc": "Decode workers"}
+      ]},
+      {"title": "Engine flags", "items": [
+        {"syntax": "sglang.launch_server ... --disaggregation-mode prefill|decode", "desc": "SGLang worker role"},
+        {"syntax": "sglang_router.launch_router --pd-disaggregation", "desc": "SGLang PD router"},
+        {"syntax": "vllm ... --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",...}'", "desc": "vLLM KV connector (experimental)"},
+        {"syntax": "python3 -m dynamo.vllm --disaggregation-mode prefill|decode", "desc": "Dynamo worker role"}
+      ]},
+      {"title": "Transfer libraries", "items": [
+        {"syntax": "NIXL", "desc": "NVIDIA's transfer library over NVLink, RDMA, storage"},
+        {"syntax": "Mooncake", "desc": "KV transfer and cache store used by several engines"},
+        {"syntax": "LMCache", "desc": "KV cache layer with offload and sharing"},
+        {"syntax": "--disaggregation-ib-device DEV", "desc": "SGLang: RDMA device used for KV transfer"}
+      ]},
+      {"title": "When to use", "items": [
+        {"syntax": "long prompts + strict ITL SLO + fast fabric", "desc": "Disaggregate"},
+        {"syntax": "short prompts or slow network", "desc": "Stay aggregated"},
+        {"syntax": "prefix-heavy traffic", "desc": "Add KV-aware routing either way"}
+      ]}
+    ],
+    "pitfalls": [
+      "Disaggregating over ordinary Ethernet and making TTFT worse.",
+      "Expecting a throughput gain rather than better latency control.",
+      "Fixed prefill/decode ratios that ignore how the workload shifts during the day.",
+      "Ignoring the decode pool's capacity, so KV handoffs queue.",
+      "Skipping the aggregated baseline benchmark."
+    ]
+  },
+  "quiz": [
+    {"q": "What is the main problem disaggregated prefill and decode solves?", "options": ["Long prefills stalling ongoing decodes when both share GPUs", "Models too large to fit on any single GPU", "Tokenizers running too slowly on the CPU", "Lack of an OpenAI-compatible API in engines"], "answer": 0, "explain": "Sharing GPUs makes prefill and decode interfere, hurting inter-token latency tails and forcing one set of tuning knobs. Separate pools fix that."},
+    {"q": "Each request moves a 500 MiB KV cache between pools over a 10 Gb Ethernet link (about 1.25 GB/s). What happens to TTFT?", "options": ["It grows by roughly 0.4 seconds per request", "It shrinks because decode starts sooner", "It is unchanged because the transfer is free", "It grows by roughly 4 milliseconds"], "answer": 0, "explain": "500 MiB is about 524 MB; at 1.25 GB/s that takes about 0.42 s, added to TTFT unless overlapped. Fast RDMA links bring it to around 10 ms."},
+    {"q": "A RAG service has 7,000-token prompts and 150-token answers. How should its pools lean?", "options": ["Relatively more prefill capacity than decode", "Relatively more decode capacity than prefill", "Equal capacity regardless of workload", "No prefill pool, only decode"], "answer": 0, "explain": "Prefill load scales with input tokens, which dominate here; decode demand is light because answers are short."},
+    {"q": "According to vLLM's documentation, what does disaggregated prefill not do?", "options": ["Improve throughput by itself", "Let you tune TTFT and ITL separately", "Help control tail inter-token latency", "Move KV caches between instances"], "answer": 0, "explain": "vLLM states that disaggregated prefill does not improve throughput; its benefits are separate tuning of TTFT and ITL and better control of ITL tails."},
+    {"q": "A chatbot has 300-token prompts, small batches and nodes on ordinary Ethernet. What is the better design?", "options": ["Aggregated serving with chunked prefill and KV-aware routing", "Disaggregated serving with a 4P1D ratio", "Disaggregated serving across regions", "One prefill pool shared by all regions"], "answer": 0, "explain": "Short prompts cause little interference and the slow network would make KV transfer expensive, so aggregated serving is simpler and likely faster."}
+  ]
+}

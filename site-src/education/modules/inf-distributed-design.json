@@ -1,0 +1,127 @@
+{
+  "id": "inf-distributed-design",
+  "minutes": 35,
+  "intro": "At cluster scale, the expensive thing is rarely arithmetic; it is moving bytes. Prompts that are recomputed because they landed on the wrong replica, KV caches that cross a slow link, weights that take minutes to load, and model shards placed across racks all burn time and money. This lesson turns that into design rules: route requests to where their data already is, tier the KV cache, place model replicas to match the network topology, and use Kubernetes building blocks made for inference rather than generic load balancing.",
+  "objectives": [
+    "Explain why round-robin load balancing wastes work for LLM traffic",
+    "Design KV-aware and session-aware routing with an inference gateway",
+    "Use a KV-cache hierarchy from GPU memory to remote storage",
+    "Place multi-GPU replicas to match NVLink domains, racks and nodes",
+    "Draw a data-movement budget for a request and find the dominant transfer"
+  ],
+  "sections": [
+    {
+      "heading": "Route to where the data already is",
+      "blocks": [
+        {"type": "p", "text": "A web load balancer spreads requests evenly and assumes any replica is as good as another. For LLMs that assumption is wrong: a replica that already holds a conversation's history or a shared system prompt in its KV cache can skip most of the prefill. Round-robin destroys that locality, so every replica keeps recomputing the same prefixes."},
+        {"type": "list", "items": [
+          "**Session affinity** sends a conversation's turns to the same replica. Simple, but it ignores load and breaks when the replica is busy or gone.",
+          "**KV-aware routing** hashes prompt prefixes into blocks, tracks which replica holds which blocks, and scores replicas by cache overlap and current load. Dynamo's router and the llm-d inference scheduler do this.",
+          "**Load- and queue-aware routing** uses each replica's waiting requests and cache usage, which the engines expose as metrics, to avoid hot spots even without cache overlap.",
+          "**Adapter-aware routing** sends requests for a LoRA adapter to replicas that already have it loaded."
+        ]},
+        {"type": "p", "text": "On Kubernetes, the **Gateway API Inference Extension** standardises this: an **InferencePool** groups the model-server pods, and an **endpoint picker** called by the gateway (through Envoy's external processing) chooses the best pod per request using engine metrics such as queue length and prefix-cache state."},
+        {"type": "code", "lang": "yaml", "caption": "An InferencePool: the pods to route across, and the endpoint picker to consult", "code": "apiVersion: inference.networking.k8s.io/v1\nkind: InferencePool\nmetadata:\n  name: chat-pool\nspec:\n  selector:\n    matchLabels:\n      app: vllm-chat\n  targetPorts:\n    - number: 8000\n  endpointPickerRef:\n    name: chat-epp\n    port:\n      number: 9002\n    failureMode: FailOpen"}
+      ]
+    },
+    {
+      "heading": "Tier the KV cache",
+      "blocks": [
+        {"type": "p", "text": "GPU memory is the fastest and smallest place for KV cache. When it is full, the choice is to evict and later recompute (spending GPU time) or to move blocks to a cheaper tier and bring them back (spending bandwidth). For long, idle conversations and shared documents, keeping cache is usually cheaper than recomputing it."},
+        {"type": "table", "headers": ["Tier", "Capacity", "Reach", "Good for"], "rows": [
+          ["GPU HBM", "Smallest", "Fastest", "Active sequences"],
+          ["CPU DRAM", "Several times larger", "Over PCIe", "Recently idle conversations"],
+          ["Local NVMe", "Much larger", "Slower, still local", "Long-lived prefixes on this node"],
+          ["Shared or object storage", "Effectively unlimited", "Over the network", "Cache shared across nodes, warm restarts"]
+        ]},
+        {"type": "p", "text": "Tools such as Dynamo's KV Block Manager, LMCache and vLLM's offloading connector implement these tiers. Combined with KV-aware routing, a cluster can behave like one large cache: a request goes where its prefix is, and if no GPU has it, a node can fetch it from a lower tier instead of recomputing."}
+      ]
+    },
+    {
+      "heading": "Place replicas to match the topology",
+      "blocks": [
+        {"type": "list", "items": [
+          "Keep each tensor-parallel group inside one NVLink domain: one node, or a rack-scale NVLink system.",
+          "Place pipeline stages and disaggregated prefill/decode pairs on nodes with fast RDMA paths between them, ideally the same rack or network spine.",
+          "Schedule multi-pod replicas as a unit: all pods start together or none do. **LeaderWorkerSet** in Kubernetes deploys a group of pods as one unit of replication; topology-aware gang schedulers such as Grove add rack and NVLink-domain placement.",
+          "Spread whole replicas across failure domains for availability, but never split one replica across them.",
+          "Keep weights close to the GPUs (node-local caches, pre-pulled images) so scaling out does not wait on downloads."
+        ]}
+      ]
+    },
+    {
+      "heading": "A data-movement budget",
+      "blocks": [
+        {"type": "p", "text": "For any design, list every transfer a request causes, its size and the link it uses, and estimate its time. The largest line is where to spend design effort."},
+        {"type": "table", "headers": ["Transfer", "Typical size", "Link"], "rows": [
+          ["Prompt and response text", "Kilobytes", "Client network"],
+          ["TP all-reduces per decode step", "Hundreds of KiB, many times per step", "NVLink"],
+          ["KV handoff (disaggregated)", "Hundreds of MiB per long prompt", "RDMA or NVLink"],
+          ["KV fetch from lower tier", "Up to the size of the prefix", "PCIe, NVMe or network"],
+          ["Weights on scale-out", "Tens to hundreds of GB per replica", "Storage and PCIe"]
+        ]},
+        {"type": "callout", "kind": "tip", "text": "Draw the budget before choosing tools. Teams often adopt disaggregation or cache offload when their dominant cost was actually cold-start weight loading or a gateway that ignores cache locality."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Measure the value of locality",
+    "steps": [
+      "Run two replicas of the same engine on two GPUs with prefix caching on.",
+      "Put a plain round-robin proxy (for example nginx with two upstreams) in front and replay 50 multi-turn conversations; record TTFT per turn.",
+      "Switch the proxy to hash on a conversation ID header (session affinity) and replay; compare TTFT for later turns.",
+      "If available, try a KV-aware router (Dynamo frontend with `--router-mode kv`) and replay again.",
+      "Write the data-movement budget for one 20-turn conversation under each setup.",
+      "Summarise which routing you would deploy and the evidence."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Bytes, not FLOPs, dominate cluster-scale cost: design for data movement.",
+      "Round-robin destroys prefix locality; route by cache overlap and load.",
+      "InferencePool plus endpoint picker is the Kubernetes standard for inference routing.",
+      "Tier KV cache from HBM to DRAM, NVMe and shared storage.",
+      "Keep TP groups in one NVLink domain; gang-schedule multi-pod replicas.",
+      "Write a data-movement budget and attack the largest line."
+    ],
+    "groups": [
+      {"title": "Routing strategies", "items": [
+        {"syntax": "round-robin", "desc": "Even spread, ignores cache: wasteful for LLMs"},
+        {"syntax": "session affinity", "desc": "Same replica per conversation; ignores load"},
+        {"syntax": "KV-aware", "desc": "Score by prefix-cache overlap and load"},
+        {"syntax": "queue-aware", "desc": "Avoid replicas with long waiting queues"},
+        {"syntax": "adapter-aware", "desc": "Prefer replicas with the LoRA already loaded"}
+      ]},
+      {"title": "Kubernetes building blocks", "items": [
+        {"syntax": "kind: InferencePool (inference.networking.k8s.io/v1)", "desc": "Pods to route across, plus endpoint picker"},
+        {"syntax": "endpointPickerRef", "desc": "Service that chooses the pod per request"},
+        {"syntax": "LeaderWorkerSet", "desc": "Deploy a multi-pod replica as one unit"},
+        {"syntax": "failureMode: FailOpen", "desc": "Fall back to plain routing if the picker is down"}
+      ]},
+      {"title": "Cache tiers", "items": [
+        {"syntax": "HBM -> DRAM -> NVMe -> shared storage", "desc": "Fast/small to slow/large"},
+        {"syntax": "evict + recompute vs offload + reload", "desc": "GPU time vs bandwidth"},
+        {"syntax": "KVBM / LMCache / OffloadingConnector", "desc": "Implementations"}
+      ]},
+      {"title": "Placement rules", "items": [
+        {"syntax": "TP group within NVLink domain", "desc": "Never across nodes over Ethernet"},
+        {"syntax": "PP stages and P/D pairs on fast RDMA paths", "desc": "Same rack or spine"},
+        {"syntax": "spread replicas, not shards, across zones", "desc": "Availability without slow links"}
+      ]}
+    ],
+    "pitfalls": [
+      "Generic round-robin load balancing in front of LLM replicas.",
+      "Session affinity that sends every turn to an overloaded replica.",
+      "Splitting one replica's shards across racks or zones.",
+      "Recomputing long idle conversations when offload would be cheaper.",
+      "Adopting complex infrastructure without a data-movement budget."
+    ]
+  },
+  "quiz": [
+    {"q": "Why does round-robin load balancing perform poorly for multi-turn LLM chat?", "options": ["Turns land on replicas without the conversation's cached prefix, so it is recomputed", "Round-robin proxies cannot carry streaming responses at all", "Round-robin ends up sending all of the traffic to one replica", "LLM replicas cannot share the same model weights between them"], "answer": 0, "explain": "Each replica caches the prefixes it has seen. Spreading turns evenly means most turns miss that cache and pay full prefill again."},
+    {"q": "In the Gateway API Inference Extension, what chooses the specific pod for each request?", "options": ["The endpoint picker referenced by the InferencePool", "The Kubernetes scheduler", "kube-proxy's iptables rules", "The model's tokenizer"], "answer": 0, "explain": "The gateway consults the endpoint picker through Envoy external processing, and it uses engine metrics such as queue length and cache state to pick a pod."},
+    {"q": "Many users return to long conversations after several idle minutes, and their caches are being evicted. What helps most?", "options": ["Offload idle KV blocks to CPU memory or NVMe and reload them", "Raise the sampling temperature so conversations end sooner", "Add more replicas behind a round-robin load balancer", "Lower max_tokens for all requests so caches stay smaller"], "answer": 0, "explain": "Tiering keeps the cache instead of recomputing it; reloading over PCIe or from NVMe is usually much cheaper than a long prefill."},
+    {"q": "A replica uses TP 8 across two 4-GPU nodes connected by Ethernet. What is the problem?", "options": ["Every layer's all-reduce crosses a slow link, stalling each step", "Kubernetes cannot run eight-GPU pods", "TP 8 requires pipeline parallelism to be disabled", "The KV cache cannot be split eight ways"], "answer": 0, "explain": "TP communicates inside every layer and needs NVLink-class links. It should stay within one NVLink domain; spanning nodes calls for pipeline parallelism."},
+    {"q": "Scaling out takes 6 minutes, of which 5 are spent fetching weights, yet the team plans to adopt KV offload to fix slow scale-up. What does a data-movement budget show?", "options": ["Weight loading is the dominant transfer and should be fixed first", "KV offload is the right fix because cache is always the bottleneck", "The gateway in front of the replicas is the real bottleneck", "Tensor-parallel communication dominates the scale-up time"], "answer": 0, "explain": "Listing transfers by size and time makes the five-minute weight fetch the largest line; local weight caching addresses it directly."}
+  ]
+}

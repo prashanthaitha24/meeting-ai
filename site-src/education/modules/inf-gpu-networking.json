@@ -1,0 +1,328 @@
+{
+  "id": "inf-gpu-networking",
+  "minutes": 35,
+  "intro": "The moment a model spans GPUs, part of every step is spent talking instead of computing. How much depends on which collective operations the parallelism strategy needs, how big each message is, and which link carries it. This lesson covers NCCL and its collectives, a simple latency-plus-bandwidth model for predicting communication time, why decode-time tensor parallelism is latency-bound while prefill is bandwidth-bound, how to measure links with nccl-tests, and the settings that most often break multi-node jobs.",
+  "objectives": [
+    "Name the NCCL collectives and which parallelism strategy uses each",
+    "Estimate communication time with a latency plus size-over-bandwidth model",
+    "Explain why small decode messages make TP latency-bound",
+    "Benchmark GPU links with nccl-tests and read algorithm versus bus bandwidth",
+    "Diagnose common multi-node networking failures from NCCL logs"
+  ],
+  "sections": [
+    {
+      "heading": "NCCL and the collectives",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "**NCCL** (NVIDIA Collective Communications Library) is what inference engines and training frameworks call to move data between GPUs. It discovers the topology (NVLink, NVSwitch, PCIe, InfiniBand, RoCE), picks algorithms such as **ring** or **tree**, and runs the transfers as GPU kernels, which is why they appear on Nsight timelines. AMD's equivalent is RCCL."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Collective",
+            "What it does",
+            "Used by"
+          ],
+          "rows": [
+            [
+              "All-reduce",
+              "Every GPU ends with the sum of everyone's data",
+              "Tensor parallelism (per layer)"
+            ],
+            [
+              "All-gather",
+              "Every GPU ends with everyone's pieces concatenated",
+              "TP variants, sequence parallelism"
+            ],
+            [
+              "Reduce-scatter",
+              "Sum, then each GPU keeps one slice",
+              "TP variants"
+            ],
+            [
+              "All-to-all",
+              "Each GPU sends a different chunk to every other",
+              "Expert parallelism token routing"
+            ],
+            [
+              "Send / receive",
+              "Point-to-point transfer",
+              "Pipeline stages, KV transfer"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "Predicting communication time",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A useful first model: time = **alpha** + size / **bandwidth**. Alpha is a fixed latency per operation (launch, synchronisation, link latency); the second term is the transfer. Large messages are dominated by bandwidth, small ones by alpha. A ring all-reduce across N GPUs moves about 2 x (N-1)/N times the message size through each GPU, which is why nccl-tests reports **bus bandwidth** (busbw), corrected for that factor, alongside raw algorithm bandwidth."
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "caption": "Decode-step TP traffic (illustrative model and timings)",
+          "code": "hidden size 8192, batch 32, FP16 activations:\n  message = 32 x 8192 x 2 bytes = 512 KiB per all-reduce\n80 layers x 2 all-reduces = 160 all-reduces per decode step\n\nif each takes ~20 us on NVLink  -> ~3.2 ms per step\nif each takes ~100 us on a slower path -> ~16 ms per step\n(compare a decode step of ~20-30 ms: the slow path eats most of it)"
+        },
+        {
+          "type": "p",
+          "text": "Decode messages are small and frequent, so tensor parallelism at decode time is **latency-bound**: what matters is how fast each tiny all-reduce completes, which NVLink and NVSwitch do in microseconds and network links cannot match. Prefill messages are large (thousands of tokens), so prefill is **bandwidth-bound**. Engines and libraries fight the latency term with fused communication kernels and by overlapping communication with computation."
+        }
+      ]
+    },
+    {
+      "heading": "Measuring links with nccl-tests",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Before trusting a multi-GPU deployment, measure the fabric. NVIDIA's `nccl-tests` sweep message sizes and report latency and bandwidth per collective. Run them on every new node type and after any driver, firmware or network change."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "caption": "Single node, 8 GPUs, then 8 nodes over the network",
+          "code": "# all-reduce from 8 bytes to 1 GiB, doubling each step, on 8 local GPUs\n./build/all_reduce_perf -b 8 -e 1G -f 2 -g 8\n\n# multi-node with MPI: 64 ranks, 8 per node, one GPU per rank\nmpirun -np 64 -N 8 ./build/all_reduce_perf -b 8 -e 8G -f 2 -g 1"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Look at **small-message latency** (top rows) for decode-time TP and **large-message busbw** (bottom rows) for prefill and KV transfer.",
+            "Compare busbw with the link's rated bandwidth; a large shortfall points at topology, configuration or a faulty link.",
+            "Inside a node, numbers should reflect NVLink; if they look like PCIe, the GPUs are not using NVLink."
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "Designing to keep communication off the critical path",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Communication cost is not fixed; architecture choices move it. Keep the most frequent, latency-sensitive collectives on the fastest links: tensor parallelism inside an NVLink domain, never across a datacenter network. Send the less frequent, larger transfers, pipeline activations and KV-cache handoffs, over the inter-node fabric, where bandwidth matters more than latency."
+        },
+        {
+          "type": "p",
+          "text": "Batch size also changes the picture. Larger decode batches make each all-reduce message bigger but amortise the fixed latency over more tokens, so communication per token falls. Overlap helps too: modern engines start sending one layer's results while computing the next, hiding part of the cost. When you see NCCL kernels taking a large share of a profiled step, the usual fixes, in order, are a smaller TP size with more replicas, keeping TP within NVLink, and only then faster or more network links."
+        },
+        {
+          "type": "p",
+          "text": "For expert parallelism the all-to-all exchange is both large and frequent, and uneven expert popularity makes some GPUs wait for others. Rack-scale NVLink domains, careful expert placement and load balancing exist largely to tame this. If you serve large mixture-of-experts models, budget as much engineering time for the network as for the GPUs."
+        }
+      ]
+    },
+    {
+      "heading": "When multi-node goes wrong",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Set `NCCL_DEBUG=INFO` and read the start-up lines: NCCL prints which transports it chose for each GPU pair (P2P over NVLink, SHM, NET over IB or Socket). Most failures are visible there."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Symptom",
+            "Likely cause",
+            "First fix"
+          ],
+          "rows": [
+            [
+              "Transport shows NET/Socket instead of IB",
+              "RDMA devices not visible or not selected",
+              "Expose IB devices to the container; set NCCL_IB_HCA"
+            ],
+            [
+              "Hang at initialisation",
+              "Wrong network interface or blocked ports",
+              "Set NCCL_SOCKET_IFNAME to the right interface; open ports"
+            ],
+            [
+              "Bandwidth far below rated",
+              "PCIe topology, GPUDirect RDMA off, MTU",
+              "Check nvidia-smi topo -m, enable GPUDirect, fix MTU"
+            ],
+            [
+              "Intermittent slowdowns",
+              "Link errors or congestion",
+              "Check NVLink and NIC error counters; look at fabric congestion"
+            ]
+          ]
+        },
+        {
+          "type": "callout",
+          "kind": "tip",
+          "text": "In containers and Kubernetes, multi-node GPU jobs typically need host networking or an RDMA-capable network plugin, the InfiniBand devices mounted, and enough locked memory. Validate with nccl-tests inside the same pod spec you will use for serving."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Measure your fabric before you trust it",
+    "steps": [
+      "On a multi-GPU instance, build nccl-tests and run all_reduce_perf across all local GPUs from 8 bytes to 1 GiB.",
+      "Record latency at 8 KiB to 1 MiB and busbw at 256 MiB and above.",
+      "Run `nvidia-smi topo -m` and relate the numbers to the links shown.",
+      "Restrict the test to two GPUs connected over PCIe (if any) and compare small-message latency.",
+      "Using the decode traffic model above, estimate communication time per step for a model you care about at TP 2, 4 and 8.",
+      "Write down the TP size beyond which communication would exceed 20% of a 25 ms step on your fabric."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "NCCL picks transports and algorithms; collectives run as GPU kernels.",
+      "TP uses all-reduce; EP uses all-to-all; PP and KV transfer use send/recv.",
+      "Time ~ alpha + size / bandwidth: small messages are latency-bound.",
+      "Decode TP is latency-bound, so it needs NVLink-class links.",
+      "Measure with nccl-tests: latency for small sizes, busbw for large.",
+      "NCCL_DEBUG=INFO shows which transport was chosen."
+    ],
+    "groups": [
+      {
+        "title": "Formulas",
+        "items": [
+          {
+            "syntax": "t = alpha + bytes / bandwidth",
+            "desc": "Latency-bandwidth model"
+          },
+          {
+            "syntax": "ring all-reduce traffic ~ 2(N-1)/N x size",
+            "desc": "Per GPU, why busbw differs from algbw"
+          },
+          {
+            "syntax": "decode msg ~ batch x hidden x bytes",
+            "desc": "TP all-reduce size per layer"
+          },
+          {
+            "syntax": "collectives/step ~ 2 x layers",
+            "desc": "TP all-reduces per forward pass"
+          }
+        ]
+      },
+      {
+        "title": "nccl-tests",
+        "items": [
+          {
+            "syntax": "all_reduce_perf -b 8 -e 1G -f 2 -g 8",
+            "desc": "Sweep sizes on 8 local GPUs"
+          },
+          {
+            "syntax": "alltoall_perf / sendrecv_perf",
+            "desc": "Other collectives (EP, PP)"
+          },
+          {
+            "syntax": "mpirun -np 64 -N 8 ... -g 1",
+            "desc": "Multi-node run"
+          },
+          {
+            "syntax": "busbw column",
+            "desc": "Compare with rated link bandwidth"
+          }
+        ]
+      },
+      {
+        "title": "NCCL environment",
+        "items": [
+          {
+            "syntax": "NCCL_DEBUG=INFO",
+            "desc": "Print topology and transport choices"
+          },
+          {
+            "syntax": "NCCL_SOCKET_IFNAME=IFACE",
+            "desc": "Interface for bootstrap and socket traffic"
+          },
+          {
+            "syntax": "NCCL_IB_HCA=DEVICE",
+            "desc": "Which InfiniBand or RoCE adapters to use"
+          },
+          {
+            "syntax": "NCCL_P2P_DISABLE=1",
+            "desc": "Diagnostic only: force off GPU peer-to-peer"
+          }
+        ]
+      },
+      {
+        "title": "Links",
+        "items": [
+          {
+            "syntax": "NVLink / NVSwitch",
+            "desc": "Microsecond latency, high bandwidth, in node or rack domain"
+          },
+          {
+            "syntax": "PCIe",
+            "desc": "Slower GPU-GPU path through switches or CPU"
+          },
+          {
+            "syntax": "InfiniBand / RoCE + GPUDirect RDMA",
+            "desc": "Inter-node, NIC reads GPU memory directly"
+          }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Deploying TP across nodes without measuring small-message latency.",
+      "Containers that cannot see the InfiniBand devices, silently falling back to TCP sockets.",
+      "Reading algorithm bandwidth as if it were link bandwidth.",
+      "Skipping nccl-tests after driver, firmware or network changes.",
+      "Leaving NCCL_P2P_DISABLE set after debugging."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "Which collective does tensor parallelism rely on in every transformer layer?",
+      "options": [
+        "All-reduce",
+        "All-to-all",
+        "Broadcast from rank 0 only",
+        "Send and receive between neighbours"
+      ],
+      "answer": 0,
+      "explain": "Each GPU computes a partial result for its slice of the layer, and an all-reduce sums those partials so every GPU has the full output."
+    },
+    {
+      "q": "Why is decode-time tensor parallelism usually latency-bound rather than bandwidth-bound?",
+      "options": [
+        "Its all-reduce messages are small and frequent, so fixed per-operation latency dominates",
+        "Decode messages are gigabytes each",
+        "NCCL disables bandwidth during decode",
+        "Decode runs on the CPU while prefill runs on the GPU"
+      ],
+      "answer": 0,
+      "explain": "A decode step all-reduces activations for the current batch only, hundreds of kilobytes, many times per step. With small messages the alpha term outweighs size over bandwidth."
+    },
+    {
+      "q": "NCCL_DEBUG=INFO shows NET/Socket for traffic between nodes that have InfiniBand adapters. What is the likely problem?",
+      "options": [
+        "The RDMA devices are not visible or not selected, so NCCL fell back to TCP",
+        "The GPUs are connected by NVLink",
+        "The model is too large for the cluster",
+        "Expert parallelism is enabled"
+      ],
+      "answer": 0,
+      "explain": "When NCCL cannot use the IB devices, often because the container cannot see them, it falls back to sockets over Ethernet, which is much slower."
+    },
+    {
+      "q": "In nccl-tests output, what does the busbw column help you judge?",
+      "options": [
+        "How close the collective gets to the hardware link bandwidth",
+        "The latency of a single 8-byte message",
+        "The GPU's peak FLOPs",
+        "How many requests per second the model can serve"
+      ],
+      "answer": 0,
+      "explain": "Bus bandwidth corrects algorithm bandwidth for how much data the collective actually moves, so it can be compared with the rated bandwidth of the links."
+    },
+    {
+      "q": "Each decode step does 160 all-reduces at about 100 microseconds each on a slow path. Roughly how much time per step is communication?",
+      "options": [
+        "About 16 ms",
+        "About 1.6 ms",
+        "About 160 ms",
+        "About 0.16 ms"
+      ],
+      "answer": 0,
+      "explain": "160 x 100 microseconds = 16,000 microseconds = 16 ms, which would consume most of a typical decode step."
+    }
+  ]
+}
