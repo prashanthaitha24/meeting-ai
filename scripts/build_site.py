@@ -100,22 +100,30 @@ def showcase(tracks):
     return "\n".join(out)
 
 
+def carousel(label, items, cls=""):
+    """A sideways row of cards with arrow buttons (behaviour in docs/carousel.js)."""
+    lab = esc(label)
+    return (f'        <div class="carousel {cls}">\n'
+            f'          <button class="car-btn car-prev" type="button" aria-label="Scroll {lab} left" hidden>&#8249;</button>\n'
+            f'          <div class="car-track" tabindex="0" role="region" aria-label="{lab}">\n{chr(10).join(items)}\n          </div>\n'
+            f'          <button class="car-btn car-next" type="button" aria-label="Scroll {lab} right" hidden>&#8250;</button>\n'
+            f'        </div>')
+
+
 def project_cards(tracks):
     out = []
     for tr in tracks:
-        if not tr["projects"]:
-            continue
-        p = tr["projects"][0]
-        badge = '<span class="badge badge-live">Available</span>' if p["live"] else '<span class="badge badge-soon">Coming soon</span>'
-        body = f'''        {badge}
+        for p in tr["projects"]:
+            badge = '<span class="badge badge-live">Available</span>' if p["live"] else '<span class="badge badge-soon">Coming soon</span>'
+            body = f'''        {badge}
         <h3>{esc(p["title"])}</h3>
         <p>{esc(p["desc"])}</p>
         <div class="meta"><span>{tr["emoji"]} {esc(tr["short"])}</span><span>⏱ about {p["hours"]} h</span><span>{esc(p["level"])}</span></div>'''
-        if p["live"]:
-            out.append(f'      <a class="card" href="education/projects/{p["id"]}.html" style="--tc:{tr["accent"]}">\n{body}\n      </a>')
-        else:
-            out.append(f'      <div class="card" style="--tc:{tr["accent"]}">\n{body}\n      </div>')
-    return "\n".join(out)
+            if p["live"]:
+                out.append(f'      <a class="card" href="education/projects/{p["id"]}.html" style="--tc:{tr["accent"]}">\n{body}\n      </a>')
+            else:
+                out.append(f'      <div class="card" style="--tc:{tr["accent"]}">\n{body}\n      </div>')
+    return carousel("Guided projects", out)
 
 
 def cert_cards(tracks):
@@ -132,7 +140,7 @@ def cert_cards(tracks):
                 out.append(f'      <a class="card" href="education/{m["id"]}.html" style="--tc:{tr["accent"]}">\n{body}\n      </a>')
             else:
                 out.append(f'      <div class="card" style="--tc:{tr["accent"]}">\n{body}\n      </div>')
-    return "\n".join(out)
+    return carousel("Certification guides", out)
 
 
 def interview_cards(kits, tracks):
@@ -205,16 +213,16 @@ def panel(tr, first):
         </div>''']
     projects = []
     for p in tr["projects"]:
-        meta = f'<span class="m">about {p["hours"]} h<br />{esc(p["level"])}</span>'
+        inner = f'<span class="t">{esc(p["title"])}</span><span class="d">{esc(p["desc"])}</span>'
         if p["live"]:
-            projects.append(f'            <a href="education/projects/{p["id"]}.html"><span><span class="t">{esc(p["title"])}</span><span class="d">{esc(p["desc"])}</span></span>{meta}</a>')
+            projects.append(f'            <a class="proj-card" href="education/projects/{p["id"]}.html">{inner}<span class="m">about {p["hours"]} h · {esc(p["level"])} →</span></a>')
         else:
-            projects.append(f'            <a class="soon-item" tabindex="-1" aria-disabled="true"><span><span class="t">{esc(p["title"])}</span><span class="d">{esc(p["desc"])}</span></span><span class="m">Coming soon</span></a>')
+            projects.append(f'            <div class="proj-card soon-item">{inner}<span class="m">Coming soon</span></div>')
     resources = "\n".join(f'            <a href="{r["url"]}" target="_blank" rel="noopener">{esc(r["title"])}<span>{esc(r["note"])}</span></a>' for r in tr["resources"])
     hidden = "" if first else " hidden"
     proj_chip = f'            <span class="chip">{len(tr["projects"])} projects</span>' if tr["projects"] else ""
-    proj_box = ('        <div class="box">\n          <div class="box-label">Guided projects</div>\n'
-                f'          <div class="proj-list">\n{chr(10).join(projects)}\n          </div>\n        </div>') if projects else ""
+    proj_box = ('      <div class="track-projects">\n        <div class="box-label">Guided projects</div>\n'
+                + carousel(f'{tr["name"]} projects', projects) + '\n      </div>') if projects else ""
     return f'''    <div class="track-panel" id="{tr["id"]}" role="tabpanel" aria-labelledby="tab-{tr["id"]}" style="--tc:{tr["accent"]}"{hidden}>
       <div class="track-head">
         <div class="track-logo">{tr["emoji"]}</div>
@@ -236,8 +244,8 @@ def panel(tr, first):
       <div class="stages">
 {chr(10).join(stages)}
       </div>
-      <div class="track-foot">
 {proj_box}
+      <div class="track-foot">
         <div class="box">
           <div class="box-label">Best free resources</div>
           <div class="res-list">
