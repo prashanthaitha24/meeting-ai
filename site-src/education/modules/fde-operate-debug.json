@@ -1,0 +1,279 @@
+{
+  "id": "fde-operate-debug",
+  "minutes": 45,
+  "intro": "Once your software runs in the customer's environment, problems arrive without you being there: a call at 8 a.m. saying \"it's not working\", a screen share with someone who is not allowed to give you access, logs you cannot see. Debugging at a customer site is a distinct skill: you design observability that plugs into their stack, ship tools that collect evidence safely, diagnose through other people's hands, and communicate clearly during incidents. This lesson covers all four.",
+  "objectives": [
+    "Build health checks, metrics, structured logs and traces that fit the customer's tooling",
+    "Ship a support-bundle command that collects evidence without leaking secrets",
+    "Debug systematically through screen shares and customer operators",
+    "Run incident communication with severity, cadence and clear updates",
+    "Turn every incident into a runbook entry and a product improvement"
+  ],
+  "sections": [
+    {
+      "heading": "Observability that plugs into their stack",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Customers already have monitoring: Prometheus and Grafana, Datadog, Splunk, Elastic, a cloud vendor's tools. Your software should emit standard signals they can collect, rather than requiring yet another dashboard: health endpoints for their orchestrator, Prometheus-format metrics, JSON logs to stdout, and OpenTelemetry traces they can route anywhere through a Collector."
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Liveness** (`/healthz`): the process is alive. **Readiness** (`/readyz`): dependencies (database, model endpoint, index) are reachable, so traffic should be sent.",
+            "**Metrics**: request rate, errors, latency histograms, queue depth, and business counters (documents indexed, answers served, actions drafted).",
+            "**Logs**: one JSON object per line with request IDs that also appear in traces and in error messages users see.",
+            "**Traces**: spans for each external call (retrieval, model, integrations), so slow requests show where time went."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "caption": "Readiness that checks dependencies, plus Prometheus metrics",
+          "code": "from fastapi import FastAPI, Response\nfrom prometheus_client import Counter, Histogram, make_asgi_app\n\napp = FastAPI()\napp.mount(\"/metrics\", make_asgi_app())\nREQUESTS = Counter(\"assistant_requests_total\", \"Requests\", [\"route\", \"status\"])\nLATENCY = Histogram(\"assistant_request_seconds\", \"Request latency\", [\"route\"])\n\n\n@app.get(\"/healthz\")\ndef healthz() -> dict:\n    return {\"ok\": True}\n\n\n@app.get(\"/readyz\")\ndef readyz(response: Response) -> dict:\n    checks = {\"index\": index.ping(), \"model\": model_client.ping(), \"db\": db.ping()}\n    if not all(checks.values()):\n        response.status_code = 503\n    return checks"
+        }
+      ]
+    },
+    {
+      "heading": "The support bundle",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "When you cannot access the environment, ask the customer to run one command that collects everything you need into an archive they can inspect before sending. Build it into the product: versions, configuration with secrets redacted, recent logs, Kubernetes resource states and events, and the results of connectivity checks."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "caption": "A minimal Kubernetes support bundle with redaction",
+          "code": "#!/usr/bin/env bash\nset -euo pipefail\nNS=\"${1:-assistant}\"\nOUT=\"support-$(date +%Y%m%d-%H%M%S)\"\nmkdir -p \"$OUT\"\nkubectl version -o yaml > \"$OUT/versions.yaml\" 2>&1 || true\nhelm list -n \"$NS\" > \"$OUT/helm.txt\" 2>&1 || true\nkubectl get all,ingress,pvc -n \"$NS\" -o wide > \"$OUT/resources.txt\"\nkubectl get events -n \"$NS\" --sort-by=.lastTimestamp > \"$OUT/events.txt\"\nfor p in $(kubectl get pods -n \"$NS\" -o name); do\n  kubectl logs -n \"$NS\" \"$p\" --all-containers --since=6h > \"$OUT/$(basename \"$p\").log\" 2>&1 || true\ndone\nkubectl get configmap -n \"$NS\" -o yaml > \"$OUT/configmaps.yaml\"\nsed -i -E 's/(password|token|secret|apikey|api_key)([\"]?[:=][ ]*)[^ ,\"]+/\\1\\2REDACTED/Ig' \"$OUT\"/*\ntar -czf \"$OUT.tar.gz\" \"$OUT\" && echo \"Review $OUT/ then send $OUT.tar.gz\""
+        },
+        {
+          "type": "callout",
+          "kind": "warning",
+          "text": "Never collect Kubernetes Secrets, environment dumps or prompt contents in a support bundle. Redaction by pattern is a safety net, not a guarantee: tell the customer to review the archive before it leaves their network."
+        }
+      ]
+    },
+    {
+      "heading": "Debugging through someone else's hands",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Often the customer's operator drives the keyboard while you watch on a screen share. Your job is to make every minute count: be systematic, ask for one command at a time with a clear reason, and keep notes the operator can reuse."
+        },
+        {
+          "type": "steps",
+          "items": [
+            "**Define the symptom precisely**: what fails, for whom, since when, what changed (deploys, certificates, network, data).",
+            "**Check from the outside in**: can users reach the app (DNS, ingress, TLS)? Is the app ready? Are its dependencies reachable from inside the pod?",
+            "**Look at recent events and logs first**: crash loops, OOM kills, failed pulls and probe failures explain most outages.",
+            "**Form one hypothesis at a time** and choose the command that would confirm or reject it.",
+            "**Change one thing**, with the customer's approval and a rollback, then verify.",
+            "**Write it down**: symptom, cause, fix, and the check that would have caught it earlier."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "caption": "The first five commands to ask an operator for",
+          "code": "kubectl get pods -n assistant -o wide\nkubectl describe pod -n assistant -l app=assistant | sed -n '/Events:/,$p'\nkubectl logs -n assistant deploy/assistant --since=30m | tail -100\nkubectl exec -n assistant deploy/assistant -- \\\n  curl -s -o /dev/null -w '%{http_code}\\n' localhost:8000/readyz\nkubectl get events -n assistant --sort-by=.lastTimestamp | tail -20"
+        }
+      ]
+    },
+    {
+      "heading": "Incident communication",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "During an outage the customer needs confidence more than technical detail. Agree severity levels and contacts before go-live, and when something breaks, follow a rhythm."
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Acknowledge fast** with what you know and when the next update is coming.",
+            "**Update on a fixed cadence** (every 30 or 60 minutes for serious incidents) even if the update is \"still investigating, current hypothesis is X\".",
+            "**One channel and one incident lead** on your side, so the customer is not hearing different stories.",
+            "**Separate mitigation from root cause**: restore service first (roll back, fail over, disable a feature flag), investigate after.",
+            "**Close with a written summary** and, for significant incidents, a blameless post-incident review with action items and owners."
+          ]
+        },
+        {
+          "type": "callout",
+          "kind": "tip",
+          "text": "A good update template: what is affected, what we know, what we are doing, what you can do meanwhile, next update at TIME."
+        }
+      ]
+    },
+    {
+      "heading": "From incident to improvement",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Every incident is information. Add a runbook entry the customer's operators can follow next time without you. Add the missing check to the preflight script, the support bundle, or a readiness probe. Add an alert if the failure was detectable. And when the cause was a product weakness rather than this customer's environment, file it with your product team with the evidence; fixing it once in the product protects every customer."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Break it, then debug it through someone else",
+    "steps": [
+      "Deploy the chart from the packaging lesson to a local cluster with /healthz, /readyz and /metrics implemented.",
+      "Write the support-bundle script and run it; review the output and confirm no secret values appear.",
+      "Ask a friend to break the deployment secretly (wrong database password, a NetworkPolicy blocking egress, an image tag that does not exist, too little memory).",
+      "Diagnose it while they drive the keyboard and you may only ask for one command at a time, following the six steps.",
+      "Send incident updates in the template format at 15-minute intervals during the exercise.",
+      "Write the runbook entry and the preflight or readiness check that would have caught the problem earlier."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Emit standard signals: health endpoints, Prometheus metrics, JSON logs, OTel traces.",
+      "Readiness checks dependencies; liveness only checks the process.",
+      "Ship a support-bundle command; customers review before sending; never collect secrets.",
+      "Debug outside-in, events and logs first, one hypothesis at a time.",
+      "Incidents: acknowledge fast, fixed update cadence, mitigate before root cause.",
+      "Every incident becomes a runbook entry, a check and possibly a product fix."
+    ],
+    "groups": [
+      {
+        "title": "kubectl triage",
+        "items": [
+          {
+            "syntax": "kubectl get pods -n NS -o wide",
+            "desc": "State, restarts, node"
+          },
+          {
+            "syntax": "kubectl describe pod POD -n NS",
+            "desc": "Events: pull errors, OOM, probes"
+          },
+          {
+            "syntax": "kubectl logs deploy/APP -n NS --since=30m",
+            "desc": "Recent logs"
+          },
+          {
+            "syntax": "kubectl logs POD --previous",
+            "desc": "Logs of the crashed container"
+          },
+          {
+            "syntax": "kubectl get events -n NS --sort-by=.lastTimestamp",
+            "desc": "Timeline"
+          },
+          {
+            "syntax": "kubectl exec deploy/APP -- curl localhost:PORT/readyz",
+            "desc": "Check from inside"
+          }
+        ]
+      },
+      {
+        "title": "Health and metrics",
+        "items": [
+          {
+            "syntax": "/healthz",
+            "desc": "Liveness: process alive"
+          },
+          {
+            "syntax": "/readyz",
+            "desc": "Readiness: dependencies reachable"
+          },
+          {
+            "syntax": "/metrics",
+            "desc": "Prometheus exposition"
+          },
+          {
+            "syntax": "request ID in logs, traces and user errors",
+            "desc": "Correlate everything"
+          },
+          {
+            "syntax": "support-bundle.sh NAMESPACE",
+            "desc": "Collect redacted evidence for review"
+          }
+        ]
+      },
+      {
+        "title": "Incident update template",
+        "items": [
+          {
+            "syntax": "Affected",
+            "desc": "Who and what"
+          },
+          {
+            "syntax": "Known / Doing",
+            "desc": "Facts and current actions"
+          },
+          {
+            "syntax": "Workaround",
+            "desc": "What users can do meanwhile"
+          },
+          {
+            "syntax": "Next update at TIME",
+            "desc": "Commit to cadence"
+          }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "A readiness probe that always returns OK even when the database is down.",
+      "Support bundles that include Secrets or environment dumps.",
+      "Asking the operator to run ten commands at once with no explanation.",
+      "Hunting root cause while the service stays down instead of rolling back.",
+      "Fixing the same incident manually at every customer instead of in the product."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "The database is down but Kubernetes keeps sending traffic to your pods. What is likely wrong?",
+      "options": [
+        "Readiness does not check dependencies",
+        "The liveness probe is configured too strictly",
+        "The image tag in the chart values is wrong",
+        "The support bundle script is missing from the image"
+      ],
+      "answer": 0,
+      "explain": "Readiness should fail when required dependencies are unreachable, so the pod is removed from service endpoints until they recover."
+    },
+    {
+      "q": "What must a support bundle never contain?",
+      "options": [
+        "Secret values or prompt contents",
+        "Kubernetes events from the namespace",
+        "Application and chart version numbers",
+        "Recent pod logs from the last six hours"
+      ],
+      "answer": 0,
+      "explain": "Bundles leave the customer's network; secrets and sensitive content must be excluded, with redaction as a backstop and customer review before sending."
+    },
+    {
+      "q": "A pod restarts every few minutes. Which command most quickly shows why?",
+      "options": [
+        "kubectl describe pod (Events section)",
+        "kubectl get nodes -o wide for the cluster",
+        "helm list for every namespace in the cluster",
+        "kubectl get ingress -A across all namespaces"
+      ],
+      "answer": 0,
+      "explain": "Pod events show OOM kills, failed probes and image pull errors, the usual causes of restarts; logs with --previous add the container's last output."
+    },
+    {
+      "q": "During a serious outage, what should come first?",
+      "options": [
+        "Mitigate first, then investigate the cause",
+        "Find the full root cause before changing anything",
+        "Wait for the next scheduled release window to fix it",
+        "Write the post-incident review with the whole team"
+      ],
+      "answer": 0,
+      "explain": "Restoring service limits customer impact; root-cause analysis can follow once users are unblocked."
+    },
+    {
+      "q": "What should every incident update to the customer include?",
+      "options": [
+        "Impact, facts, actions and the next update time",
+        "Only the final root cause, once it has been found",
+        "Detailed stack traces from every affected service",
+        "A list of everyone on your side who was paged"
+      ],
+      "answer": 0,
+      "explain": "A predictable, plain-language update with a committed next update time keeps the customer informed and confident."
+    }
+  ]
+}

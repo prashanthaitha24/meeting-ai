@@ -1,0 +1,134 @@
+{
+  "id": "fde-security-review",
+  "minutes": 45,
+  "intro": "Almost every enterprise deployment passes through the customer's security review, and many pilots stall there, not because the software is unsafe but because nobody prepared clear answers. As an FDE you are often the person who can explain exactly what data flows where, who can access it and how it is protected. This lesson covers how security reviews work, the documents that speed them up, drawing data-flow diagrams and threat models, least-privilege access, the controls reviewers always ask about, and the AI-specific questions that now appear in every review.",
+  "objectives": [
+    "Explain the stages of a customer security review and what reviewers need",
+    "Draw a data-flow diagram and run a lightweight STRIDE threat model",
+    "Design least-privilege access for people, services and cloud resources",
+    "Answer the standard control questions on encryption, secrets, logging and vulnerabilities",
+    "Address AI-specific concerns: data use, retention, prompt injection and output risk"
+  ],
+  "sections": [
+    {
+      "heading": "How security reviews work",
+      "blocks": [
+        {"type": "p", "text": "Reviews usually run in stages. A **vendor assessment** checks your company: questionnaires, compliance reports such as SOC 2 Type II or ISO 27001 certificates, penetration test summaries, policies. A **solution review** examines this specific deployment: architecture, data flows, access, where data is stored and processed. Some customers add a **penetration test** of the deployed system before production. Legal and privacy teams in parallel review the data processing agreement and any cross-border data transfers."},
+        {"type": "p", "text": "Book the review in the first week of the pilot, because security teams schedule weeks ahead. Your company's security or trust team usually owns the vendor assessment; you own the solution-specific answers. Prepare them before the first meeting, and keep a reusable pack that improves with every customer."}
+      ]
+    },
+    {
+      "heading": "Data flows and threat models",
+      "blocks": [
+        {"type": "p", "text": "The single most useful artefact is a **data-flow diagram**: every component, every arrow labelled with what data moves, over which protocol, authenticated how, and every place data is stored, with the trust boundaries (customer network, your cloud, a model provider) drawn explicitly. Reviewers think in flows; a clear diagram answers half their questions before they ask."},
+        {"type": "table", "headers": ["Flow", "Data", "Protection", "Stored?"], "rows": [
+          ["User browser -> app", "Questions, answers", "TLS 1.2+, SSO (OIDC), session cookies secure + httpOnly", "No"],
+          ["App -> document store", "Policy PDFs", "Service identity, read-only scope, private network", "Index in customer VPC"],
+          ["App -> model endpoint", "Prompt with retrieved passages", "TLS, private endpoint, zero-retention terms", "No (by contract)"],
+          ["App -> logs", "Request IDs, counts, latency", "No prompt text, 30-day retention", "Customer log platform"]
+        ]},
+        {"type": "p", "text": "Then run a lightweight **STRIDE** threat model over the diagram: for each component and flow, ask about **S**poofing (can someone pretend to be a user or service?), **T**ampering (can data be altered?), **R**epudiation (can actions be denied for lack of logs?), **I**nformation disclosure (can data leak?), **D**enial of service (can it be overwhelmed?) and **E**levation of privilege (can someone gain more access?). Record each threat with its mitigation; reviewers trust teams who found their own risks first."}
+      ]
+    },
+    {
+      "heading": "Least privilege everywhere",
+      "blocks": [
+        {"type": "p", "text": "Reviewers look for the smallest possible access for each identity: people get roles mapped from the customer's groups, services get their own identities with only the permissions they use, and nothing uses shared or personal credentials. In cloud accounts, scope policies to specific actions and resources."},
+        {"type": "code", "lang": "json", "caption": "A narrowly scoped cloud policy: read one bucket prefix, nothing else", "code": "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [\n    {\n      \"Sid\": \"ReadPolicyDocuments\",\n      \"Effect\": \"Allow\",\n      \"Action\": [\"s3:GetObject\"],\n      \"Resource\": \"arn:aws:s3:::acme-policies/motor/*\"\n    },\n    {\n      \"Sid\": \"ListOnlyThatPrefix\",\n      \"Effect\": \"Allow\",\n      \"Action\": [\"s3:ListBucket\"],\n      \"Resource\": \"arn:aws:s3:::acme-policies\",\n      \"Condition\": {\"StringLike\": {\"s3:prefix\": [\"motor/*\"]}}\n    }\n  ]\n}"},
+        {"type": "list", "items": [
+          "Prefer workload identity (cloud roles bound to the Kubernetes service account) over long-lived keys.",
+          "Separate read and write identities; most FDE integrations only need read.",
+          "Time-bound human access for support, approved and logged, removed when the engagement ends."
+        ]}
+      ]
+    },
+    {
+      "heading": "The controls reviewers always ask about",
+      "blocks": [
+        {"type": "table", "headers": ["Area", "Typical question", "Good answer includes"], "rows": [
+          ["Encryption", "Is data encrypted in transit and at rest?", "TLS versions, at-rest encryption and who holds keys"],
+          ["Secrets", "How are credentials stored and rotated?", "Vault or cloud secret manager, rotation period, no secrets in code"],
+          ["Logging", "What is logged, where, for how long?", "Audit events, no sensitive content, retention, customer access"],
+          ["Vulnerabilities", "How do you find and fix vulnerabilities?", "Image scanning, dependency updates, patch timelines by severity"],
+          ["Data residency", "Where is data stored and processed?", "Regions, sub-processors, no transfers without approval"],
+          ["Deletion", "How is data deleted at the end?", "Process, timeline, written confirmation"],
+          ["Incidents", "How will you tell us about a breach?", "Notification timeline and contacts"]
+        ]},
+        {"type": "p", "text": "Answer precisely and honestly. \"Yes, AES-256 at rest with customer-managed keys in your KMS\" beats \"industry-standard encryption\". If a control is missing, say so and propose a mitigation or a date; reviewers respect candour far more than vague assurance."}
+      ]
+    },
+    {
+      "heading": "AI-specific questions",
+      "blocks": [
+        {"type": "list", "items": [
+          "**Training on our data**: Is customer data used to train or improve any model? Have the contractual answer from each model provider and your own company ready.",
+          "**Retention at the model provider**: Are prompts and outputs stored, for how long, where? Zero-retention or in-tenant deployments may be required.",
+          "**Where inference runs**: hosted API, the customer's cloud tenancy, or self-hosted inside their network.",
+          "**Access control in retrieval**: How do you prevent users seeing documents they are not entitled to? (Permission-filtered retrieval, as in the LLM apps lesson.)",
+          "**Prompt injection and actions**: What stops malicious content from causing harmful actions? (Validation, least-privilege tools, human approval.)",
+          "**Output risk**: How are hallucinations, bias and harmful outputs detected and handled? (Evaluation, citations, human review, feedback channel.)",
+          "**Logging of prompts**: Are prompts logged? Who can see them? (Ideally metadata only by default.)"
+        ]},
+        {"type": "callout", "kind": "tip", "text": "Turn each answered review into reusable material: an up-to-date architecture and data-flow diagram, a standard answers document, and a list of configuration options (in-tenant models, no prompt logging, customer-managed keys) that resolve common objections."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Prepare a security review pack",
+    "steps": [
+      "Take the RAG assistant or support agent you built in stage 3 and draw its data-flow diagram with trust boundaries.",
+      "Fill a flow table: data, protocol, authentication, storage and retention for every arrow.",
+      "Run STRIDE over the diagram and write at least eight threats with mitigations.",
+      "Write least-privilege policies for each service identity (cloud policy or Kubernetes RBAC).",
+      "Answer the seven standard control questions and the seven AI-specific questions in writing, precisely.",
+      "Ask a colleague to play the reviewer, question you for 30 minutes, and record every question you could not answer."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Book the security review in week one; prepare answers before the meeting.",
+      "A data-flow diagram with trust boundaries answers most questions.",
+      "STRIDE your own design and show mitigations.",
+      "Least privilege for people, services and cloud resources; no shared credentials.",
+      "Precise, honest answers; propose mitigations for gaps.",
+      "Have clear answers on training use, retention, inference location and prompt injection."
+    ],
+    "groups": [
+      {"title": "STRIDE", "items": [
+        {"syntax": "S - Spoofing", "desc": "Fake identity: authentication"},
+        {"syntax": "T - Tampering", "desc": "Altered data: integrity, signing"},
+        {"syntax": "R - Repudiation", "desc": "Deniable actions: audit logs"},
+        {"syntax": "I - Information disclosure", "desc": "Leaks: encryption, access control"},
+        {"syntax": "D - Denial of service", "desc": "Overload: limits, quotas"},
+        {"syntax": "E - Elevation of privilege", "desc": "More access: least privilege"}
+      ]},
+      {"title": "Review artefacts", "items": [
+        {"syntax": "SOC 2 Type II / ISO 27001", "desc": "Vendor-level assurance reports"},
+        {"syntax": "data-flow diagram + flow table", "desc": "Solution-level clarity"},
+        {"syntax": "threat model", "desc": "Risks found and mitigated"},
+        {"syntax": "pen test summary", "desc": "Independent testing"},
+        {"syntax": "DPA + sub-processor list", "desc": "Legal and privacy"}
+      ]},
+      {"title": "Least privilege", "items": [
+        {"syntax": "Action + Resource scoped policies", "desc": "Only what is used"},
+        {"syntax": "workload identity", "desc": "No long-lived keys"},
+        {"syntax": "group -> role mapping", "desc": "People via the customer IdP"},
+        {"syntax": "time-bound support access", "desc": "Approved, logged, removed"}
+      ]}
+    ],
+    "pitfalls": [
+      "Booking the security review after the build is finished.",
+      "Vague answers such as 'industry-standard security'.",
+      "Service accounts with broad or administrator permissions.",
+      "Not knowing whether the model provider retains or trains on prompts.",
+      "Logging full prompts and answers by default."
+    ]
+  },
+  "quiz": [
+    {"q": "Which artefact answers the most reviewer questions up front?", "options": ["A data-flow diagram with trust boundaries and labelled flows", "A list of every library version used", "The marketing brochure for the product", "A video of the demo"], "answer": 0, "explain": "Reviewers reason about where data goes and how it is protected; a labelled data-flow diagram shows exactly that."},
+    {"q": "In STRIDE, missing audit logs for who approved a refund is which threat?", "options": ["Repudiation", "Spoofing", "Tampering", "Denial of service"], "answer": 0, "explain": "Repudiation is the ability to deny having performed an action; audit logs that record who did what counter it."},
+    {"q": "A reviewer asks whether data is encrypted at rest. Which answer is best?", "options": ["Yes, AES-256 with customer-managed keys in your KMS", "Yes, we use industry-standard encryption everywhere", "Encryption is handled by the cloud, so we did not check", "We plan to encrypt it after the pilot"], "answer": 0, "explain": "Precise answers naming the mechanism and key ownership build trust; vague or deferred answers create more questions."},
+    {"q": "Your integration only needs to read documents from one bucket prefix. What should its policy allow?", "options": ["GetObject on that prefix and ListBucket limited to it", "Full access to all buckets in the account", "Administrator access during the pilot only", "Read and write on the whole bucket"], "answer": 0, "explain": "Least privilege means only the actions and resources the service actually uses."},
+    {"q": "Which AI-specific question must you be able to answer for almost every review?", "options": ["Whether customer data is retained or used for training by any model provider", "Which programming language the model was written in", "How many parameters the model has", "What the model's benchmark scores are"], "answer": 0, "explain": "Data use and retention by model providers is a core privacy and confidentiality concern, and contractual answers are expected."}
+  ]
+}

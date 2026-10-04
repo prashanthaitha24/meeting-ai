@@ -1,0 +1,130 @@
+{
+  "id": "fde-packaging",
+  "minutes": 45,
+  "intro": "Deploying into your own cloud is easy; deploying into a customer's Kubernetes cluster that you do not own, with their registry, their policies, their ingress, their secrets and their security team watching, is a skill. This lesson covers building container images that pass enterprise scanners and admission policies, writing a Helm chart that adapts to any reasonable cluster through values instead of edits, the install and upgrade workflow customers expect, and the cluster quirks, such as restricted pod security and OpenShift's random user IDs, that break naive deployments.",
+  "objectives": [
+    "Build small, non-root, pinned, multi-architecture images with an SBOM",
+    "Design a Helm chart whose values cover registries, secrets, ingress and scheduling",
+    "Meet restricted pod security and least-privilege RBAC requirements",
+    "Validate, install, upgrade and roll back with Helm safely",
+    "Write installation docs and preflight checks customers can follow without you"
+  ],
+  "sections": [
+    {
+      "heading": "Images enterprises will accept",
+      "blocks": [
+        {"type": "p", "text": "Customer platforms scan every image and often enforce admission policies. Images that run as root, carry hundreds of known vulnerabilities, or float on a `latest` tag get rejected or flagged. Build images as if a security reviewer will read the Dockerfile, because one will."},
+        {"type": "code", "lang": "dockerfile", "caption": "A small, non-root, reproducible Python service image", "code": "FROM python:3.12-slim AS build\nWORKDIR /app\nCOPY pyproject.toml uv.lock ./\nRUN pip install --no-cache-dir uv && uv export --frozen --no-dev -o requirements.txt \\\n && pip install --no-cache-dir --prefix=/install -r requirements.txt\n\nFROM python:3.12-slim\nRUN useradd --uid 10001 --create-home app\nCOPY --from=build /install /usr/local\nCOPY --chown=10001:0 src/ /app/src/\nWORKDIR /app\nUSER 10001\nEXPOSE 8000\nCMD [\"python\", \"-m\", \"uvicorn\", \"src.app:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8000\"]"},
+        {"type": "list", "items": [
+          "**Non-root user** with a fixed numeric UID, and files group-owned by 0 so platforms that assign random UIDs (OpenShift) still work.",
+          "**Minimal base** and multi-stage builds: build tools stay out of the runtime image.",
+          "**Pinned versions** and release tags (and digests in the chart) so what was tested is what runs.",
+          "**Multi-architecture** builds (amd64 and arm64) with `docker buildx`, because customer fleets increasingly include ARM nodes.",
+          "**SBOM and signature**: publish a software bill of materials and sign images (for example with cosign) so the customer can verify provenance."
+        ]}
+      ]
+    },
+    {
+      "heading": "A Helm chart that adapts instead of being edited",
+      "blocks": [
+        {"type": "p", "text": "If a customer has to edit your templates to install your product, every upgrade becomes a merge conflict. Expose everything that legitimately differs between clusters as **values** with sensible defaults, and keep templates generic."},
+        {"type": "code", "lang": "yaml", "caption": "values.yaml: the knobs customer clusters actually need", "code": "image:\n  registry: registry.yourproduct.example     # customers override with their mirror\n  repository: assistant/api\n  tag: \"1.8.2\"\n  pullPolicy: IfNotPresent\nimagePullSecrets: []                         # e.g. [{name: corp-registry}]\n\nreplicaCount: 2\nresources:\n  requests: {cpu: 250m, memory: 512Mi}\n  limits: {memory: 1Gi}\n\nexistingSecret: \"\"                           # use the customer's secret instead of creating one\nenv:\n  LOG_LEVEL: info\n\ningress:\n  enabled: false\n  className: \"\"                              # nginx, openshift-default, alb ...\n  host: assistant.corp.example\n  tlsSecretName: \"\"\n\nnodeSelector: {}\ntolerations: []\naffinity: {}\npodSecurityContext:\n  runAsNonRoot: true\n  seccompProfile: {type: RuntimeDefault}\nsecurityContext:\n  allowPrivilegeEscalation: false\n  readOnlyRootFilesystem: true\n  capabilities: {drop: [\"ALL\"]}\n\nproxy:\n  httpsProxy: \"\"\n  noProxy: \".svc,.cluster.local\"\ncaBundleConfigMap: \"\"                        # customer CA mounted into the pod"},
+        {"type": "p", "text": "Support **existing secrets** (the customer creates and rotates them, often from their vault) rather than requiring secret values in `values.yaml`. Make registry, ingress class, storage class, proxy settings and CA bundle configurable. Ship a `values.schema.json` so typos fail at install time instead of producing a silently wrong deployment."}
+      ]
+    },
+    {
+      "heading": "Security posture: pod security and RBAC",
+      "blocks": [
+        {"type": "p", "text": "Many clusters enforce the Kubernetes **restricted** Pod Security Standard: non-root, no privilege escalation, all capabilities dropped, a seccomp profile. The values above satisfy it; test your chart in a namespace labelled `pod-security.kubernetes.io/enforce: restricted` before any customer does."},
+        {"type": "list", "items": [
+          "Request **namespaced** RBAC only: a Role and RoleBinding for what the app needs, never cluster-admin.",
+          "If you truly need cluster-scoped resources (CRDs, webhooks), separate them into an optional install step that the platform team runs and reviews.",
+          "Use a read-only root filesystem and mount writable `emptyDir` volumes only where needed (`/tmp`, caches).",
+          "Define readiness and liveness probes, resource requests and limits, and a PodDisruptionBudget so platform maintenance does not take you down.",
+          "Expect network policies: document every connection your pods make so the customer can allow them."
+        ]}
+      ]
+    },
+    {
+      "heading": "Install, upgrade and roll back",
+      "blocks": [
+        {"type": "code", "lang": "bash", "caption": "The workflow customers can run themselves", "code": "helm lint ./assistant -f customer-values.yaml\n# render and review before applying\nhelm template assistant ./assistant -f customer-values.yaml > rendered.yaml\nhelm upgrade --install assistant ./assistant -n assistant --create-namespace \\\n  -f customer-values.yaml --atomic --timeout 10m\nhelm history assistant -n assistant\nhelm rollback assistant 3 -n assistant   # back to revision 3 if the upgrade misbehaves"},
+        {"type": "list", "items": [
+          "`helm template` lets the customer's platform team review exactly what will be applied; many require it.",
+          "`--atomic` rolls back automatically if the release does not become healthy within the timeout.",
+          "Keep the customer's values file in their version control; upgrades become a chart version bump plus a diff review.",
+          "Document breaking changes and migration steps in release notes for every chart version."
+        ]}
+      ]
+    },
+    {
+      "heading": "Docs and preflight checks",
+      "blocks": [
+        {"type": "p", "text": "The installation guide is part of the product. It should list prerequisites (Kubernetes version range, storage class, ingress controller, GPU nodes if needed, outbound destinations), a minimal values file for a typical install, the commands above, how to verify the install, and how to uninstall cleanly. Add a **preflight** script or Helm test that checks the environment before installing: can pods pull the image, resolve and reach the database, trust the CA, get through the proxy? Failing early with a clear message saves days of remote debugging."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Package a service for a cluster you do not own",
+    "steps": [
+      "Write the Dockerfile from this lesson for a small FastAPI service, build it for amd64 and arm64 with buildx, and scan it with an open-source scanner (for example Trivy).",
+      "Create a Helm chart with the values from this lesson, including existingSecret, ingress, proxy and CA bundle options, and a values.schema.json.",
+      "Create a kind cluster and a namespace labelled to enforce the restricted Pod Security Standard; install the chart and fix anything rejected.",
+      "Install from a local registry mirror by overriding image.registry, using an imagePullSecret.",
+      "Upgrade to a new image tag with --atomic, then deliberately ship a broken version and watch the automatic rollback.",
+      "Write a one-page installation guide with prerequisites, minimal values, verify and uninstall steps, and have someone follow it cold."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Non-root, minimal, pinned, multi-arch images with SBOM and signature.",
+      "Everything cluster-specific is a value; customers never edit templates.",
+      "Support existing secrets, registry mirrors, proxies and CA bundles.",
+      "Pass the restricted Pod Security Standard; namespaced RBAC only.",
+      "helm template for review, upgrade --install --atomic, rollback ready.",
+      "Installation guide and preflight checks are part of the product."
+    ],
+    "groups": [
+      {"title": "Images", "items": [
+        {"syntax": "USER 10001 (files group 0)", "desc": "Non-root, OpenShift-friendly"},
+        {"syntax": "docker buildx build --platform linux/amd64,linux/arm64", "desc": "Multi-arch"},
+        {"syntax": "trivy image IMAGE", "desc": "Vulnerability scan"},
+        {"syntax": "cosign sign IMAGE@DIGEST", "desc": "Sign for provenance"}
+      ]},
+      {"title": "Helm", "items": [
+        {"syntax": "helm lint CHART -f VALUES", "desc": "Static checks"},
+        {"syntax": "helm template NAME CHART -f VALUES", "desc": "Render for review"},
+        {"syntax": "helm upgrade --install ... --atomic --timeout 10m", "desc": "Install or upgrade safely"},
+        {"syntax": "helm history / helm rollback NAME REV", "desc": "Revisions and rollback"},
+        {"syntax": "values.schema.json", "desc": "Validate values at install"}
+      ]},
+      {"title": "Restricted pod security", "items": [
+        {"syntax": "runAsNonRoot: true", "desc": "No root"},
+        {"syntax": "allowPrivilegeEscalation: false", "desc": "No escalation"},
+        {"syntax": "capabilities: {drop: [ALL]}", "desc": "No extra capabilities"},
+        {"syntax": "seccompProfile: {type: RuntimeDefault}", "desc": "Seccomp required"},
+        {"syntax": "readOnlyRootFilesystem: true + emptyDir", "desc": "Writable only where needed"}
+      ]},
+      {"title": "Chart values customers need", "items": [
+        {"syntax": "image.registry / imagePullSecrets", "desc": "Their mirror"},
+        {"syntax": "existingSecret", "desc": "Their secret management"},
+        {"syntax": "ingress.className / host / tls", "desc": "Their ingress"},
+        {"syntax": "nodeSelector / tolerations / affinity", "desc": "Their scheduling rules"}
+      ]}
+    ],
+    "pitfalls": [
+      "Images that run as root or use the latest tag.",
+      "Requiring cluster-admin to install an application.",
+      "Secrets that must be pasted into values.yaml.",
+      "Hard-coded registry, ingress class or storage class in templates.",
+      "Never testing under the restricted Pod Security Standard or on OpenShift."
+    ]
+  },
+  "quiz": [
+    {"q": "A customer's admission controller rejects your pods with 'must not run as root'. What should change?", "options": ["Run as a non-root UID and set runAsNonRoot in the security context", "Ask the customer to disable the admission policy", "Install the app in the kube-system namespace", "Add privileged: true to the container"], "answer": 0, "explain": "Restricted policies require non-root containers. Fixing the image and security context is the only acceptable path."},
+    {"q": "The customer must pull images from their internal mirror. How should your chart support this?", "options": ["A configurable image.registry value plus imagePullSecrets", "Customers edit the deployment template by hand", "A hard-coded mirror URL for each customer", "Copy images into the chart archive"], "answer": 0, "explain": "Exposing the registry as a value keeps templates unchanged across customers and upgrades."},
+    {"q": "Why do platform teams often ask for helm template output before installation?", "options": ["To review exactly which resources will be applied", "Because helm install cannot work without it", "To make the installation faster", "To generate the container images"], "answer": 0, "explain": "Rendered manifests let reviewers check RBAC, security contexts and network needs before anything touches their cluster."},
+    {"q": "An upgrade's new pods never become ready. Which flag would have returned the release to its previous state automatically?", "options": ["--atomic", "--create-namespace", "--dry-run", "--reuse-values"], "answer": 0, "explain": "--atomic waits for the release to become healthy and rolls it back automatically if it does not within the timeout."},
+    {"q": "Your app needs a database password that the customer rotates in their vault. What should the chart do?", "options": ["Reference an existing Kubernetes secret they manage", "Require the password in values.yaml", "Bake the password into the image", "Generate a random password at install time"], "answer": 0, "explain": "Supporting an existing secret lets the customer manage and rotate credentials with their own tooling, without exposing them in your files."}
+  ]
+}
