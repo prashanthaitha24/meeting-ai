@@ -1,0 +1,127 @@
+{
+  "id": "fde-integration",
+  "minutes": 45,
+  "intro": "An FDE's software is only as useful as its connections to the customer's systems. In a single engagement you may call a modern REST API with OAuth, receive webhooks, pick up nightly CSV files from an SFTP server, read incrementally from a database, and talk to a SOAP service older than some of your colleagues. This lesson covers each of those integration styles, the machine-to-machine authentication patterns that go with them, and the reliability patterns that keep integrations correct when networks fail and messages repeat: idempotency, incremental sync with watermarks, quarantines and reconciliation.",
+  "objectives": [
+    "Authenticate service-to-service with OAuth client credentials, API keys and mTLS",
+    "Consume paginated, rate-limited APIs safely",
+    "Receive webhooks securely with signature verification and idempotent handling",
+    "Integrate file drops over SFTP and incremental database reads robustly",
+    "Apply idempotency, watermarks, dead-letter queues and reconciliation"
+  ],
+  "sections": [
+    {
+      "heading": "Machine-to-machine authentication",
+      "blocks": [
+        {"type": "p", "text": "Integrations run without a person present, so they authenticate as a **machine identity**. The customer's identity team will usually tell you which pattern they allow; know them all."},
+        {"type": "table", "headers": ["Pattern", "How it works", "Watch out for"], "rows": [
+          ["OAuth 2.0 client credentials", "Exchange client ID and secret for a short-lived access token at the token endpoint", "Cache tokens until near expiry; request minimal scopes"],
+          ["API key", "Static secret sent in a header", "Rotation, storage in a vault, never in URLs"],
+          ["Mutual TLS (mTLS)", "Client presents a certificate the server trusts", "Certificate renewal before expiry"],
+          ["Workload identity", "Cloud or Kubernetes identity federated to the target", "Best option when available: no static secret"],
+          ["Signed requests", "Request signed with a shared secret or key (HMAC)", "Clock skew and canonicalisation details"]
+        ]},
+        {"type": "code", "lang": "python", "caption": "OAuth client credentials with token caching", "code": "import os\nimport time\n\nimport httpx\n\n_token = {\"value\": None, \"expires\": 0.0}\n\n\ndef access_token() -> str:\n    if _token[\"value\"] and time.time() < _token[\"expires\"] - 60:\n        return _token[\"value\"]\n    r = httpx.post(os.environ[\"TOKEN_URL\"], timeout=10, data={\n        \"grant_type\": \"client_credentials\",\n        \"client_id\": os.environ[\"CLIENT_ID\"],\n        \"client_secret\": os.environ[\"CLIENT_SECRET\"],\n        \"scope\": \"claims.read\",\n    })\n    r.raise_for_status()\n    body = r.json()\n    _token.update(value=body[\"access_token\"], expires=time.time() + body[\"expires_in\"])\n    return _token[\"value\"]"}
+      ]
+    },
+    {
+      "heading": "Consuming APIs: pagination and rate limits",
+      "blocks": [
+        {"type": "p", "text": "Enterprise APIs return data in pages and limit how fast you may call them. Prefer **cursor** (or token) pagination, which stays correct when records change during the read, over page-number pagination, which can skip or repeat records. Respect rate limits: read `Retry-After` on 429 responses, back off, and keep concurrency low until you know the limits. A runaway integration that overloads a customer system is a fast way to lose access."},
+        {"type": "code", "lang": "python", "caption": "Walk a cursor-paginated endpoint", "code": "def fetch_all(client, path: str, page_size: int = 200):\n    cursor = None\n    while True:\n        params = {\"limit\": page_size, **({\"cursor\": cursor} if cursor else {})}\n        r = client.get(path, params=params,\n                       headers={\"Authorization\": f\"Bearer {access_token()}\"})\n        if r.status_code == 429:\n            time.sleep(int(r.headers.get(\"Retry-After\", \"5\")))\n            continue\n        r.raise_for_status()\n        body = r.json()\n        yield from body[\"items\"]\n        cursor = body.get(\"next_cursor\")\n        if not cursor:\n            break"}
+      ]
+    },
+    {
+      "heading": "Webhooks: receiving events safely",
+      "blocks": [
+        {"type": "p", "text": "With **webhooks**, the customer's system calls you when something happens. Three rules keep them safe and correct. Verify every request's **signature** (usually an HMAC of the raw body with a shared secret) and reject anything unsigned or old. Respond quickly (within a few seconds) with 2xx and process asynchronously, because senders time out and retry. And make processing **idempotent**, because senders deliver at least once and duplicates are normal."},
+        {"type": "code", "lang": "python", "caption": "Verify an HMAC-signed webhook before trusting it", "code": "import hashlib\nimport hmac\nimport os\nimport time\n\nSECRET = os.environ[\"WEBHOOK_SECRET\"].encode()\n\n\ndef verify(raw_body: bytes, signature_hex: str, timestamp: str, max_age_s: int = 300) -> bool:\n    if abs(time.time() - int(timestamp)) > max_age_s:\n        return False                                   # reject replays of old requests\n    expected = hmac.new(SECRET, timestamp.encode() + b\".\" + raw_body, hashlib.sha256).hexdigest()\n    return hmac.compare_digest(expected, signature_hex)  # constant-time comparison"},
+        {"type": "p", "text": "Each provider documents its own header names and signing format; follow it exactly, and always sign over the raw bytes, not re-serialised JSON. Store the event ID of every processed event and skip ones you have seen."}
+      ]
+    },
+    {
+      "heading": "Files and databases",
+      "blocks": [
+        {"type": "p", "text": "Plenty of enterprise data still moves as **files**: nightly CSV or XML exports dropped on an SFTP server. Robust file integrations agree a naming convention, wait for a completion signal (a `.done` marker file or an atomic rename) so you never read a half-written file, verify a checksum or row count, process each file exactly once by recording processed file names, and move processed files to an archive folder rather than deleting them."},
+        {"type": "p", "text": "For **databases**, read from a replica or reporting view, never hammer the primary, and read **incrementally** using a watermark: the highest `updated_at` (or a monotonically increasing ID) you have processed. Overlap the window slightly to catch late commits, and dedupe on the primary key. Where the customer supports it, **change data capture** (CDC) streams inserts, updates and deletes from the database log and catches deletes that watermarks miss."},
+        {"type": "code", "lang": "sql", "caption": "Incremental read with a watermark and a safety overlap", "code": "-- :last_watermark is the max(updated_at) from the previous successful run\nSELECT claim_id, status, amount, updated_at\nFROM claims_view\nWHERE updated_at >= :last_watermark - INTERVAL '10 minutes'\nORDER BY updated_at, claim_id;\n-- upsert by claim_id on the target, then store the new max(updated_at)"},
+        {"type": "callout", "kind": "note", "text": "Legacy SOAP services are still common in insurance, banking and government. Python's zeep library reads the WSDL and generates callable operations; treat the service like any other API with timeouts, retries and logging."}
+      ]
+    },
+    {
+      "heading": "Patterns that keep integrations correct",
+      "blocks": [
+        {"type": "list", "items": [
+          "**Idempotency**: every write keyed so repeating it has no extra effect (upserts, idempotency keys, processed-event tables).",
+          "**At-least-once with dedupe** beats chasing exactly-once delivery: accept duplicates and make them harmless.",
+          "**Quarantine / dead-letter queue**: records or events that fail validation go somewhere visible with the reason, instead of blocking the pipeline or vanishing.",
+          "**Watermarks stored only after success**, so a failed run re-reads rather than skips.",
+          "**Reconciliation**: periodically compare counts or totals between source and target and alert on drift.",
+          "**Contract tests**: a test that checks the shape of the partner's responses, so you notice when they change.",
+          "**Observability**: per-run counts (read, written, quarantined), last success time and lag, with alerts."
+        ]}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Three integrations, one reliable store",
+    "steps": [
+      "Run a mock OAuth token endpoint and paginated API locally (a small FastAPI app) that issues tokens expiring in 60 seconds and returns cursor pages.",
+      "Implement the token cache and cursor walker, and upsert results into SQLite by ID; confirm a second run creates no duplicates.",
+      "Add a webhook endpoint that verifies an HMAC signature and timestamp, returns 202 immediately, and records event IDs to skip duplicates; replay the same event twice.",
+      "Run an SFTP server container, drop CSV files with .done markers, and write a poller that processes each file once and archives it.",
+      "Add a quarantine table for rows that fail validation, with the reason, and print per-run counts.",
+      "Write a reconciliation query comparing source and target counts and make the job exit non-zero on mismatch."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Machine identity: client credentials, API keys, mTLS, or workload identity (best).",
+      "Cursor pagination, respect Retry-After, low concurrency until limits are known.",
+      "Webhooks: verify signature and age, respond fast, process idempotently.",
+      "Files: completion markers, checksums, process once, archive.",
+      "Databases: replica or view, incremental watermarks with overlap, or CDC.",
+      "Idempotency, quarantine, reconciliation and per-run metrics everywhere."
+    ],
+    "groups": [
+      {"title": "Auth", "items": [
+        {"syntax": "grant_type=client_credentials", "desc": "OAuth machine-to-machine token"},
+        {"syntax": "cache token until expires_in - 60s", "desc": "Avoid a token call per request"},
+        {"syntax": "Authorization: Bearer TOKEN", "desc": "Send the token"},
+        {"syntax": "mTLS: client cert + key, server trusts CA", "desc": "Certificate-based identity"}
+      ]},
+      {"title": "APIs", "items": [
+        {"syntax": "?limit=N&cursor=C", "desc": "Cursor pagination"},
+        {"syntax": "429 + Retry-After", "desc": "Back off as instructed"},
+        {"syntax": "Idempotency-Key header", "desc": "Safe retries for POSTs"},
+        {"syntax": "contract test on response shape", "desc": "Detect partner changes"}
+      ]},
+      {"title": "Webhooks", "items": [
+        {"syntax": "HMAC-SHA256(secret, ts + '.' + raw_body)", "desc": "Typical signature scheme"},
+        {"syntax": "hmac.compare_digest", "desc": "Constant-time comparison"},
+        {"syntax": "reject if |now - ts| > 300s", "desc": "Replay protection"},
+        {"syntax": "202 then queue", "desc": "Respond fast, process async"}
+      ]},
+      {"title": "Files and DBs", "items": [
+        {"syntax": "FILE.csv + FILE.csv.done", "desc": "Completion marker"},
+        {"syntax": "processed_files table", "desc": "Process each file once"},
+        {"syntax": "WHERE updated_at >= wm - overlap", "desc": "Incremental read"},
+        {"syntax": "CDC", "desc": "Stream inserts, updates and deletes"}
+      ]}
+    ],
+    "pitfalls": [
+      "Fetching a new OAuth token for every request.",
+      "Page-number pagination over changing data, skipping or repeating records.",
+      "Processing webhooks synchronously and timing out, causing retries and duplicates.",
+      "Reading files while they are still being written.",
+      "Advancing the watermark before the write succeeded."
+    ]
+  },
+  "quiz": [
+    {"q": "A nightly job reads records by page number while the source keeps updating, and some records go missing. What is the better approach?", "options": ["Cursor pagination or an updated_at watermark", "Larger page sizes so the job finishes faster", "Running the same job twice every night", "Reading the pages in a random order each run"], "answer": 0, "explain": "Page offsets shift when records change mid-read. Cursors and watermarks track position by data, not by position in a moving list."},
+    {"q": "Your webhook handler sometimes processes the same event twice. Why, and what is the fix?", "options": ["Delivery is at-least-once; skip seen event IDs", "The signature check is failing, so disable it", "The server responds too fast, so add a delay", "Duplicates mean the customer is attacking your endpoint"], "answer": 0, "explain": "Webhook delivery is at-least-once, so duplicates are normal; idempotent processing keyed on event ID makes them harmless."},
+    {"q": "Why must webhook signatures be computed over the raw request body?", "options": ["Re-serialised JSON can differ byte for byte", "Raw bodies are always smaller than the parsed JSON", "Web frameworks forbid parsing any webhook bodies", "The raw body contains a copy of the secret key"], "answer": 0, "explain": "The sender signed exact bytes. Parsing and re-encoding can change whitespace or key order, so the HMAC would not match."},
+    {"q": "An SFTP poller occasionally imports truncated files. What prevents this?", "options": ["Wait for a .done marker or atomic rename before reading", "Poll the directory more frequently", "Read files in reverse alphabetical order", "Delete files as soon as they appear"], "answer": 0, "explain": "A completion signal guarantees the writer has finished; without it you can read a file mid-transfer."},
+    {"q": "When should an incremental sync store its new watermark?", "options": ["Only after the batch was written successfully", "Before reading, so the next run starts sooner", "At the start of every hour regardless of outcome", "Never, because watermarks are optional for most syncs"], "answer": 0, "explain": "Storing the watermark after success means a failed run re-reads the same window instead of silently skipping it."}
+  ]
+}

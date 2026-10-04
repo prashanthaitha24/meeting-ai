@@ -1,0 +1,129 @@
+{
+  "id": "fde-prototyping",
+  "minutes": 40,
+  "intro": "Customers believe what they can click. A working prototype on their own data, shown in the first two weeks, does more to align stakeholders than any number of slides, and it surfaces the real requirements faster than interviews alone. This lesson covers building such prototypes quickly with a FastAPI backend and a Streamlit front end, the demo hygiene that keeps them credible, how to iterate with users weekly, and the checklist for the moment a prototype has to become a product someone else can run.",
+  "objectives": [
+    "Build a thin backend and UI prototype in days with FastAPI and Streamlit",
+    "Structure prototype code so it can evolve instead of being thrown away",
+    "Prepare demos with seeded data, safe configuration and a reset path",
+    "Run weekly user iterations and turn feedback into prioritised changes",
+    "Apply a prototype-to-production checklist before real users depend on it"
+  ],
+  "sections": [
+    {
+      "heading": "A thin, evolvable architecture",
+      "blocks": [
+        {"type": "p", "text": "Keep the prototype in two pieces even when it is tiny: a **backend API** that holds all logic, data access and model calls, and a **thin UI** that only calls the API. The UI can be thrown away or replaced by the customer's own front end later; the API, tested and documented, often survives into production. Avoid putting business logic in the UI script, which is the most common reason prototypes cannot evolve."},
+        {"type": "code", "lang": "python", "caption": "backend/app.py: the logic lives behind an API", "code": "from fastapi import FastAPI\nfrom pydantic import BaseModel\n\napp = FastAPI(title=\"Clause assistant\")\n\n\nclass Ask(BaseModel):\n    question: str\n    user_id: str\n\n\nclass Answer(BaseModel):\n    answer: str\n    sources: list[str]\n\n\n@app.get(\"/health\")\ndef health() -> dict:\n    return {\"ok\": True}\n\n\n@app.post(\"/ask\", response_model=Answer)\ndef ask(req: Ask) -> Answer:\n    result = rag.answer(req.question, groups_for(req.user_id))   # your logic module\n    return Answer(**result)"},
+        {"type": "code", "lang": "python", "caption": "ui/app.py: a thin Streamlit chat front end", "code": "import httpx\nimport streamlit as st\n\nAPI = st.secrets.get(\"api_url\", \"http://localhost:8000\")\nst.title(\"Clause assistant (pilot)\")\n\nif \"history\" not in st.session_state:\n    st.session_state.history = []\nfor role, text in st.session_state.history:\n    st.chat_message(role).write(text)\n\nif question := st.chat_input(\"Ask about a motor policy clause\"):\n    st.chat_message(\"user\").write(question)\n    r = httpx.post(f\"{API}/ask\", json={\"question\": question, \"user_id\": \"demo\"}, timeout=60)\n    body = r.json()\n    reply = body[\"answer\"] + \"\\n\\nSources: \" + \", \".join(body[\"sources\"])\n    st.chat_message(\"assistant\").write(reply)\n    st.session_state.history += [(\"user\", question), (\"assistant\", reply)]"},
+        {"type": "code", "lang": "bash", "caption": "Run both locally", "code": "uv run uvicorn backend.app:app --reload --port 8000\nuv run streamlit run ui/app.py"}
+      ]
+    },
+    {
+      "heading": "Speed without chaos",
+      "blocks": [
+        {"type": "list", "items": [
+          "**Timebox** every prototype goal (\"answer clause questions on 200 real policies by Friday\") and cut features to hit it.",
+          "**Real data early**: a prototype on the customer's actual documents, even a sample, reveals problems no synthetic data will.",
+          "**Fake what is not the point**: stub the integrations you have not got access to yet behind the same interface the real one will use.",
+          "**Keep the evaluation set running** from the LLM apps lesson, so speed does not mean regressions.",
+          "**Commit daily** with short notes; a prototype that only exists on your laptop is a risk to the engagement."
+        ]}
+      ]
+    },
+    {
+      "heading": "Demo hygiene",
+      "blocks": [
+        {"type": "p", "text": "A prototype is judged in demos, so make demos reliable and safe. Prepare a **seeded demo dataset** of approved, realistic cases that show the value, plus a few that show honest limitations. Add a **reset** command that restores the demo state in seconds. Run the demo environment separately from anything users depend on."},
+        {"type": "list", "items": [
+          "No secrets, tokens or internal URLs visible on screen; use configuration and screen-share a clean window.",
+          "No personal data in demo cases unless the customer has approved it for that audience.",
+          "Pre-warm caches and models so the first answer is not a 40-second cold start.",
+          "Keep a recorded backup of the exact flow and a static screenshot deck for total network failure.",
+          "Know your fallback line when something odd happens: \"That is a good example of a case we route to a human; let me show you how.\""
+        ]},
+        {"type": "callout", "kind": "warning", "text": "Never fake results in a demo with hard-coded answers presented as live. If something is mocked, say so. Discovered fakery ends engagements and reputations."}
+      ]
+    },
+    {
+      "heading": "Iterating with users",
+      "blocks": [
+        {"type": "p", "text": "Put the prototype in front of a few real users as early as it is useful, and run a weekly loop: watch them use it on real work, collect failures and requests, add failures to the evaluation set, prioritise, ship, repeat. Watching beats asking: users rarely report the moment they gave up and went back to the old way, but you will see it."},
+        {"type": "p", "text": "Prioritise feedback by frequency and impact on the success metric, not by who shouted loudest. Keep a visible list of what you will do this week, next, and not at all in this pilot; it doubles as expectation management."}
+      ]
+    },
+    {
+      "heading": "From prototype to product",
+      "blocks": [
+        {"type": "p", "text": "The moment real users depend on the prototype for real work, it is production, whatever it is called. Before that moment, close the gaps."},
+        {"type": "table", "headers": ["Area", "Prototype", "Before real users rely on it"], "rows": [
+          ["Auth", "Demo user", "Customer SSO, roles mapped from groups"],
+          ["Config", "Values in code", "Environment variables and secrets store"],
+          ["Errors", "Stack traces", "Friendly errors, retries, timeouts, alerts"],
+          ["Data", "Local files", "Approved storage, retention, access logs"],
+          ["Quality", "Spot checks", "Evaluation set run in CI, tests for core logic"],
+          ["Operations", "Your laptop", "Container, deployed in customer environment, monitored, runbook"]
+        ]},
+        {"type": "p", "text": "Decide explicitly whether to **evolve** the prototype (clean architecture, tests, worth keeping) or **rebuild** a production version using what you learned (prototype was a spike, structure does not fit). Either is fine; drifting into production with demo code is not."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "A two-day prototype, demo-ready",
+    "steps": [
+      "Build the FastAPI backend with /health and /ask, backed by any simple logic (your RAG assistant from the previous lessons, or a stub).",
+      "Build the Streamlit chat UI that only calls the API, with sources shown under each answer.",
+      "Create a seeded demo dataset of ten cases (seven that show value, three that show limitations) and a reset script.",
+      "Rehearse a 15-minute demo using the structure from the communication lesson and record a backup video.",
+      "Ask two people to use it on realistic tasks while you watch silently; log every hesitation and failure.",
+      "Go through the prototype-to-product table and write the list of changes needed before real users depend on it."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Logic behind an API, thin UI on top: the API can survive into production.",
+      "Timebox, use real data early, stub what is not the point.",
+      "Seeded demo data, reset command, separate demo environment.",
+      "Never present mocked results as live.",
+      "Weekly loop with real users; watch, do not just ask.",
+      "Once users rely on it, it is production: close the gaps or rebuild."
+    ],
+    "groups": [
+      {"title": "FastAPI", "items": [
+        {"syntax": "app = FastAPI(title=...)", "desc": "Create the API"},
+        {"syntax": "@app.post(\"/ask\", response_model=Answer)", "desc": "Typed endpoint"},
+        {"syntax": "class Ask(BaseModel): ...", "desc": "Validated request body"},
+        {"syntax": "uvicorn backend.app:app --reload", "desc": "Run with auto-reload"},
+        {"syntax": "/docs", "desc": "Interactive OpenAPI docs for free"}
+      ]},
+      {"title": "Streamlit", "items": [
+        {"syntax": "streamlit run ui/app.py", "desc": "Run the UI"},
+        {"syntax": "st.chat_input / st.chat_message", "desc": "Chat interface"},
+        {"syntax": "st.session_state", "desc": "Keep state across reruns"},
+        {"syntax": "st.secrets", "desc": "Configuration and secrets"},
+        {"syntax": "@st.cache_resource", "desc": "Reuse expensive clients"}
+      ]},
+      {"title": "Demo checklist", "items": [
+        {"syntax": "seeded data + reset script", "desc": "Repeatable demo state"},
+        {"syntax": "pre-warm", "desc": "Avoid cold-start pauses"},
+        {"syntax": "no secrets or PII on screen", "desc": "Safe screen-share"},
+        {"syntax": "recorded backup", "desc": "For network or dependency failure"},
+        {"syntax": "separate demo environment", "desc": "Never the one users depend on"}
+      ]}
+    ],
+    "pitfalls": [
+      "Business logic inside the UI script, so nothing can be reused.",
+      "Prototyping on synthetic data and being surprised by the real documents.",
+      "Demoing in the same environment users depend on.",
+      "Hard-coded 'live' answers in a demo.",
+      "Letting a prototype become production by drift."
+    ]
+  },
+  "quiz": [
+    {"q": "Why keep prototype logic behind an API with a thin UI?", "options": ["The API can evolve into production while the UI is replaced", "Streamlit cannot call language models", "APIs make the demo look more impressive", "It removes the need for any tests"], "answer": 0, "explain": "Separating logic from presentation lets the tested backend survive and the UI be swapped for the customer's own front end."},
+    {"q": "Integration access to the CRM is still pending. How should the prototype handle it?", "options": ["Stub it behind the same interface the real client will use", "Wait to build anything until access arrives", "Hard-code CRM answers and present them as live", "Ask a user to share their CRM password"], "answer": 0, "explain": "A stub with the real interface keeps progress moving and makes swapping in the real integration trivial, while staying honest."},
+    {"q": "What makes a prototype demo reliable?", "options": ["Seeded data, a reset script and a recorded backup", "Running it against production data live for maximum realism", "Showing as many features as possible in the time", "Improvising the flow each time to keep it natural"], "answer": 0, "explain": "Repeatable state, warm services and a fallback recording remove most causes of demo failure."},
+    {"q": "Users quietly return to their old process after trying the prototype. How do you find out why?", "options": ["Watch them use it and note where they give up", "Send a satisfaction survey with a 1-5 scale", "Add more of the features from the original request", "Assume they need more training slides"], "answer": 0, "explain": "Observation reveals the exact moments of friction that users rarely articulate in surveys."},
+    {"q": "When does a prototype become production?", "options": ["When real users depend on it for real work", "When it has been running for exactly one month", "When the code reaches a certain size", "Only when the contract says so"], "answer": 0, "explain": "Dependence, not labels, makes something production; from that moment it needs auth, monitoring, support and proper data handling."}
+  ]
+}

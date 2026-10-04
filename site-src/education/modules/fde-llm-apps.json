@@ -1,0 +1,130 @@
+{
+  "id": "fde-llm-apps",
+  "minutes": 45,
+  "intro": "Most FDE projects today involve putting a language model to work on a customer's own knowledge and processes. The demo version takes an afternoon; the version a regulated enterprise will trust with real users takes discipline. This lesson covers the patterns that make the difference: retrieval-augmented generation over messy customer documents, respecting document permissions, grounding answers with citations, structured output that downstream systems can rely on, prompts managed as code, choosing where the model runs, and an evaluation set built from discovery so every change is measured rather than guessed.",
+  "objectives": [
+    "Design a retrieval-augmented generation pipeline for real customer documents",
+    "Enforce document permissions and cite sources in every answer",
+    "Produce validated structured output for downstream systems",
+    "Manage prompts and model choices as versioned, tested configuration",
+    "Build and run an evaluation set from day one of a project"
+  ],
+  "sections": [
+    {
+      "heading": "RAG over real customer documents",
+      "blocks": [
+        {"type": "p", "text": "**Retrieval-augmented generation** (RAG) answers questions by first retrieving relevant passages from the customer's documents and then asking the model to answer using only those passages. It keeps answers grounded in the customer's own content and current without retraining. Every stage needs care with enterprise data."},
+        {"type": "steps", "items": [
+          "**Ingest**: extract text from PDFs, Word files, wiki pages and tickets; scanned documents need OCR; tables and headings carry meaning, so keep them.",
+          "**Chunk**: split by document structure (sections, clauses, headings) rather than fixed character counts, and attach metadata: source, title, section, date, and access permissions.",
+          "**Index**: store embeddings in a vector index and the text in a keyword index; many enterprise questions use exact codes, names and numbers that keyword search finds better.",
+          "**Retrieve**: hybrid search (keyword plus vector), filtered by the user's permissions, then optionally rerank the top candidates.",
+          "**Generate**: prompt the model with the retrieved passages, instruct it to answer only from them and cite each claim, and to say when the answer is not in the sources."
+        ]},
+        {"type": "code", "lang": "python", "caption": "Structure-aware chunking that keeps metadata (simplified)", "code": "import re\n\n\ndef chunk_policy(doc_id: str, text: str, acl: list[str], max_chars: int = 2000):\n    sections = re.split(r\"\\n(?=Section \\d+[.:])\", text)   # split at 'Section 4.' headings\n    for i, sec in enumerate(sections):\n        heading = sec.strip().splitlines()[0][:120] if sec.strip() else \"\"\n        for start in range(0, len(sec), max_chars):\n            yield {\n                \"id\": f\"{doc_id}:{i}:{start}\",\n                \"text\": sec[start:start + max_chars],\n                \"doc_id\": doc_id,\n                \"heading\": heading,\n                \"acl\": acl,            # groups allowed to see this document\n            }"}
+      ]
+    },
+    {
+      "heading": "Permissions and citations",
+      "blocks": [
+        {"type": "p", "text": "In an enterprise, not everyone may read every document. A RAG system that retrieves across all documents and lets the model summarise them will leak HR files, board papers or other customers' contracts to anyone who asks the right question. Carry each document's access control list into the index and **filter retrieval by the requesting user's groups**, from the identity provider, before anything reaches the model. Never rely on the prompt to keep secrets."},
+        {"type": "code", "lang": "python", "caption": "Permission filter applied before generation (illustrative store API)", "code": "def answer(question: str, user_groups: set[str]) -> dict:\n    hits = index.search(question, top_k=40)                       # hybrid search\n    allowed = [h for h in hits if user_groups & set(h[\"acl\"])][:8]  # enforce ACLs first\n    if not allowed:\n        return {\"answer\": \"I could not find this in documents you can access.\", \"sources\": []}\n    context = \"\\n\\n\".join(f\"[{i + 1}] {h['heading']}\\n{h['text']}\" for i, h in enumerate(allowed))\n    prompt = (\"Answer using only the numbered sources. Cite like [2]. \"\n              \"If the sources do not contain the answer, say so.\\n\\n\"\n              f\"Sources:\\n{context}\\n\\nQuestion: {question}\")\n    return {\"answer\": call_llm(prompt), \"sources\": [h[\"doc_id\"] for h in allowed]}"},
+        {"type": "p", "text": "Citations do more than build trust: they let users verify an answer in seconds, and they let you debug whether a wrong answer came from bad retrieval (the right passage was not found) or bad generation (it was found but misused). Show the cited passages in the interface, linked to the source."}
+      ]
+    },
+    {
+      "heading": "Structured output for downstream systems",
+      "blocks": [
+        {"type": "p", "text": "Many FDE workflows do not end in a chat answer but in data: fields extracted from a claim form, a classification routed to a queue, a draft record for a CRM. Ask the model for **structured output** against a schema, validate every response, and decide what happens when validation fails (retry once with the error, then send to a human queue)."},
+        {"type": "code", "lang": "python", "caption": "Validate extracted fields before they touch a customer system", "code": "from pydantic import BaseModel, Field, ValidationError\n\n\nclass ClaimFields(BaseModel):\n    policy_number: str = Field(pattern=r\"^POL-\\d{8}$\")\n    incident_date: str = Field(pattern=r\"^\\d{4}-\\d{2}-\\d{2}$\")\n    claim_type: str = Field(pattern=r\"^(motor|home|travel)$\")\n    amount_claimed: float = Field(ge=0)\n\n\ndef extract(text: str) -> ClaimFields | None:\n    raw = call_llm(f\"Extract the claim fields as JSON matching this schema: \"\n                   f\"{ClaimFields.model_json_schema()}\\n\\n{text}\")\n    try:\n        return ClaimFields.model_validate_json(raw)\n    except ValidationError:\n        return None          # route to human review queue"}
+      ]
+    },
+    {
+      "heading": "Prompts, models and where they run",
+      "blocks": [
+        {"type": "list", "items": [
+          "**Prompts are code**: keep them in version control as templates, review changes, and tie each deployed version to its evaluation results.",
+          "**Model choice is configuration**, not hard-coded: a capable model for hard reasoning, a smaller, cheaper one for routing or extraction, selected per task through a gateway.",
+          "**Where the model runs is a customer decision**: a hosted API (check data retention and residency terms), a model in the customer's cloud account, or a self-hosted open-weight model on their infrastructure when data cannot leave.",
+          "**Cost and latency** scale with tokens: retrieve fewer, better passages; cache repeated prompts; set max output tokens.",
+          "**Prompt injection**: retrieved documents and user input can contain instructions; never let model output trigger actions without validation, which the agents lesson covers."
+        ]}
+      ]
+    },
+    {
+      "heading": "Evaluation from day one",
+      "blocks": [
+        {"type": "p", "text": "Without an evaluation set, every prompt tweak is a guess and every demo is anecdote. Build one in week one from discovery: real questions or documents from users, with expected answers or fields agreed with domain experts. Start with 50 to 200 items and grow it with every failure found in testing."},
+        {"type": "table", "headers": ["What to measure", "How", "Why"], "rows": [
+          ["Retrieval recall", "Is the passage containing the answer in the top k?", "Separates retrieval from generation problems"],
+          ["Answer correctness", "Expert review, or an LLM judge calibrated against experts", "The quality users feel"],
+          ["Groundedness", "Is every claim supported by a cited source?", "Catches hallucination"],
+          ["Refusal behaviour", "Does it say 'not found' when the answer is absent?", "Prevents confident wrong answers"],
+          ["Field accuracy", "Exact or normalised match per extracted field", "Structured-output workflows"]
+        ]},
+        {"type": "callout", "kind": "tip", "text": "Run the evaluation on every change to prompts, retrieval settings or models, and put the numbers in your weekly status. 'Correct answers rose from 81% to 92% on 150 expert-reviewed questions' is the sentence that wins the go decision."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "A permission-aware RAG assistant with evals",
+    "steps": [
+      "Collect 30 to 50 public documents with clear structure (policies, manuals, regulations) and assign each to one of two 'groups'.",
+      "Implement structure-aware chunking with metadata and ACLs, and index the chunks in a local vector store plus a keyword index.",
+      "Write the `answer()` function with permission filtering and citations, using any model you have access to as `call_llm`.",
+      "Prove the ACL filter works: a user in group A must never see content only group B may read, even when asked directly.",
+      "Write 40 evaluation questions with expected answers and source documents; measure retrieval recall at k=8 and answer correctness.",
+      "Change one thing (chunk size, hybrid versus vector-only, top_k) and rerun the evaluation; record the before and after."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "RAG: ingest, chunk by structure, hybrid index, permission-filtered retrieval, cited generation.",
+      "Filter by the user's permissions before retrieval results reach the model.",
+      "Citations let users verify and let you tell retrieval failures from generation failures.",
+      "Structured output: schema, validation, fallback to human review.",
+      "Prompts and model choices are versioned configuration tied to eval results.",
+      "Evaluation set from discovery in week one; run it on every change."
+    ],
+    "groups": [
+      {"title": "RAG pipeline", "items": [
+        {"syntax": "ingest -> chunk -> embed + keyword index", "desc": "Indexing"},
+        {"syntax": "chunk metadata: source, heading, date, acl", "desc": "Needed for filters and citations"},
+        {"syntax": "hybrid search -> ACL filter -> rerank -> top k", "desc": "Retrieval"},
+        {"syntax": "'answer only from sources; cite [n]; say if absent'", "desc": "Generation instruction"}
+      ]},
+      {"title": "Structured output", "items": [
+        {"syntax": "class Fields(BaseModel): ...", "desc": "Schema in code"},
+        {"syntax": "Fields.model_validate_json(raw)", "desc": "Validate model output"},
+        {"syntax": "Fields.model_json_schema()", "desc": "Give the schema to the model"},
+        {"syntax": "on failure: retry once, then human queue", "desc": "Fallback"}
+      ]},
+      {"title": "Evaluation", "items": [
+        {"syntax": "recall@k", "desc": "Right passage retrieved?"},
+        {"syntax": "correctness (expert or calibrated judge)", "desc": "Right answer?"},
+        {"syntax": "groundedness", "desc": "Claims supported by sources?"},
+        {"syntax": "refusal when absent", "desc": "Admits not knowing?"},
+        {"syntax": "field-level accuracy", "desc": "Extraction quality"}
+      ]},
+      {"title": "Deployment choices", "items": [
+        {"syntax": "hosted API", "desc": "Check retention and residency terms"},
+        {"syntax": "model in customer cloud account", "desc": "Data stays in their tenancy"},
+        {"syntax": "self-hosted open weights", "desc": "When data cannot leave"}
+      ]}
+    ],
+    "pitfalls": [
+      "Retrieving across all documents and relying on the prompt to hide restricted content.",
+      "Fixed-size chunks that cut clauses and tables in half.",
+      "Vector-only search that misses exact codes and names.",
+      "Writing model output into customer systems without validation.",
+      "No evaluation set, so every change is judged by a few hand-picked examples."
+    ]
+  },
+  "quiz": [
+    {"q": "A user from sales asks the HR assistant about colleagues' salaries and gets an answer. What is the root cause?", "options": ["Retrieval was not filtered by the user's document permissions", "The model's temperature was too high for this question", "The chunk size was too small for salary tables", "Citations were turned off in the interface"], "answer": 0, "explain": "Access control must be enforced in retrieval using the user's groups; a prompt cannot reliably keep restricted content secret."},
+    {"q": "An answer is wrong. How do citations help you debug it?", "options": ["They show whether the right passage was retrieved or misused", "They make the model refuse wrong answers", "They reduce the number of tokens used", "They automatically fix the retrieval index"], "answer": 0, "explain": "If the cited passages do not contain the answer, retrieval failed; if they do, generation misused them. Each needs a different fix."},
+    {"q": "Users ask about policy codes such as 'MX-4471', and vector search keeps missing them. What helps most?", "options": ["Hybrid search that adds keyword matching", "A larger embedding dimension for every chunk", "Higher temperature during generation", "Removing metadata from the chunks"], "answer": 0, "explain": "Exact identifiers are matched well by keyword search and poorly by semantic embeddings; combining both covers each other's gaps."},
+    {"q": "Extracted claim fields will be written into the customer's claims system. What must happen first?", "options": ["Validate against a schema and route failures to a human", "Trust the model because it was given the schema", "Write them directly and fix errors in a later batch", "Convert all fields to free text"], "answer": 0, "explain": "Models can produce malformed or wrong values; schema validation with a human fallback protects the customer's system of record."},
+    {"q": "When should the evaluation set be built?", "options": ["In the first week, from discovery examples with experts", "After the final demo, to document the results", "Only if the customer asks for metrics", "Once the prompt is finished and frozen"], "answer": 0, "explain": "An early evaluation set makes every change measurable and turns progress reports into evidence."}
+  ]
+}
