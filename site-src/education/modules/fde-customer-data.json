@@ -1,0 +1,134 @@
+{
+  "id": "fde-customer-data",
+  "minutes": 40,
+  "intro": "Every FDE project runs on the customer's data, and that data is never what the schema diagram promised. Columns are half empty, IDs do not match between systems, dates come in three formats, and the one table you need belongs to a team that has never heard of you. This lesson covers getting the right access the right way, profiling unfamiliar data quickly with SQL and pandas, the data-quality problems you will meet in almost every engagement, handling personal and sensitive data responsibly, and building the customer's trust in the numbers your software produces.",
+  "objectives": [
+    "Request least-privilege data access with a clear purpose and scope",
+    "Profile an unfamiliar table for volume, completeness, uniqueness and freshness",
+    "Recognise and handle the common data-quality problems in enterprise data",
+    "Minimise, mask and protect personal data throughout a project",
+    "Reconcile your results with the customer's own numbers to build trust"
+  ],
+  "sections": [
+    {
+      "heading": "Getting access the right way",
+      "blocks": [
+        {"type": "p", "text": "Data access is often the longest dependency in a pilot, so request it in week one, precisely. Data owners and security teams approve narrow, well-explained requests far faster than \"we need access to the database\"."},
+        {"type": "list", "items": [
+          "**Purpose**: what the data is for, in one sentence tied to the pilot's success criteria.",
+          "**Scope**: specific tables or views and columns, date range, and whether personal data is needed (often it is not).",
+          "**Access type**: read-only, ideally against a replica, a reporting view or an export, never the live transactional database for heavy queries.",
+          "**Identity**: a named service account for the application and personal accounts for people, not shared credentials.",
+          "**Location and retention**: where the data will be stored or processed, for how long, and how it will be deleted."
+        ]},
+        {"type": "callout", "kind": "tip", "text": "Ask the data owner to create a view with only the columns you need. It is safer for them, faster to approve, and documents the contract between their system and yours."}
+      ]
+    },
+    {
+      "heading": "Profiling unfamiliar data quickly",
+      "blocks": [
+        {"type": "p", "text": "Before building anything on a table, spend an hour profiling it. You are looking for volume, completeness, uniqueness, value ranges, freshness and surprises."},
+        {"type": "code", "lang": "sql", "caption": "A first profile of a claims table", "code": "SELECT\n  COUNT(*)                                   AS rows_total,\n  COUNT(DISTINCT claim_id)                   AS distinct_claims,\n  COUNT(*) - COUNT(policy_number)            AS missing_policy,\n  MIN(created_at)                            AS first_created,\n  MAX(created_at)                            AS last_created,\n  MAX(updated_at)                            AS last_updated,\n  SUM(CASE WHEN amount < 0 THEN 1 ELSE 0 END) AS negative_amounts\nFROM claims_view;\n\nSELECT status, COUNT(*) AS n\nFROM claims_view\nGROUP BY status\nORDER BY n DESC;"},
+        {"type": "code", "lang": "python", "caption": "The same questions in pandas on an export", "code": "import pandas as pd\n\ndf = pd.read_csv(\"claims_sample.csv\", dtype=str)\nprint(df.shape)\nprint(df.isna().mean().sort_values(ascending=False).head(10))   # share missing per column\nprint(df[\"claim_id\"].duplicated().sum(), \"duplicate claim ids\")\nprint(df[\"status\"].value_counts(dropna=False).head(10))\nprint(pd.to_datetime(df[\"created_at\"], errors=\"coerce\").isna().sum(), \"unparseable dates\")"},
+        {"type": "p", "text": "Reading everything as strings first (`dtype=str`) is deliberate: it lets you see the messy values before pandas silently converts or drops them. Write down every surprise with an example row and ask the data owner about it; their answer is often business knowledge you could not have guessed."}
+      ]
+    },
+    {
+      "heading": "Data-quality problems you will meet",
+      "blocks": [
+        {"type": "table", "headers": ["Problem", "Example", "Typical handling"], "rows": [
+          ["Missing values", "40% of claims have no policy number", "Find out why; exclude, infer from another source, or flag"],
+          ["Inconsistent formats", "Dates as 03/04/2026, 2026-04-03 and 4 Mar 26", "Parse explicitly with known formats; quarantine failures"],
+          ["Duplicates", "Same claim exported twice after a retry", "Deduplicate on a business key, keep the latest version"],
+          ["Mismatched IDs", "CRM uses 'C-00123', billing uses '123'", "Build and test a normalisation and mapping table"],
+          ["Stale data", "Nightly export silently stopped last month", "Check freshness on every run; alert when old"],
+          ["Encoding", "Names garbled as mojibake", "Detect and decode correctly (UTF-8 vs legacy code pages)"]
+        ]},
+        {"type": "p", "text": "Do not silently fix data. Make every rule explicit in code with a test, count the rows each rule affects, and report those counts. A pipeline that quietly drops 12% of records produces confident wrong answers; one that says \"1,203 records quarantined: unparseable date\" lets the customer fix the source."}
+      ]
+    },
+    {
+      "heading": "Personal and sensitive data",
+      "blocks": [
+        {"type": "p", "text": "Customer data often includes **personal data** (names, contact details, identifiers, health or financial information) governed by laws such as GDPR and by the customer's own policies. Treat it as radioactive: use as little as possible, for as short a time as possible, in as few places as possible."},
+        {"type": "list", "items": [
+          "**Minimise**: if the task does not need names or account numbers, exclude the columns at the source view.",
+          "**Pseudonymise**: replace identifiers with stable tokens (a keyed hash) so records can still be joined without exposing the real value.",
+          "**Mask in logs and prompts**: never log raw personal data; redact before sending text to any external model unless the customer has approved it.",
+          "**Keep data where it is allowed to be**: respect data-residency requirements; do not copy extracts to your laptop or personal cloud storage.",
+          "**Delete on schedule** and confirm deletion in writing at the end of the engagement."
+        ]},
+        {"type": "code", "lang": "python", "caption": "Stable pseudonymous IDs with a secret key", "code": "import hashlib\nimport hmac\nimport os\n\nKEY = os.environ[\"PSEUDONYM_KEY\"].encode()   # held by the customer, rotated per project\n\n\ndef pseudonym(value: str) -> str:\n    return hmac.new(KEY, value.strip().lower().encode(), hashlib.sha256).hexdigest()[:16]\n\n\nprint(pseudonym(\"jane.doe@example.com\"))   # same input -> same token, not reversible without KEY"}
+      ]
+    },
+    {
+      "heading": "Trust in the numbers",
+      "blocks": [
+        {"type": "p", "text": "The fastest way to lose a customer is a demo where your total disagrees with the report their CFO sees every Monday. Before showing any number, **reconcile** it with an existing trusted figure: row counts against the source system, totals against a finance report, a sample of records checked by hand with a domain expert. When numbers differ, find out why before the meeting, not during it."},
+        {"type": "p", "text": "Document the lineage of every figure you show: which source, which filters, which date range, which rules. A short **data contract** with the owning team (expected columns, types, freshness, volumes) turns future upstream changes from silent breakages into detected failures."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Profile, clean and protect a messy dataset",
+    "steps": [
+      "Download a public messy dataset (for example a city's open service-request data) and load it into SQLite or DuckDB as all-text columns.",
+      "Run the SQL profile and the pandas profile from this lesson and write down five surprises with example rows.",
+      "Write explicit cleaning rules with tests: date parsing with known formats, deduplication on a business key, ID normalisation.",
+      "Make the pipeline report how many rows each rule affected and quarantine rows that fail parsing.",
+      "Pseudonymise any personal fields with the keyed-hash function and verify joins still work.",
+      "Reconcile one total (for example requests per month) against a figure published by the data owner and explain any difference."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Request narrow, purpose-stated, read-only access in week one.",
+      "Profile before building: volume, completeness, uniqueness, ranges, freshness.",
+      "Never silently fix data: explicit rules, tests and counts.",
+      "Minimise, pseudonymise and mask personal data; keep it where it is allowed.",
+      "Reconcile every number with a trusted figure before showing it.",
+      "Data contracts turn upstream changes into detected failures."
+    ],
+    "groups": [
+      {"title": "SQL profiling", "items": [
+        {"syntax": "COUNT(*), COUNT(DISTINCT key)", "desc": "Volume and uniqueness"},
+        {"syntax": "COUNT(*) - COUNT(col)", "desc": "Missing values in a column"},
+        {"syntax": "MIN/MAX(created_at), MAX(updated_at)", "desc": "Range and freshness"},
+        {"syntax": "GROUP BY col ORDER BY COUNT(*) DESC", "desc": "Value distribution"},
+        {"syntax": "GROUP BY key HAVING COUNT(*) > 1", "desc": "Find duplicates"}
+      ]},
+      {"title": "pandas", "items": [
+        {"syntax": "pd.read_csv(f, dtype=str)", "desc": "See raw values first"},
+        {"syntax": "df.isna().mean()", "desc": "Share missing per column"},
+        {"syntax": "df[c].value_counts(dropna=False)", "desc": "Distribution including nulls"},
+        {"syntax": "pd.to_datetime(s, format=..., errors=\"coerce\")", "desc": "Explicit date parsing"},
+        {"syntax": "df.drop_duplicates(subset=[key], keep=\"last\")", "desc": "Deduplicate"}
+      ]},
+      {"title": "Access request", "items": [
+        {"syntax": "purpose / scope / access type", "desc": "Why, what, read-only"},
+        {"syntax": "identity / location / retention", "desc": "Who, where, how long"},
+        {"syntax": "view with only needed columns", "desc": "Fastest approval"}
+      ]},
+      {"title": "Personal data", "items": [
+        {"syntax": "minimise at source", "desc": "Exclude unneeded columns"},
+        {"syntax": "HMAC-SHA256(key, value)", "desc": "Stable pseudonymous token"},
+        {"syntax": "redact before logs and external models", "desc": "Protect content"},
+        {"syntax": "delete and confirm in writing", "desc": "End of engagement"}
+      ]}
+    ],
+    "pitfalls": [
+      "Asking for broad database access and waiting weeks for approval.",
+      "Heavy analytical queries against the live transactional database.",
+      "Silent cleaning rules that drop records nobody knows about.",
+      "Copying extracts with personal data to a laptop.",
+      "Showing a number in a demo that contradicts the customer's own report."
+    ]
+  },
+  "quiz": [
+    {"q": "Which data access request is most likely to be approved quickly?", "options": ["Read-only access to a view with six named columns for the pilot", "Admin access to the production database", "A full copy of every table for exploration", "Shared credentials from a colleague"], "answer": 0, "explain": "Narrow, purpose-bound, read-only requests are low risk for the data owner and easy for security to approve."},
+    {"q": "Why read an export with dtype=str when first profiling it?", "options": ["To see raw messy values before automatic conversion hides them", "Because pandas cannot read numbers from CSV files", "To make the file load several times faster", "Because strings use less memory than numbers"], "answer": 0, "explain": "Automatic type inference can silently turn odd values into NaN or change formats; reading as text shows what is really there."},
+    {"q": "Your pipeline drops rows whose dates do not parse. What should it also do?", "options": ["Count and quarantine them and report the count", "Fill them with today's date", "Delete them from the source system", "Ignore them, since a few rows never matter"], "answer": 0, "explain": "Explicit, counted quarantines let the customer see and fix data problems instead of trusting silently incomplete results."},
+    {"q": "You need to join customer records across two systems without exposing email addresses. What fits?", "options": ["A keyed hash (HMAC) of the normalised email as a stable token", "Storing emails in plain text but in a hidden column", "Base64-encoding the email addresses", "Using the first three letters of each email"], "answer": 0, "explain": "A keyed hash gives the same token for the same input, so joins work, while the value cannot be recovered without the secret key."},
+    {"q": "Your demo total differs from the finance team's weekly report. What should you have done?", "options": ["Reconciled against that report and explained the difference before the demo", "Removed the total from the demo", "Assumed the finance report was wrong", "Rounded the numbers until they matched"], "answer": 0, "explain": "Reconciling with trusted figures before showing them, and documenting filters and sources, is how you earn trust in your numbers."}
+  ]
+}
