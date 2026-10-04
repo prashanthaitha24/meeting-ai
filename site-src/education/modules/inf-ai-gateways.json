@@ -1,0 +1,123 @@
+{
+  "id": "inf-ai-gateways",
+  "minutes": 35,
+  "intro": "Applications should not talk to model servers directly. An AI gateway sits in front of every model, self-hosted or hosted, and gives you one API, one place for keys and quotas, routing and fallbacks when a backend fails, caching, cost tracking and policy. This lesson explains what a gateway does that an ordinary API gateway does not, the routing and reliability patterns it enables, how it relates to the inference-aware routing inside a cluster, and how to configure a working example with open-source tools.",
+  "objectives": [
+    "Explain what an AI gateway adds over a generic API gateway",
+    "Design routing, fallbacks and retries across self-hosted and hosted models",
+    "Apply per-tenant rate limits and token budgets",
+    "Decide when response caching is safe",
+    "Place the gateway relative to cluster-level inference routing"
+  ],
+  "sections": [
+    {
+      "heading": "What an AI gateway does",
+      "blocks": [
+        {"type": "p", "text": "A generic API gateway routes HTTP and counts requests. LLM traffic needs more: requests vary a thousandfold in cost depending on tokens, responses stream for seconds, failures include rate limits and context-length errors, and the same logical model may be served by several backends. An **AI gateway** understands those things."},
+        {"type": "list", "items": [
+          "**One API** (usually OpenAI-compatible) in front of many models and providers, with model names as aliases you control.",
+          "**Authentication and virtual keys** per team or customer, so provider keys never reach applications.",
+          "**Rate limits and budgets** in requests and in tokens, per key, team or tenant.",
+          "**Routing**: by model alias, weights for canaries, cost, latency or current load.",
+          "**Reliability**: retries with backoff, timeouts, and fallbacks to another deployment or model.",
+          "**Caching** of identical requests, and sometimes semantic caching.",
+          "**Observability and cost**: per-request token counts, latency, errors and spend, exported as metrics and traces.",
+          "**Policy and guardrails**: PII redaction, content filters, allowed-model lists."
+        ]}
+      ]
+    },
+    {
+      "heading": "Routing and fallbacks",
+      "blocks": [
+        {"type": "p", "text": "Treat the model name an application sends as a contract, not an address. `chat` can map to two self-hosted vLLM deployments with load-based routing, fall back to a hosted provider when both are saturated or failing, and shift 5% of traffic to a new model version as a canary. Applications never change."},
+        {"type": "code", "lang": "yaml", "caption": "LiteLLM proxy: two self-hosted vLLM backends for chat, with a fallback group", "code": "model_list:\n  - model_name: chat\n    litellm_params:\n      model: hosted_vllm/YOUR_ORG/YOUR_MODEL\n      api_base: http://vllm-a.ai.svc:8000/v1\n      rpm: 600\n  - model_name: chat\n    litellm_params:\n      model: hosted_vllm/YOUR_ORG/YOUR_MODEL\n      api_base: http://vllm-b.ai.svc:8000/v1\n      rpm: 600\n  - model_name: chat-backup\n    litellm_params:\n      model: openai/BACKUP_MODEL_NAME\n      api_key: os.environ/BACKUP_PROVIDER_KEY\n\nrouter_settings:\n  routing_strategy: least-busy\n  num_retries: 2\n  fallbacks: [{\"chat\": [\"chat-backup\"]}]\n\ngeneral_settings:\n  master_key: os.environ/LITELLM_MASTER_KEY"},
+        {"type": "list", "items": [
+          "Retry only idempotent failures (timeouts, 5xx, 429 from a backend) and with backoff; never retry a request that already streamed tokens to the client.",
+          "Fallback models must be acceptable substitutes: check prompt format, context length, tool-calling support and quality before wiring them in.",
+          "Context-length fallbacks route requests that are too long for one model to a deployment with a larger window.",
+          "Record which backend actually served each request, or debugging quality issues becomes guesswork."
+        ]}
+      ]
+    },
+    {
+      "heading": "Limits, budgets and caching",
+      "blocks": [
+        {"type": "p", "text": "Request-per-minute limits are not enough when one request can cost a thousand times another. Enforce **tokens per minute** and **spend budgets** per tenant, and return HTTP 429 with a clear message when they are exceeded. This protects shared self-hosted capacity from one noisy customer and protects your bill from runaway agents stuck in loops."},
+        {"type": "p", "text": "**Exact caching** returns a stored response for an identical request (same model, messages and parameters). It is safe for deterministic settings and repeated queries, such as classification or FAQ answers, and pointless for creative, personalised or temperature-sampled outputs. **Semantic caching** returns a stored answer for a similar question; it can save a lot, but it can also serve a wrong answer to a subtly different question, so use it only where that risk is acceptable and measured. Never share cache entries across tenants."},
+        {"type": "callout", "kind": "warning", "text": "A gateway sees every prompt and response, which makes it both your best control point and a sensitive system. Lock down who can read its logs, redact personal data before storage, and keep provider keys in a secret store."}
+      ]
+    },
+    {
+      "heading": "Where the gateway sits",
+      "blocks": [
+        {"type": "p", "text": "Think in two layers. The **AI gateway** is the front door: it decides which logical model and which backend group serve a request, enforces tenant policy, and can leave your infrastructure entirely for a hosted provider. Inside your cluster, **inference-aware routing** decides which replica of a self-hosted model handles it, using cache locality and queue depth: the Gateway API Inference Extension's endpoint picker, Dynamo's router or the llm-d scheduler. They complement each other; a gateway that picks a backend group and then round-robins replicas throws away the cluster layer's benefits."},
+        {"type": "table", "headers": ["Layer", "Decides", "Examples"], "rows": [
+          ["AI gateway", "Model alias, backend group, provider fallback, tenant limits", "LiteLLM, Envoy AI Gateway, other open-source and commercial gateways"],
+          ["Inference routing", "Which replica, by cache overlap and load", "Gateway API Inference Extension, Dynamo router, llm-d"],
+          ["Engine scheduler", "Which requests run in this step", "vLLM, SGLang, TensorRT-LLM"]
+        ]}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "A gateway with a fallback you can watch",
+    "steps": [
+      "Run two small vLLM (or SGLang) servers on two ports or GPUs serving the same model.",
+      "Run the LiteLLM proxy with the config from this lesson, pointing both `chat` entries at your servers and `chat-backup` at any other OpenAI-compatible endpoint you have.",
+      "Send requests for model `chat` through the proxy with its master key and confirm they spread across both servers.",
+      "Stop one server and confirm traffic continues on the other; stop both and confirm requests fall back to `chat-backup`.",
+      "Create a virtual key with a low tokens-per-minute limit, exceed it, and inspect the 429 response.",
+      "Look at the proxy's per-request logs or metrics and confirm you can tell which backend served each request."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Applications call model aliases on one API; the gateway maps them to backends.",
+      "Keys, quotas and budgets live at the gateway, in tokens as well as requests.",
+      "Retries with backoff for idempotent failures; never after tokens streamed.",
+      "Fallbacks must be real substitutes: format, context, tools, quality.",
+      "Exact caching only for deterministic repeats; semantic caching with care; never cross tenants.",
+      "Gateway picks the backend group; inference routing picks the replica."
+    ],
+    "groups": [
+      {"title": "LiteLLM proxy config", "items": [
+        {"syntax": "model_list: - model_name: ALIAS  litellm_params: {model, api_base}", "desc": "Map an alias to a backend"},
+        {"syntax": "model: hosted_vllm/MODEL", "desc": "Self-hosted vLLM backend"},
+        {"syntax": "api_key: os.environ/VAR", "desc": "Read secrets from the environment"},
+        {"syntax": "router_settings: {routing_strategy: least-busy}", "desc": "Also simple-shuffle, latency-, cost-, usage-based"},
+        {"syntax": "fallbacks: [{\"chat\": [\"chat-backup\"]}]", "desc": "Fallback model groups"},
+        {"syntax": "general_settings: {master_key: ...}", "desc": "Require auth on the proxy"}
+      ]},
+      {"title": "Reliability patterns", "items": [
+        {"syntax": "retry: timeouts, 5xx, backend 429", "desc": "With exponential backoff and jitter"},
+        {"syntax": "fallback: alias -> substitute alias", "desc": "On repeated failure or saturation"},
+        {"syntax": "context-window fallback", "desc": "Too-long requests to a larger-window model"},
+        {"syntax": "weighted routing 95/5", "desc": "Canary a new model version"}
+      ]},
+      {"title": "Limits", "items": [
+        {"syntax": "rpm / tpm per key or team", "desc": "Requests and tokens per minute"},
+        {"syntax": "budget per tenant per period", "desc": "Spend cap"},
+        {"syntax": "HTTP 429 + Retry-After", "desc": "Clear rejection when exceeded"}
+      ]},
+      {"title": "Caching", "items": [
+        {"syntax": "exact cache", "desc": "Same model + messages + params"},
+        {"syntax": "semantic cache", "desc": "Similar questions; risk of wrong answers"},
+        {"syntax": "cache key includes tenant", "desc": "Never share across customers"}
+      ]}
+    ],
+    "pitfalls": [
+      "Applications holding provider keys and calling backends directly.",
+      "Request-count limits only, so a few huge requests exhaust capacity.",
+      "Retrying after tokens already streamed, duplicating output.",
+      "Fallback models that silently change quality or break tool calling.",
+      "A gateway that round-robins replicas and defeats cache-aware routing."
+    ]
+  },
+  "quiz": [
+    {"q": "Why should an AI gateway enforce tokens-per-minute limits rather than only requests-per-minute?", "options": ["Request cost varies enormously with tokens, so request counts do not reflect load", "Tokens are much easier to count than whole requests at the gateway", "Model providers forbid any kind of request-based rate limiting", "Token limits make each streamed response arrive faster"], "answer": 0, "explain": "One long request can cost as much GPU time as hundreds of short ones. Token-based limits and budgets track actual consumption."},
+    {"q": "A streamed response fails after 300 tokens were sent to the client. What should the gateway do?", "options": ["Return the error rather than retrying and duplicating output", "Retry the request on another backend and stream again", "Fall back silently and append the new output", "Cache the partial response for next time"], "answer": 0, "explain": "Retrying after tokens reached the client would repeat or mix output. Retries belong before streaming starts; afterwards, surface the error."},
+    {"q": "When is exact response caching at the gateway most appropriate?", "options": ["Deterministic, repeated requests such as classification or FAQ answers", "Creative writing prompts that use a high sampling temperature", "Personalised answers that include each user's own account data", "Agent loops that call tools whose results change every time"], "answer": 0, "explain": "Exact caching returns stored output for identical inputs. It pays off when the same request recurs and the expected answer does not change."},
+    {"q": "Your gateway maps chat to a self-hosted pool, then round-robins across its replicas. What is lost?", "options": ["Cache-aware replica selection from the inference routing layer", "Authentication of the calling application by its virtual key", "The ability to stream tokens back to the client as they arrive", "Token counting for per-tenant billing and budget enforcement"], "answer": 0, "explain": "Picking replicas by prefix-cache overlap and queue depth is the inference routing layer's job; round-robin bypasses it and causes repeated prefill."},
+    {"q": "Before adding a hosted model as a fallback for your self-hosted chat model, what must you verify?", "options": ["Prompt format, context length, tool calling and quality are acceptable substitutes", "That it has a higher price per token than the self-hosted model", "That the provider runs it on the same GPU type you use", "That it is served from the same cloud region as your cluster"], "answer": 0, "explain": "A fallback that breaks the prompt template, rejects long contexts or changes tool behaviour turns an outage into silent wrong answers."}
+  ]
+}

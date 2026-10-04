@@ -1,0 +1,292 @@
+{
+  "id": "inf-slos-observability",
+  "minutes": 35,
+  "intro": "An inference service needs the same reliability discipline as any production system, with metrics that fit how LLMs behave. This lesson turns time to first token and inter-token latency into service level indicators and objectives, shows the PromQL to measure them from engine histograms, designs burn-rate alerts, and lays out the observability stack: engine, GPU and gateway metrics, traces with the GenAI semantic conventions, and logs that do not leak prompts.",
+  "objectives": [
+    "Define SLIs and SLOs for TTFT, inter-token latency, availability and correctness",
+    "Compute SLI ratios and percentiles from Prometheus histograms",
+    "Write multi-window burn-rate alerts for an inference SLO",
+    "Assemble metrics from the engine, DCGM and the gateway into one dashboard",
+    "Trace requests with GenAI attributes while protecting prompt data"
+  ],
+  "sections": [
+    {
+      "heading": "From latency metrics to SLOs",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A **service level indicator** (SLI) is a ratio of good events to all events; a **service level objective** (SLO) is the target for that ratio over a window; the **error budget** is what is left over. For LLM inference, good SLIs reflect what users feel."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "SLI",
+            "Good event",
+            "Example SLO"
+          ],
+          "rows": [
+            [
+              "Responsiveness",
+              "TTFT under 0.5 s",
+              "99% of requests over 28 days"
+            ],
+            [
+              "Streaming smoothness",
+              "Inter-token gaps under 50 ms",
+              "99% of gaps over 28 days"
+            ],
+            [
+              "Availability",
+              "Request completed without a 5xx or timeout",
+              "99.9% over 28 days"
+            ],
+            [
+              "Quality (sampled)",
+              "Passes an automated evaluation check",
+              "95% of sampled requests over 7 days"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "Pick thresholds that sit on real histogram bucket boundaries so the ratio is exact; vLLM's default TTFT histogram has a 0.5 s bucket and its inter-token latency histogram a 50 ms one. Measure the SLO at the gateway or client where possible, and use engine histograms to explain breaches."
+        },
+        {
+          "type": "p",
+          "text": "Keep the list short. Two latency SLOs and one availability SLO per model endpoint is plenty to start; more objectives mean more alerts and more arguments about which one matters. Revisit thresholds after a month of data: if you never come close to burning the budget, the target may be too loose to protect users; if you burn it every week, either the system or the target needs to change."
+        }
+      ]
+    },
+    {
+      "heading": "Measuring with PromQL",
+      "blocks": [
+        {
+          "type": "code",
+          "lang": "promql",
+          "caption": "SLI: share of requests with TTFT under 0.5 s, over 5 minutes",
+          "code": "sum(rate(vllm:time_to_first_token_seconds_bucket{model_name=\"chat\", le=\"0.5\"}[5m]))\n/\nsum(rate(vllm:time_to_first_token_seconds_count{model_name=\"chat\"}[5m]))"
+        },
+        {
+          "type": "code",
+          "lang": "promql",
+          "caption": "p95 TTFT and p99 inter-token latency for dashboards",
+          "code": "histogram_quantile(0.95,\n  sum by (le) (rate(vllm:time_to_first_token_seconds_bucket{model_name=\"chat\"}[5m])))\n\nhistogram_quantile(0.99,\n  sum by (le) (rate(vllm:inter_token_latency_seconds_bucket{model_name=\"chat\"}[5m])))"
+        },
+        {
+          "type": "p",
+          "text": "Record these as recording rules (for example `model:ttft_good:ratio_rate5m`) so alerts and dashboards read one cheap series. Engine histograms only see requests that reached the engine; requests rejected by the gateway or timed out in front of it must come from gateway metrics, which is another reason to put the availability SLI there."
+        }
+      ]
+    },
+    {
+      "heading": "Alerting on burn rate",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Alert on how fast you are spending the error budget, not on single bad minutes. With a 99% TTFT SLO the budget is 1% slow requests. A **burn rate** of 14.4 means spending the budget 14.4 times faster than sustainable, which would exhaust 2% of a 30-day budget in an hour. The standard pattern pages on a fast burn confirmed over a short and a long window, and opens a ticket for a slow burn."
+        },
+        {
+          "type": "p",
+          "text": "Two windows guard against two failure modes. The long window (one hour) proves the problem is sustained, so a few slow requests during a deploy do not wake anyone. The short window (five minutes) proves it is still happening, so the alert resolves quickly once the cause is fixed instead of firing for an hour afterwards. A second, slower tier, for example a burn rate of 6 over six hours, catches gradual degradation such as a growing prompt length that slowly erodes TTFT, and usually opens a ticket rather than paging."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "caption": "Page when the TTFT budget burns fast (99% SLO, 1-hour and 5-minute windows)",
+          "code": "groups:\n  - name: inference-slo\n    rules:\n      - alert: ChatTTFTBudgetFastBurn\n        expr: |\n          (1 - model:ttft_good:ratio_rate1h{model_name=\"chat\"}) > (14.4 * 0.01)\n          and\n          (1 - model:ttft_good:ratio_rate5m{model_name=\"chat\"}) > (14.4 * 0.01)\n        labels:\n          severity: page\n        annotations:\n          summary: \"chat TTFT error budget burning 14x too fast\""
+        },
+        {
+          "type": "callout",
+          "kind": "tip",
+          "text": "Pair every SLO alert with a runbook link that starts with the four diagnostic panels: TTFT and ITL percentiles, waiting versus running requests, KV-cache usage, and throughput. They distinguish queueing, prefill, decode and memory problems in a minute."
+        }
+      ]
+    },
+    {
+      "heading": "The observability stack",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "**Engine metrics** (`vllm:*` or equivalents): queue, running, cache usage, TTFT, inter-token latency, tokens, preemptions.",
+            "**GPU metrics** from DCGM: memory used, Tensor Core and memory activity, power, NVLink throughput and error counters.",
+            "**Gateway metrics**: request rate, status codes, rejections (429s), per-tenant token usage, upstream latency.",
+            "**Traces** with OpenTelemetry: one span per request with child spans for retrieval, tool calls and model calls, using GenAI semantic-convention attributes such as `gen_ai.request.model` and `gen_ai.usage.input_tokens` and `gen_ai.usage.output_tokens`.",
+            "**Logs**: request IDs, model, token counts, latency and finish reason; not raw prompts and outputs unless policy allows, and then redacted and access-controlled."
+          ]
+        },
+        {
+          "type": "p",
+          "text": "Put cost on the same dashboard: tokens per second times your cost per million tokens gives spend in near real time, and per-tenant token counters make chargeback and abuse detection possible. The Grafana lesson in the open-source track walks through building exactly this dashboard."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "SLOs and alerts for your own endpoint",
+    "steps": [
+      "Scrape a running vLLM server with Prometheus (and dcgm-exporter if you have it).",
+      "Write recording rules for the TTFT-good ratio over 5 minutes and 1 hour using the le=\"0.5\" bucket.",
+      "Add the fast-burn alert from this lesson and test it with `promtool test rules` by feeding a synthetic burst of slow requests.",
+      "Build a Grafana row with p95 TTFT, p99 inter-token latency, waiting versus running, and KV-cache usage.",
+      "Overload the server deliberately and confirm the alert fires and the panels tell you why.",
+      "Write a one-page runbook: what each panel means and the first action for each failure pattern."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "SLIs should match what users feel: TTFT, smooth streaming, availability, quality.",
+      "Choose thresholds on real histogram bucket boundaries.",
+      "Measure SLOs at the gateway; explain breaches with engine metrics.",
+      "Alert on error-budget burn rate over two windows, not single spikes.",
+      "Combine engine, GPU, gateway metrics with GenAI-attributed traces.",
+      "Never log raw prompts by default; log IDs, counts and timings."
+    ],
+    "groups": [
+      {
+        "title": "PromQL",
+        "items": [
+          {
+            "syntax": "rate(X_bucket{le=\"0.5\"}[5m]) / rate(X_count[5m])",
+            "desc": "Share of events under a threshold"
+          },
+          {
+            "syntax": "histogram_quantile(0.95, sum by (le) (rate(X_bucket[5m])))",
+            "desc": "Percentile from a histogram"
+          },
+          {
+            "syntax": "sum(rate(vllm:generation_tokens_total[5m]))",
+            "desc": "Output tokens per second"
+          },
+          {
+            "syntax": "sum by (code) (rate(gateway_requests_total[5m]))",
+            "desc": "Status-code mix at the gateway (name varies)"
+          }
+        ]
+      },
+      {
+        "title": "SLO arithmetic",
+        "items": [
+          {
+            "syntax": "error budget = 1 - SLO",
+            "desc": "99% SLO -> 1% budget"
+          },
+          {
+            "syntax": "burn rate = observed bad ratio / budget",
+            "desc": "1 = exactly on budget"
+          },
+          {
+            "syntax": "14.4x for 1h ~ 2% of a 30-day budget",
+            "desc": "Fast-burn page threshold"
+          },
+          {
+            "syntax": "6x for 6h ~ 5% of a 30-day budget",
+            "desc": "Second page or ticket tier"
+          }
+        ]
+      },
+      {
+        "title": "GenAI trace attributes",
+        "items": [
+          {
+            "syntax": "gen_ai.request.model",
+            "desc": "Model requested"
+          },
+          {
+            "syntax": "gen_ai.usage.input_tokens / output_tokens",
+            "desc": "Token counts per call"
+          },
+          {
+            "syntax": "gen_ai.response.finish_reasons",
+            "desc": "Why generation stopped"
+          }
+        ]
+      },
+      {
+        "title": "Dashboard rows",
+        "items": [
+          {
+            "syntax": "SLO status + budget remaining",
+            "desc": "Top row"
+          },
+          {
+            "syntax": "TTFT / ITL percentiles",
+            "desc": "User experience"
+          },
+          {
+            "syntax": "waiting vs running, KV usage",
+            "desc": "Saturation"
+          },
+          {
+            "syntax": "tokens/s, cost/hour, GPU memory",
+            "desc": "Throughput and spend"
+          }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "SLO thresholds between histogram buckets, giving misleading ratios.",
+      "Paging on single bad minutes instead of burn rate.",
+      "Only engine metrics, missing requests rejected before the engine.",
+      "Logging full prompts and outputs into a shared log system.",
+      "Dashboards with dozens of panels and no clear top row."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "Your SLO is 99% of requests with TTFT under 0.5 s. What is the error budget?",
+      "options": [
+        "1% of requests may exceed 0.5 s",
+        "0.5 s of total downtime per month",
+        "99% of requests may be slow",
+        "1% of GPU time may be idle"
+      ],
+      "answer": 0,
+      "explain": "The error budget is 1 minus the SLO: 1% of requests are allowed to miss the 0.5 s threshold over the window."
+    },
+    {
+      "q": "Why choose 0.5 s rather than 0.45 s as the TTFT threshold for an SLI computed from vLLM's default histogram?",
+      "options": [
+        "0.5 s is a bucket boundary, so the good-event ratio is exact",
+        "0.45 s cannot be represented in PromQL",
+        "Lower thresholds always cause false alerts",
+        "vLLM rounds all latencies to whole seconds"
+      ],
+      "answer": 0,
+      "explain": "Histogram ratios count observations in buckets. A threshold on a bucket boundary (le=\"0.5\") gives an exact ratio; one between boundaries forces interpolation."
+    },
+    {
+      "q": "Over the last hour, 3% of requests missed the TTFT target under a 99% SLO. What is the burn rate?",
+      "options": [
+        "3",
+        "0.03",
+        "33",
+        "97"
+      ],
+      "answer": 0,
+      "explain": "Burn rate is the observed bad ratio divided by the budget: 0.03 / 0.01 = 3, meaning the budget is being spent three times faster than sustainable."
+    },
+    {
+      "q": "The engine's TTFT SLI looks perfect but customers report failures. What is a likely gap?",
+      "options": [
+        "Requests rejected or timed out at the gateway never reach engine metrics",
+        "The engine histograms count each request twice",
+        "DCGM metrics override engine metrics",
+        "Prometheus cannot compute ratios of histograms"
+      ],
+      "answer": 0,
+      "explain": "Engine metrics only see admitted requests. 429s, gateway timeouts and network failures must come from gateway or client-side measurements."
+    },
+    {
+      "q": "Which logging practice is appropriate for an LLM service by default?",
+      "options": [
+        "Log request ID, model, token counts, latency and finish reason",
+        "Log full prompts and outputs for every request",
+        "Log nothing to protect privacy",
+        "Log only GPU temperatures"
+      ],
+      "answer": 0,
+      "explain": "Metadata supports debugging, billing and SLOs without exposing user content; raw prompts need explicit policy, redaction and access control."
+    }
+  ]
+}

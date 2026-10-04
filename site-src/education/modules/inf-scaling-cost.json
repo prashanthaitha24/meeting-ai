@@ -1,0 +1,130 @@
+{
+  "id": "inf-scaling-cost",
+  "minutes": 35,
+  "intro": "GPU capacity is expensive, slow to add, and wasted when idle. Running inference in production means deciding how much to keep warm, what signal adds more, what to do with requests while capacity arrives, and what each million tokens actually costs. This lesson covers autoscaling signals for LLM servers, why cold starts take minutes and how to shorten them, admission control and queueing, and the arithmetic of cost per token that ties all of it to a budget.",
+  "objectives": [
+    "Choose autoscaling signals that reflect LLM load: queue depth, cache use, latency",
+    "Break a cold start into its parts and shorten each",
+    "Design admission control so overload degrades gracefully",
+    "Compute cost per million tokens from GPU price, throughput and utilisation",
+    "Weigh warm capacity, scale-to-zero, reserved and spot GPUs"
+  ],
+  "sections": [
+    {
+      "heading": "Scaling on the right signal",
+      "blocks": [
+        {"type": "p", "text": "CPU and GPU utilisation are poor autoscaling signals for LLM servers: GPU utilisation reads high as soon as any work runs, and CPU is rarely the bottleneck. Scale on signals that measure unmet demand or latency risk."},
+        {"type": "table", "headers": ["Signal", "Scale out when", "Notes"], "rows": [
+          ["Requests waiting (queue depth)", "Persistently above a small threshold per replica", "Most direct measure of unmet demand"],
+          ["KV-cache usage", "Sustained above roughly 85-90%", "Predicts queueing and preemption"],
+          ["p95 TTFT", "Approaching the SLO", "Lags the cause slightly, but tracks what users feel"],
+          ["Requests running", "At the configured concurrency ceiling", "Replica is full"]
+        ]},
+        {"type": "code", "lang": "yaml", "caption": "KEDA ScaledObject: scale vLLM replicas on queued requests", "code": "apiVersion: keda.sh/v1alpha1\nkind: ScaledObject\nmetadata:\n  name: chat-vllm\nspec:\n  scaleTargetRef:\n    name: chat-vllm\n  minReplicaCount: 2\n  maxReplicaCount: 12\n  cooldownPeriod: 600\n  triggers:\n    - type: prometheus\n      metadata:\n        serverAddress: http://prometheus.monitoring.svc:9090\n        query: sum(vllm:num_requests_waiting{model_name=\"chat\"})\n        threshold: \"5\"\n        activationThreshold: \"1\""},
+        {"type": "p", "text": "Scale in slowly. A long cooldown and HPA stabilisation window prevent removing a replica that took ten minutes to start just before the next burst."}
+      ]
+    },
+    {
+      "heading": "Cold starts",
+      "blocks": [
+        {"type": "p", "text": "A new replica is useless until it can serve, and for LLMs that takes minutes. Break it down to fix it:"},
+        {"type": "steps", "items": [
+          "**Node provisioning** if no free GPU node exists: often the longest step on cloud autoscaling groups.",
+          "**Image pull**: inference images are large; pre-pull them on GPU nodes or use a registry mirror.",
+          "**Weight loading**: tens to hundreds of GB from storage into VRAM; cache weights on node-local NVMe or stream them from a neighbouring GPU.",
+          "**Engine warm-up**: compilation, CUDA graph capture and memory profiling; reuse compile caches.",
+          "**Readiness**: only after the engine answers health checks should traffic arrive."
+        ]},
+        {"type": "list", "items": [
+          "Keep **warm capacity** for the latency-sensitive path: a minimum replica count, and spare GPU nodes so provisioning is not on the critical path.",
+          "**Scale-to-zero** suits dev, batch and rarely used models where a multi-minute first response is acceptable, not interactive production chat.",
+          "Set readiness and startup probes with generous initial delays so Kubernetes does not kill a replica that is still loading weights."
+        ]}
+      ]
+    },
+    {
+      "heading": "Admission control and queueing",
+      "blocks": [
+        {"type": "p", "text": "Capacity always arrives later than demand, so decide what happens in the gap. An unbounded queue turns a short spike into minutes of terrible latency for everyone. Better: cap the queue per replica (or per tenant), reject excess requests quickly with HTTP 429 and a Retry-After header, and let clients back off and retry with jitter."},
+        {"type": "list", "items": [
+          "Give interactive traffic priority over batch, or run batch on separate capacity entirely.",
+          "Apply per-tenant rate limits and token budgets at the gateway so one customer cannot exhaust shared capacity.",
+          "Set request timeouts end to end so abandoned requests stop consuming GPU time; engines cancel generation when the client disconnects.",
+          "Shed load before the cache fills: once preemption starts, everyone gets slower."
+        ]}
+      ]
+    },
+    {
+      "heading": "Cost per million tokens",
+      "blocks": [
+        {"type": "code", "lang": "text", "caption": "The arithmetic (example prices and throughput, not quotes)", "code": "cost per 1M tokens = GPU cost per hour / (tokens per hour / 1,000,000)\n\nGPU at $4.00/hour, sustaining 2,500 output tokens/s at your latency target:\n  tokens/hour = 2,500 x 3,600 = 9,000,000\n  at 100% busy: $4.00 / 9 = $0.44 per 1M output tokens\n  at 40% average utilisation: $0.44 / 0.4 = $1.11 per 1M output tokens"},
+        {"type": "p", "text": "Two levers dominate. **Throughput per GPU at your latency target** (goodput, not peak), raised by batching, quantization, prefix caching and the right engine. **Average utilisation**, raised by autoscaling well, sharing GPUs across models, and filling quiet hours with batch work. A deployment that is twice as fast but idle 80% of the time can cost more than a slower, busy one."},
+        {"type": "list", "items": [
+          "Account for input tokens too: prefill is cheaper per token than decode but not free, and long-prompt workloads spend much of their GPU time there.",
+          "Reserved or committed GPUs lower the hourly price for the always-on floor; on-demand covers peaks; spot or preemptible GPUs suit batch jobs that tolerate interruption.",
+          "Compare against hosted APIs honestly: include engineering time, idle capacity and on-call, not just GPU-hours."
+        ]}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Price your own deployment",
+    "steps": [
+      "From your benchmark lab results, take the highest output tokens per second that met your latency target on one GPU.",
+      "Look up the on-demand hourly price of that GPU on a cloud you use.",
+      "Compute cost per million output tokens at 100%, 60% and 30% utilisation.",
+      "Sketch a daily traffic curve and decide minimum replicas, scale-out signal and threshold, and cooldown.",
+      "Time each part of a cold start on your setup (image pull, weight load, warm-up) and pick the largest to optimise.",
+      "Write a one-page capacity plan: floor, ceiling, signal, admission policy and expected cost per million tokens."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Scale on queue depth, cache usage and TTFT, not CPU or GPU utilisation.",
+      "Cold start = provision + pull + load weights + warm-up: attack the largest.",
+      "Keep warm capacity for interactive traffic; scale-to-zero for batch and dev.",
+      "Bound queues and return 429 with Retry-After instead of letting latency explode.",
+      "Cost per token = hourly price / tokens per hour, divided by utilisation.",
+      "Throughput at your SLO and average utilisation are the two cost levers."
+    ],
+    "groups": [
+      {"title": "Formulas", "items": [
+        {"syntax": "$/1M tok = $/hour / (tok/s x 3600 / 1e6)", "desc": "At full utilisation"},
+        {"syntax": "effective $/1M = $/1M / utilisation", "desc": "Idle time is paid for"},
+        {"syntax": "replicas ~ peak tok/s / goodput per replica", "desc": "Capacity at peak"},
+        {"syntax": "cold start = provision + pull + load + warm-up", "desc": "Where the minutes go"}
+      ]},
+      {"title": "Scaling signals", "items": [
+        {"syntax": "sum(vllm:num_requests_waiting)", "desc": "Queue depth"},
+        {"syntax": "vllm:kv_cache_usage_perc > 0.9", "desc": "Cache pressure"},
+        {"syntax": "histogram_quantile(0.95, ... time_to_first_token ...)", "desc": "Latency risk"},
+        {"syntax": "minReplicaCount / cooldownPeriod", "desc": "Warm floor and slow scale-in"}
+      ]},
+      {"title": "Admission control", "items": [
+        {"syntax": "HTTP 429 + Retry-After", "desc": "Reject fast under overload"},
+        {"syntax": "per-tenant rate and token limits", "desc": "Isolation at the gateway"},
+        {"syntax": "priority classes", "desc": "Interactive before batch"},
+        {"syntax": "end-to-end timeouts + cancel on disconnect", "desc": "Stop wasted generation"}
+      ]},
+      {"title": "Capacity options", "items": [
+        {"syntax": "reserved / committed", "desc": "Cheaper always-on floor"},
+        {"syntax": "on-demand", "desc": "Peaks"},
+        {"syntax": "spot / preemptible", "desc": "Interruptible batch work"}
+      ]}
+    ],
+    "pitfalls": [
+      "Autoscaling on GPU utilisation, which is always high.",
+      "Scaling in quickly and losing replicas that take minutes to come back.",
+      "Unbounded queues that turn spikes into minutes of latency.",
+      "Quoting cost per token at 100% utilisation when real utilisation is 30%.",
+      "Scale-to-zero on an interactive endpoint with multi-minute cold starts."
+    ]
+  },
+  "quiz": [
+    {"q": "Which signal best triggers scaling out an LLM serving deployment?", "options": ["Requests waiting in the engines' queues", "Average GPU utilisation across replicas", "CPU usage of the HTTP server", "Number of models in the registry"], "answer": 0, "explain": "Queue depth measures demand current replicas cannot absorb. GPU utilisation is high whenever any work runs, and CPU is rarely the limit."},
+    {"q": "A GPU costs $3.00 per hour and sustains 1,500 output tokens per second at your latency target. What is the cost per million output tokens at 100% utilisation?", "options": ["About $0.56", "About $5.40", "About $0.06", "About $2.00"], "answer": 0, "explain": "1,500 x 3,600 = 5.4 million tokens per hour; $3.00 / 5.4 = about $0.56 per million."},
+    {"q": "The same deployment averages 25% utilisation. What is the effective cost per million tokens?", "options": ["About $2.22", "About $0.56", "About $0.14", "About $1.12"], "answer": 0, "explain": "Idle hours are still paid for: $0.56 / 0.25 = about $2.22 per million tokens."},
+    {"q": "During a traffic spike the queue grows without limit and everyone waits minutes. What is the better policy?", "options": ["Bound the queue and return 429 with Retry-After for excess requests", "Disable timeouts so no request is ever dropped", "Raise max_tokens so each request finishes in one pass", "Remove the minimum replica count"], "answer": 0, "explain": "Bounded queues with fast rejection keep latency acceptable for admitted requests and let clients back off while capacity scales."},
+    {"q": "New replicas take 9 minutes to serve; 6 of those are spent waiting for a GPU node to be provisioned. What helps most?", "options": ["Keep spare warm GPU nodes so provisioning is off the critical path", "Pre-compile CUDA graphs into the image", "Shorten the readiness probe interval", "Use a smaller tokenizer"], "answer": 0, "explain": "Node provisioning is the largest share. Spare nodes, or overprovisioned placeholders that are evicted on demand, remove it from scale-out time."}
+  ]
+}
