@@ -1,0 +1,125 @@
+{
+  "id": "inf-gpu-servers",
+  "minutes": 30,
+  "intro": "A GPU is only useful once the operating system, drivers, containers and scheduler can all see it, and once weights can reach it quickly. This lesson covers the Linux side of GPU servers: the driver and CUDA stack, running GPU containers on Docker and Kubernetes, the `nvidia-smi` commands you will use every day, how GPUs connect to each other inside a node and across nodes, and how model weights get from storage into VRAM.",
+  "objectives": [
+    "Explain how the NVIDIA driver, CUDA runtime and container toolkit fit together",
+    "Run GPU workloads in Docker and request GPUs in Kubernetes",
+    "Use nvidia-smi to inspect memory, utilisation, processes and topology",
+    "Distinguish intra-node links (PCIe, NVLink) from inter-node networks (InfiniBand, RoCE)",
+    "Plan storage so model weights load fast and cold starts stay short"
+  ],
+  "sections": [
+    {
+      "heading": "The software stack: driver, CUDA, containers",
+      "blocks": [
+        {"type": "p", "text": "Three layers have to agree. The **kernel driver** on the host talks to the hardware and must be installed on the machine itself. The **CUDA runtime and libraries** (cuBLAS, cuDNN, NCCL) usually ship inside your container image with the inference engine. The driver must be new enough for the CUDA version inside the image; an old host driver is the most common reason a container reports no usable GPU."},
+        {"type": "p", "text": "The **NVIDIA Container Toolkit** connects the two: it lets Docker or containerd mount the GPU devices and the host's driver libraries into a container. After installing it, configure the runtime once and request GPUs per container."},
+        {"type": "code", "lang": "bash", "caption": "Docker: configure the runtime once, then request GPUs per container", "code": "sudo nvidia-ctk runtime configure --runtime=docker\nsudo systemctl restart docker\n\n# all GPUs, then only GPU 1\ndocker run --rm --gpus all ubuntu nvidia-smi\ndocker run --rm --gpus '\"device=1\"' ubuntu nvidia-smi"},
+        {"type": "p", "text": "On Kubernetes, the **NVIDIA device plugin** advertises GPUs as the extended resource `nvidia.com/gpu`, and the **GPU Operator** can install the driver, toolkit, device plugin and the DCGM metrics exporter as one package. Pods request whole GPUs through resource limits; GPUs are not shared between pods unless you configure time-slicing or MIG partitions."},
+        {"type": "code", "lang": "yaml", "caption": "A pod that gets one GPU", "code": "apiVersion: v1\nkind: Pod\nmetadata:\n  name: gpu-check\nspec:\n  restartPolicy: Never\n  containers:\n    - name: cuda\n      image: nvidia/cuda:12.4.1-base-ubuntu22.04\n      command: [\"nvidia-smi\"]\n      resources:\n        limits:\n          nvidia.com/gpu: 1"}
+      ]
+    },
+    {
+      "heading": "nvidia-smi: your first diagnostic tool",
+      "blocks": [
+        {"type": "p", "text": "`nvidia-smi` ships with the driver. Its default view shows each GPU's model, driver and CUDA version, temperature, power, memory used out of total, utilisation, and the processes holding memory. Learn a few more forms and you can answer most \"is the GPU the problem?\" questions in seconds."},
+        {"type": "code", "lang": "bash", "caption": "Everyday nvidia-smi", "code": "# one CSV line per GPU every second\nnvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,power.draw \\\n  --format=csv -l 1\n\n# rolling stats: power, utilisation, clocks, memory\nnvidia-smi dmon -s pucm\n\n# how the GPUs connect to each other and to CPUs\nnvidia-smi topo -m"},
+        {"type": "callout", "kind": "warning", "text": "`utilization.gpu` only means a kernel was running during the sample window, not that the GPU was busy doing useful maths. A memory-bound decode loop can show 100% while using a fraction of the compute. Use it to spot idle GPUs, not to judge efficiency; the profiling lesson covers better signals."},
+        {"type": "list", "items": [
+          "Memory used near total with many requests queued usually means the KV cache is full.",
+          "A process you do not recognise holding VRAM is often a crashed or orphaned worker; free it before blaming the engine.",
+          "`nvidia-smi -q` prints everything, including ECC errors and throttling reasons, which explain sudden slowdowns."
+        ]}
+      ]
+    },
+    {
+      "heading": "Networking: inside the node and between nodes",
+      "blocks": [
+        {"type": "p", "text": "When a model spans several GPUs, they exchange data constantly, so the links between them shape performance. Inside a node, GPUs connect over **PCIe** through the CPU or a PCIe switch, or directly over **NVLink**, NVIDIA's high-bandwidth GPU-to-GPU link, often through **NVSwitch** so every GPU reaches every other at full speed. `nvidia-smi topo -m` prints the matrix: `NV#` means NVLink, while `PIX`, `PXB`, `PHB` and `SYS` are PCIe paths of increasing distance."},
+        {"type": "p", "text": "Between nodes, traffic leaves through network cards. Inference clusters use **InfiniBand** or **RoCE** (RDMA over Converged Ethernet), both supporting **RDMA**, which lets a network card read and write remote memory without involving the remote CPU. With **GPUDirect RDMA**, the network card moves data straight to and from GPU memory. These links are an order of magnitude or more slower than NVLink, which is why tensor parallelism usually stays inside one node."},
+        {"type": "table", "headers": ["Link", "Scope", "Typical use in inference"], "rows": [
+          ["NVLink / NVSwitch", "GPUs in one node or rack-scale domain", "Tensor parallelism; fast KV transfer"],
+          ["PCIe", "GPU to CPU, NIC, storage", "Loading weights, host offload, budget multi-GPU"],
+          ["InfiniBand / RoCE + RDMA", "Between nodes", "Pipeline parallelism, disaggregated KV transfer"],
+          ["Ordinary Ethernet (TCP)", "Between services", "Client traffic, control plane"]
+        ]}
+      ]
+    },
+    {
+      "heading": "Storage: getting weights into VRAM",
+      "blocks": [
+        {"type": "p", "text": "Before serving anything, a worker must read tens or hundreds of gigabytes of weights from storage into VRAM. That load time is the core of an inference **cold start**, and it decides how fast you can scale out."},
+        {"type": "list", "items": [
+          "Weights usually come as **safetensors** files, which can be memory-mapped and loaded quickly and safely.",
+          "Downloading from a model hub or object storage on every start is slow and fragile. Cache weights on local NVMe or a shared high-throughput file system, or bake them into a node image.",
+          "On Kubernetes, a pre-populated persistent volume or a node-local cache shared across pods avoids re-downloading per replica.",
+          "Measure the load path end to end: storage read throughput, PCIe transfer and any compilation or graph capture the engine does after loading."
+        ]},
+        {"type": "callout", "kind": "tip", "text": "Persistence mode (`sudo nvidia-smi -pm 1`) keeps the driver initialised when no process is using the GPU, avoiding a few seconds of driver start-up on every new process."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Get a GPU working end to end",
+    "steps": [
+      "Rent a single-GPU cloud instance (or use a local NVIDIA GPU) running a recent Linux image with the NVIDIA driver installed.",
+      "Run `nvidia-smi` and note the driver version, the highest CUDA version it supports, and total memory.",
+      "Install the NVIDIA Container Toolkit, configure Docker with `nvidia-ctk`, and run `docker run --rm --gpus all ubuntu nvidia-smi`.",
+      "Start the `--query-gpu ... -l 1` command from this lesson in one terminal and run any GPU workload in another; watch memory and utilisation move.",
+      "Run `nvidia-smi topo -m` and identify how the GPUs and network cards connect (on a multi-GPU instance, look for NV# entries).",
+      "Time how long it takes to copy a 10 GB file from object storage versus from local NVMe on the instance, and note the difference as your cold-start budget.",
+      "Shut the instance down when finished."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Host driver must support the CUDA version inside your image.",
+      "The container toolkit mounts GPUs into containers; Kubernetes exposes them as nvidia.com/gpu.",
+      "nvidia-smi utilisation means busy at all, not efficiently busy.",
+      "NVLink inside a node, InfiniBand or RoCE with RDMA between nodes.",
+      "Weight loading dominates cold starts: cache weights close to the GPU.",
+      "Check topology before placing a multi-GPU model."
+    ],
+    "groups": [
+      {"title": "nvidia-smi", "items": [
+        {"syntax": "nvidia-smi", "desc": "Overview: memory, utilisation, power, processes"},
+        {"syntax": "nvidia-smi --query-gpu=... --format=csv -l 1", "desc": "Scriptable metrics every second"},
+        {"syntax": "nvidia-smi dmon -s pucm", "desc": "Rolling power, utilisation, clocks, memory"},
+        {"syntax": "nvidia-smi topo -m", "desc": "GPU, NIC and CPU interconnect matrix"},
+        {"syntax": "nvidia-smi -q -d PERFORMANCE", "desc": "Throttle reasons and clocks"},
+        {"syntax": "sudo nvidia-smi -pm 1", "desc": "Enable persistence mode"}
+      ]},
+      {"title": "Containers", "items": [
+        {"syntax": "sudo nvidia-ctk runtime configure --runtime=docker", "desc": "Wire the toolkit into Docker"},
+        {"syntax": "docker run --gpus all IMAGE", "desc": "All GPUs in a container"},
+        {"syntax": "docker run --gpus '\"device=0,1\"' IMAGE", "desc": "Specific GPUs"},
+        {"syntax": "CUDA_VISIBLE_DEVICES=0", "desc": "Limit which GPUs a process sees"}
+      ]},
+      {"title": "Kubernetes", "items": [
+        {"syntax": "resources.limits: {nvidia.com/gpu: 1}", "desc": "Request one whole GPU"},
+        {"syntax": "NVIDIA GPU Operator", "desc": "Driver, toolkit, device plugin, DCGM exporter in one"},
+        {"syntax": "kubectl describe node NODE | grep nvidia.com/gpu", "desc": "GPU capacity and allocation per node"}
+      ]},
+      {"title": "topo -m legend", "items": [
+        {"syntax": "NV#", "desc": "Connected by # NVLinks"},
+        {"syntax": "PIX / PXB", "desc": "Same PCIe switch / multiple PCIe switches"},
+        {"syntax": "PHB / SYS", "desc": "Through the CPU host bridge / across CPU sockets"}
+      ]}
+    ],
+    "pitfalls": [
+      "A host driver too old for the image's CUDA version, so the container sees no GPU.",
+      "Reading 100% nvidia-smi utilisation as proof the GPU is used efficiently.",
+      "Downloading weights from the internet on every pod start.",
+      "Splitting a model across GPUs that only connect through the CPU (SYS) without measuring the cost.",
+      "Orphaned processes holding VRAM after a crash."
+    ]
+  },
+  "quiz": [
+    {"q": "A new container image with a newer CUDA version reports no usable GPU, while older images work on the same host. What is the likely cause?", "options": ["The host driver is too old for that CUDA version", "Docker is not running with root privileges on the host", "The image does not include the nvidia-smi binary itself", "The GPU's VRAM is already full from other containers"], "answer": 0, "explain": "The kernel driver on the host must support the CUDA version used inside the container. Newer CUDA in the image with an old host driver fails at initialisation."},
+    {"q": "nvidia-smi shows 100% utilisation on a GPU decoding one request at a time. What can you conclude?", "options": ["A kernel was running during each sample, not that compute is well used", "The GPU is compute-saturated and needs replacing", "The model is too large for the GPU", "Batching is already at its maximum"], "answer": 0, "explain": "utilization.gpu reports whether any kernel was active in the sample window. Memory-bound decode keeps a kernel running while most compute sits idle."},
+    {"q": "nvidia-smi topo -m shows SYS between GPU 0 and GPU 1. What does that mean for tensor parallelism across them?", "options": ["Traffic crosses CPU sockets over PCIe, so it will be slow", "They share an NVSwitch at full bandwidth", "They are on different nodes connected by InfiniBand", "They cannot communicate at all"], "answer": 0, "explain": "SYS means the path traverses the inter-socket link between CPUs. Tensor parallelism exchanges data every layer, so it suits NV-linked GPUs much better."},
+    {"q": "Scaling out takes eight minutes per new replica, mostly downloading weights. What helps most?", "options": ["Cache weights on node-local NVMe or a pre-populated volume", "Enable persistence mode on every GPU in the node pool", "Give the HTTP server more CPU cores so it starts sooner", "Raise the pod's memory limit so weights load into RAM"], "answer": 0, "explain": "The cold start is dominated by fetching weights. Keeping them close to the GPU removes the download; persistence mode only saves seconds of driver start-up."},
+    {"q": "How does a Kubernetes pod request a GPU when the NVIDIA device plugin is installed?", "options": ["resources.limits with nvidia.com/gpu: 1", "A nodeSelector of gpu=true only", "An annotation gpu.nvidia.com/enabled", "Setting CUDA_VISIBLE_DEVICES in the pod spec"], "answer": 0, "explain": "The device plugin exposes GPUs as the extended resource nvidia.com/gpu, requested through resource limits like CPU and memory."}
+  ]
+}

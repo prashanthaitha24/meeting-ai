@@ -1,0 +1,123 @@
+{
+  "id": "inf-gpu-architecture",
+  "minutes": 30,
+  "intro": "Every inference decision you will make later, from batch size to how many GPUs a model needs, comes back to two numbers on a GPU's spec sheet: how much memory it has and how fast it can move data. This lesson builds the mental model of a GPU an infrastructure engineer needs: why it beats a CPU at inference, what streaming multiprocessors, CUDA cores and Tensor Cores do, and why memory capacity and bandwidth, more than raw compute, decide what you can serve.",
+  "objectives": [
+    "Explain why neural-network inference runs far faster on GPUs than on CPUs",
+    "Describe streaming multiprocessors, CUDA cores, Tensor Cores and the memory hierarchy",
+    "Estimate whether a model fits in a GPU's VRAM from its parameter count and precision",
+    "Estimate an upper bound on single-request decode speed from memory bandwidth",
+    "Read a GPU spec sheet and pick out the numbers that matter for serving"
+  ],
+  "sections": [
+    {
+      "heading": "Why GPUs: a few smart cores versus thousands of simple ones",
+      "blocks": [
+        {"type": "p", "text": "A **CPU** has a handful of powerful cores built for low-latency, branch-heavy work: an operating system, a web server, a database query planner. A **GPU** has thousands of simpler arithmetic units built to apply the same operation to huge amounts of data at once. Neural-network inference is almost entirely the second kind of work: multiplying large matrices of weights by matrices of activations, billions of identical multiply-add operations with no branching."},
+        {"type": "p", "text": "That is why a GPU can be tens to hundreds of times faster than a CPU for the same model. CPUs still matter in an inference server: they tokenize text, run the HTTP server and the scheduler, and feed the GPU. A slow or overloaded CPU can starve an expensive GPU, which is one of the first things to check when GPU utilisation is mysteriously low."},
+        {"type": "table", "headers": ["", "CPU", "GPU"], "rows": [
+          ["Cores", "Tens of complex cores", "Thousands of simple arithmetic units"],
+          ["Optimised for", "Latency of one thread, branching", "Throughput of many identical operations"],
+          ["Memory", "Large, slower system RAM", "Smaller, much faster on-package memory (HBM or GDDR)"],
+          ["Role in serving", "Tokenizing, scheduling, HTTP, orchestration", "The model's matrix maths"]
+        ]}
+      ]
+    },
+    {
+      "heading": "Inside a GPU: SMs, CUDA cores and Tensor Cores",
+      "blocks": [
+        {"type": "p", "text": "An NVIDIA GPU is built from many **streaming multiprocessors** (SMs). Each SM has general-purpose **CUDA cores** for ordinary floating-point and integer arithmetic, **Tensor Cores** that perform small matrix multiply-accumulate operations in a single step, a large **register file**, and fast on-chip **shared memory and L1 cache**. Work is scheduled in groups of 32 threads called **warps**, which execute the same instruction together. AMD GPUs use different names (compute units, matrix cores) for the same ideas."},
+        {"type": "p", "text": "For transformer inference, Tensor Cores do almost all the useful work, because attention and feed-forward layers are matrix multiplications. Tensor Cores are fastest at low precision: each new GPU generation has added support for smaller number formats (FP16 and BF16, then FP8, then 4-bit formats on the newest parts). Halving the bytes per number roughly doubles the Tensor Core throughput and halves the memory needed, which is why **quantization** matters so much for serving."},
+        {"type": "callout", "kind": "note", "text": "Peak TFLOPS figures on spec sheets are usually quoted for the lowest precision and with sparsity. Compare like with like: the same precision, dense, on the formats your model and engine actually use."}
+      ]
+    },
+    {
+      "heading": "The memory hierarchy, and why bandwidth is king",
+      "blocks": [
+        {"type": "p", "text": "Data lives at several levels: registers and shared memory inside each SM (tiny, fastest), an **L2 cache** shared by all SMs (megabytes), and **VRAM**, the GPU's main memory (tens of gigabytes, high-bandwidth memory on datacenter parts). The model's weights and the KV cache live in VRAM, and every generated token requires reading the weights from VRAM into the SMs."},
+        {"type": "p", "text": "Two VRAM numbers dominate inference. **Capacity** decides what fits: the weights, the KV cache for every active request, and some working space. **Bandwidth**, in terabytes per second, decides how fast the weights can be streamed through the SMs. When generating one token for one request, the GPU must read every weight once but does only about two floating-point operations per weight, so it spends most of its time waiting on memory. Single-request decoding is **memory-bandwidth-bound**, and you will quantify that in the profiling lesson."},
+        {"type": "code", "lang": "text", "caption": "Back-of-envelope sizing (example numbers, not a specific product)", "code": "Weights in VRAM  = parameters x bytes per parameter\n  8B params x 2 bytes (FP16)  = 16 GB\n  8B params x 1 byte  (FP8)   =  8 GB\n\nDecode upper bound at batch 1 ~ bandwidth / bytes read per token\n  2,000 GB/s / 16 GB  ~ 125 tokens/s  (FP16)\n  2,000 GB/s /  8 GB  ~ 250 tokens/s  (FP8)"},
+        {"type": "p", "text": "Batching is the escape hatch: if 32 requests decode together, the weights are read once per step but used 32 times, so throughput rises almost for free until compute or KV-cache memory runs out. Much of the rest of this track is about exploiting that."}
+      ]
+    },
+    {
+      "heading": "Reading a spec sheet as an inference engineer",
+      "blocks": [
+        {"type": "table", "headers": ["Spec", "Why it matters for serving"], "rows": [
+          ["Memory capacity (GB)", "Largest model plus KV cache that fits; how many concurrent requests"],
+          ["Memory bandwidth (TB/s)", "Decode speed per request; usually the binding limit"],
+          ["Tensor Core TFLOPS at your precision", "Prefill speed and large-batch throughput"],
+          ["Supported formats (FP8, FP4)", "Whether quantized models run natively and fast"],
+          ["Interconnect (NVLink, PCIe)", "How well a model split across GPUs performs"],
+          ["Power (W)", "Rack density and running cost"]
+        ]},
+        {"type": "list", "items": [
+          "A card with more VRAM but less bandwidth can hold a bigger model yet generate each token more slowly.",
+          "Consumer GPUs are fine for learning and small models; datacenter GPUs add HBM, NVLink, ECC memory and partitioning features such as MIG.",
+          "Price per GPU-hour only becomes meaningful once you divide by tokens served: cost per million tokens, covered in the production stage."
+        ]}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Size models against real GPUs",
+    "steps": [
+      "Pick three GPUs (one consumer card, two datacenter parts) and write down memory capacity, memory bandwidth and dense FP16 Tensor Core TFLOPS from the vendor spec sheets.",
+      "Pick three open-weight models of different sizes and compute their FP16 and FP8 weight sizes with parameters x bytes.",
+      "Mark which model fits on which GPU, leaving at least 20% of VRAM for KV cache and working memory.",
+      "For each fitting pair, estimate the batch-1 decode upper bound as bandwidth divided by weight bytes.",
+      "If you have any NVIDIA GPU, run `nvidia-smi` and compare the reported memory with the spec sheet.",
+      "Write a short table of your findings; you will check these estimates against real benchmarks in stage 4."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Inference is matrix maths: thousands of simple GPU units beat a few complex CPU cores.",
+      "Tensor Cores do the heavy lifting, faster at lower precision.",
+      "VRAM capacity decides what fits; VRAM bandwidth decides decode speed.",
+      "Single-request decode is memory-bandwidth-bound; batching reuses each weight read.",
+      "The CPU still tokenizes and schedules; a starved GPU shows low utilisation.",
+      "Compare spec-sheet TFLOPS at the same precision, dense."
+    ],
+    "groups": [
+      {"title": "Sizing formulas", "items": [
+        {"syntax": "weights_bytes = params x bytes_per_param", "desc": "FP16/BF16 = 2, FP8 = 1, 4-bit = 0.5"},
+        {"syntax": "max_tok_s(batch 1) ~ bandwidth / weights_bytes", "desc": "Upper bound on decode speed per request"},
+        {"syntax": "FLOPs per token ~ 2 x params", "desc": "Forward pass cost, ignoring attention"},
+        {"syntax": "VRAM needed ~ weights + KV cache + ~10% overhead", "desc": "Rule of thumb for fit"}
+      ]},
+      {"title": "Vocabulary", "items": [
+        {"syntax": "SM", "desc": "Streaming multiprocessor: the GPU's building block"},
+        {"syntax": "CUDA core", "desc": "General-purpose arithmetic unit inside an SM"},
+        {"syntax": "Tensor Core", "desc": "Matrix multiply-accumulate unit; does the transformer maths"},
+        {"syntax": "Warp", "desc": "32 threads executing the same instruction"},
+        {"syntax": "HBM / VRAM", "desc": "High-bandwidth on-package memory holding weights and KV cache"}
+      ]},
+      {"title": "Precision formats", "items": [
+        {"syntax": "FP32", "desc": "4 bytes; training master weights, rarely used to serve"},
+        {"syntax": "BF16 / FP16", "desc": "2 bytes; the default serving precision"},
+        {"syntax": "FP8", "desc": "1 byte; native on recent datacenter GPUs"},
+        {"syntax": "INT4 / FP4", "desc": "Half a byte; aggressive quantization, check quality"}
+      ]},
+      {"title": "First commands", "items": [
+        {"syntax": "nvidia-smi", "desc": "GPUs, memory in use, utilisation, processes"},
+        {"syntax": "nvidia-smi -L", "desc": "List GPUs with their UUIDs"},
+        {"syntax": "nvidia-smi -q -d MEMORY", "desc": "Detailed memory report"}
+      ]}
+    ],
+    "pitfalls": [
+      "Buying GPUs on peak TFLOPS when your workload is bandwidth-bound decode.",
+      "Forgetting the KV cache when checking whether a model fits.",
+      "Comparing a sparse FP8 figure on one card with a dense FP16 figure on another.",
+      "Ignoring CPU capacity, so tokenization and scheduling starve the GPU.",
+      "Assuming lower precision is free without checking output quality."
+    ]
+  },
+  "quiz": [
+    {"q": "Why does a single chat request generate tokens far below the GPU's peak TFLOPS?", "options": ["Each token needs every weight read from VRAM, so memory bandwidth limits it", "The CPU must approve every token before the GPU continues", "Tensor Cores are disabled when only one request is active", "The GPU clock drops automatically at low load"], "answer": 0, "explain": "At batch 1 the GPU does about two operations per weight byte it reads, so it waits on memory. That is the memory-bandwidth-bound regime; batching reuses each read."},
+    {"q": "A model has 14 billion parameters. Roughly how much VRAM do its weights need in FP8?", "options": ["About 14 GB", "About 28 GB", "About 7 GB", "About 56 GB"], "answer": 0, "explain": "FP8 uses one byte per parameter, so 14 billion parameters need about 14 GB, before KV cache and overhead. FP16 would need about 28 GB."},
+    {"q": "Two GPUs have equal capacity. GPU A has twice the memory bandwidth of GPU B. For batch-1 decode of the same model, what do you expect?", "options": ["GPU A generates tokens roughly twice as fast", "Both generate at the same speed because capacity is equal", "GPU B is faster because it has fewer bytes to move", "Speed depends only on Tensor Core count"], "answer": 0, "explain": "Batch-1 decode speed is bounded by bandwidth divided by the bytes read per token, so doubling bandwidth roughly doubles the bound."},
+    {"q": "Which part of a GPU performs most of the arithmetic in transformer inference?", "options": ["Tensor Cores doing matrix multiply-accumulate", "The L2 cache shared by all SMs", "The PCIe controller", "The video encoder block"], "answer": 0, "explain": "Attention and feed-forward layers are matrix multiplications, which Tensor Cores execute; caches and links only move data."},
+    {"q": "GPU utilisation sits at 40% on an inference server with plenty of queued requests. What is worth checking first?", "options": ["Whether CPU-side tokenization or scheduling is starving the GPU", "Whether the GPU has enough Tensor Cores for the model", "Whether the model's precision is too low", "Whether VRAM capacity is too large"], "answer": 0, "explain": "The CPU prepares and feeds work to the GPU. An overloaded or undersized CPU, or a slow data path, leaves the GPU idle despite demand."}
+  ]
+}

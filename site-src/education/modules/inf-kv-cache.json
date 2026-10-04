@@ -1,0 +1,120 @@
+{
+  "id": "inf-kv-cache",
+  "minutes": 30,
+  "intro": "If you remember one thing from this track, make it this: in LLM serving, GPU memory after the weights is KV cache, and KV cache is concurrency. This lesson explains what the cache stores, gives you the formula to size it, works through how many requests a GPU can hold at different context lengths, and covers the techniques engines and model designers use to shrink it: grouped-query attention, paging, prefix sharing, quantization and offloading.",
+  "objectives": [
+    "Explain what the KV cache stores and why decoding needs it",
+    "Compute KV-cache bytes per token from a model's architecture",
+    "Estimate how many concurrent requests fit at a given context length",
+    "Explain how GQA, paging, prefix caching, FP8 cache and offload reduce memory pressure",
+    "Recognise the symptoms of a full cache in a running service"
+  ],
+  "sections": [
+    {
+      "heading": "What the cache holds",
+      "blocks": [
+        {"type": "p", "text": "In every attention layer, each token produces a **key** and a **value** vector. To generate the next token, the model compares the new token's query with the keys of all previous tokens and mixes their values. Recomputing those keys and values for the whole history at every step would make generation quadratically slower, so the server stores them: that store is the **KV cache**. Prefill writes it for the prompt; each decode step reads all of it and appends one more token's worth."},
+        {"type": "p", "text": "The cache is per request and lives as long as the request. It grows linearly with the number of tokens so far, and it is read in full on every decode step, so a long context costs both memory and bandwidth."}
+      ]
+    },
+    {
+      "heading": "Sizing the cache",
+      "blocks": [
+        {"type": "code", "lang": "text", "caption": "The formula and a worked example (illustrative architecture)", "code": "KV bytes per token = 2 x layers x kv_heads x head_dim x bytes_per_value\n\n32 layers, 8 KV heads, head_dim 128, FP16 (2 bytes):\n  2 x 32 x 8 x 128 x 2 = 131,072 bytes = 128 KiB per token\n\nSame model with 32 KV heads (no GQA): 512 KiB per token"},
+        {"type": "p", "text": "Now fit it on a GPU. Take an 80 GB card, let the engine use 90% of it (72 GB), and subtract 16 GB of FP16 weights: about 56 GB is left for cache. At 128 KiB per token that is roughly 427,000 tokens of cache in total, shared by every active request."},
+        {"type": "table", "headers": ["Average tokens per request", "Concurrent requests that fit", "With FP8 KV cache"], "rows": [
+          ["4,000", "about 106", "about 213"],
+          ["32,000", "about 13", "about 26"],
+          ["128,000", "about 3", "about 6"]
+        ]},
+        {"type": "p", "text": "This is why long-context features are expensive: the same GPU serving 128k-token conversations holds a few dozen times fewer users than one serving 4k-token chats. When the cache fills, the engine must queue new requests or **preempt** running ones, evicting their cache and recomputing it later, which shows up as latency spikes."}
+      ]
+    },
+    {
+      "heading": "Making the cache smaller",
+      "blocks": [
+        {"type": "list", "items": [
+          "**Grouped-query attention (GQA)** and multi-query attention let many query heads share fewer key-value heads. Most modern models use it; it is why `kv_heads` is often far smaller than the number of attention heads. It is a property of the model, not a setting.",
+          "**Latent and sliding-window attention**: some architectures compress keys and values into a smaller latent vector, or only keep a recent window of tokens in some layers, shrinking the cache further.",
+          "**Paged allocation** (vLLM's PagedAttention and equivalents) stores the cache in small blocks allocated on demand, so memory is not reserved for the maximum length up front.",
+          "**Prefix caching** shares the cache blocks for identical prompt prefixes, such as a long system prompt, across requests.",
+          "**KV-cache quantization** stores keys and values in FP8, halving memory with usually small quality impact; validate on your evals.",
+          "**Offloading** moves inactive blocks to CPU memory or SSD and brings them back instead of recomputing, useful for long idle conversations."
+        ]},
+        {"type": "callout", "kind": "tip", "text": "The cheapest win is often a lower maximum context length in the engine. If 99% of your requests are under 8k tokens, configuring a 128k maximum mostly wastes headroom; route the rare long requests to a separate deployment."}
+      ]
+    },
+    {
+      "heading": "Spotting a full cache in production",
+      "blocks": [
+        {"type": "list", "items": [
+          "The engine's cache-usage gauge (for vLLM, `vllm:kv_cache_usage_perc`) sits near 1.0.",
+          "Requests waiting rises while requests running stays flat at a ceiling.",
+          "A preemption counter climbs and tail latency jumps.",
+          "Time to first token degrades first, because new requests cannot be admitted."
+        ]},
+        {"type": "p", "text": "The fixes come in two groups: more cache (another GPU or replica, tensor parallelism to spread weights, FP8 cache, higher memory-utilisation setting) or less demand per request (lower max context, shorter prompts, prefix caching, smaller `max_tokens`)."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Size the cache for a real model",
+    "steps": [
+      "Open the config.json of any open-weight model and find num_hidden_layers, num_key_value_heads, and the head dimension (hidden_size divided by num_attention_heads if head_dim is absent).",
+      "Compute KV bytes per token in FP16 and FP8 with the formula from this lesson.",
+      "Pick a GPU and compute the memory left for cache after weights at 90% memory utilisation.",
+      "Fill in the concurrency table for 4k, 32k and 128k average tokens per request.",
+      "If you can run vLLM, start it with that model and compare the KV-cache capacity it logs at startup with your estimate.",
+      "Send concurrent long requests until `vllm:kv_cache_usage_perc` nears 1.0 and observe waiting requests and preemptions."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Memory left after weights is KV cache, and KV cache is concurrency.",
+      "Cache grows linearly with tokens and is read in full every decode step.",
+      "GQA (fewer KV heads) is why modern models fit more users.",
+      "Long context divides concurrency; cap the maximum length to what you need.",
+      "Paging, prefix caching, FP8 cache and offload all stretch the same memory.",
+      "Full cache shows as waiting requests, preemptions and worse TTFT."
+    ],
+    "groups": [
+      {"title": "Formulas", "items": [
+        {"syntax": "KV/token = 2 x layers x kv_heads x head_dim x bytes", "desc": "Cache size per token"},
+        {"syntax": "head_dim = hidden_size / num_attention_heads", "desc": "When config.json has no head_dim"},
+        {"syntax": "cache_mem = gpu_mem x utilisation - weights", "desc": "Memory available for cache"},
+        {"syntax": "concurrency ~ cache_mem / (KV/token x avg_tokens)", "desc": "Requests that fit at once"}
+      ]},
+      {"title": "config.json fields", "items": [
+        {"syntax": "num_hidden_layers", "desc": "Layers (L)"},
+        {"syntax": "num_key_value_heads", "desc": "KV heads; smaller than attention heads under GQA"},
+        {"syntax": "num_attention_heads / hidden_size", "desc": "Used to derive head_dim"},
+        {"syntax": "max_position_embeddings", "desc": "Model's maximum context"}
+      ]},
+      {"title": "Engine knobs (vLLM)", "items": [
+        {"syntax": "--max-model-len N", "desc": "Cap context to free cache"},
+        {"syntax": "--kv-cache-dtype fp8", "desc": "Halve cache memory"},
+        {"syntax": "--gpu-memory-utilization 0.9", "desc": "Share of memory the engine claims"},
+        {"syntax": "--enable-prefix-caching", "desc": "Share identical prefixes (on by default)"}
+      ]},
+      {"title": "Symptoms", "items": [
+        {"syntax": "vllm:kv_cache_usage_perc ~ 1.0", "desc": "Cache full"},
+        {"syntax": "rising vllm:num_preemptions_total", "desc": "Requests evicted and recomputed"},
+        {"syntax": "waiting up, running flat", "desc": "Admission blocked by memory"}
+      ]}
+    ],
+    "pitfalls": [
+      "Checking only whether weights fit and forgetting the cache needs room too.",
+      "Setting the maximum context to the model's limit when real requests are short.",
+      "Using the number of attention heads instead of KV heads in the formula.",
+      "Turning on FP8 cache without checking quality on your own evaluation set.",
+      "Reading a full cache as a compute problem and adding the wrong kind of capacity."
+    ]
+  },
+  "quiz": [
+    {"q": "A model has 40 layers, 8 KV heads and head dimension 128. How large is its FP16 KV cache per token?", "options": ["160 KiB", "128 KiB", "320 KiB", "80 KiB"], "answer": 0, "explain": "2 x 40 x 8 x 128 x 2 bytes = 163,840 bytes, which is 160 KiB per token."},
+    {"q": "A GPU holds about 100 concurrent 4,000-token requests. Roughly how many fit if requests grow to 40,000 tokens on average?", "options": ["About 10", "About 100", "About 40", "About 1"], "answer": 0, "explain": "Cache per request grows tenfold with ten times the tokens, so the same cache memory holds about a tenth as many requests."},
+    {"q": "Why do most modern models need far less KV cache than their attention head count suggests?", "options": ["Grouped-query attention shares a few KV heads among many query heads", "The cache only ever stores the most recent token of each request", "The model weights are reused directly as the keys and values", "Tensor Cores compress the cache automatically during decode"], "answer": 0, "explain": "With GQA, keys and values are computed for a small number of KV heads shared by groups of query heads, so the cache scales with KV heads, not attention heads."},
+    {"q": "Ninety-nine percent of requests are under 8k tokens, but the engine is configured for 128k. What is a sensible change?", "options": ["Lower the max context and route rare long requests to a separate deployment", "Raise memory utilisation to 1.0 to fit 128k requests", "Disable prefix caching so that more memory is freed for requests", "Set max_tokens to 128k on every request so nothing is ever cut off"], "answer": 0, "explain": "A huge maximum context reserves headroom the workload rarely uses. Capping it frees cache for concurrency, and a dedicated deployment can handle the long tail."},
+    {"q": "Which observation most directly indicates that the KV cache is the bottleneck?", "options": ["Cache usage near 100% with waiting requests and preemptions rising", "GPU temperature staying above 80 degrees under sustained load", "Low CPU usage on the server while requests are being handled", "High network traffic between the server and the model registry"], "answer": 0, "explain": "A full cache blocks admission and forces evictions, which shows up as high cache usage, a growing queue and a rising preemption count."}
+  ]
+}

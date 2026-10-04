@@ -1,0 +1,122 @@
+{
+  "id": "inf-llm-lifecycle",
+  "minutes": 30,
+  "intro": "To operate an inference service you need a precise picture of what happens between a request arriving and the last token streaming out. This lesson follows one request through tokenization, queueing, prefill, the decode loop and streaming, explains what model weights are and where they sit, and shows why prefill and decode stress the hardware in opposite ways. Almost every later topic, from batching to disaggregation, is built on that difference.",
+  "objectives": [
+    "Explain tokens and why every cost, limit and speed is measured in them",
+    "Trace a request through tokenize, queue, prefill, decode, stream and stop",
+    "Contrast prefill (compute-bound) with decode (memory-bound)",
+    "Relate prompt length and output length to latency and cost",
+    "Name the sampling and stop parameters that change how long a request runs"
+  ],
+  "sections": [
+    {
+      "heading": "Tokens and weights",
+      "blocks": [
+        {"type": "p", "text": "Models do not read characters or words; they read **tokens**, chunks of text from a fixed vocabulary learned by a **tokenizer**. Common words are often one token, rarer words split into several, and code, other languages and numbers can take many more. As a loose rule of thumb, English prose averages around three-quarters of a word per token, but it varies by tokenizer, so always count with the model's own tokenizer."},
+        {"type": "p", "text": "Everything in inference is measured in tokens: the **context window** (maximum prompt plus output), prices, rate limits, throughput (tokens per second) and memory (KV cache per token). A request has **input tokens** (the prompt, including system prompt, history, retrieved documents and tool results) and **output tokens** (what the model generates)."},
+        {"type": "p", "text": "The **weights** are the model's learned parameters: large matrices for every layer. A model with 8 billion parameters in BF16 is about 16 GB of numbers that must sit in GPU memory and be read for every forward pass. Weights are fixed during inference; what changes per request is the token sequence and the per-request KV cache built from it."}
+      ]
+    },
+    {
+      "heading": "The request lifecycle",
+      "blocks": [
+        {"type": "steps", "items": [
+          "**Receive and tokenize.** The server applies the model's chat template to the messages and converts the text to token IDs on the CPU.",
+          "**Queue.** The scheduler admits the request when there is room: KV-cache memory and a slot in the running batch. Time spent here is pure waiting.",
+          "**Prefill.** The model processes all prompt tokens in one forward pass, builds the KV cache for them, and produces the first output token.",
+          "**Decode loop.** One forward pass per new token: read the weights, attend over the KV cache, pick the next token, append its keys and values to the cache.",
+          "**Stream.** Each new token is detokenized and sent to the client as it is produced.",
+          "**Stop.** The loop ends at an end-of-sequence token, a stop string, or the max-tokens limit; the KV cache is freed."
+        ]},
+        {"type": "code", "lang": "python", "caption": "The decode loop in pseudocode", "code": "tokens = tokenize(apply_chat_template(messages))\nkv_cache, logits = model.prefill(tokens)          # one pass over the whole prompt\noutput = []\nwhile len(output) < max_tokens:\n    next_id = sample(logits, temperature=0.7, top_p=0.9)\n    if next_id == EOS or hits_stop_string(output, next_id):\n        break\n    output.append(next_id)\n    stream(detokenize(next_id))\n    logits = model.decode_step(next_id, kv_cache)  # one pass per new token"}
+      ]
+    },
+    {
+      "heading": "Prefill versus decode",
+      "blocks": [
+        {"type": "p", "text": "**Prefill** handles hundreds or thousands of prompt tokens at once. Each weight read from memory is used for every prompt token, so the work is large matrix-matrix multiplication and the GPU's Tensor Cores are the limit: prefill is **compute-bound**. Its duration grows with prompt length, and it decides the **time to first token**."},
+        {"type": "p", "text": "**Decode** produces one token per request per step. Each step reads every weight but does very little arithmetic with it, so the GPU waits on memory: decode is **memory-bandwidth-bound**. Its duration grows with output length, and it decides the gap between streamed tokens. Batching many requests' decode steps together is what turns this wasteful pattern into efficient throughput."},
+        {"type": "table", "headers": ["", "Prefill", "Decode"], "rows": [
+          ["Tokens per pass", "Whole prompt", "One per request"],
+          ["Bottleneck", "Compute (Tensor Cores)", "Memory bandwidth"],
+          ["Scales with", "Input length", "Output length"],
+          ["User feels it as", "Time to first token", "Streaming speed"],
+          ["Helped by", "More compute, prefix caching", "Batching, faster memory, smaller weights"]
+        ]},
+        {"type": "callout", "kind": "tip", "text": "A RAG app with 6,000-token prompts and 200-token answers is prefill-heavy; a writing assistant with short prompts and 2,000-token answers is decode-heavy. Profile your real input and output length distribution before tuning anything."}
+      ]
+    },
+    {
+      "heading": "Parameters that change the work",
+      "blocks": [
+        {"type": "list", "items": [
+          "**max_tokens** caps output length and therefore worst-case decode time and KV-cache use. Always set it.",
+          "**Stop sequences** end generation early when a delimiter appears, saving tokens.",
+          "**temperature** and **top_p** change which token is sampled, not the cost per token; but they can change how long answers run.",
+          "**n** (several completions per prompt) shares one prefill but multiplies decode work.",
+          "**Structured output** constrains tokens to a schema; engines implement it efficiently, but it adds per-step overhead.",
+          "**Long system prompts** are paid in prefill on every request unless the engine caches the shared prefix."
+        ]}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Watch prefill and decode separately",
+    "steps": [
+      "Count tokens for a short prompt, a 2,000-word document and a block of code with the tokenizer of any open model (for example via the transformers library) and note tokens per word.",
+      "Start any OpenAI-compatible engine (vLLM is fine) with a small model.",
+      "Send a request with a 50-token prompt and `max_tokens` 500 using streaming, and record the time to the first token and the total time.",
+      "Repeat with a 4,000-token prompt and `max_tokens` 50. Which phase dominated each request?",
+      "Compute time per output token for each run as (total time minus time to first token) divided by output tokens minus one.",
+      "Write down which of your real workloads look like the first run and which like the second."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Everything is counted in tokens: context, cost, throughput, memory.",
+      "Lifecycle: tokenize, queue, prefill, decode loop, stream, stop.",
+      "Prefill is compute-bound and sets time to first token.",
+      "Decode is memory-bound and sets streaming speed.",
+      "Input length drives prefill cost; output length drives decode cost.",
+      "Always set max_tokens."
+    ],
+    "groups": [
+      {"title": "Formulas", "items": [
+        {"syntax": "latency ~ queue + prefill(input) + (output - 1) x TPOT", "desc": "End-to-end request time"},
+        {"syntax": "TTFT ~ queue + prefill", "desc": "Time until the first token"},
+        {"syntax": "prefill FLOPs ~ 2 x params x input_tokens", "desc": "Compute for the prompt, ignoring attention"},
+        {"syntax": "decode bytes per step ~ weights + KV read", "desc": "Why decode is bandwidth-bound"}
+      ]},
+      {"title": "Request parameters", "items": [
+        {"syntax": "max_tokens", "desc": "Cap output length and worst-case cost"},
+        {"syntax": "stop: [\"###\"]", "desc": "End generation on a delimiter"},
+        {"syntax": "temperature / top_p", "desc": "Sampling randomness, not cost per token"},
+        {"syntax": "n", "desc": "Several completions: one prefill, n decodes"},
+        {"syntax": "stream: true", "desc": "Send tokens as they are generated"}
+      ]},
+      {"title": "Vocabulary", "items": [
+        {"syntax": "Token", "desc": "Unit of text from the tokenizer's vocabulary"},
+        {"syntax": "Context window", "desc": "Maximum input plus output tokens"},
+        {"syntax": "Chat template", "desc": "How messages are formatted into one token sequence"},
+        {"syntax": "EOS", "desc": "End-of-sequence token that stops generation"},
+        {"syntax": "Input / output tokens", "desc": "Prompt tokens vs generated tokens; priced and timed differently"},
+        {"syntax": "Logits", "desc": "Scores over the vocabulary from which the next token is sampled"}
+      ]}
+    ],
+    "pitfalls": [
+      "Estimating tokens from word counts for code or non-English text.",
+      "No max_tokens, so one runaway request holds cache and capacity.",
+      "Tuning for decode speed when the workload is dominated by long prompts.",
+      "Re-sending huge, unchanging system prompts without prefix caching.",
+      "Reporting only total latency, hiding whether prefill or decode is the problem."
+    ]
+  },
+  "quiz": [
+    {"q": "Users of a document Q&A app with 8,000-token prompts complain about waiting before any text appears. Which phase do you optimise?", "options": ["Prefill, because the long prompt sets time to first token", "Decode, because answers stream too slowly", "Detokenization, because it runs on the CPU", "Sampling, because temperature is too high"], "answer": 0, "explain": "Time to first token is queue plus prefill, and prefill grows with prompt length. Streaming speed after the first token is a decode matter."},
+    {"q": "Why is decode memory-bandwidth-bound while prefill is compute-bound?", "options": ["Decode reuses each weight for one token per request; prefill reuses it for every prompt token", "Decode runs on CPU cores while prefill runs on Tensor Cores", "Decode reads the prompt from disk while prefill reads from cache", "Decode uses higher precision weights than prefill"], "answer": 0, "explain": "Both read all weights per pass. Prefill does arithmetic for many tokens per weight read; decode does it for one token per request, so it waits on memory."},
+    {"q": "A request asks for n=4 completions of the same prompt. How does the work change compared with n=1?", "options": ["Prefill happens once, decode work roughly quadruples", "Both prefill and decode roughly quadruple", "Neither changes because outputs are cached", "Prefill quadruples, decode stays the same"], "answer": 0, "explain": "All four completions share the prompt, so its KV cache can be computed once; each completion then decodes its own tokens."},
+    {"q": "A request had TTFT of 0.4 s, total time 4.4 s and produced 201 tokens. What was the time per output token?", "options": ["About 20 ms", "About 22 ms", "About 2 ms", "About 200 ms"], "answer": 0, "explain": "Decode time is 4.4 minus 0.4 = 4.0 s for the 200 tokens after the first, so 4.0 / 200 = 0.02 s, or 20 ms per token."},
+    {"q": "Which request parameter most directly bounds a request's worst-case decode time and KV-cache use?", "options": ["max_tokens", "temperature", "top_p", "stream"], "answer": 0, "explain": "max_tokens caps how many decode steps can run and therefore how large the request's KV cache can grow; sampling settings do not cap length."}
+  ]
+}
