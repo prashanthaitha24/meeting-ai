@@ -169,15 +169,15 @@ def tabs(tracks):
     return "\n".join(out)
 
 
-def module_row(m):
+def module_row(m, tag=""):
     title, desc = esc(m["title"]), esc(m["desc"])
     if m["live"]:
         return (f'            <li class="module"><input type="checkbox" data-id="{m["id"]}" aria-label="Mark {title} complete" />'
-                f'<a class="module-body" href="education/{m["id"]}.html"><span class="module-title">{title}</span>'
+                f'<a class="module-body" href="education/{m["id"]}.html">{tag}<span class="module-title">{title}</span>'
                 f'<span class="module-desc">{desc}</span><span class="module-cta"><span class="module-quiz" data-quiz="{m["id"]}" hidden></span>'
                 f'Lesson · Cheat sheet · Quiz →</span></a></li>')
     return (f'            <li class="module soon"><input type="checkbox" disabled aria-hidden="true" />'
-            f'<span class="module-body"><span class="module-title">{title}</span><span class="module-desc">{desc}</span>'
+            f'<span class="module-body">{tag}<span class="module-title">{title}</span><span class="module-desc">{desc}</span>'
             f'<span class="module-cta">Coming soon</span></span></li>')
 
 
@@ -185,16 +185,24 @@ def panel(tr, first):
     levels = [st["level"] for st in tr["stages"]]
     level_range = levels[0] if levels[0] == levels[-1] else f'{levels[0].split("–")[0].strip()} → {levels[-1]}'
     lessons = f'{tr["n_total"]} lessons' if tr["n_live"] == tr["n_total"] else f'{tr["n_live"]} of {tr["n_total"]} lessons live'
-    stages = []
+    cards = []
     for st in tr["stages"]:
-        rows = "\n".join(module_row(m) for m in st["modules"])
-        stages.append(f'''        <div class="stage">
-          <div class="stage-top"><span class="stage-num">Stage {st["num"]}</span><span class="stage-level">{esc(st["level"])}</span></div>
-          <h4>{esc(st["title"])}</h4>
-          <ul class="modules">
-{rows}
-          </ul>
-        </div>''')
+        tag = f'<span class="module-stage">Stage {st["num"]} · {esc(st["title"])}</span>'
+        sid = f'{tr["id"]}-s{st["num"]}'
+        cards.extend(module_row(m, tag).replace("<li ", f'<li data-stage="{sid}" ', 1) for m in st["modules"])
+    stage_chips = "".join(
+        f'<button class="stage-chip" type="button" data-jump="{tr["id"]}-s{st["num"]}">Stage {st["num"]} · {esc(st["title"])}'
+        f'<span>{esc(st["level"])}</span></button>' for st in tr["stages"])
+    stages = [f'''        <div class="stage">
+          <div class="stage-chips">{stage_chips}</div>
+          <div class="carousel">
+            <button class="car-btn car-prev" type="button" aria-label="Scroll {esc(tr["name"])} lessons left" hidden>&#8249;</button>
+            <ul class="modules car-track" tabindex="0" aria-label="{esc(tr["name"])} lessons">
+{chr(10).join(cards)}
+            </ul>
+            <button class="car-btn car-next" type="button" aria-label="Scroll {esc(tr["name"])} lessons right" hidden>&#8250;</button>
+          </div>
+        </div>''']
     projects = []
     for p in tr["projects"]:
         meta = f'<span class="m">about {p["hours"]} h<br />{esc(p["level"])}</span>'
