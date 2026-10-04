@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Autoscaling, queues, cold starts and cost per token — Inference | ThavionAI Education</title>
+  <meta name="description" content="Scaling signals, admission control, warm capacity, and the arithmetic of cost per million tokens." />
+  <meta property="og:title" content="Autoscaling, queues, cold starts and cost per token — ThavionAI Education" />
+  <meta property="og:description" content="Scaling signals, admission control, warm capacity, and the arithmetic of cost per million tokens." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/inf-scaling-cost.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-inference" data-module="inf-scaling-cost">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=inf-scaling-cost&amp;page=/education/inf-scaling-cost.html&amp;title=Autoscaling%2C%20queues%2C%20cold%20starts%20and%20cost%20per%20token">Feedback</a>
+    <a href="../education.html#inference" class="nav-cta">All Inference modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#inference">Inference</a> › Stage 7: Production inference systems</div>
+    <h1>Autoscaling, queues, cold starts and cost per token</h1>
+    <p class="lede">Scaling signals, admission control, warm capacity, and the arithmetic of cost per million tokens.</p>
+    <div class="meta">
+      <span class="chip">Advanced</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 13 of 15</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">GPU capacity is expensive, slow to add, and wasted when idle. Running inference in production means deciding how much to keep warm, what signal adds more, what to do with requests while capacity arrives, and what each million tokens actually costs. This lesson covers autoscaling signals for LLM servers, why cold starts take minutes and how to shorten them, admission control and queueing, and the arithmetic of cost per token that ties all of it to a budget.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Choose autoscaling signals that reflect LLM load: queue depth, cache use, latency</li><li>Break a cold start into its parts and shorten each</li><li>Design admission control so overload degrades gracefully</li><li>Compute cost per million tokens from GPU price, throughput and utilisation</li><li>Weigh warm capacity, scale-to-zero, reserved and spot GPUs</li></ul>
+    </div>
+    <section id="scaling-on-the-right-signal"><h2>Scaling on the right signal</h2>
+    <p>CPU and GPU utilisation are poor autoscaling signals for LLM servers: GPU utilisation reads high as soon as any work runs, and CPU is rarely the bottleneck. Scale on signals that measure unmet demand or latency risk.</p>
+    <div class="table-wrap"><table><thead><tr><th>Signal</th><th>Scale out when</th><th>Notes</th></tr></thead><tbody><tr><td>Requests waiting (queue depth)</td><td>Persistently above a small threshold per replica</td><td>Most direct measure of unmet demand</td></tr><tr><td>KV-cache usage</td><td>Sustained above roughly 85-90%</td><td>Predicts queueing and preemption</td></tr><tr><td>p95 TTFT</td><td>Approaching the SLO</td><td>Lags the cause slightly, but tracks what users feel</td></tr><tr><td>Requests running</td><td>At the configured concurrency ceiling</td><td>Replica is full</td></tr></tbody></table></div>
+    <div class="code"><div class="code-cap">KEDA ScaledObject: scale vLLM replicas on queued requests</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: chat-vllm
+spec:
+  scaleTargetRef:
+    name: chat-vllm
+  minReplicaCount: 2
+  maxReplicaCount: 12
+  cooldownPeriod: 600
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc:9090
+        query: sum(vllm:num_requests_waiting{model_name="chat"})
+        threshold: "5"
+        activationThreshold: "1"</code></pre></div>
+    <p>Scale in slowly. A long cooldown and HPA stabilisation window prevent removing a replica that took ten minutes to start just before the next burst.</p></section>
+  <section id="cold-starts"><h2>Cold starts</h2>
+    <p>A new replica is useless until it can serve, and for LLMs that takes minutes. Break it down to fix it:</p>
+    <figure class="diagram" id="fig-scale-loop"><div class="diagram-scroll"><svg viewBox="0 0 740 248" role="img" aria-label="Requests arrive at an admission control layer that rejects excess load with HTTP 429. Admitted requests queue at the engine replicas. Prometheus scrapes queue depth, and KEDA scales the deployment when waiting requests exceed a threshold. A new replica goes through node provisioning, image pull, weight loading and warm-up before becoming ready." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="scale-loop-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="scale-loop-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="scale-loop-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="scale-loop-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="scale-loop-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><polyline points="171.0,70.0 201.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#scale-loop-arrow-default)"/><polyline points="341.0,70.0 371.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#scale-loop-arrow-default)"/><rect x="326.6" y="24.0" width="58.8" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">admitted</text><polyline points="511.0,70.0 541.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#scale-loop-arrow-default)"/><rect x="499.6" y="24.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">metrics</text><polyline points="611.0,98.0 611.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#scale-loop-arrow-default)"/><rect x="614.0" y="116.0" width="64.9" height="16" rx="4" class="dg-label-bg"/><text x="618.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">threshold</text><polyline points="541.0,178.0 511.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#scale-loop-arrow-default)"/><rect x="511.9" y="132.0" width="28.3" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">add</text><polyline points="441.0,150.0 441.0,98.0" fill="none" style="stroke:currentColor" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#scale-loop-arrow-default)"/><rect x="444.0" y="116.0" width="101.5" height="16" rx="4" class="dg-label-bg"/><text x="448.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">ready (minutes)</text><rect x="31" y="42.0" width="140" height="56" rx="28.0" class="dg-node dg-actor"/><text x="101.0" y="70.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Requests</text><rect x="201" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Admission</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">429 when full</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Replicas</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">queue + batch</text><path d="M541,49.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M541,49.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Prometheus</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">requests waiting</text><rect x="541" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="611.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">KEDA / HPA</text><text x="611.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">scale out</text><rect x="371" y="150.0" width="140" height="56" rx="8" class="dg-node dg-muted"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text2)">New replica</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">provision, pull, load</text></svg></div><figcaption>Scale on unmet demand: queue depth drives new replicas, but each one pays a multi-minute cold start before it can serve, so warm capacity and admission control cover the gap.</figcaption></figure>
+    <ol><li><strong>Node provisioning</strong> if no free GPU node exists: often the longest step on cloud autoscaling groups.</li><li><strong>Image pull</strong>: inference images are large; pre-pull them on GPU nodes or use a registry mirror.</li><li><strong>Weight loading</strong>: tens to hundreds of GB from storage into VRAM; cache weights on node-local NVMe or stream them from a neighbouring GPU.</li><li><strong>Engine warm-up</strong>: compilation, CUDA graph capture and memory profiling; reuse compile caches.</li><li><strong>Readiness</strong>: only after the engine answers health checks should traffic arrive.</li></ol>
+    <ul><li>Keep <strong>warm capacity</strong> for the latency-sensitive path: a minimum replica count, and spare GPU nodes so provisioning is not on the critical path.</li><li><strong>Scale-to-zero</strong> suits dev, batch and rarely used models where a multi-minute first response is acceptable, not interactive production chat.</li><li>Set readiness and startup probes with generous initial delays so Kubernetes does not kill a replica that is still loading weights.</li></ul></section>
+  <section id="admission-control-and-queueing"><h2>Admission control and queueing</h2>
+    <p>Capacity always arrives later than demand, so decide what happens in the gap. An unbounded queue turns a short spike into minutes of terrible latency for everyone. Better: cap the queue per replica (or per tenant), reject excess requests quickly with HTTP 429 and a Retry-After header, and let clients back off and retry with jitter.</p>
+    <ul><li>Give interactive traffic priority over batch, or run batch on separate capacity entirely.</li><li>Apply per-tenant rate limits and token budgets at the gateway so one customer cannot exhaust shared capacity.</li><li>Set request timeouts end to end so abandoned requests stop consuming GPU time; engines cancel generation when the client disconnects.</li><li>Shed load before the cache fills: once preemption starts, everyone gets slower.</li></ul></section>
+  <section id="cost-per-million-tokens"><h2>Cost per million tokens</h2>
+    <div class="code"><div class="code-cap">The arithmetic (example prices and throughput, not quotes)</div><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>cost per 1M tokens = GPU cost per hour / (tokens per hour / 1,000,000)
+
+GPU at $4.00/hour, sustaining 2,500 output tokens/s at your latency target:
+  tokens/hour = 2,500 x 3,600 = 9,000,000
+  at 100% busy: $4.00 / 9 = $0.44 per 1M output tokens
+  at 40% average utilisation: $0.44 / 0.4 = $1.11 per 1M output tokens</code></pre></div>
+    <p>Two levers dominate. <strong>Throughput per GPU at your latency target</strong> (goodput, not peak), raised by batching, quantization, prefix caching and the right engine. <strong>Average utilisation</strong>, raised by autoscaling well, sharing GPUs across models, and filling quiet hours with batch work. A deployment that is twice as fast but idle 80% of the time can cost more than a slower, busy one.</p>
+    <ul><li>Account for input tokens too: prefill is cheaper per token than decode but not free, and long-prompt workloads spend much of their GPU time there.</li><li>Reserved or committed GPUs lower the hourly price for the always-on floor; on-demand covers peaks; spot or preemptible GPUs suit batch jobs that tolerate interruption.</li><li>Compare against hosted APIs honestly: include engineering time, idle capacity and on-call, not just GPU-hours.</li></ul></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Price your own deployment</h2>
+    <ol><li>From your benchmark lab results, take the highest output tokens per second that met your latency target on one GPU.</li><li>Look up the on-demand hourly price of that GPU on a cloud you use.</li><li>Compute cost per million output tokens at 100%, 60% and 30% utilisation.</li><li>Sketch a daily traffic curve and decide minimum replicas, scale-out signal and threshold, and cooldown.</li><li>Time each part of a cold start on your setup (image pull, weight load, warm-up) and pick the largest to optimise.</li><li>Write a one-page capacity plan: floor, ceiling, signal, admission policy and expected cost per million tokens.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Autoscaling, queues, cold starts and cost per token — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Scale on queue depth, cache usage and TTFT, not CPU or GPU utilisation.</li><li>Cold start = provision + pull + load weights + warm-up: attack the largest.</li><li>Keep warm capacity for interactive traffic; scale-to-zero for batch and dev.</li><li>Bound queues and return 429 with Retry-After instead of letting latency explode.</li><li>Cost per token = hourly price / tokens per hour, divided by utilisation.</li><li>Throughput at your SLO and average utilisation are the two cost levers.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Formulas</h3><table><tbody><tr><td><code>$/1M tok = $/hour / (tok/s x 3600 / 1e6)</code></td><td>At full utilisation</td></tr><tr><td><code>effective $/1M = $/1M / utilisation</code></td><td>Idle time is paid for</td></tr><tr><td><code>replicas ~ peak tok/s / goodput per replica</code></td><td>Capacity at peak</td></tr><tr><td><code>cold start = provision + pull + load + warm-up</code></td><td>Where the minutes go</td></tr></tbody></table></div><div class="cheat-group"><h3>Scaling signals</h3><table><tbody><tr><td><code>sum(vllm:num_requests_waiting)</code></td><td>Queue depth</td></tr><tr><td><code>vllm:kv_cache_usage_perc &gt; 0.9</code></td><td>Cache pressure</td></tr><tr><td><code>histogram_quantile(0.95, ... time_to_first_token ...)</code></td><td>Latency risk</td></tr><tr><td><code>minReplicaCount / cooldownPeriod</code></td><td>Warm floor and slow scale-in</td></tr></tbody></table></div><div class="cheat-group"><h3>Admission control</h3><table><tbody><tr><td><code>HTTP 429 + Retry-After</code></td><td>Reject fast under overload</td></tr><tr><td><code>per-tenant rate and token limits</code></td><td>Isolation at the gateway</td></tr><tr><td><code>priority classes</code></td><td>Interactive before batch</td></tr><tr><td><code>end-to-end timeouts + cancel on disconnect</code></td><td>Stop wasted generation</td></tr></tbody></table></div><div class="cheat-group"><h3>Capacity options</h3><table><tbody><tr><td><code>reserved / committed</code></td><td>Cheaper always-on floor</td></tr><tr><td><code>on-demand</code></td><td>Peaks</td></tr><tr><td><code>spot / preemptible</code></td><td>Interruptible batch work</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Autoscaling on GPU utilisation, which is always high.</li><li>Scaling in quickly and losing replicas that take minutes to come back.</li><li>Unbounded queues that turn spikes into minutes of latency.</li><li>Quoting cost per token at 100% utilisation when real utilisation is 30%.</li><li>Scale-to-zero on an interactive endpoint with multi-minute cold starts.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "Which signal best triggers scaling out an LLM serving deployment?", "options": ["Requests waiting in the engines' queues", "Average GPU utilisation across replicas", "CPU usage of the HTTP server", "Number of models in the registry"], "answer": 0, "explain": "Queue depth measures demand current replicas cannot absorb. GPU utilisation is high whenever any work runs, and CPU is rarely the limit."}, {"q": "A GPU costs $3.00 per hour and sustains 1,500 output tokens per second at your latency target. What is the cost per million output tokens at 100% utilisation?", "options": ["About $0.56", "About $5.40", "About $0.06", "About $2.00"], "answer": 0, "explain": "1,500 x 3,600 = 5.4 million tokens per hour; $3.00 / 5.4 = about $0.56 per million."}, {"q": "The same deployment averages 25% utilisation. What is the effective cost per million tokens?", "options": ["About $2.22", "About $0.56", "About $0.14", "About $1.12"], "answer": 0, "explain": "Idle hours are still paid for: $0.56 / 0.25 = about $2.22 per million tokens."}, {"q": "During a traffic spike the queue grows without limit and everyone waits minutes. What is the better policy?", "options": ["Bound the queue and return 429 with Retry-After for excess requests", "Disable timeouts so no request is ever dropped", "Raise max_tokens so each request finishes in one pass", "Remove the minimum replica count"], "answer": 0, "explain": "Bounded queues with fast rejection keep latency acceptable for admitted requests and let clients back off while capacity scales."}, {"q": "New replicas take 9 minutes to serve; 6 of those are spent waiting for a GPU node to be provisioned. What helps most?", "options": ["Keep spare warm GPU nodes so provisioning is off the critical path", "Pre-compile CUDA graphs into the image", "Shorten the readiness probe interval", "Use a smaller tokenizer"], "answer": 0, "explain": "Node provisioning is the largest share. Spare nodes, or overprovisioned placeholders that are evicted on demand, remove it from scale-out time."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="inf-distributed-design.html"><span>← Previous</span><strong>Designing around data movement</strong></a>
+    <a class="pager-up" href="../education.html#inference">All Inference modules</a>
+    <a class="pager-link pager-next" href="inf-slos-observability.html"><span>Next →</span><strong>Inference SLOs and observability</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=inf-scaling-cost&amp;page=/education/inf-scaling-cost.html&amp;title=Autoscaling%2C%20queues%2C%20cold%20starts%20and%20cost%20per%20token">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=inf-scaling-cost&amp;page=/education/inf-scaling-cost.html&amp;title=Autoscaling%2C%20queues%2C%20cold%20starts%20and%20cost%20per%20token">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

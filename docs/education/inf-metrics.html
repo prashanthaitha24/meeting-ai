@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Latency and throughput metrics — Inference | ThavionAI Education</title>
+  <meta name="description" content="TTFT, TPOT, inter-token latency, goodput and percentiles — and where each kind of bottleneck shows up." />
+  <meta property="og:title" content="Latency and throughput metrics — ThavionAI Education" />
+  <meta property="og:description" content="TTFT, TPOT, inter-token latency, goodput and percentiles — and where each kind of bottleneck shows up." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/inf-metrics.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-inference" data-module="inf-metrics">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=inf-metrics&amp;page=/education/inf-metrics.html&amp;title=Latency%20and%20throughput%20metrics">Feedback</a>
+    <a href="../education.html#inference" class="nav-cta">All Inference modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#inference">Inference</a> › Stage 3: Analysing inference performance</div>
+    <h1>Latency and throughput metrics</h1>
+    <p class="lede">TTFT, TPOT, inter-token latency, goodput and percentiles — and where each kind of bottleneck shows up.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">~30 min read</span>
+      <span class="chip">Module 5 of 15</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">"Is it fast?" has at least five different answers for an LLM service, and optimising the wrong one is the most common mistake in inference work. This lesson defines the metrics precisely (time to first token, time per output token, inter-token latency, end-to-end latency, throughput and goodput), shows how to compute them from timestamps, explains why percentiles matter more than averages, and maps each kind of bottleneck to the metric it damages.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Define TTFT, TPOT, ITL, end-to-end latency, throughput and goodput precisely</li><li>Compute those metrics from request and token timestamps</li><li>Explain the throughput versus latency trade-off as concurrency rises</li><li>Use percentiles and say where measurements should be taken</li><li>Map queueing, prefill, decode, memory and CPU bottlenecks to the metrics they hurt</li></ul>
+    </div>
+    <section id="the-latency-metrics"><h2>The latency metrics</h2>
+    <div class="table-wrap"><table><thead><tr><th>Metric</th><th>Definition</th><th>Driven mostly by</th></tr></thead><tbody><tr><td>TTFT (time to first token)</td><td>Request sent to first output token received</td><td>Queue wait + prefill</td></tr><tr><td>TPOT (time per output token)</td><td>(end-to-end - TTFT) / (output tokens - 1), per request</td><td>Decode step time, batch size</td></tr><tr><td>ITL (inter-token latency)</td><td>Each gap between consecutive streamed tokens</td><td>Decode steps, interference from prefill</td></tr><tr><td>E2E latency</td><td>Request sent to last token received</td><td>All of the above x output length</td></tr></tbody></table></div>
+    <p>TPOT and ITL are close relatives. TPOT is one average number per request; ITL is the whole distribution of gaps, which exposes <strong>stalls</strong>: a stream that usually ticks every 20 ms but freezes for 400 ms while the engine prefills someone else's long prompt has a fine average TPOT and a terrible ITL tail. Users read that freeze as the service hanging.</p>
+    <div class="code"><div class="code-cap">Metrics from client-side timestamps for one streamed request</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>def request_metrics(t_sent, token_times):
+    """t_sent: request start; token_times: arrival time of each streamed token."""
+    ttft = token_times[0] - t_sent
+    e2e = token_times[-1] - t_sent
+    n = len(token_times)
+    tpot = (e2e - ttft) / (n - 1) if n &gt; 1 else 0.0
+    itl = [b - a for a, b in zip(token_times, token_times[1:])]
+    return {"ttft": ttft, "tpot": tpot, "e2e": e2e, "itl": itl}</code></pre></div></section>
+  <section id="throughput-goodput-and-the-trade-off"><h2>Throughput, goodput and the trade-off</h2>
+    <p><strong>Throughput</strong> is work per unit time: output tokens per second (the usual headline), total tokens per second, or requests per second. Per GPU is the number that maps to cost. <strong>Goodput</strong> is throughput that meets your latency targets, for example requests per second completed with TTFT under 500 ms and TPOT under 50 ms. A configuration that doubles throughput by blowing through the latency target has improved nothing users care about.</p>
+    <p>As you raise concurrency, batches get bigger: throughput climbs because each weight read serves more requests, but every request's decode step gets slower and queues start forming, so TTFT and TPOT rise. Plotted as throughput against latency, every engine and configuration traces a curve, and the right operating point is the highest throughput that still meets the latency SLO.</p>
+    <div class="callout callout-tip"><strong>Tip</strong><p>Never report a throughput number without the concurrency or request rate, the input and output lengths, and the latency percentiles it was measured at. Without those, the number is not comparable to anything.</p></div></section>
+  <section id="percentiles-and-where-to-measure"><h2>Percentiles and where to measure</h2>
+    <ul><li>Report p50, p90 and p99, not the mean. LLM latency distributions have long tails from queueing, long prompts and preemption.</li><li><strong>Client-side</strong> measurement includes network and the gateway; it is what users feel and what SLOs should use.</li><li><strong>Server-side</strong> engine metrics (histograms for TTFT and inter-token latency) isolate the engine, which is what you tune.</li><li>A large gap between the two points at the network, a gateway, or the client's own processing.</li><li>Measure under the real mix of input and output lengths; a benchmark of 128-token prompts says little about a RAG app with 6,000-token prompts.</li></ul></section>
+  <section id="a-worked-example-reading-one-benchmark-run"><h2>A worked example: reading one benchmark run</h2>
+    <p>Suppose a benchmark at concurrency 16 reports p50 TTFT of 180 ms, p99 TTFT of 2.1 s, p50 TPOT of 24 ms and p99 TPOT of 31 ms, with 2,900 output tokens per second. The decode numbers are tight, so steady-state generation is healthy: at 24 ms per token each user sees roughly 40 tokens per second, faster than anyone reads. The trouble is the TTFT tail. A p99 more than ten times the median means a minority of requests waited a long time before starting.</p>
+    <p>There are two usual explanations, and the other metrics tell them apart. If waiting requests climbed during the run, capacity ran short at moments of burst and requests queued: add replicas, or admit fewer requests per replica and scale out earlier. If the slow requests were the ones with the longest prompts, prefill itself is the cost: prefix caching, chunked prefill, a faster GPU for prefill, or eventually disaggregated prefill are the levers. Look at TTFT broken down by input length before choosing.</p>
+    <p>Now rerun at concurrency 32. If throughput rises to 3,600 tokens per second but p99 TPOT jumps to 58 ms, you have crossed a 50 ms streaming target: the extra throughput is not goodput. The operating point for this configuration sits somewhere between 16 and 32 concurrent requests per replica, and that number, not the peak throughput, is what you feed into capacity planning and autoscaling thresholds.</p></section>
+  <section id="bottlenecks-and-their-fingerprints"><h2>Bottlenecks and their fingerprints</h2>
+    <div class="table-wrap"><table><thead><tr><th>Bottleneck</th><th>Metric it hurts</th><th>Fingerprint</th></tr></thead><tbody><tr><td>Queueing (not enough capacity)</td><td>TTFT</td><td>Waiting requests grow; TTFT rises while TPOT is steady</td></tr><tr><td>Prefill compute</td><td>TTFT, ITL tail</td><td>TTFT tracks prompt length; stalls in other streams during long prefills</td></tr><tr><td>Decode bandwidth / large batch</td><td>TPOT</td><td>TPOT rises with concurrency; GPU memory traffic saturated</td></tr><tr><td>KV-cache memory</td><td>TTFT, tail latency</td><td>Cache usage near full; preemptions</td></tr><tr><td>CPU (tokenizer, scheduler, HTTP)</td><td>Everything</td><td>CPU pegged, GPU underused</td></tr><tr><td>Network or gateway</td><td>Client-side only</td><td>Server metrics fine, client metrics poor</td></tr></tbody></table></div>
+    <p>With these fingerprints you can read most incidents from a dashboard of four panels: TTFT and TPOT percentiles, running versus waiting requests, KV-cache usage, and throughput. The observability lesson builds exactly that.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Measure the curve yourself</h2>
+    <ol><li>Serve a small model with any OpenAI-compatible engine.</li><li>Write a client (or adapt the function above) that sends streamed requests and records TTFT, TPOT, ITL and E2E per request.</li><li>Run 50 requests at concurrency 1, 4, 16 and 32 with fixed input (about 500 tokens) and output (about 200 tokens) lengths.</li><li>For each level, compute output tokens per second and p50/p99 of TTFT and TPOT.</li><li>Plot throughput against p99 TPOT and mark the highest point under a 50 ms TPOT target: that is your goodput operating point.</li><li>Repeat one level with 4,000-token prompts and compare ITL tails.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Latency and throughput metrics — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>TTFT = queue + prefill; TPOT and ITL = decode behaviour.</li><li>ITL distribution reveals stalls that average TPOT hides.</li><li>Goodput (throughput within SLO) beats raw throughput.</li><li>More concurrency: more throughput, worse latency; pick the point on the curve.</li><li>Report percentiles with lengths and concurrency, or the number means nothing.</li><li>SLOs from the client side; tuning from engine metrics.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Definitions</h3><table><tbody><tr><td><code>TTFT = t_first_token - t_sent</code></td><td>Responsiveness</td></tr><tr><td><code>TPOT = (E2E - TTFT) / (n_out - 1)</code></td><td>Average decode speed per request</td></tr><tr><td><code>ITL_i = t_token[i+1] - t_token[i]</code></td><td>Each streaming gap</td></tr><tr><td><code>E2E = t_last_token - t_sent</code></td><td>Whole request</td></tr><tr><td><code>tokens/s per user ~ 1 / TPOT</code></td><td>Streaming speed a user sees</td></tr></tbody></table></div><div class="cheat-group"><h3>Throughput</h3><table><tbody><tr><td><code>output tok/s = sum(n_out) / wall_time</code></td><td>Headline throughput</td></tr><tr><td><code>tok/s per GPU</code></td><td>The number that maps to cost</td></tr><tr><td><code>goodput = requests/s meeting all SLOs</code></td><td>Throughput users benefit from</td></tr></tbody></table></div><div class="cheat-group"><h3>Reporting checklist</h3><table><tbody><tr><td><code>input / output length distribution</code></td><td>Always state it</td></tr><tr><td><code>concurrency or request rate</code></td><td>Load level of the run</td></tr><tr><td><code>p50 / p90 / p99</code></td><td>Percentiles, not means</td></tr><tr><td><code>client-side vs server-side</code></td><td>Where it was measured</td></tr></tbody></table></div><div class="cheat-group"><h3>Fingerprints</h3><table><tbody><tr><td><code>TTFT up, TPOT flat</code></td><td>Queueing: add capacity</td></tr><tr><td><code>TPOT up with concurrency</code></td><td>Decode saturation: smaller batch or more GPUs</td></tr><tr><td><code>ITL spikes</code></td><td>Prefill interference: chunked prefill or disaggregation</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Optimising average latency while p99 users wait seconds.</li><li>Quoting tokens per second without lengths, concurrency or percentiles.</li><li>Benchmarking with short synthetic prompts when production prompts are long.</li><li>Raising throughput past the point where latency targets break.</li><li>Setting SLOs on server metrics that ignore the gateway and network.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "Under peak load TTFT triples while TPOT barely changes. What is the most likely bottleneck?", "options": ["Requests are queueing for capacity before prefill", "Decode is saturating memory bandwidth", "The tokenizer is producing too many tokens", "Streaming is slowed by the network"], "answer": 0, "explain": "TTFT includes queue wait; TPOT reflects decode once running. TTFT rising alone means requests wait to be admitted, so more capacity is needed."}, {"q": "A stream averages 22 ms per token but users report freezes of almost half a second. Which metric exposes this?", "options": ["The distribution of inter-token latency", "Average TPOT per request", "Total throughput in tokens per second", "Requests per second"], "answer": 0, "explain": "TPOT averages the gaps, hiding rare long ones. The ITL distribution, especially its tail, shows the stalls."}, {"q": "Config A gives 30% more tokens per second than config B, but A's p99 TPOT breaks your 50 ms target while B meets it. Which is better for users?", "options": ["B, because goodput counts only work that meets the SLO", "A, because throughput is the headline metric", "Neither, because TTFT was not measured", "A, because p99 only affects a few users"], "answer": 0, "explain": "Throughput that violates latency targets is not useful work. Goodput, throughput within SLO, favours B."}, {"q": "A request took 6.2 s end to end with TTFT 0.2 s and produced 301 tokens. What was its TPOT?", "options": ["20 ms", "21 ms", "60 ms", "2 ms"], "answer": 0, "explain": "(6.2 - 0.2) / (301 - 1) = 6.0 / 300 = 0.02 s, or 20 ms per output token."}, {"q": "Engine metrics show p99 TTFT of 300 ms, but clients measure 1.4 s. Where do you look first?", "options": ["The network path and gateway between clients and the engine", "The engine's prefill kernels", "The KV-cache size setting", "The model's tokenizer"], "answer": 0, "explain": "Server-side metrics isolate the engine. A large gap to client-side measurements points at what lies between them: gateways, proxies, network or client processing."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="inf-kv-cache.html"><span>← Previous</span><strong>The KV cache</strong></a>
+    <a class="pager-up" href="../education.html#inference">All Inference modules</a>
+    <a class="pager-link pager-next" href="inf-profiling.html"><span>Next →</span><strong>Compute-bound, memory-bound, and profiling</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=inf-metrics&amp;page=/education/inf-metrics.html&amp;title=Latency%20and%20throughput%20metrics">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=inf-metrics&amp;page=/education/inf-metrics.html&amp;title=Latency%20and%20throughput%20metrics">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

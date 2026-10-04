@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>When one GPU isn't enough — Inference | ThavionAI Education</title>
+  <meta name="description" content="Tensor, pipeline, data and expert parallelism: what each splits, what it costs, and when to use it." />
+  <meta property="og:title" content="When one GPU isn&#x27;t enough — ThavionAI Education" />
+  <meta property="og:description" content="Tensor, pipeline, data and expert parallelism: what each splits, what it costs, and when to use it." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/inf-parallelism.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-inference" data-module="inf-parallelism">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=inf-parallelism&amp;page=/education/inf-parallelism.html&amp;title=When%20one%20GPU%20isn%27t%20enough">Feedback</a>
+    <a href="../education.html#inference" class="nav-cta">All Inference modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#inference">Inference</a> › Stage 5: Parallelism &amp; GPU networking</div>
+    <h1>When one GPU isn't enough</h1>
+    <p class="lede">Tensor, pipeline, data and expert parallelism: what each splits, what it costs, and when to use it.</p>
+    <div class="meta">
+      <span class="chip">Advanced</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 9 of 15</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">Some models do not fit on one GPU, and some workloads need more throughput than one GPU can give. The answer is parallelism, but there are four different ways to split the work, and each trades memory, latency, throughput and communication differently. This lesson explains tensor, pipeline, data and expert parallelism, shows the sizing arithmetic that tells you when you need them, and gives you a rule of thumb for combining them across GPUs and nodes.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Decide when a model needs more than one GPU from its size and your context needs</li><li>Explain what tensor, pipeline, data and expert parallelism each split</li><li>Predict the communication each strategy needs and where it should run</li><li>Combine strategies for multi-GPU and multi-node deployments</li><li>Avoid the common mistake of adding parallelism that adds latency without benefit</li></ul>
+    </div>
+    <section id="when-one-gpu-isn-t-enough"><h2>When one GPU isn't enough</h2>
+    <p>Start with memory. A model needs its weights plus enough KV cache for useful concurrency plus working space. A 70-billion-parameter model in FP16 is about 140 GB of weights: it cannot fit on one 80 GB GPU at all, and two would leave little room for cache, so four is the practical minimum. In FP8 the same model is about 70 GB, which technically fits on one 80 GB card but leaves almost no cache, so two GPUs is still the sensible floor. A model of around 405 billion parameters is roughly 405 GB in FP8 and 810 GB in FP16: one eight-GPU node in FP8, two nodes in FP16.</p>
+    <p>The second reason is throughput: a model fits on one GPU, but you need more requests per second than one GPU serves within your latency target. That calls for copies, not splitting, and it is a different strategy entirely.</p></section>
+  <section id="the-four-strategies"><h2>The four strategies</h2>
+    <div class="table-wrap"><table><thead><tr><th>Strategy</th><th>Splits</th><th>Communication</th><th>Best for</th></tr></thead><tbody><tr><td>Tensor (TP)</td><td>Each layer's weight matrices across GPUs</td><td>All-reduce inside every layer</td><td>Fitting a model; lower latency per token; within one node</td></tr><tr><td>Pipeline (PP)</td><td>Groups of layers into stages on different GPUs</td><td>Activations passed stage to stage</td><td>Spanning nodes over slower links</td></tr><tr><td>Data (DP)</td><td>Nothing: full replicas</td><td>None between replicas</td><td>More throughput when the model fits</td></tr><tr><td>Expert (EP)</td><td>Experts of a mixture-of-experts model</td><td>All-to-all token routing per MoE layer</td><td>Large MoE models</td></tr></tbody></table></div>
+    <p><strong>Tensor parallelism</strong> cuts each big matrix into slices, one per GPU; each GPU computes its slice and the partial results are combined with an <strong>all-reduce</strong>, typically twice per transformer layer. Every GPU holds a fraction of the weights and of the KV cache, and because work per token is split, per-token latency can drop. The price is constant, latency-sensitive communication, which is why TP belongs on NVLink inside a node, usually at 2, 4 or 8.</p>
+    <figure class="diagram" id="fig-tp-vs-pp"><div class="diagram-scroll"><svg viewBox="0 0 570 248" role="img" aria-label="Top row, tensor parallelism: GPU 0 and GPU 1 each hold half of every layer&#x27;s weights; after each layer they exchange partial results with an all-reduce over NVLink. Bottom row, pipeline parallelism: node A holds layers 1 to 40 and node B holds layers 41 to 80; activations flow from node A to node B once per step over the inter-node network." style="width:100%;max-width:570px;min-width:540px;height:auto;display:block"><defs><marker id="tp-vs-pp-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="tp-vs-pp-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="tp-vs-pp-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="tp-vs-pp-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="tp-vs-pp-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><rect x="20" y="19" width="502" height="102" rx="10" class="dg-group"/><text x="30" y="114" font-size="10" font-weight="700" letter-spacing="1" class="dg-group-label">TENSOR PARALLEL: INSIDE ONE NODE</text><rect x="20" y="127" width="502" height="102" rx="10" class="dg-group"/><text x="30" y="222" font-size="10" font-weight="700" letter-spacing="1" class="dg-group-label">PIPELINE PARALLEL: ACROSS NODES</text><polyline points="171.0,70.0 371.0,70.0" fill="none" style="stroke:#f87171" stroke-width="1.6" marker-end="url(#tp-vs-pp-arrow-danger)"/><rect x="198.9" y="24.0" width="144.2" height="16" rx="4" class="dg-label-bg"/><text x="271.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:#f87171">all-reduce every layer</text><polyline points="171.0,178.0 371.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#tp-vs-pp-arrow-default)"/><rect x="201.9" y="132.0" width="138.1" height="16" rx="4" class="dg-label-bg"/><text x="271.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">activations once/step</text><rect x="31" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">GPU 0</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">half of each layer</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">GPU 1</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">half of each layer</text><rect x="31" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="101.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Node A</text><text x="101.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">layers 1-40</text><rect x="371" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Node B</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">layers 41-80</text></svg></div><figcaption>Tensor parallelism splits every layer across GPUs and all-reduces inside each layer; pipeline parallelism gives each GPU whole layers and only passes activations between stages.</figcaption></figure>
+    <p><strong>Pipeline parallelism</strong> puts the first layers on one GPU, the next on another, and so on. Only activations cross between stages, once per stage, so it tolerates slower links and is the usual way to span nodes. It does not make a single token faster; each extra stage adds a hop. Throughput depends on keeping every stage busy with different micro-batches; idle stages are called <strong>bubbles</strong>.</p>
+    <p><strong>Data parallelism</strong> simply runs more copies behind a load balancer. <strong>Expert parallelism</strong> places the experts of a mixture-of-experts model on different GPUs and sends each token to the GPUs holding its chosen experts, an all-to-all exchange per MoE layer that needs a fast fabric and good load balancing across experts.</p></section>
+  <section id="combining-them"><h2>Combining them</h2>
+    <ul><li><strong>Fits on one GPU with room for cache:</strong> no splitting. Add replicas (DP) for throughput.</li><li><strong>Needs several GPUs, fits in one node:</strong> TP across that node's NVLink-connected GPUs, then replicate the whole TP group for throughput.</li><li><strong>Needs more than one node:</strong> TP inside each node, PP across nodes (for example TP 8, PP 2 on two eight-GPU nodes).</li><li><strong>Large MoE model:</strong> EP for the expert layers, often with DP or TP for the attention layers; engines expose this as a combination of flags.</li><li><strong>Very long contexts:</strong> context or sequence parallelism splits the sequence itself across GPUs, an advanced option some engines provide.</li></ul>
+    <div class="code"><div class="code-cap">The same choices expressed as engine flags</div><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># one node, 4 GPUs, model split four ways
+vllm serve "$MODEL_ID" --tensor-parallel-size 4
+
+# two nodes of 8 GPUs: TP inside each node, PP across nodes
+vllm serve "$MODEL_ID" --tensor-parallel-size 8 --pipeline-parallel-size 2
+
+# TensorRT-LLM equivalents
+trtllm-serve "$MODEL_ID" --tp_size 8 --pp_size 2</code></pre></div>
+    <div class="callout callout-warning"><strong>Watch out</strong><p>More parallelism is not automatically better. TP 8 on a model that fits comfortably on 2 GPUs spends most of its time communicating; four TP-2 replicas usually deliver far more throughput from the same eight GPUs. Use the smallest split that fits your model and cache, then replicate.</p></div></section>
+  <section id="choosing-with-numbers"><h2>Choosing with numbers</h2>
+    <p>A reliable procedure: compute weight memory at your precision; decide the KV cache you need from your concurrency and context targets (the KV-cache lesson's formula); add about 10% for overhead; divide by usable memory per GPU and round up to a power of two for TP. If that exceeds one node, add pipeline stages across nodes. Then benchmark the candidate layouts, for example TP 4 with two replicas versus TP 8 with one, on your workload, and pick the higher goodput per GPU.</p>
+    <p>Remember what each choice does to the KV cache: TP splits it across GPUs too, so a TP 4 group holds four times the cache of one GPU minus the weights, which is often why moving from TP 2 to TP 4 increases concurrency more than you expect.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Plan, then measure, a multi-GPU layout</h2>
+    <ol><li>Pick a model too large for one of your target GPUs and compute its weight memory in FP16 and FP8.</li><li>Choose concurrency and context targets and compute the KV cache needed; add 10% overhead and work out the minimum TP size.</li><li>On a multi-GPU instance, serve a smaller model at TP 1, TP 2 and TP 4 (if available) and record per-token latency at concurrency 1.</li><li>At a fixed total of four GPUs, compare one TP 4 server with two TP 2 servers behind a simple load balancer at high concurrency; record total throughput.</li><li>Explain the results using communication cost and KV-cache capacity.</li><li>Write a recommendation for your original large model: TP, PP, DP sizes and why.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>When one GPU isn't enough — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Split only when memory (weights + cache) or latency demands it; otherwise replicate.</li><li>TP splits layers, all-reduces every layer, belongs on NVLink inside a node.</li><li>PP splits layers into stages, tolerates slow links, adds per-hop latency.</li><li>DP is replicas: throughput without communication.</li><li>EP spreads MoE experts with all-to-all routing.</li><li>Smallest TP that fits, then replicate; benchmark layouts by goodput per GPU.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Sizing</h3><table><tbody><tr><td><code>weights = params x bytes</code></td><td>70B FP16 ~ 140 GB; FP8 ~ 70 GB</td></tr><tr><td><code>need = weights + KV(target) + 10%</code></td><td>Total memory for the deployment</td></tr><tr><td><code>TP = next power of 2 &gt;= need / usable_per_GPU</code></td><td>Minimum tensor-parallel size</td></tr><tr><td><code>PP = nodes needed when TP exceeds one node</code></td><td>Pipeline stages across nodes</td></tr></tbody></table></div><div class="cheat-group"><h3>Flags</h3><table><tbody><tr><td><code>vllm: --tensor-parallel-size N</code></td><td>TP</td></tr><tr><td><code>vllm: --pipeline-parallel-size N</code></td><td>PP</td></tr><tr><td><code>vllm: --data-parallel-size N</code></td><td>DP inside one engine</td></tr><tr><td><code>trtllm-serve: --tp_size --pp_size --ep_size</code></td><td>TensorRT-LLM equivalents</td></tr></tbody></table></div><div class="cheat-group"><h3>Communication</h3><table><tbody><tr><td><code>TP: all-reduce, ~2 per layer</code></td><td>Latency-critical, needs NVLink</td></tr><tr><td><code>PP: send/recv of activations per stage</code></td><td>Tolerates inter-node links</td></tr><tr><td><code>EP: all-to-all per MoE layer</code></td><td>Bandwidth-heavy, load-balance experts</td></tr><tr><td><code>DP: none between replicas</code></td><td>Only a load balancer</td></tr></tbody></table></div><div class="cheat-group"><h3>Decision rules</h3><table><tbody><tr><td><code>fits on 1 GPU with cache room -&gt; DP only</code></td><td>Replicate for throughput</td></tr><tr><td><code>fits in 1 node -&gt; TP within node, then DP</code></td><td>Smallest TP that fits</td></tr><tr><td><code>spans nodes -&gt; TP in node x PP across nodes</code></td><td>e.g. TP 8, PP 2</td></tr><tr><td><code>MoE -&gt; EP for experts (+ DP/TP for attention)</code></td><td>Fast fabric needed</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>TP across nodes over slow links, so every layer waits on the network.</li><li>Huge TP for a small model, wasting GPUs on communication.</li><li>Forgetting KV cache when deciding the minimum GPU count.</li><li>Expecting pipeline parallelism to cut per-token latency.</li><li>Choosing a layout without benchmarking alternatives on the same GPU budget.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "A model has 34B parameters and you serve it in FP16 on 80 GB GPUs with a large KV-cache target. What is the sensible starting layout?", "options": ["TP 2, then replicate for throughput", "TP 8 on a single node", "PP 4 across four nodes", "One GPU with CPU offload of half the weights"], "answer": 0, "explain": "34B in FP16 is about 68 GB of weights, leaving too little cache on one 80 GB GPU. TP 2 gives room for cache; more throughput comes from more TP-2 replicas."}, {"q": "Why should tensor parallelism usually stay inside one node?", "options": ["It all-reduces inside every layer, which needs NVLink-class bandwidth and latency", "It only works with pipeline parallelism disabled", "Kubernetes cannot schedule it across nodes", "It requires every GPU to hold the full weights"], "answer": 0, "explain": "TP exchanges partial results in every layer for every step, so slow inter-node links would stall each token. Pipeline parallelism is the usual cross-node choice."}, {"q": "Eight GPUs serve a model that fits on two. Which layout probably gives the most throughput?", "options": ["Four TP-2 replicas behind a load balancer", "One TP-8 server", "One TP-2 server with PP 4", "Eight single-GPU servers with CPU offload"], "answer": 0, "explain": "TP 8 spends much of each step communicating. Using the smallest split that fits and replicating it gives more independent capacity from the same GPUs."}, {"q": "What does pipeline parallelism do to the latency of a single token compared with one GPU (if the model fit)?", "options": ["It adds a hop per stage, so it does not reduce it", "It divides it by the number of stages", "It removes all communication from the critical path", "It halves it regardless of the number of stages"], "answer": 0, "explain": "Each token still passes through every layer in order; stages run sequentially for one token and add transfer hops. PP improves fit and throughput, not single-token latency."}, {"q": "Which strategy is specific to mixture-of-experts models?", "options": ["Expert parallelism with all-to-all token routing", "Tensor parallelism with all-reduce", "Data parallelism with replicas", "Pipeline parallelism with stages"], "answer": 0, "explain": "Expert parallelism places different experts on different GPUs and routes each token to the GPUs holding its chosen experts, which only applies to MoE layers."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="inf-batching-benchmarking.html"><span>← Previous</span><strong>Batching, scheduling and benchmarking</strong></a>
+    <a class="pager-up" href="../education.html#inference">All Inference modules</a>
+    <a class="pager-link pager-next" href="inf-gpu-networking.html"><span>Next →</span><strong>GPU interconnects and communication cost</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=inf-parallelism&amp;page=/education/inf-parallelism.html&amp;title=When%20one%20GPU%20isn%27t%20enough">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=inf-parallelism&amp;page=/education/inf-parallelism.html&amp;title=When%20one%20GPU%20isn%27t%20enough">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

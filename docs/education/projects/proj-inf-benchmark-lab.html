@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Inference benchmark lab and write-up — Inference project | ThavionAI Education</title>
+  <meta name="description" content="Rent one GPU, serve an open-weight model with vLLM, build a small measurement harness, and run a disciplined series of experiments: a baseline concurrency sweep, then one variable at a time (batch limits, KV-cache precision, context length, prefix caching). Watch the engine and GPU metrics while you do it, then turn the results into a short public write-up that names the bottleneck, the trade-off and the result. It is the exercise the whole Inference Engineering track builds towards, and the write-up is portfolio proof." />
+  <meta property="og:title" content="Inference benchmark lab and write-up — ThavionAI project" />
+  <meta property="og:description" content="Rent one GPU, serve an open-weight model with vLLM, build a small measurement harness, and run a disciplined series of experiments: a baseline concurrency sweep, then one variable at a time (batch limits, KV-cache precision, context length, prefix caching). Watch the engine and GPU metrics while you do it, then turn the results into a short public write-up that names the bottleneck, the trade-off and the result. It is the exercise the whole Inference Engineering track builds towards, and the write-up is portfolio proof." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/projects/proj-inf-benchmark-lab.html" />
+  <link rel="icon" href="../../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="../lesson.css" />
+  <link rel="stylesheet" href="project.css" />
+</head>
+<body class="track-inference" data-project="proj-inf-benchmark-lab">
+
+<nav>
+  <a href="../../index.html" class="nav-logo"><img class="nav-logo-icon" src="../../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../../index.html">Home</a>
+    <a href="../../education.html">Tracks</a>
+    <a href="../../engineering.html#projects" class="active">Projects</a>
+    <a href="../../education.html#certs">Certifications</a>
+    <a href="../../index.html#apps">Apps</a>
+    <a href="../../feedback.html?page=/education/projects/proj-inf-benchmark-lab.html&amp;title=Inference%20benchmark%20lab%20and%20write-up">Feedback</a>
+    <a href="../../education.html#inference" class="nav-cta">Inference track</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../../education.html">Education</a> › <a href="../../education.html#inference">Inference Engineering</a> › Guided project</div>
+    <h1>Inference benchmark lab and write-up</h1>
+    <p class="lede">Rent one GPU, serve an open-weight model with vLLM, build a small measurement harness, and run a disciplined series of experiments: a baseline concurrency sweep, then one variable at a time (batch limits, KV-cache precision, context length, prefix caching). Watch the engine and GPU metrics while you do it, then turn the results into a short public write-up that names the bottleneck, the trade-off and the result. It is the exercise the whole Inference Engineering track builds towards, and the write-up is portfolio proof.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">about 6 hours</span>
+      <span class="chip">7 phases · 30 steps</span>
+      <span class="chip chip-quiz" id="progressChip">0 / 30 done</span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav">
+  <div class="wrap">
+    <a href="#overview">Overview</a>
+    <a href="#phase-1">1. Provision a GPU and check the stack</a>
+    <a href="#phase-2">2. Serve the model</a>
+    <a href="#phase-3">3. Build the measurement harness</a>
+    <a href="#phase-4">4. Watch while you measure</a>
+    <a href="#phase-5">5. Baseline sweep</a>
+    <a href="#phase-6">6. One variable at a time</a>
+    <a href="#phase-7">7. Write it up and publish</a>
+    <a href="#troubleshooting">Troubleshooting</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <section class="pj-intro" id="overview">
+    <div class="objectives">
+      <div class="box-label">What you will have at the end</div>
+      <p class="pj-outcome">A public repository with a reproducible <code>serve/</code> setup, a <code>bench/</code> harness and raw results for every run, plots of throughput against latency percentiles, and a <code>REPORT.md</code> that states your operating point (concurrency and settings that meet a latency target), the evidence for the bottleneck at each step, the cost per million tokens it implies, and what you would test next.</p>
+    </div>
+    <div class="pj-grid">
+      <div class="pj-box">
+        <div class="box-label">Before you start</div>
+        <ul><li>Comfortable with Linux, Docker and Python</li><li>The stage 2 to 4 lessons of this track (lifecycle, KV cache, metrics, profiling, batching and benchmarking)</li><li>A cloud account that can rent a single NVIDIA GPU instance for a few hours, or a local NVIDIA GPU</li></ul>
+      </div>
+      <div class="pj-box">
+        <div class="box-label">Tools you will install</div>
+        <ul class="pj-tools"><li><strong>vLLM</strong> — the serving engine under test, run from its official container image <a href="https://docs.vllm.ai/" target="_blank" rel="noopener">↗</a></li><li><strong>Docker + NVIDIA Container Toolkit</strong> — run the engine and monitoring with GPU access <a href="https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html" target="_blank" rel="noopener">↗</a></li><li><strong>Prometheus</strong> — scrape vLLM's metrics during the experiments <a href="https://prometheus.io/docs/" target="_blank" rel="noopener">↗</a></li><li><strong>Python (httpx, pandas, matplotlib)</strong> — the measurement harness and the plots <a href="https://www.python-httpx.org/" target="_blank" rel="noopener">↗</a></li><li><strong>nvidia-smi</strong> — GPU memory, utilisation and power during runs <a href="https://docs.nvidia.com/deploy/nvidia-smi/index.html" target="_blank" rel="noopener">↗</a></li></ul>
+      </div>
+    </div>
+    <div class="pj-box pj-layout"><div class="box-label">Repository layout at the end</div><pre><code>inference-bench-lab/
+├── serve/
+│   ├── run-vllm.sh             # the exact engine command for each experiment
+│   └── prometheus.yml          # scrapes vLLM /metrics
+├── bench/
+│   ├── harness.py              # streaming client: TTFT, TPOT, ITL per request
+│   ├── sweep.sh                # concurrency sweep with vllm bench serve
+│   └── analyse.py              # tables and plots from results/
+├── results/
+│   ├── baseline/               # raw JSON per run
+│   ├── exp-max-num-seqs/
+│   ├── exp-fp8-kv/
+│   └── exp-prefix-cache/
+├── plots/
+└── REPORT.md                   # question, setup, results, bottleneck, trade-off, next test</code></pre></div>
+    <p class="pj-hint">Tick each step as you finish it — your progress is saved in this browser only (<a href="../../education.html#progressPanel">back up or restore</a> on the hub). Every code block has a copy button. If something goes wrong, the <a href="#troubleshooting">troubleshooting</a> section at the end covers the usual suspects.</p>
+  </section>
+
+  <section id="phase-1" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 1</span><h2>Provision a GPU and check the stack</h2></div>
+    <p class="pj-goal">A GPU machine where Docker containers can see the GPU, with the facts you will need for sizing written down.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-1-1"><label class="pj-step-tick"><input type="checkbox" data-step="1-1" aria-label="Done: step 1.1" /><span class="pj-step-num">1.1</span></label><div class="pj-step-body"><div class="pj-step-text">Create a public repository for the lab and clone it onto the GPU machine. Rent a single-GPU instance with a recent NVIDIA driver image; a mid-range datacenter GPU with 24 GB or more is plenty for a small model.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>gh repo create inference-bench-lab --public --clone
+cd inference-bench-lab
+mkdir -p serve bench results plots</code></pre></div></div></li><li class="pj-step" id="step-1-2"><label class="pj-step-tick"><input type="checkbox" data-step="1-2" aria-label="Done: step 1.2" /><span class="pj-step-num">1.2</span></label><div class="pj-step-body"><div class="pj-step-text">Record the GPU model, memory, driver version and the highest CUDA version the driver supports. These go in the setup section of your report.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv
+nvidia-smi | head -5</code></pre></div><div class="pj-check"><strong>Check:</strong> You see your GPU and its total memory.</div></div></li><li class="pj-step" id="step-1-3"><label class="pj-step-tick"><input type="checkbox" data-step="1-3" aria-label="Done: step 1.3" /><span class="pj-step-num">1.3</span></label><div class="pj-step-body"><div class="pj-step-text">Install the NVIDIA Container Toolkit if the image does not include it, wire it into Docker and prove a container can see the GPU.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+docker run --rm --gpus all ubuntu nvidia-smi</code></pre></div><div class="pj-check"><strong>Check:</strong> The container prints the same GPU table.</div></div></li><li class="pj-step" id="step-1-4"><label class="pj-step-tick"><input type="checkbox" data-step="1-4" aria-label="Done: step 1.4" /><span class="pj-step-num">1.4</span></label><div class="pj-step-body"><div class="pj-step-text">Pick a small open-weight instruct model (a few billion parameters) and compute, before running anything, its FP16 weight size and its KV bytes per token from its config.json. Write both into a notes file.</div><div class="pj-note">KV bytes per token = 2 x num_hidden_layers x num_key_value_heads x head_dim x 2. This prediction is what you will check against the engine's own log.</div></div></li></ol>
+  </section>
+
+  <section id="phase-2" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 2</span><h2>Serve the model</h2></div>
+    <p class="pj-goal">vLLM serving the model in a pinned container, with weights cached on local disk and metrics exposed.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-2-1"><label class="pj-step-tick"><input type="checkbox" data-step="2-1" aria-label="Done: step 2.1" /><span class="pj-step-num">2.1</span></label><div class="pj-step-body"><div class="pj-step-text">Write the engine command into a script so every experiment is reproducible. Pin the image version, mount the Hugging Face cache so weights download once, run detached, and wait until the server is healthy before returning.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>cat &gt; serve/run-vllm.sh &lt;&lt;'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+MODEL_ID="${MODEL_ID:?set MODEL_ID}"
+docker rm -f vllm &gt;/dev/null 2&gt;&amp;1 || true
+docker run -d --name vllm --gpus all --ipc=host -p 8000:8000 \
+  -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
+  -e HF_TOKEN \
+  vllm/vllm-openai:v0.30.0 "$MODEL_ID" --max-model-len 8192 "$@"
+until curl -sf localhost:8000/health &gt;/dev/null; do sleep 5; done
+echo "vLLM ready with extra args: $*"
+SCRIPT
+chmod +x serve/run-vllm.sh</code></pre></div></div></li><li class="pj-step" id="step-2-2"><label class="pj-step-tick"><input type="checkbox" data-step="2-2" aria-label="Done: step 2.2" /><span class="pj-step-num">2.2</span></label><div class="pj-step-body"><div class="pj-step-text">Start the baseline server. The script returns once the engine is healthy; follow its log with <code>docker logs -f vllm</code> in another terminal.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>export MODEL_ID=YOUR_ORG/YOUR_MODEL
+./serve/run-vllm.sh</code></pre></div><div class="pj-note">If the model is gated, export HF_TOKEN first. The first start downloads weights; later starts reuse the cache.</div><div class="pj-check"><strong>Check:</strong> <code>curl -s localhost:8000/health</code> returns HTTP 200.</div></div></li><li class="pj-step" id="step-2-3"><label class="pj-step-tick"><input type="checkbox" data-step="2-3" aria-label="Done: step 2.3" /><span class="pj-step-num">2.3</span></label><div class="pj-step-body"><div class="pj-step-text">Find the line in the engine log that reports KV-cache capacity (in tokens or blocks) and compare it with your prediction from phase 1.</div><div class="pj-note">If they differ a lot, check head_dim and num_key_value_heads in config.json, and the memory-utilisation default.</div></div></li><li class="pj-step" id="step-2-4"><label class="pj-step-tick"><input type="checkbox" data-step="2-4" aria-label="Done: step 2.4" /><span class="pj-step-num">2.4</span></label><div class="pj-step-body"><div class="pj-step-text">Send one chat request to confirm the OpenAI-compatible API works end to end.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+  -d "{\"model\": \"$MODEL_ID\", \"messages\": [{\"role\": \"user\", \"content\": \"Hi\"}], \"max_tokens\": 20}"</code></pre></div><div class="pj-check"><strong>Check:</strong> You get a JSON response with a short answer.</div></div></li></ol>
+  </section>
+
+  <section id="phase-3" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 3</span><h2>Build the measurement harness</h2></div>
+    <p class="pj-goal">A streaming client that records TTFT, TPOT and every inter-token gap per request, plus the engine's own benchmark for sweeps.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-3-1"><label class="pj-step-tick"><input type="checkbox" data-step="3-1" aria-label="Done: step 3.1" /><span class="pj-step-num">3.1</span></label><div class="pj-step-body"><div class="pj-step-text">Install the client libraries in a virtual environment.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>python3 -m venv .venv &amp;&amp; source .venv/bin/activate
+pip install httpx pandas matplotlib vllm</code></pre></div><div class="pj-note">Installing vllm locally gives you <code>vllm bench serve</code>; it does not need to run the engine on this machine.</div></div></li><li class="pj-step" id="step-3-2"><label class="pj-step-tick"><input type="checkbox" data-step="3-2" aria-label="Done: step 3.2" /><span class="pj-step-num">3.2</span></label><div class="pj-step-body"><div class="pj-step-text">Write a streaming harness that measures from the client side, where users feel latency.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># bench/harness.py
+import asyncio, json, os, sys, time
+import httpx
+
+URL = "http://localhost:8000/v1/chat/completions"
+MODEL = os.environ["MODEL_ID"]
+
+
+async def one(client, prompt, max_tokens):
+    body = {"model": MODEL, "stream": True, "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}]}
+    t0, times = time.perf_counter(), []
+    async with client.stream("POST", URL, json=body, timeout=600) as r:
+        async for line in r.aiter_lines():
+            if line.startswith("data: ") and line != "data: [DONE]":
+                if json.loads(line[6:])["choices"][0]["delta"].get("content"):
+                    times.append(time.perf_counter())
+    ttft = times[0] - t0
+    tpot = (times[-1] - times[0]) / max(len(times) - 1, 1)
+    gaps = [b - a for a, b in zip(times, times[1:])]
+    return {"ttft": ttft, "tpot": tpot, "n": len(times), "max_gap": max(gaps, default=0)}
+
+
+async def main(concurrency, prompt_words, max_tokens, n):
+    prompt = "word " * prompt_words + "\nSummarise the text above in detail."
+    sem = asyncio.Semaphore(concurrency)
+    async with httpx.AsyncClient() as client:
+        async def guarded():
+            async with sem:
+                return await one(client, prompt, max_tokens)
+        results = await asyncio.gather(*[guarded() for _ in range(n)])
+    print(json.dumps(results))
+
+
+if __name__ == "__main__":
+    c, words, out, n = map(int, sys.argv[1:5])
+    asyncio.run(main(c, words, out, n))</code></pre></div><div class="pj-note">The harness counts streamed chunks with content as tokens; engines usually send one token per chunk, which is close enough for latency work. Use the engine's benchmark for exact token throughput.</div></div></li><li class="pj-step" id="step-3-3"><label class="pj-step-tick"><input type="checkbox" data-step="3-3" aria-label="Done: step 3.3" /><span class="pj-step-num">3.3</span></label><div class="pj-step-body"><div class="pj-step-text">Run it once at low load to check the numbers look sane.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>python bench/harness.py 1 500 200 5 &gt; results/smoke.json
+python -c "import json;r=json.load(open('results/smoke.json'));print(r[0])"</code></pre></div><div class="pj-check"><strong>Check:</strong> TTFT is well under a second and TPOT is tens of milliseconds on a single request.</div></div></li><li class="pj-step" id="step-3-4"><label class="pj-step-tick"><input type="checkbox" data-step="3-4" aria-label="Done: step 3.4" /><span class="pj-step-num">3.4</span></label><div class="pj-step-body"><div class="pj-step-text">Write the sweep script around vLLM's benchmark so every run uses the same workload and saves raw results.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>cat &gt; bench/sweep.sh &lt;&lt;'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+OUT="results/${1:?experiment name}"
+mkdir -p "$OUT"
+for c in 1 4 8 16 32 64; do
+  vllm bench serve --base-url http://localhost:8000 --model "$MODEL_ID" \
+    --dataset-name random --random-input-len 1500 --random-output-len 300 \
+    --num-prompts 300 --max-concurrency "$c" \
+    --percentile-metrics ttft,tpot,itl --metric-percentiles 50,99 \
+    --save-result --result-dir "$OUT" --result-filename "c${c}.json"
+done
+EOF
+chmod +x bench/sweep.sh</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-4" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 4</span><h2>Watch while you measure</h2></div>
+    <p class="pj-goal">Engine and GPU metrics visible during every run, so you can attribute each result to a bottleneck.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-4-1"><label class="pj-step-tick"><input type="checkbox" data-step="4-1" aria-label="Done: step 4.1" /><span class="pj-step-num">4.1</span></label><div class="pj-step-body"><div class="pj-step-text">Start Prometheus scraping the engine's metrics endpoint.</div><div class="code"><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># serve/prometheus.yml
+global:
+  scrape_interval: 5s
+scrape_configs:
+  - job_name: vllm
+    static_configs:
+      - targets: ["localhost:8000"]</code></pre></div></div></li><li class="pj-step" id="step-4-2"><label class="pj-step-tick"><input type="checkbox" data-step="4-2" aria-label="Done: step 4.2" /><span class="pj-step-num">4.2</span></label><div class="pj-step-body"><div class="pj-step-text">Run Prometheus with host networking so it can reach the engine on localhost.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>docker run -d --name prom --network host \
+  -v "$PWD/serve/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
+  prom/prometheus:v3.15.0</code></pre></div><div class="pj-check"><strong>Check:</strong> http://localhost:9090/targets shows the vllm target as UP (use an SSH tunnel if the instance has no public UI access).</div></div></li><li class="pj-step" id="step-4-3"><label class="pj-step-tick"><input type="checkbox" data-step="4-3" aria-label="Done: step 4.3" /><span class="pj-step-num">4.3</span></label><div class="pj-step-body"><div class="pj-step-text">In a separate terminal, log GPU memory, utilisation and power once a second during runs.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>nvidia-smi --query-gpu=timestamp,utilization.gpu,memory.used,power.draw \
+  --format=csv -l 1 &gt; results/gpu-log.csv</code></pre></div></div></li><li class="pj-step" id="step-4-4"><label class="pj-step-tick"><input type="checkbox" data-step="4-4" aria-label="Done: step 4.4" /><span class="pj-step-num">4.4</span></label><div class="pj-step-body"><div class="pj-step-text">Bookmark four queries in the Prometheus UI: waiting and running requests, KV-cache usage, preemptions, and p99 TTFT.</div><div class="code"><div class="code-head"><span>promql</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>vllm:num_requests_waiting
+vllm:num_requests_running
+vllm:kv_cache_usage_perc
+rate(vllm:num_preemptions_total[1m])
+histogram_quantile(0.99, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket[1m])))</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-5" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 5</span><h2>Baseline sweep</h2></div>
+    <p class="pj-goal">The throughput-versus-latency curve of the default configuration, and your operating point against a latency target.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-5-1"><label class="pj-step-tick"><input type="checkbox" data-step="5-1" aria-label="Done: step 5.1" /><span class="pj-step-num">5.1</span></label><div class="pj-step-body"><div class="pj-step-text">Choose and write down your latency targets before you look at results, for example p99 TTFT under 1 s and p99 TPOT under 50 ms.</div><div class="pj-note">Deciding afterwards invites picking whatever looks good.</div></div></li><li class="pj-step" id="step-5-2"><label class="pj-step-tick"><input type="checkbox" data-step="5-2" aria-label="Done: step 5.2" /><span class="pj-step-num">5.2</span></label><div class="pj-step-body"><div class="pj-step-text">Run two warm-up requests, then the baseline sweep.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>python bench/harness.py 2 200 50 4 &gt; /dev/null
+./bench/sweep.sh baseline</code></pre></div><div class="pj-check"><strong>Check:</strong> results/baseline/ contains c1.json to c64.json.</div></div></li><li class="pj-step" id="step-5-3"><label class="pj-step-tick"><input type="checkbox" data-step="5-3" aria-label="Done: step 5.3" /><span class="pj-step-num">5.3</span></label><div class="pj-step-body"><div class="pj-step-text">While the high-concurrency runs execute, watch the four Prometheus queries and note at which concurrency waiting requests appear and whether KV-cache usage approaches 1.0.</div></div></li><li class="pj-step" id="step-5-4"><label class="pj-step-tick"><input type="checkbox" data-step="5-4" aria-label="Done: step 5.4" /><span class="pj-step-num">5.4</span></label><div class="pj-step-body"><div class="pj-step-text">Write the analysis script that turns result files into a table and a throughput-versus-latency plot.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># bench/analyse.py
+import glob, json, re, sys
+import matplotlib.pyplot as plt
+import pandas as pd
+
+rows = []
+for exp in sys.argv[1:]:
+    for f in glob.glob(f"results/{exp}/c*.json"):
+        r = json.load(open(f))
+        rows.append({"exp": exp, "concurrency": int(re.search(r"c(\d+)", f).group(1)),
+                     "tok_s": r["output_throughput"],
+                     "p99_ttft_ms": r["p99_ttft_ms"], "p99_tpot_ms": r["p99_tpot_ms"]})
+df = pd.DataFrame(rows).sort_values(["exp", "concurrency"])
+print(df.to_markdown(index=False))
+for exp, g in df.groupby("exp"):
+    plt.plot(g["p99_tpot_ms"], g["tok_s"], marker="o", label=exp)
+plt.xlabel("p99 TPOT (ms)")
+plt.ylabel("output tokens/s")
+plt.legend()
+plt.savefig("plots/throughput_vs_tpot.png", dpi=150)</code></pre></div><div class="pj-note">Field names in the result JSON can change between vLLM versions; open one file and adjust the keys if needed. <code>to_markdown</code> needs the tabulate package (<code>pip install tabulate</code>).</div></div></li><li class="pj-step" id="step-5-5"><label class="pj-step-tick"><input type="checkbox" data-step="5-5" aria-label="Done: step 5.5" /><span class="pj-step-num">5.5</span></label><div class="pj-step-body"><div class="pj-step-text">Run it for the baseline and mark the highest concurrency that meets both targets. That is your baseline operating point.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>pip install tabulate
+python bench/analyse.py baseline</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-6" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 6</span><h2>One variable at a time</h2></div>
+    <p class="pj-goal">Three controlled experiments, each changing exactly one setting from the baseline, with the bottleneck identified for each.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-6-1"><label class="pj-step-tick"><input type="checkbox" data-step="6-1" aria-label="Done: step 6.1" /><span class="pj-step-num">6.1</span></label><div class="pj-step-body"><div class="pj-step-text">Experiment 1, batch limit: restart the engine with a lower sequence cap (the script replaces the running container) and rerun the sweep.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>./serve/run-vllm.sh --max-num-seqs 16
+./bench/sweep.sh exp-max-num-seqs</code></pre></div><div class="pj-note">Expect better per-user TPOT at high concurrency but more queueing (TTFT) once requests exceed the cap.</div></div></li><li class="pj-step" id="step-6-2"><label class="pj-step-tick"><input type="checkbox" data-step="6-2" aria-label="Done: step 6.2" /><span class="pj-step-num">6.2</span></label><div class="pj-step-body"><div class="pj-step-text">Experiment 2, KV-cache precision: restart with an FP8 cache (default sequence cap) and rerun.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>./serve/run-vllm.sh --kv-cache-dtype fp8
+./bench/sweep.sh exp-fp8-kv</code></pre></div><div class="pj-note">Check the startup log: KV capacity in tokens should roughly double. FP8 cache needs GPU and model support; if it is rejected, record that as a finding.</div></div></li><li class="pj-step" id="step-6-3"><label class="pj-step-tick"><input type="checkbox" data-step="6-3" aria-label="Done: step 6.3" /><span class="pj-step-num">6.3</span></label><div class="pj-step-body"><div class="pj-step-text">Spot-check quality for experiment 2: ask the FP8-cache server and the baseline the same ten questions and compare answers.</div><div class="pj-note">Precision changes can affect output. A table of ten prompts with both answers side by side is enough for a write-up; serious deployments run a proper evaluation set.</div></div></li><li class="pj-step" id="step-6-4"><label class="pj-step-tick"><input type="checkbox" data-step="6-4" aria-label="Done: step 6.4" /><span class="pj-step-num">6.4</span></label><div class="pj-step-body"><div class="pj-step-text">Experiment 3, prefix caching: keep the baseline engine but change the workload to share a long system prompt, and compare TTFT with prefix caching on (default) and off.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>./serve/run-vllm.sh --no-enable-prefix-caching
+python bench/harness.py 8 2000 100 80 &gt; results/prefix-off.json
+./serve/run-vllm.sh
+python bench/harness.py 8 2000 100 80 &gt; results/prefix-on.json</code></pre></div><div class="pj-note">The harness sends the same long prompt every time, which is exactly the case prefix caching helps.</div></div></li><li class="pj-step" id="step-6-5"><label class="pj-step-tick"><input type="checkbox" data-step="6-5" aria-label="Done: step 6.5" /><span class="pj-step-num">6.5</span></label><div class="pj-step-body"><div class="pj-step-text">Plot all sweeps on one chart and tabulate the operating point for each experiment.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>python bench/analyse.py baseline exp-max-num-seqs exp-fp8-kv</code></pre></div><div class="pj-check"><strong>Check:</strong> plots/throughput_vs_tpot.png shows three curves.</div></div></li></ol>
+  </section>
+
+  <section id="phase-7" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 7</span><h2>Write it up and publish</h2></div>
+    <p class="pj-goal">A short, honest report someone else can reproduce, and a clean shutdown.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-7-1"><label class="pj-step-tick"><input type="checkbox" data-step="7-1" aria-label="Done: step 7.1" /><span class="pj-step-num">7.1</span></label><div class="pj-step-body"><div class="pj-step-text">Write REPORT.md with a fixed structure: question; setup (GPU, driver, image tag, model, precision, flags, workload); targets; results table and plot; for each experiment the bottleneck with evidence, the trade-off and the result; cost per million tokens at your best operating point; what you would test next.</div><div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>## Experiment 2: FP8 KV cache
+Bottleneck (baseline): KV cache full above c=32 (kv_cache_usage_perc ~1.0, preemptions rising).
+Change: --kv-cache-dtype fp8 (only change).
+Result: KV capacity roughly doubled; operating point moved from c=24 to c=40 at p99 TPOT &lt; 50 ms.
+Trade-off: small answer differences on 2 of 10 spot-check prompts; needs a real eval before production.
+Next: repeat with 4,000-token prompts, where cache pressure is higher.</code></pre></div><div class="pj-note">The numbers above are a template, not expected results; write what you measured.</div></div></li><li class="pj-step" id="step-7-2"><label class="pj-step-tick"><input type="checkbox" data-step="7-2" aria-label="Done: step 7.2" /><span class="pj-step-num">7.2</span></label><div class="pj-step-body"><div class="pj-step-text">Compute cost per million output tokens at your best operating point: hourly GPU price divided by output tokens per hour, then at a realistic utilisation such as 40%.</div></div></li><li class="pj-step" id="step-7-3"><label class="pj-step-tick"><input type="checkbox" data-step="7-3" aria-label="Done: step 7.3" /><span class="pj-step-num">7.3</span></label><div class="pj-step-body"><div class="pj-step-text">Commit the scripts, raw results, plots and report, and push. Add the repository link to your CV or portfolio.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>git add serve bench results plots REPORT.md
+git commit -m "Inference benchmark lab: baseline + 3 controlled experiments"
+git push -u origin HEAD</code></pre></div></div></li><li class="pj-step" id="step-7-4"><label class="pj-step-tick"><input type="checkbox" data-step="7-4" aria-label="Done: step 7.4" /><span class="pj-step-num">7.4</span></label><div class="pj-step-body"><div class="pj-step-text">Tear everything down so the GPU stops costing money: stop the containers and terminate the cloud instance.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>docker rm -f vllm prom || true</code></pre></div><div class="pj-check"><strong>Check:</strong> The instance shows as terminated in your cloud console and no GPU hours are accruing.</div></div></li></ol>
+  </section>
+
+  <section id="troubleshooting" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Help</span><h2>Troubleshooting</h2></div>
+    <dl class="pj-trouble"><dt>The container starts but reports no CUDA device</dt><dd>Check that <code>docker run --rm --gpus all ubuntu nvidia-smi</code> works; if not, reconfigure the NVIDIA Container Toolkit. If it does, the host driver may be too old for the image's CUDA version; use a newer driver image.</dd><dt>The engine exits with an out-of-memory error at startup</dt><dd>Lower <code>--max-model-len</code>, choose a smaller model, or lower <code>--gpu-memory-utilization</code> if other processes hold GPU memory (check <code>nvidia-smi</code>).</dd><dt>vllm bench serve fails with connection refused</dt><dd>The engine is still loading; wait until <code>/health</code> returns 200. Also confirm the <code>--base-url</code> and that port 8000 is published.</dd><dt>Results vary a lot between identical runs</dt><dd>Make sure warm-up requests ran, nothing else uses the GPU, and the run is long enough (raise <code>--num-prompts</code>). Repeat each point and report the spread.</dd><dt>--kv-cache-dtype fp8 is rejected</dt><dd>Not every GPU and model combination supports an FP8 cache. Record it as a finding and try a different variable, such as <code>--max-num-batched-tokens</code>.</dd><dt>Prometheus shows the target as DOWN</dt><dd>Prometheus runs with host networking and scrapes localhost:8000; confirm the engine is up and that the metrics path <code>/metrics</code> responds with curl.</dd></dl>
+  </section>
+
+  <section id="next" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Next</span><h2>Where to go from here</h2></div>
+    <ul class="pj-next"><li>Repeat the baseline with SGLang or TensorRT-LLM on the same GPU and compare operating points.</li><li>Move to a two-GPU instance and compare TP 2 against two TP 1 replicas behind a load balancer.</li><li>Change the workload to long prompts (4,000+ tokens) and see how the bottleneck moves from decode to prefill and cache.</li><li>Add an autoscaling experiment: KEDA on vllm:num_requests_waiting with a bursty open-loop load.</li><li>Turn the report into a short blog post or talk: the bottleneck, the trade-off and the result.</li></ul>
+  </section>
+
+  <p class="feedback-row">Did a step fail or feel unclear? <a href="../../feedback.html?page=/education/projects/proj-inf-benchmark-lab.html&amp;title=Inference%20benchmark%20lab%20and%20write-up">Tell me which one →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../../privacy.html">Privacy</a>
+      <a href="../../terms.html">Terms</a>
+      <a href="../../feedback.html?page=/education/projects/proj-inf-benchmark-lab.html&amp;title=Inference%20benchmark%20lab%20and%20write-up">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="project.js"></script>
+</body>
+</html>

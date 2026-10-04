@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Designing around data movement — Inference | ThavionAI Education</title>
+  <meta name="description" content="KV-aware routing, cache tiers, placement and topology — architecture driven by where bytes have to travel." />
+  <meta property="og:title" content="Designing around data movement — ThavionAI Education" />
+  <meta property="og:description" content="KV-aware routing, cache tiers, placement and topology — architecture driven by where bytes have to travel." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/inf-distributed-design.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-inference" data-module="inf-distributed-design">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=inf-distributed-design&amp;page=/education/inf-distributed-design.html&amp;title=Designing%20around%20data%20movement">Feedback</a>
+    <a href="../education.html#inference" class="nav-cta">All Inference modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#inference">Inference</a> › Stage 6: Distributed inference architecture</div>
+    <h1>Designing around data movement</h1>
+    <p class="lede">KV-aware routing, cache tiers, placement and topology — architecture driven by where bytes have to travel.</p>
+    <div class="meta">
+      <span class="chip">Advanced</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 12 of 15</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">At cluster scale, the expensive thing is rarely arithmetic; it is moving bytes. Prompts that are recomputed because they landed on the wrong replica, KV caches that cross a slow link, weights that take minutes to load, and model shards placed across racks all burn time and money. This lesson turns that into design rules: route requests to where their data already is, tier the KV cache, place model replicas to match the network topology, and use Kubernetes building blocks made for inference rather than generic load balancing.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Explain why round-robin load balancing wastes work for LLM traffic</li><li>Design KV-aware and session-aware routing with an inference gateway</li><li>Use a KV-cache hierarchy from GPU memory to remote storage</li><li>Place multi-GPU replicas to match NVLink domains, racks and nodes</li><li>Draw a data-movement budget for a request and find the dominant transfer</li></ul>
+    </div>
+    <section id="route-to-where-the-data-already-is"><h2>Route to where the data already is</h2>
+    <p>A web load balancer spreads requests evenly and assumes any replica is as good as another. For LLMs that assumption is wrong: a replica that already holds a conversation's history or a shared system prompt in its KV cache can skip most of the prefill. Round-robin destroys that locality, so every replica keeps recomputing the same prefixes.</p>
+    <ul><li><strong>Session affinity</strong> sends a conversation's turns to the same replica. Simple, but it ignores load and breaks when the replica is busy or gone.</li><li><strong>KV-aware routing</strong> hashes prompt prefixes into blocks, tracks which replica holds which blocks, and scores replicas by cache overlap and current load. Dynamo's router and the llm-d inference scheduler do this.</li><li><strong>Load- and queue-aware routing</strong> uses each replica's waiting requests and cache usage, which the engines expose as metrics, to avoid hot spots even without cache overlap.</li><li><strong>Adapter-aware routing</strong> sends requests for a LoRA adapter to replicas that already have it loaded.</li></ul>
+    <p>On Kubernetes, the <strong>Gateway API Inference Extension</strong> standardises this: an <strong>InferencePool</strong> groups the model-server pods, and an <strong>endpoint picker</strong> called by the gateway (through Envoy's external processing) chooses the best pod per request using engine metrics such as queue length and prefix-cache state.</p>
+    <figure class="diagram" id="fig-routing-layers"><div class="diagram-scroll"><svg viewBox="0 0 740 356" role="img" aria-label="Clients call an AI gateway, which forwards to the inference gateway&#x27;s endpoint picker. The picker reads queue depth and prefix-cache state from each replica and sends the request to replica B, which already holds the prefix, rather than replica A. Replicas can offload and reload KV blocks from a cache tier in CPU memory, NVMe or shared storage." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="routing-layers-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="routing-layers-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="routing-layers-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="routing-layers-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="routing-layers-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><polyline points="171.0,178.0 201.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#routing-layers-arrow-default)"/><rect x="159.7" y="132.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">request</text><polyline points="341.0,178.0 371.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#routing-layers-arrow-default)"/><rect x="335.8" y="132.0" width="40.5" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">route</text><polyline points="511.0,178.0 541.0,178.0" fill="none" style="stroke:var(--accent)" stroke-width="1.6" marker-end="url(#routing-layers-arrow-accent)"/><rect x="484.4" y="132.0" width="83.2" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--accent)">best replica</text><polyline points="441.0,150.0 441.0,70.0 541.0,70.0" fill="none" style="stroke:rgba(148,163,184,0.55)" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#routing-layers-arrow-muted)"/><polyline points="611.0,206.0 611.0,258.0" fill="none" style="stroke:currentColor" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#routing-layers-arrow-default)"/><rect x="614.0" y="224.0" width="101.5" height="16" rx="4" class="dg-label-bg"/><text x="618.0" y="232.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">offload, reload</text><rect x="31" y="150.0" width="140" height="56" rx="28.0" class="dg-node dg-actor"/><text x="101.0" y="178.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Clients</text><rect x="201" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="271.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">AI gateway</text><text x="271.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">tenants, limits</text><rect x="371" y="150.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Endpoint picker</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">cache + queue aware</text><rect x="541" y="42.0" width="140" height="56" rx="8" class="dg-node dg-muted"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text2)">Replica A</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">no prefix cached</text><rect x="541" y="150.0" width="140" height="56" rx="8" class="dg-node dg-ok"/><text x="611.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#6ee7b7">Replica B</text><text x="611.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">prefix cached</text><path d="M541,265.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M541,265.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="611.0" y="279.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Cache tier</text><text x="611.0" y="297.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">DRAM, NVMe, shared</text></svg></div><figcaption>Route to where the data already is: the gateway applies tenant policy, the endpoint picker chooses the replica holding the prompt's prefix, and cold cache can be fetched from a lower tier.</figcaption></figure>
+    <div class="code"><div class="code-cap">An InferencePool: the pods to route across, and the endpoint picker to consult</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata:
+  name: chat-pool
+spec:
+  selector:
+    matchLabels:
+      app: vllm-chat
+  targetPorts:
+    - number: 8000
+  endpointPickerRef:
+    name: chat-epp
+    port:
+      number: 9002
+    failureMode: FailOpen</code></pre></div></section>
+  <section id="tier-the-kv-cache"><h2>Tier the KV cache</h2>
+    <p>GPU memory is the fastest and smallest place for KV cache. When it is full, the choice is to evict and later recompute (spending GPU time) or to move blocks to a cheaper tier and bring them back (spending bandwidth). For long, idle conversations and shared documents, keeping cache is usually cheaper than recomputing it.</p>
+    <div class="table-wrap"><table><thead><tr><th>Tier</th><th>Capacity</th><th>Reach</th><th>Good for</th></tr></thead><tbody><tr><td>GPU HBM</td><td>Smallest</td><td>Fastest</td><td>Active sequences</td></tr><tr><td>CPU DRAM</td><td>Several times larger</td><td>Over PCIe</td><td>Recently idle conversations</td></tr><tr><td>Local NVMe</td><td>Much larger</td><td>Slower, still local</td><td>Long-lived prefixes on this node</td></tr><tr><td>Shared or object storage</td><td>Effectively unlimited</td><td>Over the network</td><td>Cache shared across nodes, warm restarts</td></tr></tbody></table></div>
+    <p>Tools such as Dynamo's KV Block Manager, LMCache and vLLM's offloading connector implement these tiers. Combined with KV-aware routing, a cluster can behave like one large cache: a request goes where its prefix is, and if no GPU has it, a node can fetch it from a lower tier instead of recomputing.</p></section>
+  <section id="place-replicas-to-match-the-topology"><h2>Place replicas to match the topology</h2>
+    <ul><li>Keep each tensor-parallel group inside one NVLink domain: one node, or a rack-scale NVLink system.</li><li>Place pipeline stages and disaggregated prefill/decode pairs on nodes with fast RDMA paths between them, ideally the same rack or network spine.</li><li>Schedule multi-pod replicas as a unit: all pods start together or none do. <strong>LeaderWorkerSet</strong> in Kubernetes deploys a group of pods as one unit of replication; topology-aware gang schedulers such as Grove add rack and NVLink-domain placement.</li><li>Spread whole replicas across failure domains for availability, but never split one replica across them.</li><li>Keep weights close to the GPUs (node-local caches, pre-pulled images) so scaling out does not wait on downloads.</li></ul></section>
+  <section id="a-data-movement-budget"><h2>A data-movement budget</h2>
+    <p>For any design, list every transfer a request causes, its size and the link it uses, and estimate its time. The largest line is where to spend design effort.</p>
+    <div class="table-wrap"><table><thead><tr><th>Transfer</th><th>Typical size</th><th>Link</th></tr></thead><tbody><tr><td>Prompt and response text</td><td>Kilobytes</td><td>Client network</td></tr><tr><td>TP all-reduces per decode step</td><td>Hundreds of KiB, many times per step</td><td>NVLink</td></tr><tr><td>KV handoff (disaggregated)</td><td>Hundreds of MiB per long prompt</td><td>RDMA or NVLink</td></tr><tr><td>KV fetch from lower tier</td><td>Up to the size of the prefix</td><td>PCIe, NVMe or network</td></tr><tr><td>Weights on scale-out</td><td>Tens to hundreds of GB per replica</td><td>Storage and PCIe</td></tr></tbody></table></div>
+    <div class="callout callout-tip"><strong>Tip</strong><p>Draw the budget before choosing tools. Teams often adopt disaggregation or cache offload when their dominant cost was actually cold-start weight loading or a gateway that ignores cache locality.</p></div></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Measure the value of locality</h2>
+    <ol><li>Run two replicas of the same engine on two GPUs with prefix caching on.</li><li>Put a plain round-robin proxy (for example nginx with two upstreams) in front and replay 50 multi-turn conversations; record TTFT per turn.</li><li>Switch the proxy to hash on a conversation ID header (session affinity) and replay; compare TTFT for later turns.</li><li>If available, try a KV-aware router (Dynamo frontend with <code>--router-mode kv</code>) and replay again.</li><li>Write the data-movement budget for one 20-turn conversation under each setup.</li><li>Summarise which routing you would deploy and the evidence.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Designing around data movement — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Bytes, not FLOPs, dominate cluster-scale cost: design for data movement.</li><li>Round-robin destroys prefix locality; route by cache overlap and load.</li><li>InferencePool plus endpoint picker is the Kubernetes standard for inference routing.</li><li>Tier KV cache from HBM to DRAM, NVMe and shared storage.</li><li>Keep TP groups in one NVLink domain; gang-schedule multi-pod replicas.</li><li>Write a data-movement budget and attack the largest line.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Routing strategies</h3><table><tbody><tr><td><code>round-robin</code></td><td>Even spread, ignores cache: wasteful for LLMs</td></tr><tr><td><code>session affinity</code></td><td>Same replica per conversation; ignores load</td></tr><tr><td><code>KV-aware</code></td><td>Score by prefix-cache overlap and load</td></tr><tr><td><code>queue-aware</code></td><td>Avoid replicas with long waiting queues</td></tr><tr><td><code>adapter-aware</code></td><td>Prefer replicas with the LoRA already loaded</td></tr></tbody></table></div><div class="cheat-group"><h3>Kubernetes building blocks</h3><table><tbody><tr><td><code>kind: InferencePool (inference.networking.k8s.io/v1)</code></td><td>Pods to route across, plus endpoint picker</td></tr><tr><td><code>endpointPickerRef</code></td><td>Service that chooses the pod per request</td></tr><tr><td><code>LeaderWorkerSet</code></td><td>Deploy a multi-pod replica as one unit</td></tr><tr><td><code>failureMode: FailOpen</code></td><td>Fall back to plain routing if the picker is down</td></tr></tbody></table></div><div class="cheat-group"><h3>Cache tiers</h3><table><tbody><tr><td><code>HBM -&gt; DRAM -&gt; NVMe -&gt; shared storage</code></td><td>Fast/small to slow/large</td></tr><tr><td><code>evict + recompute vs offload + reload</code></td><td>GPU time vs bandwidth</td></tr><tr><td><code>KVBM / LMCache / OffloadingConnector</code></td><td>Implementations</td></tr></tbody></table></div><div class="cheat-group"><h3>Placement rules</h3><table><tbody><tr><td><code>TP group within NVLink domain</code></td><td>Never across nodes over Ethernet</td></tr><tr><td><code>PP stages and P/D pairs on fast RDMA paths</code></td><td>Same rack or spine</td></tr><tr><td><code>spread replicas, not shards, across zones</code></td><td>Availability without slow links</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Generic round-robin load balancing in front of LLM replicas.</li><li>Session affinity that sends every turn to an overloaded replica.</li><li>Splitting one replica's shards across racks or zones.</li><li>Recomputing long idle conversations when offload would be cheaper.</li><li>Adopting complex infrastructure without a data-movement budget.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "Why does round-robin load balancing perform poorly for multi-turn LLM chat?", "options": ["Turns land on replicas without the conversation's cached prefix, so it is recomputed", "Round-robin proxies cannot carry streaming responses at all", "Round-robin ends up sending all of the traffic to one replica", "LLM replicas cannot share the same model weights between them"], "answer": 0, "explain": "Each replica caches the prefixes it has seen. Spreading turns evenly means most turns miss that cache and pay full prefill again."}, {"q": "In the Gateway API Inference Extension, what chooses the specific pod for each request?", "options": ["The endpoint picker referenced by the InferencePool", "The Kubernetes scheduler", "kube-proxy's iptables rules", "The model's tokenizer"], "answer": 0, "explain": "The gateway consults the endpoint picker through Envoy external processing, and it uses engine metrics such as queue length and cache state to pick a pod."}, {"q": "Many users return to long conversations after several idle minutes, and their caches are being evicted. What helps most?", "options": ["Offload idle KV blocks to CPU memory or NVMe and reload them", "Raise the sampling temperature so conversations end sooner", "Add more replicas behind a round-robin load balancer", "Lower max_tokens for all requests so caches stay smaller"], "answer": 0, "explain": "Tiering keeps the cache instead of recomputing it; reloading over PCIe or from NVMe is usually much cheaper than a long prefill."}, {"q": "A replica uses TP 8 across two 4-GPU nodes connected by Ethernet. What is the problem?", "options": ["Every layer's all-reduce crosses a slow link, stalling each step", "Kubernetes cannot run eight-GPU pods", "TP 8 requires pipeline parallelism to be disabled", "The KV cache cannot be split eight ways"], "answer": 0, "explain": "TP communicates inside every layer and needs NVLink-class links. It should stay within one NVLink domain; spanning nodes calls for pipeline parallelism."}, {"q": "Scaling out takes 6 minutes, of which 5 are spent fetching weights, yet the team plans to adopt KV offload to fix slow scale-up. What does a data-movement budget show?", "options": ["Weight loading is the dominant transfer and should be fixed first", "KV offload is the right fix because cache is always the bottleneck", "The gateway in front of the replicas is the real bottleneck", "Tensor-parallel communication dominates the scale-up time"], "answer": 0, "explain": "Listing transfers by size and time makes the five-minute weight fetch the largest line; local weight caching addresses it directly."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="inf-disaggregation.html"><span>← Previous</span><strong>Disaggregated prefill and decode</strong></a>
+    <a class="pager-up" href="../education.html#inference">All Inference modules</a>
+    <a class="pager-link pager-next" href="inf-scaling-cost.html"><span>Next →</span><strong>Autoscaling, queues, cold starts and cost per token</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=inf-distributed-design&amp;page=/education/inf-distributed-design.html&amp;title=Designing%20around%20data%20movement">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=inf-distributed-design&amp;page=/education/inf-distributed-design.html&amp;title=Designing%20around%20data%20movement">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

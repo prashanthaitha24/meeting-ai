@@ -1,0 +1,326 @@
+{
+  "id": "proj-inf-benchmark-lab",
+  "track": "inference",
+  "title": "Inference benchmark lab and write-up",
+  "summary": "Rent one GPU, serve an open-weight model with vLLM, build a small measurement harness, and run a disciplined series of experiments: a baseline concurrency sweep, then one variable at a time (batch limits, KV-cache precision, context length, prefix caching). Watch the engine and GPU metrics while you do it, then turn the results into a short public write-up that names the bottleneck, the trade-off and the result. It is the exercise the whole Inference Engineering track builds towards, and the write-up is portfolio proof.",
+  "outcome": "A public repository with a reproducible `serve/` setup, a `bench/` harness and raw results for every run, plots of throughput against latency percentiles, and a `REPORT.md` that states your operating point (concurrency and settings that meet a latency target), the evidence for the bottleneck at each step, the cost per million tokens it implies, and what you would test next.",
+  "hours": 6,
+  "level": "Intermediate",
+  "prereqs": [
+    "Comfortable with Linux, Docker and Python",
+    "The stage 2 to 4 lessons of this track (lifecycle, KV cache, metrics, profiling, batching and benchmarking)",
+    "A cloud account that can rent a single NVIDIA GPU instance for a few hours, or a local NVIDIA GPU"
+  ],
+  "tools": [
+    {
+      "name": "vLLM",
+      "why": "the serving engine under test, run from its official container image",
+      "url": "https://docs.vllm.ai/"
+    },
+    {
+      "name": "Docker + NVIDIA Container Toolkit",
+      "why": "run the engine and monitoring with GPU access",
+      "url": "https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html"
+    },
+    {
+      "name": "Prometheus",
+      "why": "scrape vLLM's metrics during the experiments",
+      "url": "https://prometheus.io/docs/"
+    },
+    {
+      "name": "Python (httpx, pandas, matplotlib)",
+      "why": "the measurement harness and the plots",
+      "url": "https://www.python-httpx.org/"
+    },
+    {
+      "name": "nvidia-smi",
+      "why": "GPU memory, utilisation and power during runs",
+      "url": "https://docs.nvidia.com/deploy/nvidia-smi/index.html"
+    }
+  ],
+  "layout": "inference-bench-lab/\n├── serve/\n│   ├── run-vllm.sh             # the exact engine command for each experiment\n│   └── prometheus.yml          # scrapes vLLM /metrics\n├── bench/\n│   ├── harness.py              # streaming client: TTFT, TPOT, ITL per request\n│   ├── sweep.sh                # concurrency sweep with vllm bench serve\n│   └── analyse.py              # tables and plots from results/\n├── results/\n│   ├── baseline/               # raw JSON per run\n│   ├── exp-max-num-seqs/\n│   ├── exp-fp8-kv/\n│   └── exp-prefix-cache/\n├── plots/\n└── REPORT.md                   # question, setup, results, bottleneck, trade-off, next test",
+  "phases": [
+    {
+      "title": "Provision a GPU and check the stack",
+      "goal": "A GPU machine where Docker containers can see the GPU, with the facts you will need for sizing written down.",
+      "steps": [
+        {
+          "text": "Create a public repository for the lab and clone it onto the GPU machine. Rent a single-GPU instance with a recent NVIDIA driver image; a mid-range datacenter GPU with 24 GB or more is plenty for a small model.",
+          "code": {
+            "lang": "bash",
+            "code": "gh repo create inference-bench-lab --public --clone\ncd inference-bench-lab\nmkdir -p serve bench results plots"
+          }
+        },
+        {
+          "text": "Record the GPU model, memory, driver version and the highest CUDA version the driver supports. These go in the setup section of your report.",
+          "code": {
+            "lang": "bash",
+            "code": "nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv\nnvidia-smi | head -5"
+          },
+          "check": "You see your GPU and its total memory."
+        },
+        {
+          "text": "Install the NVIDIA Container Toolkit if the image does not include it, wire it into Docker and prove a container can see the GPU.",
+          "code": {
+            "lang": "bash",
+            "code": "sudo nvidia-ctk runtime configure --runtime=docker\nsudo systemctl restart docker\ndocker run --rm --gpus all ubuntu nvidia-smi"
+          },
+          "check": "The container prints the same GPU table."
+        },
+        {
+          "text": "Pick a small open-weight instruct model (a few billion parameters) and compute, before running anything, its FP16 weight size and its KV bytes per token from its config.json. Write both into a notes file.",
+          "note": "KV bytes per token = 2 x num_hidden_layers x num_key_value_heads x head_dim x 2. This prediction is what you will check against the engine's own log."
+        }
+      ]
+    },
+    {
+      "title": "Serve the model",
+      "goal": "vLLM serving the model in a pinned container, with weights cached on local disk and metrics exposed.",
+      "steps": [
+        {
+          "text": "Write the engine command into a script so every experiment is reproducible. Pin the image version, mount the Hugging Face cache so weights download once, run detached, and wait until the server is healthy before returning.",
+          "code": {
+            "lang": "bash",
+            "code": "cat > serve/run-vllm.sh <<'SCRIPT'\n#!/usr/bin/env bash\nset -euo pipefail\nMODEL_ID=\"${MODEL_ID:?set MODEL_ID}\"\ndocker rm -f vllm >/dev/null 2>&1 || true\ndocker run -d --name vllm --gpus all --ipc=host -p 8000:8000 \\\n  -v \"$HOME/.cache/huggingface:/root/.cache/huggingface\" \\\n  -e HF_TOKEN \\\n  vllm/vllm-openai:v0.30.0 \"$MODEL_ID\" --max-model-len 8192 \"$@\"\nuntil curl -sf localhost:8000/health >/dev/null; do sleep 5; done\necho \"vLLM ready with extra args: $*\"\nSCRIPT\nchmod +x serve/run-vllm.sh"
+          }
+        },
+        {
+          "text": "Start the baseline server. The script returns once the engine is healthy; follow its log with `docker logs -f vllm` in another terminal.",
+          "code": {
+            "lang": "bash",
+            "code": "export MODEL_ID=YOUR_ORG/YOUR_MODEL\n./serve/run-vllm.sh"
+          },
+          "note": "If the model is gated, export HF_TOKEN first. The first start downloads weights; later starts reuse the cache.",
+          "check": "`curl -s localhost:8000/health` returns HTTP 200."
+        },
+        {
+          "text": "Find the line in the engine log that reports KV-cache capacity (in tokens or blocks) and compare it with your prediction from phase 1.",
+          "note": "If they differ a lot, check head_dim and num_key_value_heads in config.json, and the memory-utilisation default."
+        },
+        {
+          "text": "Send one chat request to confirm the OpenAI-compatible API works end to end.",
+          "code": {
+            "lang": "bash",
+            "code": "curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \\\n  -d \"{\\\"model\\\": \\\"$MODEL_ID\\\", \\\"messages\\\": [{\\\"role\\\": \\\"user\\\", \\\"content\\\": \\\"Hi\\\"}], \\\"max_tokens\\\": 20}\""
+          },
+          "check": "You get a JSON response with a short answer."
+        }
+      ]
+    },
+    {
+      "title": "Build the measurement harness",
+      "goal": "A streaming client that records TTFT, TPOT and every inter-token gap per request, plus the engine's own benchmark for sweeps.",
+      "steps": [
+        {
+          "text": "Install the client libraries in a virtual environment.",
+          "code": {
+            "lang": "bash",
+            "code": "python3 -m venv .venv && source .venv/bin/activate\npip install httpx pandas matplotlib vllm"
+          },
+          "note": "Installing vllm locally gives you `vllm bench serve`; it does not need to run the engine on this machine."
+        },
+        {
+          "text": "Write a streaming harness that measures from the client side, where users feel latency.",
+          "code": {
+            "lang": "python",
+            "code": "# bench/harness.py\nimport asyncio, json, os, sys, time\nimport httpx\n\nURL = \"http://localhost:8000/v1/chat/completions\"\nMODEL = os.environ[\"MODEL_ID\"]\n\n\nasync def one(client, prompt, max_tokens):\n    body = {\"model\": MODEL, \"stream\": True, \"max_tokens\": max_tokens,\n            \"messages\": [{\"role\": \"user\", \"content\": prompt}]}\n    t0, times = time.perf_counter(), []\n    async with client.stream(\"POST\", URL, json=body, timeout=600) as r:\n        async for line in r.aiter_lines():\n            if line.startswith(\"data: \") and line != \"data: [DONE]\":\n                if json.loads(line[6:])[\"choices\"][0][\"delta\"].get(\"content\"):\n                    times.append(time.perf_counter())\n    ttft = times[0] - t0\n    tpot = (times[-1] - times[0]) / max(len(times) - 1, 1)\n    gaps = [b - a for a, b in zip(times, times[1:])]\n    return {\"ttft\": ttft, \"tpot\": tpot, \"n\": len(times), \"max_gap\": max(gaps, default=0)}\n\n\nasync def main(concurrency, prompt_words, max_tokens, n):\n    prompt = \"word \" * prompt_words + \"\\nSummarise the text above in detail.\"\n    sem = asyncio.Semaphore(concurrency)\n    async with httpx.AsyncClient() as client:\n        async def guarded():\n            async with sem:\n                return await one(client, prompt, max_tokens)\n        results = await asyncio.gather(*[guarded() for _ in range(n)])\n    print(json.dumps(results))\n\n\nif __name__ == \"__main__\":\n    c, words, out, n = map(int, sys.argv[1:5])\n    asyncio.run(main(c, words, out, n))"
+          },
+          "note": "The harness counts streamed chunks with content as tokens; engines usually send one token per chunk, which is close enough for latency work. Use the engine's benchmark for exact token throughput."
+        },
+        {
+          "text": "Run it once at low load to check the numbers look sane.",
+          "code": {
+            "lang": "bash",
+            "code": "python bench/harness.py 1 500 200 5 > results/smoke.json\npython -c \"import json;r=json.load(open('results/smoke.json'));print(r[0])\""
+          },
+          "check": "TTFT is well under a second and TPOT is tens of milliseconds on a single request."
+        },
+        {
+          "text": "Write the sweep script around vLLM's benchmark so every run uses the same workload and saves raw results.",
+          "code": {
+            "lang": "bash",
+            "code": "cat > bench/sweep.sh <<'EOF'\n#!/usr/bin/env bash\nset -euo pipefail\nOUT=\"results/${1:?experiment name}\"\nmkdir -p \"$OUT\"\nfor c in 1 4 8 16 32 64; do\n  vllm bench serve --base-url http://localhost:8000 --model \"$MODEL_ID\" \\\n    --dataset-name random --random-input-len 1500 --random-output-len 300 \\\n    --num-prompts 300 --max-concurrency \"$c\" \\\n    --percentile-metrics ttft,tpot,itl --metric-percentiles 50,99 \\\n    --save-result --result-dir \"$OUT\" --result-filename \"c${c}.json\"\ndone\nEOF\nchmod +x bench/sweep.sh"
+          }
+        }
+      ]
+    },
+    {
+      "title": "Watch while you measure",
+      "goal": "Engine and GPU metrics visible during every run, so you can attribute each result to a bottleneck.",
+      "steps": [
+        {
+          "text": "Start Prometheus scraping the engine's metrics endpoint.",
+          "code": {
+            "lang": "yaml",
+            "code": "# serve/prometheus.yml\nglobal:\n  scrape_interval: 5s\nscrape_configs:\n  - job_name: vllm\n    static_configs:\n      - targets: [\"localhost:8000\"]"
+          }
+        },
+        {
+          "text": "Run Prometheus with host networking so it can reach the engine on localhost.",
+          "code": {
+            "lang": "bash",
+            "code": "docker run -d --name prom --network host \\\n  -v \"$PWD/serve/prometheus.yml:/etc/prometheus/prometheus.yml:ro\" \\\n  prom/prometheus:v3.15.0"
+          },
+          "check": "http://localhost:9090/targets shows the vllm target as UP (use an SSH tunnel if the instance has no public UI access)."
+        },
+        {
+          "text": "In a separate terminal, log GPU memory, utilisation and power once a second during runs.",
+          "code": {
+            "lang": "bash",
+            "code": "nvidia-smi --query-gpu=timestamp,utilization.gpu,memory.used,power.draw \\\n  --format=csv -l 1 > results/gpu-log.csv"
+          }
+        },
+        {
+          "text": "Bookmark four queries in the Prometheus UI: waiting and running requests, KV-cache usage, preemptions, and p99 TTFT.",
+          "code": {
+            "lang": "promql",
+            "code": "vllm:num_requests_waiting\nvllm:num_requests_running\nvllm:kv_cache_usage_perc\nrate(vllm:num_preemptions_total[1m])\nhistogram_quantile(0.99, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket[1m])))"
+          }
+        }
+      ]
+    },
+    {
+      "title": "Baseline sweep",
+      "goal": "The throughput-versus-latency curve of the default configuration, and your operating point against a latency target.",
+      "steps": [
+        {
+          "text": "Choose and write down your latency targets before you look at results, for example p99 TTFT under 1 s and p99 TPOT under 50 ms.",
+          "note": "Deciding afterwards invites picking whatever looks good."
+        },
+        {
+          "text": "Run two warm-up requests, then the baseline sweep.",
+          "code": {
+            "lang": "bash",
+            "code": "python bench/harness.py 2 200 50 4 > /dev/null\n./bench/sweep.sh baseline"
+          },
+          "check": "results/baseline/ contains c1.json to c64.json."
+        },
+        {
+          "text": "While the high-concurrency runs execute, watch the four Prometheus queries and note at which concurrency waiting requests appear and whether KV-cache usage approaches 1.0."
+        },
+        {
+          "text": "Write the analysis script that turns result files into a table and a throughput-versus-latency plot.",
+          "code": {
+            "lang": "python",
+            "code": "# bench/analyse.py\nimport glob, json, re, sys\nimport matplotlib.pyplot as plt\nimport pandas as pd\n\nrows = []\nfor exp in sys.argv[1:]:\n    for f in glob.glob(f\"results/{exp}/c*.json\"):\n        r = json.load(open(f))\n        rows.append({\"exp\": exp, \"concurrency\": int(re.search(r\"c(\\d+)\", f).group(1)),\n                     \"tok_s\": r[\"output_throughput\"],\n                     \"p99_ttft_ms\": r[\"p99_ttft_ms\"], \"p99_tpot_ms\": r[\"p99_tpot_ms\"]})\ndf = pd.DataFrame(rows).sort_values([\"exp\", \"concurrency\"])\nprint(df.to_markdown(index=False))\nfor exp, g in df.groupby(\"exp\"):\n    plt.plot(g[\"p99_tpot_ms\"], g[\"tok_s\"], marker=\"o\", label=exp)\nplt.xlabel(\"p99 TPOT (ms)\")\nplt.ylabel(\"output tokens/s\")\nplt.legend()\nplt.savefig(\"plots/throughput_vs_tpot.png\", dpi=150)"
+          },
+          "note": "Field names in the result JSON can change between vLLM versions; open one file and adjust the keys if needed. `to_markdown` needs the tabulate package (`pip install tabulate`)."
+        },
+        {
+          "text": "Run it for the baseline and mark the highest concurrency that meets both targets. That is your baseline operating point.",
+          "code": {
+            "lang": "bash",
+            "code": "pip install tabulate\npython bench/analyse.py baseline"
+          }
+        }
+      ]
+    },
+    {
+      "title": "One variable at a time",
+      "goal": "Three controlled experiments, each changing exactly one setting from the baseline, with the bottleneck identified for each.",
+      "steps": [
+        {
+          "text": "Experiment 1, batch limit: restart the engine with a lower sequence cap (the script replaces the running container) and rerun the sweep.",
+          "code": {
+            "lang": "bash",
+            "code": "./serve/run-vllm.sh --max-num-seqs 16\n./bench/sweep.sh exp-max-num-seqs"
+          },
+          "note": "Expect better per-user TPOT at high concurrency but more queueing (TTFT) once requests exceed the cap."
+        },
+        {
+          "text": "Experiment 2, KV-cache precision: restart with an FP8 cache (default sequence cap) and rerun.",
+          "code": {
+            "lang": "bash",
+            "code": "./serve/run-vllm.sh --kv-cache-dtype fp8\n./bench/sweep.sh exp-fp8-kv"
+          },
+          "note": "Check the startup log: KV capacity in tokens should roughly double. FP8 cache needs GPU and model support; if it is rejected, record that as a finding."
+        },
+        {
+          "text": "Spot-check quality for experiment 2: ask the FP8-cache server and the baseline the same ten questions and compare answers.",
+          "note": "Precision changes can affect output. A table of ten prompts with both answers side by side is enough for a write-up; serious deployments run a proper evaluation set."
+        },
+        {
+          "text": "Experiment 3, prefix caching: keep the baseline engine but change the workload to share a long system prompt, and compare TTFT with prefix caching on (default) and off.",
+          "code": {
+            "lang": "bash",
+            "code": "./serve/run-vllm.sh --no-enable-prefix-caching\npython bench/harness.py 8 2000 100 80 > results/prefix-off.json\n./serve/run-vllm.sh\npython bench/harness.py 8 2000 100 80 > results/prefix-on.json"
+          },
+          "note": "The harness sends the same long prompt every time, which is exactly the case prefix caching helps."
+        },
+        {
+          "text": "Plot all sweeps on one chart and tabulate the operating point for each experiment.",
+          "code": {
+            "lang": "bash",
+            "code": "python bench/analyse.py baseline exp-max-num-seqs exp-fp8-kv"
+          },
+          "check": "plots/throughput_vs_tpot.png shows three curves."
+        }
+      ]
+    },
+    {
+      "title": "Write it up and publish",
+      "goal": "A short, honest report someone else can reproduce, and a clean shutdown.",
+      "steps": [
+        {
+          "text": "Write REPORT.md with a fixed structure: question; setup (GPU, driver, image tag, model, precision, flags, workload); targets; results table and plot; for each experiment the bottleneck with evidence, the trade-off and the result; cost per million tokens at your best operating point; what you would test next.",
+          "code": {
+            "lang": "text",
+            "code": "## Experiment 2: FP8 KV cache\nBottleneck (baseline): KV cache full above c=32 (kv_cache_usage_perc ~1.0, preemptions rising).\nChange: --kv-cache-dtype fp8 (only change).\nResult: KV capacity roughly doubled; operating point moved from c=24 to c=40 at p99 TPOT < 50 ms.\nTrade-off: small answer differences on 2 of 10 spot-check prompts; needs a real eval before production.\nNext: repeat with 4,000-token prompts, where cache pressure is higher."
+          },
+          "note": "The numbers above are a template, not expected results; write what you measured."
+        },
+        {
+          "text": "Compute cost per million output tokens at your best operating point: hourly GPU price divided by output tokens per hour, then at a realistic utilisation such as 40%."
+        },
+        {
+          "text": "Commit the scripts, raw results, plots and report, and push. Add the repository link to your CV or portfolio.",
+          "code": {
+            "lang": "bash",
+            "code": "git add serve bench results plots REPORT.md\ngit commit -m \"Inference benchmark lab: baseline + 3 controlled experiments\"\ngit push -u origin HEAD"
+          }
+        },
+        {
+          "text": "Tear everything down so the GPU stops costing money: stop the containers and terminate the cloud instance.",
+          "code": {
+            "lang": "bash",
+            "code": "docker rm -f vllm prom || true"
+          },
+          "check": "The instance shows as terminated in your cloud console and no GPU hours are accruing."
+        }
+      ]
+    }
+  ],
+  "troubleshooting": [
+    {
+      "symptom": "The container starts but reports no CUDA device",
+      "fix": "Check that `docker run --rm --gpus all ubuntu nvidia-smi` works; if not, reconfigure the NVIDIA Container Toolkit. If it does, the host driver may be too old for the image's CUDA version; use a newer driver image."
+    },
+    {
+      "symptom": "The engine exits with an out-of-memory error at startup",
+      "fix": "Lower `--max-model-len`, choose a smaller model, or lower `--gpu-memory-utilization` if other processes hold GPU memory (check `nvidia-smi`)."
+    },
+    {
+      "symptom": "vllm bench serve fails with connection refused",
+      "fix": "The engine is still loading; wait until `/health` returns 200. Also confirm the `--base-url` and that port 8000 is published."
+    },
+    {
+      "symptom": "Results vary a lot between identical runs",
+      "fix": "Make sure warm-up requests ran, nothing else uses the GPU, and the run is long enough (raise `--num-prompts`). Repeat each point and report the spread."
+    },
+    {
+      "symptom": "--kv-cache-dtype fp8 is rejected",
+      "fix": "Not every GPU and model combination supports an FP8 cache. Record it as a finding and try a different variable, such as `--max-num-batched-tokens`."
+    },
+    {
+      "symptom": "Prometheus shows the target as DOWN",
+      "fix": "Prometheus runs with host networking and scrapes localhost:8000; confirm the engine is up and that the metrics path `/metrics` responds with curl."
+    }
+  ],
+  "next": [
+    "Repeat the baseline with SGLang or TensorRT-LLM on the same GPU and compare operating points.",
+    "Move to a two-GPU instance and compare TP 2 against two TP 1 replicas behind a load balancer.",
+    "Change the workload to long prompts (4,000+ tokens) and see how the bottleneck moves from decode to prefill and cache.",
+    "Add an autoscaling experiment: KEDA on vllm:num_requests_waiting with a bursty open-loop load.",
+    "Turn the report into a short blog post or talk: the bottleneck, the trade-off and the result."
+  ]
+}

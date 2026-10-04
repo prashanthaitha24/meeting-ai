@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GPU servers in practice — Inference | ThavionAI Education</title>
+  <meta name="description" content="Drivers, containers and nvidia-smi on Linux; PCIe, NVLink and the network between nodes; storage for model weights." />
+  <meta property="og:title" content="GPU servers in practice — ThavionAI Education" />
+  <meta property="og:description" content="Drivers, containers and nvidia-smi on Linux; PCIe, NVLink and the network between nodes; storage for model weights." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/inf-gpu-servers.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-inference" data-module="inf-gpu-servers">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=inf-gpu-servers&amp;page=/education/inf-gpu-servers.html&amp;title=GPU%20servers%20in%20practice">Feedback</a>
+    <a href="../education.html#inference" class="nav-cta">All Inference modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#inference">Inference</a> › Stage 1: GPU &amp; systems foundation</div>
+    <h1>GPU servers in practice</h1>
+    <p class="lede">Drivers, containers and nvidia-smi on Linux; PCIe, NVLink and the network between nodes; storage for model weights.</p>
+    <div class="meta">
+      <span class="chip">Beginner</span>
+      <span class="chip">~30 min read</span>
+      <span class="chip">Module 2 of 15</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">A GPU is only useful once the operating system, drivers, containers and scheduler can all see it, and once weights can reach it quickly. This lesson covers the Linux side of GPU servers: the driver and CUDA stack, running GPU containers on Docker and Kubernetes, the <code>nvidia-smi</code> commands you will use every day, how GPUs connect to each other inside a node and across nodes, and how model weights get from storage into VRAM.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Explain how the NVIDIA driver, CUDA runtime and container toolkit fit together</li><li>Run GPU workloads in Docker and request GPUs in Kubernetes</li><li>Use nvidia-smi to inspect memory, utilisation, processes and topology</li><li>Distinguish intra-node links (PCIe, NVLink) from inter-node networks (InfiniBand, RoCE)</li><li>Plan storage so model weights load fast and cold starts stay short</li></ul>
+    </div>
+    <section id="the-software-stack-driver-cuda-containers"><h2>The software stack: driver, CUDA, containers</h2>
+    <p>Three layers have to agree. The <strong>kernel driver</strong> on the host talks to the hardware and must be installed on the machine itself. The <strong>CUDA runtime and libraries</strong> (cuBLAS, cuDNN, NCCL) usually ship inside your container image with the inference engine. The driver must be new enough for the CUDA version inside the image; an old host driver is the most common reason a container reports no usable GPU.</p>
+    <p>The <strong>NVIDIA Container Toolkit</strong> connects the two: it lets Docker or containerd mount the GPU devices and the host's driver libraries into a container. After installing it, configure the runtime once and request GPUs per container.</p>
+    <div class="code"><div class="code-cap">Docker: configure the runtime once, then request GPUs per container</div><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+
+# all GPUs, then only GPU 1
+docker run --rm --gpus all ubuntu nvidia-smi
+docker run --rm --gpus '"device=1"' ubuntu nvidia-smi</code></pre></div>
+    <p>On Kubernetes, the <strong>NVIDIA device plugin</strong> advertises GPUs as the extended resource <code>nvidia.com/gpu</code>, and the <strong>GPU Operator</strong> can install the driver, toolkit, device plugin and the DCGM metrics exporter as one package. Pods request whole GPUs through resource limits; GPUs are not shared between pods unless you configure time-slicing or MIG partitions.</p>
+    <div class="code"><div class="code-cap">A pod that gets one GPU</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-check
+spec:
+  restartPolicy: Never
+  containers:
+    - name: cuda
+      image: nvidia/cuda:12.4.1-base-ubuntu22.04
+      command: ["nvidia-smi"]
+      resources:
+        limits:
+          nvidia.com/gpu: 1</code></pre></div></section>
+  <section id="nvidia-smi-your-first-diagnostic-tool"><h2>nvidia-smi: your first diagnostic tool</h2>
+    <p><code>nvidia-smi</code> ships with the driver. Its default view shows each GPU's model, driver and CUDA version, temperature, power, memory used out of total, utilisation, and the processes holding memory. Learn a few more forms and you can answer most "is the GPU the problem?" questions in seconds.</p>
+    <div class="code"><div class="code-cap">Everyday nvidia-smi</div><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># one CSV line per GPU every second
+nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,power.draw \
+  --format=csv -l 1
+
+# rolling stats: power, utilisation, clocks, memory
+nvidia-smi dmon -s pucm
+
+# how the GPUs connect to each other and to CPUs
+nvidia-smi topo -m</code></pre></div>
+    <div class="callout callout-warning"><strong>Watch out</strong><p><code>utilization.gpu</code> only means a kernel was running during the sample window, not that the GPU was busy doing useful maths. A memory-bound decode loop can show 100% while using a fraction of the compute. Use it to spot idle GPUs, not to judge efficiency; the profiling lesson covers better signals.</p></div>
+    <ul><li>Memory used near total with many requests queued usually means the KV cache is full.</li><li>A process you do not recognise holding VRAM is often a crashed or orphaned worker; free it before blaming the engine.</li><li><code>nvidia-smi -q</code> prints everything, including ECC errors and throttling reasons, which explain sudden slowdowns.</li></ul></section>
+  <section id="networking-inside-the-node-and-between-nodes"><h2>Networking: inside the node and between nodes</h2>
+    <p>When a model spans several GPUs, they exchange data constantly, so the links between them shape performance. Inside a node, GPUs connect over <strong>PCIe</strong> through the CPU or a PCIe switch, or directly over <strong>NVLink</strong>, NVIDIA's high-bandwidth GPU-to-GPU link, often through <strong>NVSwitch</strong> so every GPU reaches every other at full speed. <code>nvidia-smi topo -m</code> prints the matrix: <code>NV#</code> means NVLink, while <code>PIX</code>, <code>PXB</code>, <code>PHB</code> and <code>SYS</code> are PCIe paths of increasing distance.</p>
+    <p>Between nodes, traffic leaves through network cards. Inference clusters use <strong>InfiniBand</strong> or <strong>RoCE</strong> (RDMA over Converged Ethernet), both supporting <strong>RDMA</strong>, which lets a network card read and write remote memory without involving the remote CPU. With <strong>GPUDirect RDMA</strong>, the network card moves data straight to and from GPU memory. These links are an order of magnitude or more slower than NVLink, which is why tensor parallelism usually stays inside one node.</p>
+    <div class="table-wrap"><table><thead><tr><th>Link</th><th>Scope</th><th>Typical use in inference</th></tr></thead><tbody><tr><td>NVLink / NVSwitch</td><td>GPUs in one node or rack-scale domain</td><td>Tensor parallelism; fast KV transfer</td></tr><tr><td>PCIe</td><td>GPU to CPU, NIC, storage</td><td>Loading weights, host offload, budget multi-GPU</td></tr><tr><td>InfiniBand / RoCE + RDMA</td><td>Between nodes</td><td>Pipeline parallelism, disaggregated KV transfer</td></tr><tr><td>Ordinary Ethernet (TCP)</td><td>Between services</td><td>Client traffic, control plane</td></tr></tbody></table></div></section>
+  <section id="storage-getting-weights-into-vram"><h2>Storage: getting weights into VRAM</h2>
+    <p>Before serving anything, a worker must read tens or hundreds of gigabytes of weights from storage into VRAM. That load time is the core of an inference <strong>cold start</strong>, and it decides how fast you can scale out.</p>
+    <ul><li>Weights usually come as <strong>safetensors</strong> files, which can be memory-mapped and loaded quickly and safely.</li><li>Downloading from a model hub or object storage on every start is slow and fragile. Cache weights on local NVMe or a shared high-throughput file system, or bake them into a node image.</li><li>On Kubernetes, a pre-populated persistent volume or a node-local cache shared across pods avoids re-downloading per replica.</li><li>Measure the load path end to end: storage read throughput, PCIe transfer and any compilation or graph capture the engine does after loading.</li></ul>
+    <div class="callout callout-tip"><strong>Tip</strong><p>Persistence mode (<code>sudo nvidia-smi -pm 1</code>) keeps the driver initialised when no process is using the GPU, avoiding a few seconds of driver start-up on every new process.</p></div></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Get a GPU working end to end</h2>
+    <ol><li>Rent a single-GPU cloud instance (or use a local NVIDIA GPU) running a recent Linux image with the NVIDIA driver installed.</li><li>Run <code>nvidia-smi</code> and note the driver version, the highest CUDA version it supports, and total memory.</li><li>Install the NVIDIA Container Toolkit, configure Docker with <code>nvidia-ctk</code>, and run <code>docker run --rm --gpus all ubuntu nvidia-smi</code>.</li><li>Start the <code>--query-gpu ... -l 1</code> command from this lesson in one terminal and run any GPU workload in another; watch memory and utilisation move.</li><li>Run <code>nvidia-smi topo -m</code> and identify how the GPUs and network cards connect (on a multi-GPU instance, look for NV# entries).</li><li>Time how long it takes to copy a 10 GB file from object storage versus from local NVMe on the instance, and note the difference as your cold-start budget.</li><li>Shut the instance down when finished.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>GPU servers in practice — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Host driver must support the CUDA version inside your image.</li><li>The container toolkit mounts GPUs into containers; Kubernetes exposes them as nvidia.com/gpu.</li><li>nvidia-smi utilisation means busy at all, not efficiently busy.</li><li>NVLink inside a node, InfiniBand or RoCE with RDMA between nodes.</li><li>Weight loading dominates cold starts: cache weights close to the GPU.</li><li>Check topology before placing a multi-GPU model.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>nvidia-smi</h3><table><tbody><tr><td><code>nvidia-smi</code></td><td>Overview: memory, utilisation, power, processes</td></tr><tr><td><code>nvidia-smi --query-gpu=... --format=csv -l 1</code></td><td>Scriptable metrics every second</td></tr><tr><td><code>nvidia-smi dmon -s pucm</code></td><td>Rolling power, utilisation, clocks, memory</td></tr><tr><td><code>nvidia-smi topo -m</code></td><td>GPU, NIC and CPU interconnect matrix</td></tr><tr><td><code>nvidia-smi -q -d PERFORMANCE</code></td><td>Throttle reasons and clocks</td></tr><tr><td><code>sudo nvidia-smi -pm 1</code></td><td>Enable persistence mode</td></tr></tbody></table></div><div class="cheat-group"><h3>Containers</h3><table><tbody><tr><td><code>sudo nvidia-ctk runtime configure --runtime=docker</code></td><td>Wire the toolkit into Docker</td></tr><tr><td><code>docker run --gpus all IMAGE</code></td><td>All GPUs in a container</td></tr><tr><td><code>docker run --gpus '"device=0,1"' IMAGE</code></td><td>Specific GPUs</td></tr><tr><td><code>CUDA_VISIBLE_DEVICES=0</code></td><td>Limit which GPUs a process sees</td></tr></tbody></table></div><div class="cheat-group"><h3>Kubernetes</h3><table><tbody><tr><td><code>resources.limits: {nvidia.com/gpu: 1}</code></td><td>Request one whole GPU</td></tr><tr><td><code>NVIDIA GPU Operator</code></td><td>Driver, toolkit, device plugin, DCGM exporter in one</td></tr><tr><td><code>kubectl describe node NODE | grep nvidia.com/gpu</code></td><td>GPU capacity and allocation per node</td></tr></tbody></table></div><div class="cheat-group"><h3>topo -m legend</h3><table><tbody><tr><td><code>NV#</code></td><td>Connected by # NVLinks</td></tr><tr><td><code>PIX / PXB</code></td><td>Same PCIe switch / multiple PCIe switches</td></tr><tr><td><code>PHB / SYS</code></td><td>Through the CPU host bridge / across CPU sockets</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>A host driver too old for the image's CUDA version, so the container sees no GPU.</li><li>Reading 100% nvidia-smi utilisation as proof the GPU is used efficiently.</li><li>Downloading weights from the internet on every pod start.</li><li>Splitting a model across GPUs that only connect through the CPU (SYS) without measuring the cost.</li><li>Orphaned processes holding VRAM after a crash.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "A new container image with a newer CUDA version reports no usable GPU, while older images work on the same host. What is the likely cause?", "options": ["The host driver is too old for that CUDA version", "Docker is not running with root privileges on the host", "The image does not include the nvidia-smi binary itself", "The GPU's VRAM is already full from other containers"], "answer": 0, "explain": "The kernel driver on the host must support the CUDA version used inside the container. Newer CUDA in the image with an old host driver fails at initialisation."}, {"q": "nvidia-smi shows 100% utilisation on a GPU decoding one request at a time. What can you conclude?", "options": ["A kernel was running during each sample, not that compute is well used", "The GPU is compute-saturated and needs replacing", "The model is too large for the GPU", "Batching is already at its maximum"], "answer": 0, "explain": "utilization.gpu reports whether any kernel was active in the sample window. Memory-bound decode keeps a kernel running while most compute sits idle."}, {"q": "nvidia-smi topo -m shows SYS between GPU 0 and GPU 1. What does that mean for tensor parallelism across them?", "options": ["Traffic crosses CPU sockets over PCIe, so it will be slow", "They share an NVSwitch at full bandwidth", "They are on different nodes connected by InfiniBand", "They cannot communicate at all"], "answer": 0, "explain": "SYS means the path traverses the inter-socket link between CPUs. Tensor parallelism exchanges data every layer, so it suits NV-linked GPUs much better."}, {"q": "Scaling out takes eight minutes per new replica, mostly downloading weights. What helps most?", "options": ["Cache weights on node-local NVMe or a pre-populated volume", "Enable persistence mode on every GPU in the node pool", "Give the HTTP server more CPU cores so it starts sooner", "Raise the pod's memory limit so weights load into RAM"], "answer": 0, "explain": "The cold start is dominated by fetching weights. Keeping them close to the GPU removes the download; persistence mode only saves seconds of driver start-up."}, {"q": "How does a Kubernetes pod request a GPU when the NVIDIA device plugin is installed?", "options": ["resources.limits with nvidia.com/gpu: 1", "A nodeSelector of gpu=true only", "An annotation gpu.nvidia.com/enabled", "Setting CUDA_VISIBLE_DEVICES in the pod spec"], "answer": 0, "explain": "The device plugin exposes GPUs as the extended resource nvidia.com/gpu, requested through resource limits like CPU and memory."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="inf-gpu-architecture.html"><span>← Previous</span><strong>GPU architecture for inference</strong></a>
+    <a class="pager-up" href="../education.html#inference">All Inference modules</a>
+    <a class="pager-link pager-next" href="inf-llm-lifecycle.html"><span>Next →</span><strong>The life of an inference request</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=inf-gpu-servers&amp;page=/education/inf-gpu-servers.html&amp;title=GPU%20servers%20in%20practice">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=inf-gpu-servers&amp;page=/education/inf-gpu-servers.html&amp;title=GPU%20servers%20in%20practice">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

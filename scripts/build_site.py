@@ -220,7 +220,8 @@ def panel(tr, first):
             projects.append(f'            <div class="proj-card soon-item">{inner}<span class="m">Coming soon</span></div>')
     resources = "\n".join(f'            <a href="{r["url"]}" target="_blank" rel="noopener">{esc(r["title"])}<span>{esc(r["note"])}</span></a>' for r in tr["resources"])
     hidden = "" if first else " hidden"
-    proj_chip = f'            <span class="chip">{len(tr["projects"])} projects</span>' if tr["projects"] else ""
+    n_proj = len(tr["projects"])
+    proj_chip = f'            <span class="chip">{n_proj} project{"s" if n_proj != 1 else ""}</span>' if n_proj else ""
     proj_box = ('      <div class="track-projects">\n        <div class="box-label">Guided projects</div>\n'
                 + carousel(f'{tr["name"]} projects', projects) + '\n      </div>') if projects else ""
     return f'''    <div class="track-panel" id="{tr["id"]}" role="tabpanel" aria-labelledby="tab-{tr["id"]}" style="--tc:{tr["accent"]}"{hidden}>

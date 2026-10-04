@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GPU architecture for inference — Inference | ThavionAI Education</title>
+  <meta name="description" content="CPU vs GPU, SMs, CUDA and Tensor Cores, VRAM and memory bandwidth — and why inference workloads favour GPUs." />
+  <meta property="og:title" content="GPU architecture for inference — ThavionAI Education" />
+  <meta property="og:description" content="CPU vs GPU, SMs, CUDA and Tensor Cores, VRAM and memory bandwidth — and why inference workloads favour GPUs." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/inf-gpu-architecture.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-inference" data-module="inf-gpu-architecture">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=inf-gpu-architecture&amp;page=/education/inf-gpu-architecture.html&amp;title=GPU%20architecture%20for%20inference">Feedback</a>
+    <a href="../education.html#inference" class="nav-cta">All Inference modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#inference">Inference</a> › Stage 1: GPU &amp; systems foundation</div>
+    <h1>GPU architecture for inference</h1>
+    <p class="lede">CPU vs GPU, SMs, CUDA and Tensor Cores, VRAM and memory bandwidth — and why inference workloads favour GPUs.</p>
+    <div class="meta">
+      <span class="chip">Beginner</span>
+      <span class="chip">~30 min read</span>
+      <span class="chip">Module 1 of 15</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">Every inference decision you will make later, from batch size to how many GPUs a model needs, comes back to two numbers on a GPU's spec sheet: how much memory it has and how fast it can move data. This lesson builds the mental model of a GPU an infrastructure engineer needs: why it beats a CPU at inference, what streaming multiprocessors, CUDA cores and Tensor Cores do, and why memory capacity and bandwidth, more than raw compute, decide what you can serve.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Explain why neural-network inference runs far faster on GPUs than on CPUs</li><li>Describe streaming multiprocessors, CUDA cores, Tensor Cores and the memory hierarchy</li><li>Estimate whether a model fits in a GPU's VRAM from its parameter count and precision</li><li>Estimate an upper bound on single-request decode speed from memory bandwidth</li><li>Read a GPU spec sheet and pick out the numbers that matter for serving</li></ul>
+    </div>
+    <section id="why-gpus-a-few-smart-cores-versus-thousands-of-simple-ones"><h2>Why GPUs: a few smart cores versus thousands of simple ones</h2>
+    <p>A <strong>CPU</strong> has a handful of powerful cores built for low-latency, branch-heavy work: an operating system, a web server, a database query planner. A <strong>GPU</strong> has thousands of simpler arithmetic units built to apply the same operation to huge amounts of data at once. Neural-network inference is almost entirely the second kind of work: multiplying large matrices of weights by matrices of activations, billions of identical multiply-add operations with no branching.</p>
+    <p>That is why a GPU can be tens to hundreds of times faster than a CPU for the same model. CPUs still matter in an inference server: they tokenize text, run the HTTP server and the scheduler, and feed the GPU. A slow or overloaded CPU can starve an expensive GPU, which is one of the first things to check when GPU utilisation is mysteriously low.</p>
+    <div class="table-wrap"><table><thead><tr><th></th><th>CPU</th><th>GPU</th></tr></thead><tbody><tr><td>Cores</td><td>Tens of complex cores</td><td>Thousands of simple arithmetic units</td></tr><tr><td>Optimised for</td><td>Latency of one thread, branching</td><td>Throughput of many identical operations</td></tr><tr><td>Memory</td><td>Large, slower system RAM</td><td>Smaller, much faster on-package memory (HBM or GDDR)</td></tr><tr><td>Role in serving</td><td>Tokenizing, scheduling, HTTP, orchestration</td><td>The model's matrix maths</td></tr></tbody></table></div></section>
+  <section id="inside-a-gpu-sms-cuda-cores-and-tensor-cores"><h2>Inside a GPU: SMs, CUDA cores and Tensor Cores</h2>
+    <p>An NVIDIA GPU is built from many <strong>streaming multiprocessors</strong> (SMs). Each SM has general-purpose <strong>CUDA cores</strong> for ordinary floating-point and integer arithmetic, <strong>Tensor Cores</strong> that perform small matrix multiply-accumulate operations in a single step, a large <strong>register file</strong>, and fast on-chip <strong>shared memory and L1 cache</strong>. Work is scheduled in groups of 32 threads called <strong>warps</strong>, which execute the same instruction together. AMD GPUs use different names (compute units, matrix cores) for the same ideas.</p>
+    <p>For transformer inference, Tensor Cores do almost all the useful work, because attention and feed-forward layers are matrix multiplications. Tensor Cores are fastest at low precision: each new GPU generation has added support for smaller number formats (FP16 and BF16, then FP8, then 4-bit formats on the newest parts). Halving the bytes per number roughly doubles the Tensor Core throughput and halves the memory needed, which is why <strong>quantization</strong> matters so much for serving.</p>
+    <div class="callout callout-note"><strong>Note</strong><p>Peak TFLOPS figures on spec sheets are usually quoted for the lowest precision and with sparsity. Compare like with like: the same precision, dense, on the formats your model and engine actually use.</p></div></section>
+  <section id="the-memory-hierarchy-and-why-bandwidth-is-king"><h2>The memory hierarchy, and why bandwidth is king</h2>
+    <p>Data lives at several levels: registers and shared memory inside each SM (tiny, fastest), an <strong>L2 cache</strong> shared by all SMs (megabytes), and <strong>VRAM</strong>, the GPU's main memory (tens of gigabytes, high-bandwidth memory on datacenter parts). The model's weights and the KV cache live in VRAM, and every generated token requires reading the weights from VRAM into the SMs.</p>
+    <figure class="diagram" id="fig-gpu-memory-path"><div class="diagram-scroll"><svg viewBox="0 0 740 248" role="img" aria-label="The CPU tokenizes requests and launches work on the GPU over PCIe. Inside the GPU, model weights and the KV cache live in VRAM (HBM). For each step they are read through the shared L2 cache into the streaming multiprocessors, where Tensor Cores perform the matrix maths and registers and shared memory hold working data. The VRAM-to-SM path is labelled as the bandwidth bottleneck for decode." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="gpu-memory-path-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="gpu-memory-path-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="gpu-memory-path-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="gpu-memory-path-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="gpu-memory-path-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><rect x="190" y="19" width="502" height="210" rx="10" class="dg-group"/><text x="200" y="222" font-size="10" font-weight="700" letter-spacing="1" class="dg-group-label">GPU</text><polyline points="171.0,70.0 201.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#gpu-memory-path-arrow-default)"/><rect x="126.1" y="24.0" width="119.8" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">PCIe: load, launch</text><polyline points="341.0,70.0 371.0,70.0" fill="none" style="stroke:#f87171" stroke-width="1.6" marker-end="url(#gpu-memory-path-arrow-danger)"/><rect x="305.2" y="24.0" width="101.5" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:#f87171">bandwidth-bound</text><polyline points="511.0,70.0 541.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#gpu-memory-path-arrow-default)"/><rect x="508.8" y="24.0" width="34.4" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">feed</text><polyline points="611.0,98.0 611.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#gpu-memory-path-arrow-default)"/><rect x="614.0" y="116.0" width="83.2" height="16" rx="4" class="dg-label-bg"/><text x="618.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">matrix maths</text><rect x="31" y="42.0" width="140" height="56" rx="28.0" class="dg-node dg-actor"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">CPU</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">tokenize, schedule</text><path d="M201,49.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M201,49.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">VRAM (HBM)</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">weights + KV cache</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">L2 cache</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">shared by all SMs</text><rect x="541" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">SMs</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">Tensor Cores</text><rect x="541" y="150.0" width="140" height="56" rx="8" class="dg-node dg-ok"/><text x="611.0" y="178.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#6ee7b7">Next token</text></svg></div><figcaption>Every decode step streams the weights from VRAM through L2 into the SMs, so memory bandwidth, not Tensor Core speed, usually sets the pace.</figcaption></figure>
+    <p>Two VRAM numbers dominate inference. <strong>Capacity</strong> decides what fits: the weights, the KV cache for every active request, and some working space. <strong>Bandwidth</strong>, in terabytes per second, decides how fast the weights can be streamed through the SMs. When generating one token for one request, the GPU must read every weight once but does only about two floating-point operations per weight, so it spends most of its time waiting on memory. Single-request decoding is <strong>memory-bandwidth-bound</strong>, and you will quantify that in the profiling lesson.</p>
+    <div class="code"><div class="code-cap">Back-of-envelope sizing (example numbers, not a specific product)</div><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>Weights in VRAM  = parameters x bytes per parameter
+  8B params x 2 bytes (FP16)  = 16 GB
+  8B params x 1 byte  (FP8)   =  8 GB
+
+Decode upper bound at batch 1 ~ bandwidth / bytes read per token
+  2,000 GB/s / 16 GB  ~ 125 tokens/s  (FP16)
+  2,000 GB/s /  8 GB  ~ 250 tokens/s  (FP8)</code></pre></div>
+    <p>Batching is the escape hatch: if 32 requests decode together, the weights are read once per step but used 32 times, so throughput rises almost for free until compute or KV-cache memory runs out. Much of the rest of this track is about exploiting that.</p></section>
+  <section id="reading-a-spec-sheet-as-an-inference-engineer"><h2>Reading a spec sheet as an inference engineer</h2>
+    <div class="table-wrap"><table><thead><tr><th>Spec</th><th>Why it matters for serving</th></tr></thead><tbody><tr><td>Memory capacity (GB)</td><td>Largest model plus KV cache that fits; how many concurrent requests</td></tr><tr><td>Memory bandwidth (TB/s)</td><td>Decode speed per request; usually the binding limit</td></tr><tr><td>Tensor Core TFLOPS at your precision</td><td>Prefill speed and large-batch throughput</td></tr><tr><td>Supported formats (FP8, FP4)</td><td>Whether quantized models run natively and fast</td></tr><tr><td>Interconnect (NVLink, PCIe)</td><td>How well a model split across GPUs performs</td></tr><tr><td>Power (W)</td><td>Rack density and running cost</td></tr></tbody></table></div>
+    <ul><li>A card with more VRAM but less bandwidth can hold a bigger model yet generate each token more slowly.</li><li>Consumer GPUs are fine for learning and small models; datacenter GPUs add HBM, NVLink, ECC memory and partitioning features such as MIG.</li><li>Price per GPU-hour only becomes meaningful once you divide by tokens served: cost per million tokens, covered in the production stage.</li></ul></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Size models against real GPUs</h2>
+    <ol><li>Pick three GPUs (one consumer card, two datacenter parts) and write down memory capacity, memory bandwidth and dense FP16 Tensor Core TFLOPS from the vendor spec sheets.</li><li>Pick three open-weight models of different sizes and compute their FP16 and FP8 weight sizes with parameters x bytes.</li><li>Mark which model fits on which GPU, leaving at least 20% of VRAM for KV cache and working memory.</li><li>For each fitting pair, estimate the batch-1 decode upper bound as bandwidth divided by weight bytes.</li><li>If you have any NVIDIA GPU, run <code>nvidia-smi</code> and compare the reported memory with the spec sheet.</li><li>Write a short table of your findings; you will check these estimates against real benchmarks in stage 4.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>GPU architecture for inference — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Inference is matrix maths: thousands of simple GPU units beat a few complex CPU cores.</li><li>Tensor Cores do the heavy lifting, faster at lower precision.</li><li>VRAM capacity decides what fits; VRAM bandwidth decides decode speed.</li><li>Single-request decode is memory-bandwidth-bound; batching reuses each weight read.</li><li>The CPU still tokenizes and schedules; a starved GPU shows low utilisation.</li><li>Compare spec-sheet TFLOPS at the same precision, dense.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Sizing formulas</h3><table><tbody><tr><td><code>weights_bytes = params x bytes_per_param</code></td><td>FP16/BF16 = 2, FP8 = 1, 4-bit = 0.5</td></tr><tr><td><code>max_tok_s(batch 1) ~ bandwidth / weights_bytes</code></td><td>Upper bound on decode speed per request</td></tr><tr><td><code>FLOPs per token ~ 2 x params</code></td><td>Forward pass cost, ignoring attention</td></tr><tr><td><code>VRAM needed ~ weights + KV cache + ~10% overhead</code></td><td>Rule of thumb for fit</td></tr></tbody></table></div><div class="cheat-group"><h3>Vocabulary</h3><table><tbody><tr><td><code>SM</code></td><td>Streaming multiprocessor: the GPU's building block</td></tr><tr><td><code>CUDA core</code></td><td>General-purpose arithmetic unit inside an SM</td></tr><tr><td><code>Tensor Core</code></td><td>Matrix multiply-accumulate unit; does the transformer maths</td></tr><tr><td><code>Warp</code></td><td>32 threads executing the same instruction</td></tr><tr><td><code>HBM / VRAM</code></td><td>High-bandwidth on-package memory holding weights and KV cache</td></tr></tbody></table></div><div class="cheat-group"><h3>Precision formats</h3><table><tbody><tr><td><code>FP32</code></td><td>4 bytes; training master weights, rarely used to serve</td></tr><tr><td><code>BF16 / FP16</code></td><td>2 bytes; the default serving precision</td></tr><tr><td><code>FP8</code></td><td>1 byte; native on recent datacenter GPUs</td></tr><tr><td><code>INT4 / FP4</code></td><td>Half a byte; aggressive quantization, check quality</td></tr></tbody></table></div><div class="cheat-group"><h3>First commands</h3><table><tbody><tr><td><code>nvidia-smi</code></td><td>GPUs, memory in use, utilisation, processes</td></tr><tr><td><code>nvidia-smi -L</code></td><td>List GPUs with their UUIDs</td></tr><tr><td><code>nvidia-smi -q -d MEMORY</code></td><td>Detailed memory report</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Buying GPUs on peak TFLOPS when your workload is bandwidth-bound decode.</li><li>Forgetting the KV cache when checking whether a model fits.</li><li>Comparing a sparse FP8 figure on one card with a dense FP16 figure on another.</li><li>Ignoring CPU capacity, so tokenization and scheduling starve the GPU.</li><li>Assuming lower precision is free without checking output quality.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "Why does a single chat request generate tokens far below the GPU's peak TFLOPS?", "options": ["Each token needs every weight read from VRAM, so memory bandwidth limits it", "The CPU must approve every token before the GPU continues", "Tensor Cores are disabled when only one request is active", "The GPU clock drops automatically at low load"], "answer": 0, "explain": "At batch 1 the GPU does about two operations per weight byte it reads, so it waits on memory. That is the memory-bandwidth-bound regime; batching reuses each read."}, {"q": "A model has 14 billion parameters. Roughly how much VRAM do its weights need in FP8?", "options": ["About 14 GB", "About 28 GB", "About 7 GB", "About 56 GB"], "answer": 0, "explain": "FP8 uses one byte per parameter, so 14 billion parameters need about 14 GB, before KV cache and overhead. FP16 would need about 28 GB."}, {"q": "Two GPUs have equal capacity. GPU A has twice the memory bandwidth of GPU B. For batch-1 decode of the same model, what do you expect?", "options": ["GPU A generates tokens roughly twice as fast", "Both generate at the same speed because capacity is equal", "GPU B is faster because it has fewer bytes to move", "Speed depends only on Tensor Core count"], "answer": 0, "explain": "Batch-1 decode speed is bounded by bandwidth divided by the bytes read per token, so doubling bandwidth roughly doubles the bound."}, {"q": "Which part of a GPU performs most of the arithmetic in transformer inference?", "options": ["Tensor Cores doing matrix multiply-accumulate", "The L2 cache shared by all SMs", "The PCIe controller", "The video encoder block"], "answer": 0, "explain": "Attention and feed-forward layers are matrix multiplications, which Tensor Cores execute; caches and links only move data."}, {"q": "GPU utilisation sits at 40% on an inference server with plenty of queued requests. What is worth checking first?", "options": ["Whether CPU-side tokenization or scheduling is starving the GPU", "Whether the GPU has enough Tensor Cores for the model", "Whether the model's precision is too low", "Whether VRAM capacity is too large"], "answer": 0, "explain": "The CPU prepares and feeds work to the GPU. An overloaded or undersized CPU, or a slow data path, leaves the GPU idle despite demand."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <span class="pager-link pager-prev is-empty"></span>
+    <a class="pager-up" href="../education.html#inference">All Inference modules</a>
+    <a class="pager-link pager-next" href="inf-gpu-servers.html"><span>Next →</span><strong>GPU servers in practice</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=inf-gpu-architecture&amp;page=/education/inf-gpu-architecture.html&amp;title=GPU%20architecture%20for%20inference">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=inf-gpu-architecture&amp;page=/education/inf-gpu-architecture.html&amp;title=GPU%20architecture%20for%20inference">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Inference SLOs and observability — Inference | ThavionAI Education</title>
+  <meta name="description" content="Turning TTFT and ITL into SLOs, and dashboards and alerts for latency, throughput, GPU use and errors." />
+  <meta property="og:title" content="Inference SLOs and observability — ThavionAI Education" />
+  <meta property="og:description" content="Turning TTFT and ITL into SLOs, and dashboards and alerts for latency, throughput, GPU use and errors." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/inf-slos-observability.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-inference" data-module="inf-slos-observability">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=inf-slos-observability&amp;page=/education/inf-slos-observability.html&amp;title=Inference%20SLOs%20and%20observability">Feedback</a>
+    <a href="../education.html#inference" class="nav-cta">All Inference modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#inference">Inference</a> › Stage 7: Production inference systems</div>
+    <h1>Inference SLOs and observability</h1>
+    <p class="lede">Turning TTFT and ITL into SLOs, and dashboards and alerts for latency, throughput, GPU use and errors.</p>
+    <div class="meta">
+      <span class="chip">Advanced</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 14 of 15</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">An inference service needs the same reliability discipline as any production system, with metrics that fit how LLMs behave. This lesson turns time to first token and inter-token latency into service level indicators and objectives, shows the PromQL to measure them from engine histograms, designs burn-rate alerts, and lays out the observability stack: engine, GPU and gateway metrics, traces with the GenAI semantic conventions, and logs that do not leak prompts.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Define SLIs and SLOs for TTFT, inter-token latency, availability and correctness</li><li>Compute SLI ratios and percentiles from Prometheus histograms</li><li>Write multi-window burn-rate alerts for an inference SLO</li><li>Assemble metrics from the engine, DCGM and the gateway into one dashboard</li><li>Trace requests with GenAI attributes while protecting prompt data</li></ul>
+    </div>
+    <section id="from-latency-metrics-to-slos"><h2>From latency metrics to SLOs</h2>
+    <p>A <strong>service level indicator</strong> (SLI) is a ratio of good events to all events; a <strong>service level objective</strong> (SLO) is the target for that ratio over a window; the <strong>error budget</strong> is what is left over. For LLM inference, good SLIs reflect what users feel.</p>
+    <div class="table-wrap"><table><thead><tr><th>SLI</th><th>Good event</th><th>Example SLO</th></tr></thead><tbody><tr><td>Responsiveness</td><td>TTFT under 0.5 s</td><td>99% of requests over 28 days</td></tr><tr><td>Streaming smoothness</td><td>Inter-token gaps under 50 ms</td><td>99% of gaps over 28 days</td></tr><tr><td>Availability</td><td>Request completed without a 5xx or timeout</td><td>99.9% over 28 days</td></tr><tr><td>Quality (sampled)</td><td>Passes an automated evaluation check</td><td>95% of sampled requests over 7 days</td></tr></tbody></table></div>
+    <p>Pick thresholds that sit on real histogram bucket boundaries so the ratio is exact; vLLM's default TTFT histogram has a 0.5 s bucket and its inter-token latency histogram a 50 ms one. Measure the SLO at the gateway or client where possible, and use engine histograms to explain breaches.</p>
+    <p>Keep the list short. Two latency SLOs and one availability SLO per model endpoint is plenty to start; more objectives mean more alerts and more arguments about which one matters. Revisit thresholds after a month of data: if you never come close to burning the budget, the target may be too loose to protect users; if you burn it every week, either the system or the target needs to change.</p></section>
+  <section id="measuring-with-promql"><h2>Measuring with PromQL</h2>
+    <div class="code"><div class="code-cap">SLI: share of requests with TTFT under 0.5 s, over 5 minutes</div><div class="code-head"><span>promql</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>sum(rate(vllm:time_to_first_token_seconds_bucket{model_name="chat", le="0.5"}[5m]))
+/
+sum(rate(vllm:time_to_first_token_seconds_count{model_name="chat"}[5m]))</code></pre></div>
+    <div class="code"><div class="code-cap">p95 TTFT and p99 inter-token latency for dashboards</div><div class="code-head"><span>promql</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>histogram_quantile(0.95,
+  sum by (le) (rate(vllm:time_to_first_token_seconds_bucket{model_name="chat"}[5m])))
+
+histogram_quantile(0.99,
+  sum by (le) (rate(vllm:inter_token_latency_seconds_bucket{model_name="chat"}[5m])))</code></pre></div>
+    <p>Record these as recording rules (for example <code>model:ttft_good:ratio_rate5m</code>) so alerts and dashboards read one cheap series. Engine histograms only see requests that reached the engine; requests rejected by the gateway or timed out in front of it must come from gateway metrics, which is another reason to put the availability SLI there.</p></section>
+  <section id="alerting-on-burn-rate"><h2>Alerting on burn rate</h2>
+    <p>Alert on how fast you are spending the error budget, not on single bad minutes. With a 99% TTFT SLO the budget is 1% slow requests. A <strong>burn rate</strong> of 14.4 means spending the budget 14.4 times faster than sustainable, which would exhaust 2% of a 30-day budget in an hour. The standard pattern pages on a fast burn confirmed over a short and a long window, and opens a ticket for a slow burn.</p>
+    <p>Two windows guard against two failure modes. The long window (one hour) proves the problem is sustained, so a few slow requests during a deploy do not wake anyone. The short window (five minutes) proves it is still happening, so the alert resolves quickly once the cause is fixed instead of firing for an hour afterwards. A second, slower tier, for example a burn rate of 6 over six hours, catches gradual degradation such as a growing prompt length that slowly erodes TTFT, and usually opens a ticket rather than paging.</p>
+    <div class="code"><div class="code-cap">Page when the TTFT budget burns fast (99% SLO, 1-hour and 5-minute windows)</div><div class="code-head"><span>yaml</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>groups:
+  - name: inference-slo
+    rules:
+      - alert: ChatTTFTBudgetFastBurn
+        expr: |
+          (1 - model:ttft_good:ratio_rate1h{model_name="chat"}) &gt; (14.4 * 0.01)
+          and
+          (1 - model:ttft_good:ratio_rate5m{model_name="chat"}) &gt; (14.4 * 0.01)
+        labels:
+          severity: page
+        annotations:
+          summary: "chat TTFT error budget burning 14x too fast"</code></pre></div>
+    <div class="callout callout-tip"><strong>Tip</strong><p>Pair every SLO alert with a runbook link that starts with the four diagnostic panels: TTFT and ITL percentiles, waiting versus running requests, KV-cache usage, and throughput. They distinguish queueing, prefill, decode and memory problems in a minute.</p></div></section>
+  <section id="the-observability-stack"><h2>The observability stack</h2>
+    <ul><li><strong>Engine metrics</strong> (<code>vllm:*</code> or equivalents): queue, running, cache usage, TTFT, inter-token latency, tokens, preemptions.</li><li><strong>GPU metrics</strong> from DCGM: memory used, Tensor Core and memory activity, power, NVLink throughput and error counters.</li><li><strong>Gateway metrics</strong>: request rate, status codes, rejections (429s), per-tenant token usage, upstream latency.</li><li><strong>Traces</strong> with OpenTelemetry: one span per request with child spans for retrieval, tool calls and model calls, using GenAI semantic-convention attributes such as <code>gen_ai.request.model</code> and <code>gen_ai.usage.input_tokens</code> and <code>gen_ai.usage.output_tokens</code>.</li><li><strong>Logs</strong>: request IDs, model, token counts, latency and finish reason; not raw prompts and outputs unless policy allows, and then redacted and access-controlled.</li></ul>
+    <p>Put cost on the same dashboard: tokens per second times your cost per million tokens gives spend in near real time, and per-tenant token counters make chargeback and abuse detection possible. The Grafana lesson in the open-source track walks through building exactly this dashboard.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>SLOs and alerts for your own endpoint</h2>
+    <ol><li>Scrape a running vLLM server with Prometheus (and dcgm-exporter if you have it).</li><li>Write recording rules for the TTFT-good ratio over 5 minutes and 1 hour using the le="0.5" bucket.</li><li>Add the fast-burn alert from this lesson and test it with <code>promtool test rules</code> by feeding a synthetic burst of slow requests.</li><li>Build a Grafana row with p95 TTFT, p99 inter-token latency, waiting versus running, and KV-cache usage.</li><li>Overload the server deliberately and confirm the alert fires and the panels tell you why.</li><li>Write a one-page runbook: what each panel means and the first action for each failure pattern.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Inference SLOs and observability — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>SLIs should match what users feel: TTFT, smooth streaming, availability, quality.</li><li>Choose thresholds on real histogram bucket boundaries.</li><li>Measure SLOs at the gateway; explain breaches with engine metrics.</li><li>Alert on error-budget burn rate over two windows, not single spikes.</li><li>Combine engine, GPU, gateway metrics with GenAI-attributed traces.</li><li>Never log raw prompts by default; log IDs, counts and timings.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>PromQL</h3><table><tbody><tr><td><code>rate(X_bucket{le="0.5"}[5m]) / rate(X_count[5m])</code></td><td>Share of events under a threshold</td></tr><tr><td><code>histogram_quantile(0.95, sum by (le) (rate(X_bucket[5m])))</code></td><td>Percentile from a histogram</td></tr><tr><td><code>sum(rate(vllm:generation_tokens_total[5m]))</code></td><td>Output tokens per second</td></tr><tr><td><code>sum by (code) (rate(gateway_requests_total[5m]))</code></td><td>Status-code mix at the gateway (name varies)</td></tr></tbody></table></div><div class="cheat-group"><h3>SLO arithmetic</h3><table><tbody><tr><td><code>error budget = 1 - SLO</code></td><td>99% SLO -&gt; 1% budget</td></tr><tr><td><code>burn rate = observed bad ratio / budget</code></td><td>1 = exactly on budget</td></tr><tr><td><code>14.4x for 1h ~ 2% of a 30-day budget</code></td><td>Fast-burn page threshold</td></tr><tr><td><code>6x for 6h ~ 5% of a 30-day budget</code></td><td>Second page or ticket tier</td></tr></tbody></table></div><div class="cheat-group"><h3>GenAI trace attributes</h3><table><tbody><tr><td><code>gen_ai.request.model</code></td><td>Model requested</td></tr><tr><td><code>gen_ai.usage.input_tokens / output_tokens</code></td><td>Token counts per call</td></tr><tr><td><code>gen_ai.response.finish_reasons</code></td><td>Why generation stopped</td></tr></tbody></table></div><div class="cheat-group"><h3>Dashboard rows</h3><table><tbody><tr><td><code>SLO status + budget remaining</code></td><td>Top row</td></tr><tr><td><code>TTFT / ITL percentiles</code></td><td>User experience</td></tr><tr><td><code>waiting vs running, KV usage</code></td><td>Saturation</td></tr><tr><td><code>tokens/s, cost/hour, GPU memory</code></td><td>Throughput and spend</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>SLO thresholds between histogram buckets, giving misleading ratios.</li><li>Paging on single bad minutes instead of burn rate.</li><li>Only engine metrics, missing requests rejected before the engine.</li><li>Logging full prompts and outputs into a shared log system.</li><li>Dashboards with dozens of panels and no clear top row.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "Your SLO is 99% of requests with TTFT under 0.5 s. What is the error budget?", "options": ["1% of requests may exceed 0.5 s", "0.5 s of total downtime per month", "99% of requests may be slow", "1% of GPU time may be idle"], "answer": 0, "explain": "The error budget is 1 minus the SLO: 1% of requests are allowed to miss the 0.5 s threshold over the window."}, {"q": "Why choose 0.5 s rather than 0.45 s as the TTFT threshold for an SLI computed from vLLM's default histogram?", "options": ["0.5 s is a bucket boundary, so the good-event ratio is exact", "0.45 s cannot be represented in PromQL", "Lower thresholds always cause false alerts", "vLLM rounds all latencies to whole seconds"], "answer": 0, "explain": "Histogram ratios count observations in buckets. A threshold on a bucket boundary (le=\"0.5\") gives an exact ratio; one between boundaries forces interpolation."}, {"q": "Over the last hour, 3% of requests missed the TTFT target under a 99% SLO. What is the burn rate?", "options": ["3", "0.03", "33", "97"], "answer": 0, "explain": "Burn rate is the observed bad ratio divided by the budget: 0.03 / 0.01 = 3, meaning the budget is being spent three times faster than sustainable."}, {"q": "The engine's TTFT SLI looks perfect but customers report failures. What is a likely gap?", "options": ["Requests rejected or timed out at the gateway never reach engine metrics", "The engine histograms count each request twice", "DCGM metrics override engine metrics", "Prometheus cannot compute ratios of histograms"], "answer": 0, "explain": "Engine metrics only see admitted requests. 429s, gateway timeouts and network failures must come from gateway or client-side measurements."}, {"q": "Which logging practice is appropriate for an LLM service by default?", "options": ["Log request ID, model, token counts, latency and finish reason", "Log full prompts and outputs for every request", "Log nothing to protect privacy", "Log only GPU temperatures"], "answer": 0, "explain": "Metadata supports debugging, billing and SLOs without exposing user content; raw prompts need explicit policy, redaction and access control."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="inf-scaling-cost.html"><span>← Previous</span><strong>Autoscaling, queues, cold starts and cost per token</strong></a>
+    <a class="pager-up" href="../education.html#inference">All Inference modules</a>
+    <a class="pager-link pager-next" href="inf-ai-gateways.html"><span>Next →</span><strong>AI gateways</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=inf-slos-observability&amp;page=/education/inf-slos-observability.html&amp;title=Inference%20SLOs%20and%20observability">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=inf-slos-observability&amp;page=/education/inf-slos-observability.html&amp;title=Inference%20SLOs%20and%20observability">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

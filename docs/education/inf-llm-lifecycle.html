@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>The life of an inference request — Inference | ThavionAI Education</title>
+  <meta name="description" content="Tokens, weights and the request lifecycle; prefill versus decode and their very different compute patterns." />
+  <meta property="og:title" content="The life of an inference request — ThavionAI Education" />
+  <meta property="og:description" content="Tokens, weights and the request lifecycle; prefill versus decode and their very different compute patterns." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/inf-llm-lifecycle.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-inference" data-module="inf-llm-lifecycle">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=inf-llm-lifecycle&amp;page=/education/inf-llm-lifecycle.html&amp;title=The%20life%20of%20an%20inference%20request">Feedback</a>
+    <a href="../education.html#inference" class="nav-cta">All Inference modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#inference">Inference</a> › Stage 2: LLM inference fundamentals</div>
+    <h1>The life of an inference request</h1>
+    <p class="lede">Tokens, weights and the request lifecycle; prefill versus decode and their very different compute patterns.</p>
+    <div class="meta">
+      <span class="chip">Beginner</span>
+      <span class="chip">~30 min read</span>
+      <span class="chip">Module 3 of 15</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">To operate an inference service you need a precise picture of what happens between a request arriving and the last token streaming out. This lesson follows one request through tokenization, queueing, prefill, the decode loop and streaming, explains what model weights are and where they sit, and shows why prefill and decode stress the hardware in opposite ways. Almost every later topic, from batching to disaggregation, is built on that difference.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Explain tokens and why every cost, limit and speed is measured in them</li><li>Trace a request through tokenize, queue, prefill, decode, stream and stop</li><li>Contrast prefill (compute-bound) with decode (memory-bound)</li><li>Relate prompt length and output length to latency and cost</li><li>Name the sampling and stop parameters that change how long a request runs</li></ul>
+    </div>
+    <section id="tokens-and-weights"><h2>Tokens and weights</h2>
+    <p>Models do not read characters or words; they read <strong>tokens</strong>, chunks of text from a fixed vocabulary learned by a <strong>tokenizer</strong>. Common words are often one token, rarer words split into several, and code, other languages and numbers can take many more. As a loose rule of thumb, English prose averages around three-quarters of a word per token, but it varies by tokenizer, so always count with the model's own tokenizer.</p>
+    <p>Everything in inference is measured in tokens: the <strong>context window</strong> (maximum prompt plus output), prices, rate limits, throughput (tokens per second) and memory (KV cache per token). A request has <strong>input tokens</strong> (the prompt, including system prompt, history, retrieved documents and tool results) and <strong>output tokens</strong> (what the model generates).</p>
+    <p>The <strong>weights</strong> are the model's learned parameters: large matrices for every layer. A model with 8 billion parameters in BF16 is about 16 GB of numbers that must sit in GPU memory and be read for every forward pass. Weights are fixed during inference; what changes per request is the token sequence and the per-request KV cache built from it.</p></section>
+  <section id="the-request-lifecycle"><h2>The request lifecycle</h2>
+    <ol><li><strong>Receive and tokenize.</strong> The server applies the model's chat template to the messages and converts the text to token IDs on the CPU.</li><li><strong>Queue.</strong> The scheduler admits the request when there is room: KV-cache memory and a slot in the running batch. Time spent here is pure waiting.</li><li><strong>Prefill.</strong> The model processes all prompt tokens in one forward pass, builds the KV cache for them, and produces the first output token.</li><li><strong>Decode loop.</strong> One forward pass per new token: read the weights, attend over the KV cache, pick the next token, append its keys and values to the cache.</li><li><strong>Stream.</strong> Each new token is detokenized and sent to the client as it is produced.</li><li><strong>Stop.</strong> The loop ends at an end-of-sequence token, a stop string, or the max-tokens limit; the KV cache is freed.</li></ol>
+    <figure class="diagram" id="fig-request-lifecycle"><div class="diagram-scroll"><svg viewBox="0 0 740 248" role="img" aria-label="A client sends a request. The server tokenizes it on the CPU and places it in a waiting queue. The scheduler admits it when KV-cache space is free. Prefill processes the whole prompt in one pass, writes the KV cache and produces the first token. The decode loop then produces one token per step, reading and appending to the KV cache, and streams each token back to the client until a stop condition." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="request-lifecycle-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="request-lifecycle-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="request-lifecycle-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="request-lifecycle-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="request-lifecycle-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><polyline points="171.0,70.0 201.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#request-lifecycle-arrow-default)"/><rect x="159.7" y="24.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">request</text><polyline points="341.0,70.0 371.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#request-lifecycle-arrow-default)"/><rect x="335.8" y="24.0" width="40.5" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">admit</text><polyline points="511.0,70.0 541.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#request-lifecycle-arrow-default)"/><rect x="487.4" y="24.0" width="77.1" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">first token</text><polyline points="441.0,98.0 441.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#request-lifecycle-arrow-default)"/><rect x="444.0" y="116.0" width="40.5" height="16" rx="4" class="dg-label-bg"/><text x="448.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">write</text><polyline points="611.0,98.0 611.0,178.0 511.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#request-lifecycle-arrow-default)"/><rect x="519.4" y="159.0" width="83.2" height="16" rx="4" class="dg-label-bg"/><text x="561.0" y="167.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">read, append</text><polyline points="611.0,42.0 611.0,20.0 101.0,20.0 101.0,42.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#request-lifecycle-arrow-default)"/><rect x="311.4" y="1.0" width="89.3" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="9.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">stream tokens</text><rect x="31" y="42.0" width="140" height="56" rx="28.0" class="dg-node dg-actor"/><text x="101.0" y="70.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Client</text><rect x="201" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Tokenize + queue</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">waiting</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Prefill</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">compute-bound</text><rect x="541" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Decode loop</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">memory-bound</text><path d="M371,157.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M371,157.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">KV cache</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">grows per token</text></svg></div><figcaption>One request's journey: queue wait and the compute-bound prefill make up time to first token; the memory-bound decode loop sets streaming speed.</figcaption></figure>
+    <div class="code"><div class="code-cap">The decode loop in pseudocode</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>tokens = tokenize(apply_chat_template(messages))
+kv_cache, logits = model.prefill(tokens)          # one pass over the whole prompt
+output = []
+while len(output) &lt; max_tokens:
+    next_id = sample(logits, temperature=0.7, top_p=0.9)
+    if next_id == EOS or hits_stop_string(output, next_id):
+        break
+    output.append(next_id)
+    stream(detokenize(next_id))
+    logits = model.decode_step(next_id, kv_cache)  # one pass per new token</code></pre></div></section>
+  <section id="prefill-versus-decode"><h2>Prefill versus decode</h2>
+    <p><strong>Prefill</strong> handles hundreds or thousands of prompt tokens at once. Each weight read from memory is used for every prompt token, so the work is large matrix-matrix multiplication and the GPU's Tensor Cores are the limit: prefill is <strong>compute-bound</strong>. Its duration grows with prompt length, and it decides the <strong>time to first token</strong>.</p>
+    <p><strong>Decode</strong> produces one token per request per step. Each step reads every weight but does very little arithmetic with it, so the GPU waits on memory: decode is <strong>memory-bandwidth-bound</strong>. Its duration grows with output length, and it decides the gap between streamed tokens. Batching many requests' decode steps together is what turns this wasteful pattern into efficient throughput.</p>
+    <div class="table-wrap"><table><thead><tr><th></th><th>Prefill</th><th>Decode</th></tr></thead><tbody><tr><td>Tokens per pass</td><td>Whole prompt</td><td>One per request</td></tr><tr><td>Bottleneck</td><td>Compute (Tensor Cores)</td><td>Memory bandwidth</td></tr><tr><td>Scales with</td><td>Input length</td><td>Output length</td></tr><tr><td>User feels it as</td><td>Time to first token</td><td>Streaming speed</td></tr><tr><td>Helped by</td><td>More compute, prefix caching</td><td>Batching, faster memory, smaller weights</td></tr></tbody></table></div>
+    <div class="callout callout-tip"><strong>Tip</strong><p>A RAG app with 6,000-token prompts and 200-token answers is prefill-heavy; a writing assistant with short prompts and 2,000-token answers is decode-heavy. Profile your real input and output length distribution before tuning anything.</p></div></section>
+  <section id="parameters-that-change-the-work"><h2>Parameters that change the work</h2>
+    <ul><li><strong>max_tokens</strong> caps output length and therefore worst-case decode time and KV-cache use. Always set it.</li><li><strong>Stop sequences</strong> end generation early when a delimiter appears, saving tokens.</li><li><strong>temperature</strong> and <strong>top_p</strong> change which token is sampled, not the cost per token; but they can change how long answers run.</li><li><strong>n</strong> (several completions per prompt) shares one prefill but multiplies decode work.</li><li><strong>Structured output</strong> constrains tokens to a schema; engines implement it efficiently, but it adds per-step overhead.</li><li><strong>Long system prompts</strong> are paid in prefill on every request unless the engine caches the shared prefix.</li></ul></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Watch prefill and decode separately</h2>
+    <ol><li>Count tokens for a short prompt, a 2,000-word document and a block of code with the tokenizer of any open model (for example via the transformers library) and note tokens per word.</li><li>Start any OpenAI-compatible engine (vLLM is fine) with a small model.</li><li>Send a request with a 50-token prompt and <code>max_tokens</code> 500 using streaming, and record the time to the first token and the total time.</li><li>Repeat with a 4,000-token prompt and <code>max_tokens</code> 50. Which phase dominated each request?</li><li>Compute time per output token for each run as (total time minus time to first token) divided by output tokens minus one.</li><li>Write down which of your real workloads look like the first run and which like the second.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>The life of an inference request — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Everything is counted in tokens: context, cost, throughput, memory.</li><li>Lifecycle: tokenize, queue, prefill, decode loop, stream, stop.</li><li>Prefill is compute-bound and sets time to first token.</li><li>Decode is memory-bound and sets streaming speed.</li><li>Input length drives prefill cost; output length drives decode cost.</li><li>Always set max_tokens.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Formulas</h3><table><tbody><tr><td><code>latency ~ queue + prefill(input) + (output - 1) x TPOT</code></td><td>End-to-end request time</td></tr><tr><td><code>TTFT ~ queue + prefill</code></td><td>Time until the first token</td></tr><tr><td><code>prefill FLOPs ~ 2 x params x input_tokens</code></td><td>Compute for the prompt, ignoring attention</td></tr><tr><td><code>decode bytes per step ~ weights + KV read</code></td><td>Why decode is bandwidth-bound</td></tr></tbody></table></div><div class="cheat-group"><h3>Request parameters</h3><table><tbody><tr><td><code>max_tokens</code></td><td>Cap output length and worst-case cost</td></tr><tr><td><code>stop: ["###"]</code></td><td>End generation on a delimiter</td></tr><tr><td><code>temperature / top_p</code></td><td>Sampling randomness, not cost per token</td></tr><tr><td><code>n</code></td><td>Several completions: one prefill, n decodes</td></tr><tr><td><code>stream: true</code></td><td>Send tokens as they are generated</td></tr></tbody></table></div><div class="cheat-group"><h3>Vocabulary</h3><table><tbody><tr><td><code>Token</code></td><td>Unit of text from the tokenizer's vocabulary</td></tr><tr><td><code>Context window</code></td><td>Maximum input plus output tokens</td></tr><tr><td><code>Chat template</code></td><td>How messages are formatted into one token sequence</td></tr><tr><td><code>EOS</code></td><td>End-of-sequence token that stops generation</td></tr><tr><td><code>Input / output tokens</code></td><td>Prompt tokens vs generated tokens; priced and timed differently</td></tr><tr><td><code>Logits</code></td><td>Scores over the vocabulary from which the next token is sampled</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Estimating tokens from word counts for code or non-English text.</li><li>No max_tokens, so one runaway request holds cache and capacity.</li><li>Tuning for decode speed when the workload is dominated by long prompts.</li><li>Re-sending huge, unchanging system prompts without prefix caching.</li><li>Reporting only total latency, hiding whether prefill or decode is the problem.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "Users of a document Q&A app with 8,000-token prompts complain about waiting before any text appears. Which phase do you optimise?", "options": ["Prefill, because the long prompt sets time to first token", "Decode, because answers stream too slowly", "Detokenization, because it runs on the CPU", "Sampling, because temperature is too high"], "answer": 0, "explain": "Time to first token is queue plus prefill, and prefill grows with prompt length. Streaming speed after the first token is a decode matter."}, {"q": "Why is decode memory-bandwidth-bound while prefill is compute-bound?", "options": ["Decode reuses each weight for one token per request; prefill reuses it for every prompt token", "Decode runs on CPU cores while prefill runs on Tensor Cores", "Decode reads the prompt from disk while prefill reads from cache", "Decode uses higher precision weights than prefill"], "answer": 0, "explain": "Both read all weights per pass. Prefill does arithmetic for many tokens per weight read; decode does it for one token per request, so it waits on memory."}, {"q": "A request asks for n=4 completions of the same prompt. How does the work change compared with n=1?", "options": ["Prefill happens once, decode work roughly quadruples", "Both prefill and decode roughly quadruple", "Neither changes because outputs are cached", "Prefill quadruples, decode stays the same"], "answer": 0, "explain": "All four completions share the prompt, so its KV cache can be computed once; each completion then decodes its own tokens."}, {"q": "A request had TTFT of 0.4 s, total time 4.4 s and produced 201 tokens. What was the time per output token?", "options": ["About 20 ms", "About 22 ms", "About 2 ms", "About 200 ms"], "answer": 0, "explain": "Decode time is 4.4 minus 0.4 = 4.0 s for the 200 tokens after the first, so 4.0 / 200 = 0.02 s, or 20 ms per token."}, {"q": "Which request parameter most directly bounds a request's worst-case decode time and KV-cache use?", "options": ["max_tokens", "temperature", "top_p", "stream"], "answer": 0, "explain": "max_tokens caps how many decode steps can run and therefore how large the request's KV cache can grow; sampling settings do not cap length."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="inf-gpu-servers.html"><span>← Previous</span><strong>GPU servers in practice</strong></a>
+    <a class="pager-up" href="../education.html#inference">All Inference modules</a>
+    <a class="pager-link pager-next" href="inf-kv-cache.html"><span>Next →</span><strong>The KV cache</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=inf-llm-lifecycle&amp;page=/education/inf-llm-lifecycle.html&amp;title=The%20life%20of%20an%20inference%20request">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=inf-llm-lifecycle&amp;page=/education/inf-llm-lifecycle.html&amp;title=The%20life%20of%20an%20inference%20request">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

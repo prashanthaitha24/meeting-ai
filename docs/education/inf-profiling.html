@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Compute-bound, memory-bound, and profiling — Inference | ThavionAI Education</title>
+  <meta name="description" content="Arithmetic intensity and the roofline, then measuring for real with nvidia-smi, DCGM and Nsight." />
+  <meta property="og:title" content="Compute-bound, memory-bound, and profiling — ThavionAI Education" />
+  <meta property="og:description" content="Arithmetic intensity and the roofline, then measuring for real with nvidia-smi, DCGM and Nsight." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/inf-profiling.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-inference" data-module="inf-profiling">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=inf-profiling&amp;page=/education/inf-profiling.html&amp;title=Compute-bound%2C%20memory-bound%2C%20and%20profiling">Feedback</a>
+    <a href="../education.html#inference" class="nav-cta">All Inference modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#inference">Inference</a> › Stage 3: Analysing inference performance</div>
+    <h1>Compute-bound, memory-bound, and profiling</h1>
+    <p class="lede">Arithmetic intensity and the roofline, then measuring for real with nvidia-smi, DCGM and Nsight.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">~35 min read</span>
+      <span class="chip">Module 6 of 15</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">Metrics tell you a service is slow; profiling tells you why. This lesson gives you the one model that explains most GPU performance questions, the roofline, and uses it to show exactly why decode is memory-bound and prefill is compute-bound, and when batching flips decode from one to the other. Then it covers the measuring tools in order of depth: nvidia-smi for a glance, DCGM metrics for fleets, Nsight Systems for timelines, and Nsight Compute for individual kernels.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Compute arithmetic intensity and the ridge point of a GPU</li><li>Use the roofline to classify a workload as compute-bound or memory-bound</li><li>Predict how batch size changes decode from memory-bound toward compute-bound</li><li>Choose between nvidia-smi, DCGM, Nsight Systems and Nsight Compute for a question</li><li>Read GPU timeline gaps that point to CPU, synchronisation or communication stalls</li></ul>
+    </div>
+    <section id="arithmetic-intensity-and-the-roofline"><h2>Arithmetic intensity and the roofline</h2>
+    <p>Every piece of GPU work does some floating-point operations (FLOPs) and moves some bytes to and from memory. Its <strong>arithmetic intensity</strong> is FLOPs per byte moved. A GPU has a peak compute rate (FLOP/s) and a peak memory bandwidth (bytes/s); their ratio is the <strong>ridge point</strong>. Work with intensity below the ridge cannot use all the compute because memory cannot feed it fast enough: it is <strong>memory-bound</strong>. Work above the ridge is <strong>compute-bound</strong>.</p>
+    <div class="code"><div class="code-cap">The roofline in numbers (an example GPU, not a specific product)</div><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>peak compute   = 1,000 TFLOP/s  (dense FP16 Tensor Core)
+peak bandwidth = 3.3 TB/s
+ridge point    = 1,000e12 / 3.3e12 ~ 300 FLOPs per byte
+
+attainable FLOP/s = min(peak compute, intensity x peak bandwidth)</code></pre></div>
+    <p>Plot attainable performance against intensity on log axes and you get a slanted line (bandwidth-limited) meeting a flat roof (compute-limited) at the ridge. Every optimisation either raises a kernel's intensity, moving it right toward the roof, or makes it run closer to the line it is already under.</p></section>
+  <section id="placing-prefill-and-decode-on-the-roofline"><h2>Placing prefill and decode on the roofline</h2>
+    <p>A forward pass costs about 2 FLOPs per parameter per token. In FP16 each parameter is 2 bytes. During <strong>decode at batch size B</strong>, the weights are read once and used for B tokens, so intensity is roughly 2B FLOPs over 2 bytes, about <strong>B FLOPs per byte</strong>. At batch 1 that is about 1, far below a ridge of around 300: the GPU uses well under 1% of its compute. At batch 64 it is about 64: much better, still memory-bound. Reading the KV cache adds bytes without many FLOPs, so long contexts push decode further toward the memory side.</p>
+    <p><strong>Prefill</strong> of a 2,000-token prompt uses each weight for 2,000 tokens, an intensity in the thousands, well past the ridge: compute-bound. That is the roofline explanation of everything in the lifecycle lesson, and it predicts what helps: for decode, bigger batches, fewer bytes per weight (quantization) and faster memory; for prefill, more Tensor Core throughput and less redundant work (prefix caching).</p>
+    <div class="callout callout-note"><strong>Note</strong><p>Quantizing weights to FP8 halves the bytes per parameter, which both halves memory traffic and doubles intensity. That is why it speeds up memory-bound decode almost proportionally, even before faster FP8 Tensor Core maths is counted.</p></div></section>
+  <section id="measuring-from-a-glance-to-a-kernel"><h2>Measuring: from a glance to a kernel</h2>
+    <div class="table-wrap"><table><thead><tr><th>Tool</th><th>Answers</th><th>Cost</th></tr></thead><tbody><tr><td>nvidia-smi</td><td>Is the GPU busy at all? Memory used? Throttling?</td><td>Free, instant</td></tr><tr><td>DCGM + dcgm-exporter</td><td>Per-GPU utilisation, Tensor Core and memory activity over time, across a fleet</td><td>Always on, Prometheus</td></tr><tr><td>Nsight Systems (nsys)</td><td>Timeline: where time goes across CPU threads, CUDA kernels, memory copies, NCCL</td><td>Minutes, per run</td></tr><tr><td>Nsight Compute (ncu)</td><td>Why one kernel is slow: achieved bandwidth and FLOPs versus peak</td><td>Slow, per kernel</td></tr></tbody></table></div>
+    <p>DCGM's profiling metrics are the useful upgrade over nvidia-smi's coarse utilisation: <code>DCGM_FI_PROF_PIPE_TENSOR_ACTIVE</code> shows how busy the Tensor Cores really are, and <code>DCGM_FI_PROF_DRAM_ACTIVE</code> shows how busy the memory interface is. A decode-heavy server typically shows DRAM activity high and Tensor activity low, the memory-bound signature in production. Some fields, such as SM activity, are commented out in the exporter's default counter list and must be enabled.</p>
+    <div class="code"><div class="code-cap">Profile a short benchmark with Nsight Systems, then one kernel with Nsight Compute</div><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># timeline of CPU threads, CUDA kernels, memory copies and NCCL calls
+nsys profile -o decode_run --trace=cuda,nvtx,osrt python bench.py
+nsys stats decode_run.nsys-rep
+
+# detailed counters for the first 5 matmul-like kernels
+ncu --kernel-name regex:gemm --launch-count 5 --set full -o gemm python bench.py</code></pre></div></section>
+  <section id="reading-a-timeline"><h2>Reading a timeline</h2>
+    <ul><li><strong>Gaps between kernels</strong> on the GPU row with CPU activity at the same moment: the CPU is too slow to launch work (scheduling, tokenization, Python overhead). Engines use CUDA graphs to cut launch overhead for exactly this reason.</li><li><strong>Long memory copies</strong> between host and device in the steady state: something is being moved over PCIe each step that should stay on the GPU.</li><li><strong>NCCL kernels taking a large share</strong> of each step in a multi-GPU run: communication is the bottleneck, covered in the parallelism stage.</li><li><strong>One kernel dominating</strong>: profile it with Nsight Compute and compare achieved memory bandwidth with the GPU's peak. Near peak means it is already as fast as the hardware allows at that intensity.</li></ul>
+    <div class="callout callout-tip"><strong>Tip</strong><p>Profile short, representative runs. A few seconds of steady-state decode at your real batch size tells you more than an hour of traces, and Nsight output for long runs gets unwieldy fast.</p></div></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Find the roofline in your own benchmark</h2>
+    <ol><li>Look up your GPU's dense FP16 Tensor Core TFLOPS and memory bandwidth and compute its ridge point.</li><li>Compute the decode arithmetic intensity at batch 1, 8, 32 and 128 using the B FLOPs per byte rule, and mark which side of the ridge each falls on.</li><li>Run a decode benchmark at those batch sizes (vLLM's offline LLM class or <code>vllm bench serve</code> at matching concurrency) and record tokens per second.</li><li>Plot tokens per second against batch size; note where gains start to flatten.</li><li>Run <code>nsys profile</code> on a few seconds of steady-state decode and look for gaps between kernels and the share of time in matmul kernels.</li><li>If dcgm-exporter is available, watch DRAM_ACTIVE and PIPE_TENSOR_ACTIVE during the run and relate them to your roofline prediction.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Compute-bound, memory-bound, and profiling — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Intensity = FLOPs / bytes; ridge = peak FLOP/s / peak bytes/s.</li><li>Below the ridge: memory-bound. Above: compute-bound.</li><li>Decode intensity is about the batch size; prefill intensity is about the prompt length.</li><li>Quantization halves bytes and doubles intensity: big win for decode.</li><li>nvidia-smi for a glance, DCGM for fleets, nsys for timelines, ncu for kernels.</li><li>Timeline gaps usually mean the CPU or synchronisation, not the GPU.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Formulas</h3><table><tbody><tr><td><code>intensity = FLOPs / bytes_moved</code></td><td>Arithmetic intensity</td></tr><tr><td><code>ridge = peak_FLOPs / peak_bandwidth</code></td><td>Where memory-bound becomes compute-bound</td></tr><tr><td><code>attainable = min(peak_FLOPs, intensity x bandwidth)</code></td><td>The roofline</td></tr><tr><td><code>decode intensity ~ B (FP16)</code></td><td>About batch size FLOPs per byte</td></tr><tr><td><code>prefill intensity ~ prompt tokens</code></td><td>Large, so compute-bound</td></tr></tbody></table></div><div class="cheat-group"><h3>Nsight</h3><table><tbody><tr><td><code>nsys profile -o NAME --trace=cuda,nvtx,osrt CMD</code></td><td>Capture a timeline</td></tr><tr><td><code>nsys stats NAME.nsys-rep</code></td><td>Summaries of kernels, copies, API calls</td></tr><tr><td><code>ncu --set full --launch-count N -o NAME CMD</code></td><td>Detailed per-kernel counters</td></tr><tr><td><code>ncu --kernel-name regex:PATTERN</code></td><td>Profile only matching kernels</td></tr><tr><td><code>nvidia-smi dmon -s pucm</code></td><td>Quick rolling power, utilisation, clocks, memory</td></tr></tbody></table></div><div class="cheat-group"><h3>DCGM metrics</h3><table><tbody><tr><td><code>DCGM_FI_PROF_PIPE_TENSOR_ACTIVE</code></td><td>Share of cycles Tensor Cores are busy</td></tr><tr><td><code>DCGM_FI_PROF_DRAM_ACTIVE</code></td><td>Share of cycles memory interface is busy</td></tr><tr><td><code>DCGM_FI_DEV_FB_USED</code></td><td>VRAM used (MiB)</td></tr><tr><td><code>DCGM_FI_DEV_GPU_UTIL</code></td><td>Coarse utilisation, like nvidia-smi</td></tr><tr><td><code>DCGM_FI_DEV_NVLINK_BANDWIDTH_TOTAL</code></td><td>NVLink throughput</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Judging efficiency from nvidia-smi utilisation alone.</li><li>Expecting more TFLOPS to speed up batch-1 decode.</li><li>Profiling cold-start or warm-up instead of steady state.</li><li>Hour-long Nsight captures nobody can open, instead of short representative runs.</li><li>Ignoring KV-cache reads, which make long-context decode even more memory-bound.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "A GPU offers 800 TFLOP/s and 2 TB/s of bandwidth. What is its ridge point?", "options": ["400 FLOPs per byte", "1,600 FLOPs per byte", "40 FLOPs per byte", "2.5 FLOPs per byte"], "answer": 0, "explain": "Ridge point = peak compute / peak bandwidth = 800e12 / 2e12 = 400 FLOPs per byte."}, {"q": "On that GPU, FP16 decode runs at batch size 16. Which regime is it in?", "options": ["Memory-bound: intensity of about 16 is far below the ridge", "Compute-bound: Tensor Cores limit it", "Balanced exactly at the ridge", "Network-bound, because decode crosses nodes"], "answer": 0, "explain": "FP16 decode intensity is roughly the batch size, about 16 FLOPs per byte, far below a ridge of 400, so memory bandwidth limits it."}, {"q": "Why does FP8 weight quantization speed up decode almost proportionally?", "options": ["It halves the bytes read per token in a memory-bound workload", "It doubles the number of Tensor Cores on the GPU", "It removes the need for a KV cache", "It moves decode onto the CPU"], "answer": 0, "explain": "Decode is limited by bytes moved. Halving bytes per weight halves the traffic, so steps finish roughly twice as fast if memory was the limit."}, {"q": "An Nsight Systems timeline shows frequent idle gaps on the GPU row while one CPU thread is fully busy. What does that suggest?", "options": ["The CPU cannot launch work fast enough and the GPU starves", "The GPU is compute-bound on matmul kernels", "NCCL communication dominates each step", "The KV cache is full"], "answer": 0, "explain": "Idle GPU time aligned with a busy CPU thread means kernels are not being issued quickly enough, a CPU or launch-overhead bottleneck."}, {"q": "Which tool would you use to find out why one specific matmul kernel achieves low memory bandwidth?", "options": ["Nsight Compute", "nvidia-smi", "dcgm-exporter", "nvidia-smi topo -m"], "answer": 0, "explain": "Nsight Compute collects detailed counters for individual kernels, including achieved bandwidth and compute versus peak; the others give whole-GPU or topology views."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="inf-metrics.html"><span>← Previous</span><strong>Latency and throughput metrics</strong></a>
+    <a class="pager-up" href="../education.html#inference">All Inference modules</a>
+    <a class="pager-link pager-next" href="inf-serving-engines.html"><span>Next →</span><strong>Serving engines: vLLM, SGLang, TensorRT-LLM</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=inf-profiling&amp;page=/education/inf-profiling.html&amp;title=Compute-bound%2C%20memory-bound%2C%20and%20profiling">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=inf-profiling&amp;page=/education/inf-profiling.html&amp;title=Compute-bound%2C%20memory-bound%2C%20and%20profiling">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

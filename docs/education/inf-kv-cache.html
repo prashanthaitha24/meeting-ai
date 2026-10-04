@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>The KV cache — Inference | ThavionAI Education</title>
+  <meta name="description" content="How the cache grows with context and concurrency, how to size it, and the tricks that shrink it." />
+  <meta property="og:title" content="The KV cache — ThavionAI Education" />
+  <meta property="og:description" content="How the cache grows with context and concurrency, how to size it, and the tricks that shrink it." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/inf-kv-cache.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-inference" data-module="inf-kv-cache">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=inf-kv-cache&amp;page=/education/inf-kv-cache.html&amp;title=The%20KV%20cache">Feedback</a>
+    <a href="../education.html#inference" class="nav-cta">All Inference modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#inference">Inference</a> › Stage 2: LLM inference fundamentals</div>
+    <h1>The KV cache</h1>
+    <p class="lede">How the cache grows with context and concurrency, how to size it, and the tricks that shrink it.</p>
+    <div class="meta">
+      <span class="chip">Beginner</span>
+      <span class="chip">~30 min read</span>
+      <span class="chip">Module 4 of 15</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">If you remember one thing from this track, make it this: in LLM serving, GPU memory after the weights is KV cache, and KV cache is concurrency. This lesson explains what the cache stores, gives you the formula to size it, works through how many requests a GPU can hold at different context lengths, and covers the techniques engines and model designers use to shrink it: grouped-query attention, paging, prefix sharing, quantization and offloading.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Explain what the KV cache stores and why decoding needs it</li><li>Compute KV-cache bytes per token from a model's architecture</li><li>Estimate how many concurrent requests fit at a given context length</li><li>Explain how GQA, paging, prefix caching, FP8 cache and offload reduce memory pressure</li><li>Recognise the symptoms of a full cache in a running service</li></ul>
+    </div>
+    <section id="what-the-cache-holds"><h2>What the cache holds</h2>
+    <p>In every attention layer, each token produces a <strong>key</strong> and a <strong>value</strong> vector. To generate the next token, the model compares the new token's query with the keys of all previous tokens and mixes their values. Recomputing those keys and values for the whole history at every step would make generation quadratically slower, so the server stores them: that store is the <strong>KV cache</strong>. Prefill writes it for the prompt; each decode step reads all of it and appends one more token's worth.</p>
+    <p>The cache is per request and lives as long as the request. It grows linearly with the number of tokens so far, and it is read in full on every decode step, so a long context costs both memory and bandwidth.</p></section>
+  <section id="sizing-the-cache"><h2>Sizing the cache</h2>
+    <div class="code"><div class="code-cap">The formula and a worked example (illustrative architecture)</div><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>KV bytes per token = 2 x layers x kv_heads x head_dim x bytes_per_value
+
+32 layers, 8 KV heads, head_dim 128, FP16 (2 bytes):
+  2 x 32 x 8 x 128 x 2 = 131,072 bytes = 128 KiB per token
+
+Same model with 32 KV heads (no GQA): 512 KiB per token</code></pre></div>
+    <p>Now fit it on a GPU. Take an 80 GB card, let the engine use 90% of it (72 GB), and subtract 16 GB of FP16 weights: about 56 GB is left for cache. At 128 KiB per token that is roughly 427,000 tokens of cache in total, shared by every active request.</p>
+    <div class="table-wrap"><table><thead><tr><th>Average tokens per request</th><th>Concurrent requests that fit</th><th>With FP8 KV cache</th></tr></thead><tbody><tr><td>4,000</td><td>about 106</td><td>about 213</td></tr><tr><td>32,000</td><td>about 13</td><td>about 26</td></tr><tr><td>128,000</td><td>about 3</td><td>about 6</td></tr></tbody></table></div>
+    <p>This is why long-context features are expensive: the same GPU serving 128k-token conversations holds a few dozen times fewer users than one serving 4k-token chats. When the cache fills, the engine must queue new requests or <strong>preempt</strong> running ones, evicting their cache and recomputing it later, which shows up as latency spikes.</p></section>
+  <section id="making-the-cache-smaller"><h2>Making the cache smaller</h2>
+    <ul><li><strong>Grouped-query attention (GQA)</strong> and multi-query attention let many query heads share fewer key-value heads. Most modern models use it; it is why <code>kv_heads</code> is often far smaller than the number of attention heads. It is a property of the model, not a setting.</li><li><strong>Latent and sliding-window attention</strong>: some architectures compress keys and values into a smaller latent vector, or only keep a recent window of tokens in some layers, shrinking the cache further.</li><li><strong>Paged allocation</strong> (vLLM's PagedAttention and equivalents) stores the cache in small blocks allocated on demand, so memory is not reserved for the maximum length up front.</li><li><strong>Prefix caching</strong> shares the cache blocks for identical prompt prefixes, such as a long system prompt, across requests.</li><li><strong>KV-cache quantization</strong> stores keys and values in FP8, halving memory with usually small quality impact; validate on your evals.</li><li><strong>Offloading</strong> moves inactive blocks to CPU memory or SSD and brings them back instead of recomputing, useful for long idle conversations.</li></ul>
+    <div class="callout callout-tip"><strong>Tip</strong><p>The cheapest win is often a lower maximum context length in the engine. If 99% of your requests are under 8k tokens, configuring a 128k maximum mostly wastes headroom; route the rare long requests to a separate deployment.</p></div></section>
+  <section id="spotting-a-full-cache-in-production"><h2>Spotting a full cache in production</h2>
+    <ul><li>The engine's cache-usage gauge (for vLLM, <code>vllm:kv_cache_usage_perc</code>) sits near 1.0.</li><li>Requests waiting rises while requests running stays flat at a ceiling.</li><li>A preemption counter climbs and tail latency jumps.</li><li>Time to first token degrades first, because new requests cannot be admitted.</li></ul>
+    <p>The fixes come in two groups: more cache (another GPU or replica, tensor parallelism to spread weights, FP8 cache, higher memory-utilisation setting) or less demand per request (lower max context, shorter prompts, prefix caching, smaller <code>max_tokens</code>).</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Size the cache for a real model</h2>
+    <ol><li>Open the config.json of any open-weight model and find num_hidden_layers, num_key_value_heads, and the head dimension (hidden_size divided by num_attention_heads if head_dim is absent).</li><li>Compute KV bytes per token in FP16 and FP8 with the formula from this lesson.</li><li>Pick a GPU and compute the memory left for cache after weights at 90% memory utilisation.</li><li>Fill in the concurrency table for 4k, 32k and 128k average tokens per request.</li><li>If you can run vLLM, start it with that model and compare the KV-cache capacity it logs at startup with your estimate.</li><li>Send concurrent long requests until <code>vllm:kv_cache_usage_perc</code> nears 1.0 and observe waiting requests and preemptions.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>The KV cache — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Memory left after weights is KV cache, and KV cache is concurrency.</li><li>Cache grows linearly with tokens and is read in full every decode step.</li><li>GQA (fewer KV heads) is why modern models fit more users.</li><li>Long context divides concurrency; cap the maximum length to what you need.</li><li>Paging, prefix caching, FP8 cache and offload all stretch the same memory.</li><li>Full cache shows as waiting requests, preemptions and worse TTFT.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Formulas</h3><table><tbody><tr><td><code>KV/token = 2 x layers x kv_heads x head_dim x bytes</code></td><td>Cache size per token</td></tr><tr><td><code>head_dim = hidden_size / num_attention_heads</code></td><td>When config.json has no head_dim</td></tr><tr><td><code>cache_mem = gpu_mem x utilisation - weights</code></td><td>Memory available for cache</td></tr><tr><td><code>concurrency ~ cache_mem / (KV/token x avg_tokens)</code></td><td>Requests that fit at once</td></tr></tbody></table></div><div class="cheat-group"><h3>config.json fields</h3><table><tbody><tr><td><code>num_hidden_layers</code></td><td>Layers (L)</td></tr><tr><td><code>num_key_value_heads</code></td><td>KV heads; smaller than attention heads under GQA</td></tr><tr><td><code>num_attention_heads / hidden_size</code></td><td>Used to derive head_dim</td></tr><tr><td><code>max_position_embeddings</code></td><td>Model's maximum context</td></tr></tbody></table></div><div class="cheat-group"><h3>Engine knobs (vLLM)</h3><table><tbody><tr><td><code>--max-model-len N</code></td><td>Cap context to free cache</td></tr><tr><td><code>--kv-cache-dtype fp8</code></td><td>Halve cache memory</td></tr><tr><td><code>--gpu-memory-utilization 0.9</code></td><td>Share of memory the engine claims</td></tr><tr><td><code>--enable-prefix-caching</code></td><td>Share identical prefixes (on by default)</td></tr></tbody></table></div><div class="cheat-group"><h3>Symptoms</h3><table><tbody><tr><td><code>vllm:kv_cache_usage_perc ~ 1.0</code></td><td>Cache full</td></tr><tr><td><code>rising vllm:num_preemptions_total</code></td><td>Requests evicted and recomputed</td></tr><tr><td><code>waiting up, running flat</code></td><td>Admission blocked by memory</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Checking only whether weights fit and forgetting the cache needs room too.</li><li>Setting the maximum context to the model's limit when real requests are short.</li><li>Using the number of attention heads instead of KV heads in the formula.</li><li>Turning on FP8 cache without checking quality on your own evaluation set.</li><li>Reading a full cache as a compute problem and adding the wrong kind of capacity.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "A model has 40 layers, 8 KV heads and head dimension 128. How large is its FP16 KV cache per token?", "options": ["160 KiB", "128 KiB", "320 KiB", "80 KiB"], "answer": 0, "explain": "2 x 40 x 8 x 128 x 2 bytes = 163,840 bytes, which is 160 KiB per token."}, {"q": "A GPU holds about 100 concurrent 4,000-token requests. Roughly how many fit if requests grow to 40,000 tokens on average?", "options": ["About 10", "About 100", "About 40", "About 1"], "answer": 0, "explain": "Cache per request grows tenfold with ten times the tokens, so the same cache memory holds about a tenth as many requests."}, {"q": "Why do most modern models need far less KV cache than their attention head count suggests?", "options": ["Grouped-query attention shares a few KV heads among many query heads", "The cache only ever stores the most recent token of each request", "The model weights are reused directly as the keys and values", "Tensor Cores compress the cache automatically during decode"], "answer": 0, "explain": "With GQA, keys and values are computed for a small number of KV heads shared by groups of query heads, so the cache scales with KV heads, not attention heads."}, {"q": "Ninety-nine percent of requests are under 8k tokens, but the engine is configured for 128k. What is a sensible change?", "options": ["Lower the max context and route rare long requests to a separate deployment", "Raise memory utilisation to 1.0 to fit 128k requests", "Disable prefix caching so that more memory is freed for requests", "Set max_tokens to 128k on every request so nothing is ever cut off"], "answer": 0, "explain": "A huge maximum context reserves headroom the workload rarely uses. Capping it frees cache for concurrency, and a dedicated deployment can handle the long tail."}, {"q": "Which observation most directly indicates that the KV cache is the bottleneck?", "options": ["Cache usage near 100% with waiting requests and preemptions rising", "GPU temperature staying above 80 degrees under sustained load", "Low CPU usage on the server while requests are being handled", "High network traffic between the server and the model registry"], "answer": 0, "explain": "A full cache blocks admission and forces evictions, which shows up as high cache usage, a growing queue and a rising preemption count."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="inf-llm-lifecycle.html"><span>← Previous</span><strong>The life of an inference request</strong></a>
+    <a class="pager-up" href="../education.html#inference">All Inference modules</a>
+    <a class="pager-link pager-next" href="inf-metrics.html"><span>Next →</span><strong>Latency and throughput metrics</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=inf-kv-cache&amp;page=/education/inf-kv-cache.html&amp;title=The%20KV%20cache">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=inf-kv-cache&amp;page=/education/inf-kv-cache.html&amp;title=The%20KV%20cache">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>
