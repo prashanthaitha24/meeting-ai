@@ -1,0 +1,306 @@
+{
+  "id": "fde-productizing",
+  "minutes": 35,
+  "intro": "An FDE team that builds a custom solution for every customer becomes a consultancy with a product attached, and eventually drowns in forks it cannot maintain. The best FDE organisations do the opposite: they treat each deployment as research, notice what repeats across customers, and turn it into product. This lesson covers how to keep customer-specific work thin, structure code as configuration and extensions instead of forks, recognise patterns worth productising, write field requests that product teams act on, and build an internal library of reusable components and playbooks.",
+  "objectives": [
+    "Explain why bespoke forks are costly and how to avoid them",
+    "Separate customer-specific configuration and extensions from shared code",
+    "Recognise patterns across deployments that should become product",
+    "Write field requests with evidence that product teams can prioritise",
+    "Contribute reusable components, templates and playbooks to the FDE team"
+  ],
+  "sections": [
+    {
+      "heading": "The cost of forks",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A **fork** is a copy of the product's code modified for one customer. It feels fast: change anything, ship today. Then the product releases a security fix and you must merge it into twelve divergent copies, each with its own bugs and its own undocumented behaviour, maintained by whichever FDE happened to write it. Upgrades stall, customers fall behind, and the team's capacity disappears into maintenance."
+        },
+        {
+          "type": "p",
+          "text": "The goal is that every customer runs the **same product version**, and everything that differs is expressed in configuration, data, or well-defined extension points. Customer-specific code is allowed, but it lives outside the product, behind stable interfaces, so the product can upgrade underneath it."
+        },
+        {
+          "type": "p",
+          "text": "This is not an argument against speed. Early in an engagement, a quick customer-specific script is often the right call. The discipline is to keep it outside the core, label it honestly as customer-specific, and revisit it when the next customer needs something similar, rather than letting it quietly become part of a private version of the product."
+        }
+      ]
+    },
+    {
+      "heading": "Configuration and extension points",
+      "blocks": [
+        {
+          "type": "table",
+          "headers": [
+            "Need",
+            "Fork (avoid)",
+            "Productised alternative"
+          ],
+          "rows": [
+            [
+              "Different terminology or prompts",
+              "Edit prompt strings in code",
+              "Prompt templates in per-customer configuration"
+            ],
+            [
+              "Customer-specific data source",
+              "Patch the ingestion module",
+              "Connector interface; customer connector as a plugin"
+            ],
+            [
+              "Extra validation rules",
+              "Add if-statements for one customer",
+              "Rules engine or hook called with the record"
+            ],
+            [
+              "Different workflow steps",
+              "Copy and modify the workflow",
+              "Workflow defined as data with reusable step types"
+            ],
+            [
+              "Branding",
+              "Change CSS in the app",
+              "Theme settings"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "caption": "A connector interface: the product owns it, customers plug in",
+          "code": "from typing import Iterable, Protocol\n\n\nclass Document(dict):\n    \"\"\"id, text, title, updated_at, acl\"\"\"\n\n\nclass Connector(Protocol):\n    name: str\n\n    def list_changed(self, since: str) -> Iterable[Document]: ...\n    def acl_for(self, doc_id: str) -> list[str]: ...\n\n\nCONNECTORS: dict[str, type] = {}\n\n\ndef register(cls):\n    CONNECTORS[cls.name] = cls\n    return cls\n\n\n@register\nclass AcmeDmsConnector:                 # lives in the customer's extension package\n    name = \"acme-dms\"\n\n    def list_changed(self, since: str):\n        yield from acme_client.documents(modified_after=since)\n\n    def acl_for(self, doc_id: str) -> list[str]:\n        return acme_client.permissions(doc_id)"
+        },
+        {
+          "type": "p",
+          "text": "With an interface like this, the second customer with a similar system reuses or adapts a connector instead of patching the core, and the product team can see from the registry which connectors exist and which keep being rebuilt, a strong signal for productisation."
+        }
+      ]
+    },
+    {
+      "heading": "Spotting patterns worth productising",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "**The rule of three**: the first time, build it for the customer; the second, notice the similarity; the third, propose it as product.",
+            "**Repeated glue**: the same integration (a common CRM, document store, ticketing system) built at several customers.",
+            "**Repeated workarounds**: scripts or manual steps every deployment needs (data cleanup, permission sync, report exports).",
+            "**Repeated objections**: the same security-review question or missing feature blocking several deals.",
+            "**Repeated configuration**: the same settings changed from default at every customer, which suggests the default is wrong."
+          ]
+        },
+        {
+          "type": "callout",
+          "kind": "tip",
+          "text": "Keep a shared log across the FDE team: customer, need, workaround used, effort spent. A month of entries turns opinions into a ranked list with evidence."
+        }
+      ]
+    },
+    {
+      "heading": "Field requests that get acted on",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Product teams receive many requests and must prioritise. A request that says \"customer X wants Y\" competes poorly; one that quantifies the need across customers, explains the underlying problem and shows what the workaround costs gets attention."
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "caption": "A field request template",
+          "code": "Title:        Permission-aware retrieval for SharePoint sources\nProblem:      Users must only see answers from documents they can open.\n              Today each deployment hand-builds ACL sync (2-3 weeks of FDE time).\nCustomers:    Acme Insurance (live), Globex Bank (pilot), Initech (blocked in security review)\nEvidence:     3 deployments, ~8 FDE-weeks spent on workarounds; Initech deal at risk\nWorkaround:   Nightly ACL export script per customer (fragile, 24h staleness)\nProposal:     Native ACL sync for the SharePoint connector, filter at retrieval\nNot needed:   Real-time sync; field-level permissions\nContact:      FDE lead for Acme, available for design review"
+        },
+        {
+          "type": "p",
+          "text": "Follow up: join the design discussion, offer real data and users for testing, and close the loop with the customers when it ships. FDEs who are known for well-evidenced requests become trusted partners of product teams, and see their requests built."
+        }
+      ]
+    },
+    {
+      "heading": "Building the team's toolkit",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "**Reference architectures** for common deployment types (cloud SaaS, customer VPC, air-gapped).",
+            "**Templates**: discovery summary, pilot plan, status update, security pack, outcome report, runbook.",
+            "**Reusable components**: connectors, evaluation harnesses, support-bundle scripts, Helm values for common platforms.",
+            "**Playbooks**: step-by-step guides for recurring situations, such as the first week at a new customer or passing a bank's security review.",
+            "**Retrospectives** after each engagement feeding all of the above."
+          ]
+        },
+        {
+          "type": "p",
+          "text": "Treat the toolkit like product: versioned, owned, reviewed, and pruned when stale. Every hour saved in the next engagement compounds across the team."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Refactor a fork into product plus extension",
+    "steps": [
+      "Take a small app you built in this track and imagine three customers, each needing a different document source and different validation rules.",
+      "Write the naive version: three copies of the code with customer-specific edits; count the duplicated lines.",
+      "Refactor into one core with a Connector interface, a validation hook and per-customer configuration files.",
+      "Implement two connectors as plugins and run all three 'customers' from the same core version.",
+      "Write a field request using the template for a capability all three needed.",
+      "Write one playbook page your team could use at the next customer."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Same product version everywhere; differences live in config, data and extensions.",
+      "Forks feel fast and become a maintenance trap.",
+      "Interfaces (connectors, hooks) let customer code plug in without patching the core.",
+      "Rule of three: build, notice, productise.",
+      "Field requests need cross-customer evidence and the cost of the workaround.",
+      "Invest in the team toolkit: templates, components, playbooks."
+    ],
+    "groups": [
+      {
+        "title": "Instead of forking",
+        "items": [
+          {
+            "syntax": "per-customer config files",
+            "desc": "Prompts, thresholds, terminology"
+          },
+          {
+            "syntax": "Connector protocol + registry",
+            "desc": "Customer data sources as plugins"
+          },
+          {
+            "syntax": "validation / workflow hooks",
+            "desc": "Custom rules without core edits"
+          },
+          {
+            "syntax": "workflows as data",
+            "desc": "Compose reusable step types"
+          }
+        ]
+      },
+      {
+        "title": "Pattern signals",
+        "items": [
+          {
+            "syntax": "same integration built 2-3 times",
+            "desc": "Productise the connector"
+          },
+          {
+            "syntax": "same workaround script everywhere",
+            "desc": "Missing feature"
+          },
+          {
+            "syntax": "same security objection",
+            "desc": "Missing control or option"
+          },
+          {
+            "syntax": "same default changed everywhere",
+            "desc": "Wrong default"
+          }
+        ]
+      },
+      {
+        "title": "Field request",
+        "items": [
+          {
+            "syntax": "problem, not solution",
+            "desc": "Why customers need it"
+          },
+          {
+            "syntax": "customers + evidence + effort spent",
+            "desc": "Quantified demand"
+          },
+          {
+            "syntax": "workaround and its cost",
+            "desc": "What it costs today"
+          },
+          {
+            "syntax": "not needed",
+            "desc": "Keeps scope small"
+          }
+        ]
+      },
+      {
+        "title": "Toolkit",
+        "items": [
+          {
+            "syntax": "reference architectures",
+            "desc": "SaaS, VPC, air-gapped"
+          },
+          {
+            "syntax": "templates + playbooks",
+            "desc": "Repeatable engagements"
+          },
+          {
+            "syntax": "reusable components",
+            "desc": "Connectors, evals, support bundles"
+          }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Copying the product repository per customer.",
+      "if customer == 'acme' branches in core code.",
+      "Field requests with one customer's name and no evidence.",
+      "Productising after one customer, before the pattern is clear.",
+      "Templates and playbooks that nobody owns or updates."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "Why are per-customer forks of the product dangerous?",
+      "options": [
+        "Every fix must be merged into each copy",
+        "Customers are unable to read forked code",
+        "Forks always run slower than the main product",
+        "Version control cannot store forks"
+      ],
+      "answer": 0,
+      "explain": "Divergent copies multiply maintenance; security fixes and upgrades stall as each fork needs its own merge and testing."
+    },
+    {
+      "q": "A customer needs a document source the product does not support. What is the productised approach?",
+      "options": [
+        "Implement it against a connector interface as a plugin",
+        "Patch the core ingestion module for this customer",
+        "Copy the repository and modify ingestion",
+        "Tell the customer it cannot be supported"
+      ],
+      "answer": 0,
+      "explain": "A plugin behind a stable interface lets the core upgrade independently and lets the next customer reuse the connector."
+    },
+    {
+      "q": "Three customers each needed a nightly ACL export script. What should the FDE team do?",
+      "options": [
+        "File a field request with the evidence",
+        "Keep writing the script for each new customer",
+        "Remove the permission checks to save time",
+        "Ask each customer to build it themselves"
+      ],
+      "answer": 0,
+      "explain": "A repeated workaround is a strong productisation signal; quantified evidence helps the product team prioritise it."
+    },
+    {
+      "q": "What makes a field request persuasive to a product team?",
+      "options": [
+        "Cross-customer evidence and workaround cost",
+        "The name of the biggest customer asking for it",
+        "A detailed UI mock-up of the solution",
+        "The number of messages sent about it"
+      ],
+      "answer": 0,
+      "explain": "Product teams prioritise by impact; evidence of repeated need and its cost frames the request as a business decision."
+    },
+    {
+      "q": "When should a customer-specific feature be proposed as product?",
+      "options": [
+        "After the pattern has repeated across several customers",
+        "Immediately after the first customer asks",
+        "Never, because FDEs only build custom work",
+        "Only when the customer threatens to leave"
+      ],
+      "answer": 0,
+      "explain": "The rule of three avoids productising one-off needs while catching genuine patterns early enough to save effort."
+    }
+  ]
+}
