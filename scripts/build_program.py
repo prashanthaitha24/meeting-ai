@@ -24,6 +24,7 @@ OUT = ROOT / "docs" / "school" / "program"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import school_diagrams as sd  # noqa: E402
 import program_levels as pl  # noqa: E402
+import program_pictures as pp  # noqa: E402
 
 esc = html.escape
 INK = sd.INK
@@ -299,42 +300,60 @@ def build_day_more(level, wk_ix, day):
         out = []
         for _ in range(n):
             rk, rh = pl.resolve(k, h, weeks, wk_ix, rnd)
-            out.append(pl.KINDS[rk][3](rnd, rh))
+            st = pl.KINDS[rk][3](rnd, rh)
+            st["art"] = pp.story_art(st["text"], rnd)       # every word problem gets a picture
+            out.append(st)
+        return out
+
+    def pics(k, h, n):
+        out, tries = [], 0
+        while len(out) < n and tries < n * 6:
+            tries += 1
+            rk, _rh = pl.resolve(k, h, weeks, wk_ix, rnd)
+            p = pp.pic(rk, rnd)
+            if p:
+                out.append(p)
         return out
 
     def size(k):
         return 16 if (k in pl.KINDS and pl.KINDS[k][1] == "num") else 12
 
-    def drill_sheet(k, h, label):
-        head, grid, probs = drills(k, h, size(k))
-        return (label, [(head, grid, probs)])
+    def drill_sheet(k, h, label, n_pics=4):
+        head, grid, probs = drills(k, h, size(k) - n_pics)
+        secs = []
+        pp_ = pics(k, h, n_pics)
+        if pp_:
+            secs.append(("Look at the picture and answer", "pics", pp_))
+        secs.append((head, grid, probs))
+        return (label, secs)
 
     story_sec = lambda k, h, n: ("Maths all around us — read and solve", "story", stories(k, h, n))
 
     def challenge(k, h):
-        head, grid, probs = drills(k, h, 10)
-        return ("Challenge", [(head, grid, probs), ("Story problems", "story", stories(k, h, 3))])
+        head, grid, probs = drills(k, h, 8)
+        return ("Challenge", [("Picture puzzles", "pics", pics(k, h, 3)), (head, grid, probs),
+                              ("Story problems", "story", stories(k, h, 3))])
 
     if day == 7:
-        sheets = [drill_sheet(kind, hi, f"This week: {title}")]
+        sheets = [drill_sheet(kind, hi, f"This week: {title}", 6)]
         for e in pick_earlier(wk_ix):
             et, ek, eh = weeks[e]
-            sheets.append(drill_sheet(ek, eh, f"Revision: {et}"))
-        sheets.append(("Maths all around us", [story_sec(kind, hi, 7)]))
+            sheets.append(drill_sheet(ek, eh, f"Revision: {et}", 4))
+        sheets.append(("Maths all around us", [story_sec(kind, hi, 6)]))
         sheets.append(challenge(kind, hi))
         while len(sheets) < 5:
             sheets.append(drill_sheet(kind, hi, "Extra practice"))
         return "Revision — this week and earlier weeks", sheets[:5]
 
     pt, pk, ph = weeks[wk_ix - 1] if wk_ix else (title, kind, hi)
-    wh1, wg1, wp1 = drills(pk, ph, 8)
-    wh2, wg2, wp2 = drills(kind, hi, 8)
-    warm = ("Warm up", [(f"Quick recall: {pt}" if wk_ix else wh1, wg1, wp1), (wh2, wg2, wp2)])
+    wh1, wg1, wp1 = drills(pk, ph, 6)
+    warm = ("Picture warm-up", [("Look at the picture and answer", "pics", pics(kind, hi, 6)),
+                                (f"Quick recall: {pt}" if wk_ix else wh1, wg1, wp1)])
     return title, [
         warm,
-        drill_sheet(kind, hi, "Number practice"),
-        drill_sheet(kind, hi, "More practice"),
-        ("Maths all around us", [story_sec(kind, hi, 7)]),
+        drill_sheet(kind, hi, "Number practice", 4),
+        drill_sheet(kind, hi, "More practice", 4),
+        ("Maths all around us", [story_sec(kind, hi, 6)]),
         challenge(kind, hi),
     ]
 
@@ -493,7 +512,13 @@ def render_problem(idx, p):
         return f'<div class="{cls}"><span class="n">{idx})</span>{art}<div class="eq">{eq}</div></div>'
     if t == "story":
         art = '<div class="art">' + illus_two(p["a"], p["b"], p["op"], p["ic"]) + "</div>" if p["illus"] else ""
+        if p.get("art"):
+            art = f'<div class="art">{p["art"]}</div>'
         return f'<div class="prob story"><span class="n">{idx})</span><p class="stx">{esc(p["text"])}</p>{art}<div class="eq">Answer: <span class="abox"></span></div></div>'
+    if t == "pic":
+        parts = [esc(x) for x in p["q"].split(pl.BOX)]
+        body = '<span class="abox"></span>'.join(parts) if len(parts) > 1 else parts[0] + ' <span class="abox"></span>'
+        return f'<div class="prob pic qpic"><span class="n">{idx})</span><div class="art">{p["svg"]}</div><div class="eq">{body}</div></div>'
     if t == "q":
         parts = [esc(x) for x in p["q"].split(pl.BOX)]
         body = '<span class="abox"></span>'.join(parts) if len(parts) > 1 else parts[0] + ' = <span class="abox"></span>'
@@ -514,7 +539,7 @@ def answer_of(p):
         return p["terms"][p["blank"]]
     if t == "arith":
         return p["a"] + p["b"] if p["op"] == "add" else p["a"] - p["b"]
-    if t in ("story", "scene", "q"):
+    if t in ("story", "scene", "q", "pic"):
         return esc(str(p["ans"]))
     return None
 
@@ -546,6 +571,9 @@ PROGRAM_CSS = """
     .grid.seq { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
     .grid.story { grid-template-columns: 1fr; }
     .grid.wide { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+    .grid.pics { grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); }
+    .prob.qpic .eq { white-space: normal; font-size: 16px; line-height: 1.6; }
+    .today .scene svg { display: block; margin-top: 10px; }
     .grid.wide .prob .eq { white-space: normal; font-size: 16px; line-height: 1.6; }
     .prob.qp .abox { margin: 0 3px; }
     .prob { display: flex; align-items: center; gap: 10px; border: 1px solid var(--border); border-radius: 12px; padding: 11px 13px; background: #fff; break-inside: avoid; }
@@ -635,7 +663,7 @@ DAY_PAGE = """<!DOCTYPE html>
       <a class="btn btn-secondary" href="{lid}.html">All weeks</a>
     </div>
   </section>
-  <div class="today"><span class="ic">\U0001f4d6</span><div><b>Today's story</b><p>{intro}</p></div></div>
+  <div class="today"><span class="ic">\U0001f4d6</span><div><b>Today's story</b><p>{intro}</p>{intro_art}</div></div>
 {sections}
   <section class="answers">
     <h2 style="font-size:15px;font-weight:800">Answer key <span style="font-weight:500;color:var(--text3);font-size:12px">(for grown-ups)</span></h2>
@@ -686,6 +714,7 @@ def render_day(level, wk_ix, day, prev_href, next_href):
         lid=lid, lname=lname, letter=letter, lletter=letter.lower(), day=day,
         sub=esc(sub), count=total, nsheets=len(sheets), sections="\n".join(sheet_html),
         answers="".join(akey_parts), prev=prev_btn, next=next_btn, intro=esc(intro),
+        intro_art=("" if lid == "basic" else f'<div class="scene">{pp.story_art(intro, irnd)}</div>'),
     )
     (OUT / f"{lid}-{letter.lower()}-{day}.html").write_text(page)
 
