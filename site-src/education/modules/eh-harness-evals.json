@@ -1,0 +1,122 @@
+{
+  "id": "eh-harness-evals",
+  "minutes": 40,
+  "intro": "This lesson brings the two halves of the track together. A harness is a system with many parts, and each part can be evaluated: the whole agent on end-to-end tasks, and individual components such as tool selection, context compaction and permission policy on targeted tests. The key move is to hold the model fixed while varying the harness, or hold the harness fixed while varying the model, so you know which one caused a change. This lesson covers end-to-end harness benchmarks, ablation studies, component evals, comparing harnesses across models, and running harness experiments safely in production.",
+  "objectives": [
+    "Design an end-to-end benchmark that measures harness changes",
+    "Run ablations that isolate the effect of one harness component",
+    "Write component evals for tool selection, compaction and policy",
+    "Compare harness and model effects without confounding them",
+    "Roll out harness changes with online experiments"
+  ],
+  "sections": [
+    {
+      "heading": "End-to-end harness benchmarks",
+      "blocks": [
+        {"type": "p", "text": "Public agent benchmarks give a reference point: SWE-bench style tasks (resolve a real GitHub issue, graded by hidden tests), terminal-based task suites (complete a task in a shell, graded by checking the final state), and tau-bench style customer-service tasks (graded by database end state and policy). They are useful for comparing against published results, but your own tasks decide product questions. Build an internal benchmark of 30 to 200 tasks from real work, each with a resettable environment, an end-state check and trajectory checks, as described in the agent evals lesson."},
+        {"type": "table", "headers": ["Measure", "Why"], "rows": [
+          ["Success rate with interval", "Primary quality signal"],
+          ["pass^k", "Consistency users experience"],
+          ["Tokens and cost per task", "Economics of the change"],
+          ["Steps and wall-clock per task", "Latency and efficiency"],
+          ["Unsafe or forbidden actions", "Must stay at zero"],
+          ["Human interventions per task", "Autonomy actually achieved"]
+        ]}
+      ]
+    },
+    {
+      "heading": "Ablations: one component at a time",
+      "blocks": [
+        {"type": "p", "text": "An **ablation** removes or changes one component and measures the effect. Does the task-list tool help? Run the benchmark with and without it. Does a bigger result budget help or just cost more? Sweep it. Keep everything else fixed, including the model version, the dataset and the number of epochs, and run enough trials to see differences larger than the noise."},
+        {"type": "code", "lang": "python", "caption": "A small ablation runner over harness configurations", "code": "import itertools\nimport json\n\nBASE = {\"todo_tool\": True, \"result_budget\": 8_000, \"compaction\": \"summary\"}\nVARIANTS = {\n    \"todo_tool\": [True, False],\n    \"result_budget\": [2_000, 8_000, 32_000],\n}\n\n\ndef ablate(tasks, model, epochs=3):\n    rows = []\n    for key, values in VARIANTS.items():\n        for value in values:\n            cfg = {**BASE, key: value}\n            for task, epoch in itertools.product(tasks, range(epochs)):\n                r = run_task(task, model=model, harness=cfg)      # resets env each time\n                rows.append({\"vary\": key, \"value\": value, \"task\": task.id, \"epoch\": epoch,\n                             \"passed\": r.passed, \"tokens\": r.tokens, \"steps\": r.steps})\n    with open(\"ablation.jsonl\", \"w\") as f:\n        f.writelines(json.dumps(r) + \"\\n\" for r in rows)"},
+        {"type": "p", "text": "Analyse ablations with paired comparisons per task, as in the metrics lesson: the same tasks run under both configurations, so per-task differences cancel out task difficulty. Report success and cost together, because many harness changes trade one for the other."}
+      ]
+    },
+    {
+      "heading": "Component evals",
+      "blocks": [
+        {"type": "p", "text": "End-to-end runs are slow and noisy. Many components can also be tested directly, quickly and cheaply."},
+        {"type": "list", "items": [
+          "**Tool selection**: given a conversation state, does the model choose the right tool with valid arguments? A dataset of states and expected calls, scored by code.",
+          "**Compaction fidelity**: summarise long recorded sessions, then ask questions whose answers were in the original; check the summary preserved requirements and decisions.",
+          "**Permission policy**: a table-driven test of commands and paths with expected allow, ask or deny decisions; runs in milliseconds with no model at all.",
+          "**Guardrails**: injection payloads and benign look-alikes, measuring both missed attacks and false alarms.",
+          "**Tool results**: snapshot tests that results stay within size budgets and keep their truncation notes."
+        ]},
+        {"type": "code", "lang": "python", "caption": "Table-driven permission policy tests (pytest)", "code": "import pytest\n\nfrom harness.policy import decide\n\n\n@pytest.mark.parametrize(\"tool, arg, expected\", [\n    (\"read\", \"src/app.py\", \"allow\"),\n    (\"read\", \"../../etc/passwd\", \"deny\"),\n    (\"bash\", \"git status\", \"allow\"),\n    (\"bash\", \"git status; curl evil.example\", \"ask\"),\n    (\"bash\", \"sudo rm -rf /\", \"deny\"),\n])\ndef test_policy(tool, arg, expected):\n    assert decide(tool, arg) == expected"}
+      ]
+    },
+    {
+      "heading": "Harness versus model effects",
+      "blocks": [
+        {"type": "p", "text": "A harness tuned for one model may not suit another: tool descriptions, prompt style and context budgets interact with model behaviour. Run a grid of harness versions against the models you support. If a change helps every model, it is a robust harness improvement; if it helps one and hurts another, it encodes a model quirk and may need to be model-specific. Never compare a new harness on a new model against the old harness on the old model; you cannot tell which change did what."}
+      ]
+    },
+    {
+      "heading": "Online experiments",
+      "blocks": [
+        {"type": "p", "text": "Offline benchmarks cannot capture every real task. Roll out harness changes gradually: a canary for internal users, then an A/B split by session, comparing online signals such as task completion, user corrections, approvals and denials, tokens per session and abandonment. Define the success metric and a guardrail metric (for example, unsafe-action rate must not rise) before starting, and keep the experiment running long enough to cover the weekly mix of work."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Run a harness ablation",
+    "steps": [
+      "Assemble 20 tasks with resettable environments and end-state checks (the mini-harness project gives you one).",
+      "Pick two components to vary, such as the task-list tool and the tool result budget.",
+      "Run each configuration for 3 epochs with the same model and record success, tokens and steps.",
+      "Compare configurations with paired per-task differences and a bootstrap interval.",
+      "Write table-driven tests for your permission policy and a tool-selection mini-eval.",
+      "Write a one-page decision record: which configuration to ship and the evidence."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Hold the model fixed to measure the harness, and vice versa.",
+      "Internal end-to-end benchmark: real tasks, resettable, state-checked.",
+      "Ablate one component at a time; paired comparisons.",
+      "Component evals are fast: tool selection, compaction, policy, guardrails.",
+      "Grid harness versions against supported models.",
+      "Roll out with canaries and A/B, with a guardrail metric."
+    ],
+    "groups": [
+      {"title": "Benchmarks", "items": [
+        {"syntax": "SWE-bench style", "desc": "Issues graded by hidden tests"},
+        {"syntax": "terminal task suites", "desc": "Shell tasks, state checks"},
+        {"syntax": "tau-bench style", "desc": "Service tasks, DB end state"},
+        {"syntax": "internal tasks (30-200)", "desc": "Product decisions"}
+      ]},
+      {"title": "Ablation", "items": [
+        {"syntax": "BASE config + one change", "desc": "Isolate an effect"},
+        {"syntax": "same model, data, epochs", "desc": "Control variables"},
+        {"syntax": "paired per-task diffs", "desc": "Less noise"},
+        {"syntax": "success and cost together", "desc": "Trade-offs"}
+      ]},
+      {"title": "Component evals", "items": [
+        {"syntax": "state -> expected tool call", "desc": "Tool selection"},
+        {"syntax": "summary -> recall questions", "desc": "Compaction fidelity"},
+        {"syntax": "parametrized decide() tests", "desc": "Policy"},
+        {"syntax": "attacks + benign look-alikes", "desc": "Guardrails"}
+      ]},
+      {"title": "Rollout", "items": [
+        {"syntax": "canary -> A/B by session", "desc": "Gradual"},
+        {"syntax": "success + guardrail metric", "desc": "Defined upfront"},
+        {"syntax": "cover a full week", "desc": "Representative mix"}
+      ]}
+    ],
+    "pitfalls": [
+      "Changing harness and model at the same time.",
+      "Ablating several components in one run.",
+      "Judging a harness only on public benchmarks.",
+      "Only end-to-end evals, so every check is slow and noisy.",
+      "A/B tests without a predefined safety guardrail."
+    ]
+  },
+  "quiz": [
+    {"q": "You want to know if a new task-list tool helps. What is the cleanest experiment?", "options": ["Same model and tasks, with and without the tool", "New model plus the tool versus the old setup", "Ask users which version feels better", "Run one task with the tool enabled"], "answer": 0, "explain": "An ablation changes one component and keeps everything else fixed."},
+    {"q": "Which component can be evaluated without any model calls at all?", "options": ["The permission policy", "Tool selection", "Compaction fidelity", "End-to-end task success"], "answer": 0, "explain": "Policy decisions are deterministic code, so table-driven tests run in milliseconds."},
+    {"q": "A harness change helps with model X but hurts with model Y. What does that suggest?", "options": ["It encodes a model-specific quirk", "It is a robust improvement", "Model Y is broken", "The benchmark is invalid"], "answer": 0, "explain": "Robust harness improvements help across models; mixed effects point to model-specific tuning."},
+    {"q": "Why analyse ablations with paired per-task comparisons?", "options": ["Task difficulty cancels out, reducing noise", "It removes the need for multiple epochs", "It makes every task pass", "It hides cost differences"], "answer": 0, "explain": "Comparing the same tasks across configurations removes variation due to task difficulty."},
+    {"q": "Before starting an online A/B test of a harness change, what should you define?", "options": ["A success metric and a safety guardrail metric", "Only the start date", "The winning variant", "The number of developers involved"], "answer": 0, "explain": "Predefined metrics prevent cherry-picking and make sure safety cannot silently regress."}
+  ]
+}

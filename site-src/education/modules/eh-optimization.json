@@ -1,0 +1,299 @@
+{
+  "id": "eh-optimization",
+  "minutes": 40,
+  "intro": "Once an agent works, the next questions are how much it costs and how long users wait. Agent runs can involve dozens of model calls, each re-sending a growing context, so cost and latency grow quickly with task length. Optimising them without hurting quality needs the same discipline as everything else in this track: measure, change one thing, and compare on the benchmark. This lesson covers the right unit of measurement, where tokens and time actually go, and the main levers: fewer steps, smaller contexts, caching, model routing, parallelism, streaming and batch processing.",
+  "objectives": [
+    "Measure cost and latency per successful task, not per call",
+    "Profile where tokens and time are spent in agent runs",
+    "Reduce steps and context with better tools and context policy",
+    "Use caching, routing, parallelism and batching appropriately",
+    "Choose configurations on the quality-cost frontier"
+  ],
+  "sections": [
+    {
+      "heading": "The right unit: cost per successful task",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Cost per call or per token is misleading for agents. A cheaper model that needs twice as many steps, or fails more often and gets retried, can cost more per completed task. Measure **cost per successful task** (total spend on a benchmark divided by tasks solved) and **time to completion**, alongside success rate. A change is only an optimisation if quality holds."
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "caption": "Comparing configurations by cost per success",
+          "code": "def summarise(runs: list[dict], price_in: float, price_out: float) -> dict:\n    \"\"\"price_* = your provider's price per token for input and output.\"\"\"\n    cost = sum(r[\"input_tokens\"] * price_in + r[\"output_tokens\"] * price_out for r in runs)\n    solved = sum(r[\"passed\"] for r in runs)\n    secs = sorted(r[\"seconds\"] for r in runs)\n    return {\n        \"success\": solved / len(runs),\n        \"cost_per_success\": cost / solved if solved else float(\"inf\"),\n        \"p50_seconds\": secs[len(secs) // 2],\n        \"p90_seconds\": secs[int(len(secs) * 0.9)],\n    }"
+        }
+      ]
+    },
+    {
+      "heading": "Where the tokens go",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "In a loop, each model call re-sends the whole context. If the context grows by a few thousand tokens per step, total input tokens grow roughly with the square of the number of steps, so long runs are disproportionately expensive. Profile real traces: input versus output tokens, tokens per step over a run, and which layer (system prompt, tools, history, results) dominates. Usually input tokens from accumulated history and tool results dominate, which points at the biggest levers: fewer steps and smaller contexts."
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Fewer steps**: task-level tools, better error messages, clearer instructions, and parallel independent calls in one step.",
+            "**Smaller contexts**: bounded tool results, compaction, just-in-time retrieval, clearing stale tool outputs.",
+            "**Shorter outputs**: ask for concise reasoning and structured outputs where free text is not needed."
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "Caching, routing and batching",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "After reducing how many tokens a run needs, reduce what each token costs. These levers are powerful but each has a failure mode, so evaluate them on the benchmark like any other change and count every attempt, including escalations and retries, in the cost."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Lever",
+            "How",
+            "Watch out for"
+          ],
+          "rows": [
+            [
+              "Prompt caching",
+              "Stable prefix first so providers can reuse it",
+              "Anything dynamic near the top breaks it"
+            ],
+            [
+              "Model routing",
+              "Smaller model for simple steps or tasks, larger for hard ones",
+              "Routing errors; measure end to end"
+            ],
+            [
+              "Sub-agents on smaller models",
+              "Search and summarise with a cheaper model",
+              "Quality of returned summaries"
+            ],
+            [
+              "Batch processing",
+              "Asynchronous batch endpoints for evals and offline jobs",
+              "Not for interactive use; slower turnaround"
+            ],
+            [
+              "Result caching",
+              "Reuse tool results and outputs for identical inputs",
+              "Stale data; key on everything that matters"
+            ]
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "caption": "A simple router with an escalation path",
+          "code": "def route(task: dict) -> str:\n    \"\"\"Pick a model tier from cheap task features; escalate on failure.\"\"\"\n    hard = task[\"files_touched_estimate\"] > 3 or task[\"type\"] in {\"debug\", \"design\"}\n    return \"large\" if hard else \"small\"\n\n\ndef run_with_escalation(task):\n    tier = route(task)\n    result = run_task(task, model_tier=tier)\n    if not result.passed and tier == \"small\":\n        result = run_task(task, model_tier=\"large\")     # count both runs in the cost\n    return result"
+        },
+        {
+          "type": "p",
+          "text": "Routing deserves particular care. A router that sends a hard task to a small model wastes the small model's attempt and then pays for the large one anyway, so a bad router can cost more than always using the large model. Start with simple, explainable rules based on task features, measure the escalation rate, and only consider a learned router once you have enough labelled runs to train and evaluate it."
+        }
+      ]
+    },
+    {
+      "heading": "Latency",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Latency in agents comes mostly from the number of sequential model calls and slow tools, not from any single call. Users also judge speed by how soon they see something useful, so visible progress matters as much as total time."
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Stream** model output and progress (current step, task list) so users see work immediately; perceived latency matters as much as total time.",
+            "**Parallelise** independent tool calls and sub-agents.",
+            "**Prefer fast tools**: an indexed code search beats scanning files; a precomputed summary beats reading a long document every time.",
+            "**Cut wasted steps**: loops, re-reading the same file, and retries caused by vague errors.",
+            "**Set time budgets** and return partial results rather than making users wait indefinitely."
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "Choosing on the frontier",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Plot each configuration's success rate against its cost per success (or latency). Configurations that are worse on both axes than another are dominated and can be discarded; the rest form a **frontier** of sensible trade-offs. The product decides where to sit on it: an interactive assistant may favour latency, a nightly batch job cost, and a high-stakes workflow quality. Re-run the comparison whenever models or prices change, because the frontier moves."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Halve the cost without losing quality",
+    "steps": [
+      "Run your benchmark and record success, cost per success, p50 and p90 time.",
+      "Profile tokens per step and per layer from traces; find the biggest consumer.",
+      "Apply one lever (bounded results, compaction or caching-friendly ordering) and re-run.",
+      "Add a small-model route with escalation for easy tasks and re-run, counting both attempts.",
+      "Parallelise independent read-only tool calls and measure latency change.",
+      "Plot all configurations on success versus cost per success and pick one from the frontier."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Measure cost per successful task and time to completion.",
+      "Input tokens grow fast with steps; fewer steps and smaller contexts win.",
+      "Stable prefixes for caching; routing with escalation.",
+      "Batch endpoints for evals and offline work.",
+      "Stream and parallelise for latency.",
+      "Pick from the success versus cost frontier; re-check when things change."
+    ],
+    "groups": [
+      {
+        "title": "Measure",
+        "items": [
+          {
+            "syntax": "cost / tasks solved",
+            "desc": "Cost per success"
+          },
+          {
+            "syntax": "p50 / p90 seconds",
+            "desc": "Time to completion"
+          },
+          {
+            "syntax": "tokens per step over the run",
+            "desc": "Context growth"
+          },
+          {
+            "syntax": "tokens per layer",
+            "desc": "Biggest consumer"
+          }
+        ]
+      },
+      {
+        "title": "Fewer tokens",
+        "items": [
+          {
+            "syntax": "bounded tool results",
+            "desc": "Smaller history"
+          },
+          {
+            "syntax": "compaction",
+            "desc": "Long runs"
+          },
+          {
+            "syntax": "task-level tools",
+            "desc": "Fewer steps"
+          },
+          {
+            "syntax": "concise structured outputs",
+            "desc": "Fewer output tokens"
+          }
+        ]
+      },
+      {
+        "title": "Cheaper tokens",
+        "items": [
+          {
+            "syntax": "prompt caching",
+            "desc": "Stable prefix"
+          },
+          {
+            "syntax": "route small -> escalate large",
+            "desc": "Model tiers"
+          },
+          {
+            "syntax": "cheaper sub-agents",
+            "desc": "Search, summarise"
+          },
+          {
+            "syntax": "batch API for evals",
+            "desc": "Offline work"
+          }
+        ]
+      },
+      {
+        "title": "Faster",
+        "items": [
+          {
+            "syntax": "stream progress",
+            "desc": "Perceived latency"
+          },
+          {
+            "syntax": "parallel reads",
+            "desc": "Wall-clock"
+          },
+          {
+            "syntax": "indexed search",
+            "desc": "Fast tools"
+          },
+          {
+            "syntax": "time budget + partial result",
+            "desc": "Bounded waits"
+          }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Optimising price per token while cost per success rises.",
+      "Routing to a small model without counting escalations.",
+      "Dynamic content at the top of the prompt defeating caching.",
+      "Optimising latency by cutting verification steps.",
+      "Not re-running comparisons when models or prices change."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A cheaper model halves the price per token but needs three times as many steps per task. What should you compare?",
+      "options": [
+        "Cost per successful task",
+        "Price per token only",
+        "Output tokens per call",
+        "Model parameter count"
+      ],
+      "answer": 0,
+      "explain": "More steps and failures can make a cheaper model more expensive per completed task."
+    },
+    {
+      "q": "Why do long agent runs cost disproportionately more?",
+      "options": [
+        "Each call re-sends a growing context",
+        "Providers charge more after an hour",
+        "Tool calls are billed per step",
+        "Output tokens double each step"
+      ],
+      "answer": 0,
+      "explain": "Total input tokens grow roughly with the square of the step count when context grows each step."
+    },
+    {
+      "q": "Where are batch processing endpoints most appropriate?",
+      "options": [
+        "Offline evals and bulk jobs",
+        "Interactive chat sessions",
+        "Approval prompts",
+        "Streaming progress updates"
+      ],
+      "answer": 0,
+      "explain": "Batch processing trades turnaround time for cost, which suits work no user is waiting on."
+    },
+    {
+      "q": "A configuration has lower success and higher cost than another. What is it on the frontier?",
+      "options": [
+        "Dominated, so discard it",
+        "The best trade-off",
+        "The latency winner",
+        "The default choice"
+      ],
+      "answer": 0,
+      "explain": "It is worse on both axes, so another configuration is better in every respect."
+    },
+    {
+      "q": "What is a risky way to reduce latency?",
+      "options": [
+        "Skipping verification steps",
+        "Streaming progress",
+        "Parallel read-only calls",
+        "Faster indexed search"
+      ],
+      "answer": 0,
+      "explain": "Removing verification trades correctness for speed, which usually costs more later."
+    }
+  ]
+}

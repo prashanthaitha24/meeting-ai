@@ -1,0 +1,281 @@
+{
+  "id": "eh-observability",
+  "minutes": 40,
+  "intro": "When an agent fails, the question is always the same: what did it see, and what did it decide at each step? Without a trace, you are left guessing from the final answer. Observability for agents means recording every model call and tool call as a structured trace, with the inputs, outputs, tokens, latency and errors of each step, so you can replay a run, find where it went wrong, and aggregate behaviour across thousands of runs. This lesson covers trace structure, OpenTelemetry's generative AI conventions, what to record and redact, a debugging workflow, and the metrics worth charting.",
+  "objectives": [
+    "Structure agent runs as traces with spans for model and tool calls",
+    "Instrument a harness with OpenTelemetry using generative AI attributes",
+    "Decide what to record, what to redact and how long to keep it",
+    "Debug a failed run step by step from its trace",
+    "Chart the aggregate metrics that reveal harness problems"
+  ],
+  "sections": [
+    {
+      "heading": "Traces, spans and runs",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A **trace** is one agent run. Inside it, each model call and each tool call is a **span** with a start time, duration, attributes and status. Spans nest: a sub-agent's work appears under the step that delegated to it. With this structure you can see the whole run as a timeline, open any step to read the exact messages the model received, and compare runs side by side."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Span",
+            "Key attributes"
+          ],
+          "rows": [
+            [
+              "agent run (root)",
+              "task ID, user or session ID (hashed), harness version, outcome"
+            ],
+            [
+              "model call",
+              "model, input and output tokens, latency, stop reason, tool calls requested"
+            ],
+            [
+              "tool call",
+              "tool name, arguments, result size, duration, error, permission decision"
+            ],
+            [
+              "sub-agent",
+              "brief, nested spans, returned summary"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "Instrumenting with OpenTelemetry",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "OpenTelemetry defines semantic conventions for generative AI (attribute names prefixed `gen_ai.`), so traces from different harnesses and libraries can be read by the same backends. Open-source tools such as Langfuse and Arize Phoenix, and general tracing backends such as Jaeger or Grafana Tempo, can receive them. The conventions are still evolving, so pin the version you follow."
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "caption": "Spans around model and tool calls",
+          "code": "from opentelemetry import trace\n\ntracer = trace.get_tracer(\"my-harness\")\n\n\ndef traced_model_call(messages, tools, model: str):\n    with tracer.start_as_current_span(f\"chat {model}\") as span:\n        span.set_attribute(\"gen_ai.operation.name\", \"chat\")\n        span.set_attribute(\"gen_ai.request.model\", model)\n        reply = call_llm(messages, tools=tools)\n        span.set_attribute(\"gen_ai.usage.input_tokens\", reply.usage.input_tokens)\n        span.set_attribute(\"gen_ai.usage.output_tokens\", reply.usage.output_tokens)\n        span.set_attribute(\"harness.tool_calls\", len(reply.tool_calls))\n        return reply\n\n\ndef traced_tool_call(name: str, args: dict, run):\n    with tracer.start_as_current_span(f\"execute_tool {name}\") as span:\n        span.set_attribute(\"gen_ai.operation.name\", \"execute_tool\")\n        span.set_attribute(\"gen_ai.tool.name\", name)\n        try:\n            result = run(**args)\n            span.set_attribute(\"harness.result_chars\", len(result))\n            return result\n        except Exception as e:\n            span.record_exception(e)\n            span.set_status(trace.Status(trace.StatusCode.ERROR))\n            raise"
+        },
+        {
+          "type": "p",
+          "text": "Instrument in one place. If every model call goes through a single client function and every tool call through a single dispatcher, two wrappers trace the whole harness, and nothing new can slip through untraced. Export through an OpenTelemetry Collector, which can batch, sample and apply redaction rules before data leaves your network, so you can switch backends without touching the harness code."
+        }
+      ]
+    },
+    {
+      "heading": "What to record and what to redact",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Record full prompts and responses in development and evals, where replay is essential.",
+            "In production, record content only where you have a lawful basis and a retention limit; otherwise record metadata (sizes, tokens, tool names, outcomes) and sample content with consent.",
+            "Redact secrets, credentials and personal data before export, at the harness, not later in the backend.",
+            "Hash user identifiers so runs can be grouped without exposing identity.",
+            "Record the harness version, prompt hash and model with every trace, so behaviour changes can be tied to releases."
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "A debugging workflow",
+      "blocks": [
+        {
+          "type": "steps",
+          "items": [
+            "Start at the outcome: what was wrong with the final state or answer?",
+            "Find the first step where the run diverged from what a competent human would do.",
+            "Read exactly what the model received at that step: was the needed information present, visible and unambiguous?",
+            "Classify the cause: missing context, misleading tool result, bad tool choice, bad arguments, policy denial, budget hit, or a genuinely wrong decision with good inputs.",
+            "Fix the harness layer responsible (tool, context, prompt, policy), add the run as an eval case, and re-run."
+          ]
+        },
+        {
+          "type": "p",
+          "text": "Most agent failures turn out to be harness failures: a truncated result cut off the important line, an error message gave no guidance, or the needed file was never offered. Only the trace shows that."
+        }
+      ]
+    },
+    {
+      "heading": "Aggregate metrics",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Across many traces, chart the signals that reveal harness health: success rate by task type, steps and tokens per task (median and p90), cost per successful task, tool error rate and invalid-argument rate per tool, permission denials and approvals per task, loop detections, budget exhaustions, and latency per step. Break them down by harness version so a release that doubles steps per task is caught the same day."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Trace and debug an agent",
+    "steps": [
+      "Run a tracing backend locally (for example Jaeger or Phoenix in Docker).",
+      "Instrument your agent loop with spans for runs, model calls and tool calls using gen_ai attributes.",
+      "Add redaction for a fake secret pattern before export and verify it never reaches the backend.",
+      "Run ten benchmark tasks and open a failed trace; walk the debugging workflow to the first divergence.",
+      "Classify the cause, fix the responsible layer and add the case to your eval set.",
+      "Build a small chart of steps per task and tool error rate by harness version."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Trace = run; spans = model calls and tool calls, nested.",
+      "Use OpenTelemetry gen_ai attributes; pin the convention version.",
+      "Record version, prompt hash and model on every trace.",
+      "Redact at the harness; hash user IDs; limit retention.",
+      "Debug from the first divergent step; most failures are harness failures.",
+      "Chart steps, tokens, cost, tool errors and denials by version."
+    ],
+    "groups": [
+      {
+        "title": "Span attributes",
+        "items": [
+          {
+            "syntax": "gen_ai.operation.name",
+            "desc": "chat, execute_tool"
+          },
+          {
+            "syntax": "gen_ai.request.model",
+            "desc": "Model used"
+          },
+          {
+            "syntax": "gen_ai.usage.input_tokens / output_tokens",
+            "desc": "Tokens"
+          },
+          {
+            "syntax": "gen_ai.tool.name",
+            "desc": "Tool called"
+          },
+          {
+            "syntax": "span.record_exception(e)",
+            "desc": "Errors"
+          }
+        ]
+      },
+      {
+        "title": "Backends",
+        "items": [
+          {
+            "syntax": "Langfuse, Arize Phoenix",
+            "desc": "LLM-focused, open source"
+          },
+          {
+            "syntax": "Jaeger, Grafana Tempo",
+            "desc": "General tracing"
+          },
+          {
+            "syntax": "OTel Collector",
+            "desc": "Route, redact, sample"
+          }
+        ]
+      },
+      {
+        "title": "Debug causes",
+        "items": [
+          {
+            "syntax": "missing context",
+            "desc": "Info not offered"
+          },
+          {
+            "syntax": "misleading result",
+            "desc": "Truncation, vague errors"
+          },
+          {
+            "syntax": "bad tool or arguments",
+            "desc": "Tool design"
+          },
+          {
+            "syntax": "policy denial / budget",
+            "desc": "Harness limits"
+          }
+        ]
+      },
+      {
+        "title": "Metrics",
+        "items": [
+          {
+            "syntax": "steps, tokens per task (p50, p90)",
+            "desc": "Efficiency"
+          },
+          {
+            "syntax": "cost per successful task",
+            "desc": "Economics"
+          },
+          {
+            "syntax": "tool error rate per tool",
+            "desc": "Tool quality"
+          },
+          {
+            "syntax": "denials, loops, budget hits",
+            "desc": "Harness health"
+          }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Logging only the final answer.",
+      "Exporting raw prompts with secrets or personal data.",
+      "Traces without harness version or prompt hash.",
+      "Blaming the model before reading the step where it diverged.",
+      "Metrics averaged over all versions, hiding a bad release."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "What is a span in an agent trace?",
+      "options": [
+        "One step, such as a model or tool call",
+        "The whole conversation history",
+        "A summary of the final answer",
+        "A token budget"
+      ],
+      "answer": 0,
+      "explain": "Spans are timed, attributed units of work inside the trace of a run."
+    },
+    {
+      "q": "Where should secrets and personal data be redacted from traces?",
+      "options": [
+        "In the harness, before export",
+        "Only in the dashboard view",
+        "Never, traces must be complete",
+        "After a month of retention"
+      ],
+      "answer": 0,
+      "explain": "Redacting at the source keeps sensitive data from ever reaching the backend."
+    },
+    {
+      "q": "A trace shows the model chose a wrong file because the search result was cut off before the right match. What kind of failure is it?",
+      "options": [
+        "A harness failure",
+        "Pure model reasoning failure",
+        "A network outage",
+        "A permission denial"
+      ],
+      "answer": 0,
+      "explain": "Truncation in the tool layer hid the needed information, so the fix belongs in the harness."
+    },
+    {
+      "q": "Why record the harness version and prompt hash on every trace?",
+      "options": [
+        "To tie behaviour changes to releases",
+        "To reduce token usage",
+        "Because OpenTelemetry requires it",
+        "To speed up tool calls"
+      ],
+      "answer": 0,
+      "explain": "Version-tagged traces let you break metrics down by release and spot regressions."
+    },
+    {
+      "q": "After a release, median steps per task doubles while success is flat. What does that suggest?",
+      "options": [
+        "A harness regression in efficiency",
+        "A clear quality improvement",
+        "Nothing worth investigating",
+        "A cheaper model"
+      ],
+      "answer": 0,
+      "explain": "More steps for the same success means higher cost and latency; inspect traces from the new version."
+    }
+  ]
+}

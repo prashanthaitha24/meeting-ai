@@ -1,0 +1,137 @@
+{
+  "id": "eh-production",
+  "minutes": 45,
+  "intro": "Running an agent for yourself is one thing; running it for thousands of users is a distributed-systems problem with an unpredictable component in the middle. Production agents need sandboxes provisioned per session, a gateway in front of model providers with quotas and fallbacks, durable session state, versioned prompts and harness configuration, audit logs, kill switches, and an incident process that understands model behaviour. This final lesson assembles everything in the track into a production architecture and a launch checklist.",
+  "objectives": [
+    "Describe a production architecture for an agent service",
+    "Version and roll out prompts, tools and harness configuration safely",
+    "Handle provider outages, rate limits and per-tenant quotas",
+    "Prepare kill switches, audit logs and incident runbooks for agents",
+    "Run a launch review using a production readiness checklist"
+  ],
+  "sections": [
+    {
+      "heading": "A production architecture",
+      "blocks": [
+        {"type": "table", "headers": ["Component", "Responsibility"], "rows": [
+          ["API and session service", "Authenticates users, stores durable session state, streams progress"],
+          ["Agent workers", "Run the loop; stateless so they can scale and restart"],
+          ["Sandbox pool", "Pre-warmed isolated containers or microVMs, one per session, destroyed after"],
+          ["Model gateway", "Routes to providers, enforces quotas, retries, fallbacks, caching, logging"],
+          ["Tool services and MCP servers", "Business actions with the user's permissions"],
+          ["Policy and approvals", "Permission rules, approval queue, audit log"],
+          ["Telemetry", "Traces, metrics, online evals, cost tracking"],
+          ["Config and flags", "Versioned prompts, tool sets, budgets, kill switches"]
+        ]},
+        {"type": "p", "text": "Keep agent workers stateless and store session state (messages, task list, workspace snapshot references) durably, so a crashed worker or a deploy does not lose a user's task. Long tasks should survive restarts by resuming from the last completed step."}
+      ]
+    },
+    {
+      "heading": "Versioned configuration and rollout",
+      "blocks": [
+        {"type": "p", "text": "Prompts, tool definitions, budgets and model choices are behaviour, so manage them like code: versioned in a repository, reviewed, evaluated in CI and rolled out gradually. Record the configuration version in every trace. Being able to roll back a prompt in one minute is as important as rolling back a deploy."},
+        {"type": "code", "lang": "yaml", "caption": "agent-config.yaml: one versioned unit of behaviour", "code": "version: 2026.10.1\nprompt: prompts/support-v14.md\ntools: [orders_search, orders_refund_preview, orders_refund, tickets_create]\nmodels:\n  primary: provider-a/large\n  fallback: provider-b/large\n  router_small: provider-a/small\nbudgets:\n  max_steps: 30\n  max_tokens: 300000\n  max_seconds: 600\napprovals:\n  orders_refund: always\n  tickets_create: never\nrollout:\n  canary_percent: 5\n  guardrail_metric: unsafe_action_rate\nkill_switch: false"}
+      ]
+    },
+    {
+      "heading": "Providers, quotas and fallbacks",
+      "blocks": [
+        {"type": "list", "items": [
+          "**Gateway**: all model traffic passes through one internal gateway that holds keys, enforces per-tenant and per-user quotas, and records usage for cost attribution.",
+          "**Rate limits**: queue and smooth bursts; back off on provider limits; prioritise interactive sessions over background jobs.",
+          "**Fallbacks**: a second provider or model for outages, evaluated in advance on the benchmark so you know the quality you fall back to.",
+          "**Timeouts**: per call and per session, with clear user-facing messages when exceeded.",
+          "**Cost controls**: per-tenant budgets and alerts on spend anomalies, since a looping agent can burn money quickly."
+        ]}
+      ]
+    },
+    {
+      "heading": "Safety operations",
+      "blocks": [
+        {"type": "p", "text": "Agents can take actions, so incidents can be actions, not only bad text. Prepare for that before launch."},
+        {"type": "list", "items": [
+          "**Kill switches** at several levels: disable one tool, disable write actions, disable the agent for a tenant, disable it globally. They must work without a deploy.",
+          "**Audit log** of every consequential action: who, which session, which tool, arguments, approval, result. Keep it separate from debug traces and tamper-evident.",
+          "**Runbooks** for agent incidents: stop the behaviour, find affected sessions from traces, reverse actions where possible, notify users, add eval cases, then re-enable.",
+          "**Data handling**: retention limits for prompts and traces, redaction, regional storage where required, and clear user-facing disclosure that an AI agent is acting."
+        ]},
+        {"type": "code", "lang": "python", "caption": "Kill-switch checks before every tool call", "code": "def check_switches(flags, tenant: str, tool: str, is_write: bool) -> str | None:\n    if flags.get(\"agent_disabled\") or flags.get(f\"tenant_disabled:{tenant}\"):\n        return \"The assistant is temporarily unavailable.\"\n    if flags.get(f\"tool_disabled:{tool}\"):\n        return f\"{tool} is temporarily disabled; tell the user and offer a human handoff.\"\n    if is_write and flags.get(\"writes_disabled\"):\n        return \"Write actions are paused; prepare the change for a human to apply.\"\n    return None"}
+      ]
+    },
+    {
+      "heading": "Launch readiness",
+      "blocks": [
+        {"type": "steps", "items": [
+          "**Evals**: held-out benchmark meets the target with intervals; pass^k for key tasks; safety suite at zero failures; red-team findings fixed and added as cases.",
+          "**Isolation**: sandboxes per session, no network by default, least-privilege credentials, approvals on irreversible actions.",
+          "**Operations**: tracing, dashboards for success, cost and unsafe actions, alerts, on-call owner, runbooks, kill switches tested.",
+          "**Resilience**: fallback provider evaluated, quotas and budgets set, sessions survive worker restarts.",
+          "**Rollout**: canary percentage, success and guardrail metrics, rollback procedure rehearsed.",
+          "**Compliance**: data retention, redaction, audit log, user disclosure and human escalation path."
+        ]},
+        {"type": "callout", "kind": "tip", "text": "Rehearse the bad day before launch: flip each kill switch in staging, fail the primary provider, and walk through reversing a wrong refund from the audit log."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Production review of your agent",
+    "steps": [
+      "Draw your agent's production architecture using the components table and mark what you have and what is missing.",
+      "Move prompts, tools, budgets and model choices into a versioned config file recorded in every trace.",
+      "Add a gateway wrapper with per-user quotas, retries and a fallback model, and evaluate the fallback on your benchmark.",
+      "Implement and test four kill switches without redeploying.",
+      "Write a one-page incident runbook for a wrong-action incident.",
+      "Run the launch readiness checklist and list the gaps with owners and dates."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Stateless workers, durable sessions, sandbox per session.",
+      "One model gateway: keys, quotas, retries, fallbacks, cost.",
+      "Prompts and harness config are versioned behaviour.",
+      "Kill switches at tool, write, tenant and global level.",
+      "Audit every consequential action; rehearse incidents.",
+      "Launch on evidence: held-out evals, safety at zero, rollout plan."
+    ],
+    "groups": [
+      {"title": "Architecture", "items": [
+        {"syntax": "session service + durable state", "desc": "Survive restarts"},
+        {"syntax": "stateless agent workers", "desc": "Scale and redeploy"},
+        {"syntax": "pre-warmed sandbox pool", "desc": "Fast isolation"},
+        {"syntax": "model gateway", "desc": "Central control"}
+      ]},
+      {"title": "Config", "items": [
+        {"syntax": "version, prompt, tools, models", "desc": "One versioned unit"},
+        {"syntax": "budgets: steps, tokens, seconds", "desc": "Limits"},
+        {"syntax": "approvals per tool", "desc": "Human control"},
+        {"syntax": "rollout: canary + guardrail", "desc": "Gradual release"}
+      ]},
+      {"title": "Resilience", "items": [
+        {"syntax": "fallback model, pre-evaluated", "desc": "Outages"},
+        {"syntax": "per-tenant quotas", "desc": "Fairness and cost"},
+        {"syntax": "prioritise interactive traffic", "desc": "Under load"},
+        {"syntax": "spend anomaly alerts", "desc": "Runaway loops"}
+      ]},
+      {"title": "Safety ops", "items": [
+        {"syntax": "kill switch: tool / writes / tenant / all", "desc": "No deploy needed"},
+        {"syntax": "audit log (tamper-evident)", "desc": "Accountability"},
+        {"syntax": "runbook: stop, scope, reverse, notify", "desc": "Incidents"},
+        {"syntax": "retention + redaction + disclosure", "desc": "Compliance"}
+      ]}
+    ],
+    "pitfalls": [
+      "Session state held only in worker memory.",
+      "Provider keys spread across services instead of one gateway.",
+      "A fallback model that was never evaluated.",
+      "Kill switches that need a deploy to flip.",
+      "Launching on a dev-set score without held-out and safety evals."
+    ]
+  },
+  "quiz": [
+    {"q": "A deploy restarts agent workers and users lose in-progress tasks. What design fixes this?", "options": ["Durable session state with resumable steps", "Larger worker machines", "Longer prompt caching", "Fewer tools"], "answer": 0, "explain": "Stateless workers plus durable state let any worker resume a session after a restart."},
+    {"q": "Why route all model traffic through one gateway?", "options": ["Central quotas, fallbacks, keys and cost tracking", "It makes every model smarter", "Providers require a gateway", "It removes the need for evals"], "answer": 0, "explain": "A single gateway enforces policy and attributes usage consistently."},
+    {"q": "The agent issues wrong refunds after a prompt change. What should you reach for first?", "options": ["A kill switch for refunds or writes", "A new model version", "A larger step budget", "Disabling tracing"], "answer": 0, "explain": "Stop the harmful behaviour immediately without a deploy, then investigate from traces and the audit log."},
+    {"q": "What must be true of a fallback model before an outage happens?", "options": ["It has been evaluated on the benchmark", "It is the cheapest model available", "It is from the same provider", "It has a larger context window"], "answer": 0, "explain": "You need to know the quality you will fall back to; untested fallbacks can fail badly."},
+    {"q": "Why manage prompts and tool sets as versioned configuration?", "options": ["They are behaviour and need review and rollback", "Version control makes prompts shorter", "It is required for caching", "Models cannot read unversioned prompts"], "answer": 0, "explain": "Prompt and tool changes alter behaviour like code changes do, so they need CI evals, rollout and fast rollback."}
+  ]
+}

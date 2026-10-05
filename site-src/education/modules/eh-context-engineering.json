@@ -1,0 +1,126 @@
+{
+  "id": "eh-context-engineering",
+  "minutes": 40,
+  "intro": "Everything an agent knows at a given step is what the harness put into the context window for that request. Context engineering is the practice of deciding what goes in, in what order, in what form, and what gets left out, summarised or fetched later. It matters because context is finite, costs money on every call, and degrades in quality when it is cluttered: models attend less reliably to details buried in long, noisy prompts. This lesson covers the layers of context, budgeting, just-in-time retrieval, compaction, persistent notes, sub-agents for isolation, and ordering for prompt caching.",
+  "objectives": [
+    "List the layers of an agent's context and what belongs in each",
+    "Budget the context window and measure what consumes it",
+    "Prefer just-in-time retrieval over preloading large content",
+    "Apply compaction, persistent notes and sub-agents to long tasks",
+    "Order context to take advantage of prompt caching"
+  ],
+  "sections": [
+    {
+      "heading": "The layers of context",
+      "blocks": [
+        {"type": "table", "headers": ["Layer", "Changes", "Contents"], "rows": [
+          ["System prompt", "Rarely", "Role, rules, safety policy, output format"],
+          ["Tool definitions", "Rarely", "Names, descriptions, schemas"],
+          ["Project instructions", "Per project", "Conventions, commands, gotchas (for example an AGENTS.md file)"],
+          ["Retrieved knowledge", "Per task", "Docs, code, records fetched for this task"],
+          ["Conversation history", "Every turn", "User messages, model replies, tool calls"],
+          ["Tool results", "Every step", "Outputs of commands, searches and reads"]
+        ]},
+        {"type": "p", "text": "Each layer competes for the same window. In long agent sessions, tool results usually grow fastest: a few test runs, file reads and search results can dwarf everything else. Context engineering starts with measuring which layer is consuming the budget."}
+      ]
+    },
+    {
+      "heading": "Budgets and measurement",
+      "blocks": [
+        {"type": "p", "text": "Give each layer a budget and enforce it when assembling the request. Log the token count of each layer on every call, so you can see when a session is approaching its limit and which layer caused it. Treat the window as a scarce resource even when the model offers a very large one: more context means more cost and latency on every step, and important details are easier to miss in a long, noisy prompt."},
+        {"type": "code", "lang": "python", "caption": "Assembling a request under per-layer budgets", "code": "BUDGET = {\"system\": 3_000, \"tools\": 4_000, \"project\": 2_000,\n          \"history\": 40_000, \"results\": 20_000}\n\n\ndef assemble(state) -> list[dict]:\n    msgs = [system_msg(clip(state.system, BUDGET[\"system\"]))]\n    msgs.append(project_msg(clip(state.project_notes, BUDGET[\"project\"])))\n    history = recent_within(state.history, BUDGET[\"history\"])   # newest turns first\n    if len(history) < len(state.history):\n        msgs.append(summary_msg(state.summary))                  # compacted older turns\n    msgs += history\n    log_tokens({k: count_tokens(v) for k, v in by_layer(msgs).items()})\n    return msgs"}
+      ]
+    },
+    {
+      "heading": "Just-in-time beats preloading",
+      "blocks": [
+        {"type": "p", "text": "Early RAG systems stuffed every possibly relevant document into the prompt up front. Agents can do better: give them lightweight references (file paths, document titles, search tools) and let them fetch details when needed. A coding agent that can list directories, search for a symbol and read a range of lines needs far less context than one given the whole repository, and it reads what is relevant to the current step."},
+        {"type": "list", "items": [
+          "Preload only what is needed on almost every step: rules, conventions, the task itself.",
+          "Expose search and read tools with limits and offsets for everything else.",
+          "Return file and document references in results, so the agent can choose to open them.",
+          "Keep a short index (names and one-line descriptions) in context instead of full contents."
+        ]}
+      ]
+    },
+    {
+      "heading": "Long tasks: compaction, notes and sub-agents",
+      "blocks": [
+        {"type": "list", "items": [
+          "**Compaction**: when history nears its budget, summarise older turns into decisions made, files changed, open problems and next steps, then drop the raw turns. Clear old tool results first; they are rarely needed verbatim.",
+          "**Persistent notes**: let the agent write a progress file or task list outside the context window and re-read it, so state survives compaction and even new sessions.",
+          "**Sub-agents**: delegate a self-contained subtask (search the codebase for usages, read these ten documents) to a fresh agent with its own clean context, and return only a short result to the main agent.",
+          "**Structured state**: keep facts the harness can track (current branch, files edited, test status) in data structures and render a compact view, rather than relying on the model to remember them from history."
+        ]},
+        {"type": "callout", "kind": "warning", "text": "Compaction loses information. Test it: run long tasks with and without compaction on your benchmark and check which details the summary dropped. Keep anything the user stated as a requirement verbatim."}
+      ]
+    },
+    {
+      "heading": "Order for caching and clarity",
+      "blocks": [
+        {"type": "p", "text": "Many providers can cache a prompt prefix that repeats across requests, which reduces cost and latency for the cached part. Put stable content first (system prompt, tool definitions, project instructions) and changing content last (history and new results), and avoid inserting timestamps or random IDs near the top, which break the cache on every call. The same ordering helps clarity: rules first, then background, then the current situation and the immediate request at the end."},
+        {"type": "p", "text": "Finally, evaluate context changes like any other harness change. A different summary prompt, a smaller result budget or a new project instruction can raise or lower task success; measure success, tokens per task and cost together on the benchmark before keeping the change."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Instrument and tighten an agent's context",
+    "steps": [
+      "Add per-layer token logging to an agent loop (yours or the minimal loop from the anatomy lesson).",
+      "Run five long tasks and chart which layer grows fastest.",
+      "Cap tool results with a truncation note and re-run; compare success and tokens per task.",
+      "Implement compaction that summarises history beyond a budget into decisions, changes, open issues and next steps.",
+      "Add a persistent progress file the agent updates and re-reads; test a task across two sessions.",
+      "Reorder the prompt so stable content comes first and measure the cache hit rate if your provider reports it."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Context = everything the model knows at this step.",
+      "Measure tokens per layer; tool results usually grow fastest.",
+      "Preload rules and the task; fetch the rest just in time.",
+      "Compaction, persistent notes and sub-agents for long tasks.",
+      "Stable content first for caching; current request last.",
+      "Evaluate context changes on success, tokens and cost."
+    ],
+    "groups": [
+      {"title": "Layers", "items": [
+        {"syntax": "system prompt", "desc": "Rules, role, format"},
+        {"syntax": "tool definitions", "desc": "Schemas"},
+        {"syntax": "project instructions (AGENTS.md)", "desc": "Conventions"},
+        {"syntax": "history + tool results", "desc": "Grows every step"}
+      ]},
+      {"title": "Techniques", "items": [
+        {"syntax": "per-layer budgets", "desc": "Enforced at assembly"},
+        {"syntax": "search/read tools with limits", "desc": "Just-in-time"},
+        {"syntax": "compaction summary", "desc": "Decisions, changes, next steps"},
+        {"syntax": "progress file", "desc": "State outside the window"},
+        {"syntax": "sub-agent", "desc": "Isolated context, short result"}
+      ]},
+      {"title": "Caching", "items": [
+        {"syntax": "stable prefix first", "desc": "Cache hits"},
+        {"syntax": "no timestamps at the top", "desc": "Avoid cache breaks"},
+        {"syntax": "request last", "desc": "Clarity"}
+      ]},
+      {"title": "Measure", "items": [
+        {"syntax": "tokens per layer per call", "desc": "Find the hog"},
+        {"syntax": "tokens per task", "desc": "Cost"},
+        {"syntax": "success with vs without compaction", "desc": "Information loss"}
+      ]}
+    ],
+    "pitfalls": [
+      "Preloading whole repositories or document sets.",
+      "Unbounded tool output in history.",
+      "Compaction that drops user requirements.",
+      "Timestamps at the top of the prompt breaking the cache.",
+      "Changing context policy without measuring task success."
+    ]
+  },
+  "quiz": [
+    {"q": "In a long coding session, which context layer usually grows fastest?", "options": ["Tool results", "System prompt", "Tool definitions", "Project instructions"], "answer": 0, "explain": "Test output, file reads and search results accumulate on every step."},
+    {"q": "What does just-in-time context mean for an agent?", "options": ["Fetch details with tools when needed", "Preload every relevant document", "Retrain the model per task", "Send the system prompt last"], "answer": 0, "explain": "Lightweight references plus search and read tools let the agent pull only what the current step needs."},
+    {"q": "Why delegate a broad codebase search to a sub-agent?", "options": ["Its exploration stays out of the main context", "Sub-agents are always more accurate", "It avoids needing tools", "It disables compaction"], "answer": 0, "explain": "The sub-agent uses its own context and returns a short result, keeping the main context clean."},
+    {"q": "A harness puts the current timestamp at the start of every prompt. What is the side effect?", "options": ["Prompt prefix caching stops working", "The model refuses to answer", "Tool calls become invalid", "History is compacted"], "answer": 0, "explain": "Caches match a stable prefix; changing text at the top invalidates it on each call."},
+    {"q": "What is the main risk of compaction?", "options": ["Losing details the task still needs", "Using more tokens than before", "Breaking tool schemas", "Making runs deterministic"], "answer": 0, "explain": "Summaries drop information; test them and keep stated requirements verbatim."}
+  ]
+}

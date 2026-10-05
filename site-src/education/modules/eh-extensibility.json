@@ -1,0 +1,122 @@
+{
+  "id": "eh-extensibility",
+  "minutes": 40,
+  "intro": "No harness ships with every tool and every rule a team needs. Modern harnesses are built to be extended in three main ways: the Model Context Protocol (MCP) connects external tools and data through a standard interface; hooks run your own code at fixed points in the agent's lifecycle to enforce rules or add context; and skills package instructions, scripts and reference material that the agent loads only when a task needs them. This lesson explains each mechanism, when to use which, how to build a small MCP server and a policy hook, and the security questions every extension raises.",
+  "objectives": [
+    "Explain MCP's client-server model, its primitives and its transports",
+    "Build a small MCP server that exposes a tool",
+    "Use lifecycle hooks to enforce policy deterministically",
+    "Package knowledge as skills with progressive disclosure",
+    "Assess the security risks of third-party extensions"
+  ],
+  "sections": [
+    {
+      "heading": "The Model Context Protocol",
+      "blocks": [
+        {"type": "p", "text": "MCP is an open protocol for connecting agents to tools and data. The harness runs an **MCP client**; each integration is an **MCP server** that exposes capabilities in a standard form. Write the integration once as a server, and any MCP-capable harness can use it. Servers run locally as a subprocess speaking over **stdio**, or remotely over **Streamable HTTP**, where authorisation is typically handled with OAuth."},
+        {"type": "table", "headers": ["Primitive", "Controlled by", "Example"], "rows": [
+          ["Tools", "The model decides to call them", "orders_search, create_ticket"],
+          ["Resources", "The application or user attaches them", "A file, a database schema, a document"],
+          ["Prompts", "The user picks them", "A reusable \"review this PR\" template"]
+        ]},
+        {"type": "code", "lang": "python", "caption": "orders_server.py: a minimal MCP server with the Python SDK", "code": "from mcp.server.fastmcp import FastMCP\n\nmcp = FastMCP(\"orders\")\n\nORDERS = {\"A-1042\": {\"email\": \"sam@example.com\", \"status\": \"delivered\", \"total\": 59.0}}\n\n\n@mcp.tool()\ndef orders_search(customer_email: str) -> str:\n    \"\"\"Find a customer's orders. Use before any refund to get the order ID.\"\"\"\n    rows = [f\"{oid} | {o['status']} | {o['total']:.2f}\"\n            for oid, o in ORDERS.items() if o[\"email\"] == customer_email]\n    return \"\\n\".join(rows) or f\"No orders for {customer_email}.\"\n\n\nif __name__ == \"__main__\":\n    mcp.run()          # stdio transport by default"},
+        {"type": "p", "text": "The function's name, type hints and docstring become the tool's name, schema and description, so everything from the tool design lesson applies: clear names, precise types, actionable results. Test servers with the MCP Inspector before connecting them to an agent."}
+      ]
+    },
+    {
+      "heading": "Hooks: deterministic control",
+      "blocks": [
+        {"type": "p", "text": "Instructions in a prompt are suggestions; the model usually follows them, but not always. **Hooks** are code the harness runs at lifecycle events (session start, before a tool runs, after a tool runs, when the agent tries to stop), and they always run. Use them for rules that must hold every time: block edits to protected files, run a formatter after every edit, add the current branch to context at session start, or require tests before stopping. The details differ by harness, but most pass the event as JSON and let the hook allow, block with a reason, or add context."},
+        {"type": "code", "lang": "python", "caption": "A pre-tool hook that blocks edits to protected paths", "code": "#!/usr/bin/env python3\n\"\"\"Reads the pending tool call as JSON on stdin; exit code 2 blocks it, stderr is the reason.\"\"\"\nimport fnmatch\nimport json\nimport sys\n\nPROTECTED = [\"*.env\", \"migrations/*\", \"tests/*\", \".github/workflows/*\"]\n\nevent = json.load(sys.stdin)\npath = event.get(\"tool_input\", {}).get(\"file_path\", \"\")\nif event.get(\"tool_name\") in (\"edit\", \"write\") and any(fnmatch.fnmatch(path, p) for p in PROTECTED):\n    print(f\"{path} is protected; explain the needed change to the user instead.\", file=sys.stderr)\n    sys.exit(2)\nsys.exit(0)"},
+        {"type": "callout", "kind": "tip", "text": "A good rule of thumb: if breaking a rule once would be unacceptable, put it in a hook or the permission policy, not only in the prompt."}
+      ]
+    },
+    {
+      "heading": "Skills: knowledge on demand",
+      "blocks": [
+        {"type": "p", "text": "Teams accumulate procedures: how to cut a release, how to write a migration, how to use the internal design system. Putting all of that in the system prompt wastes context on every call. A **skill** packages one procedure as a folder with a short description, detailed instructions and any helper scripts or reference files. The harness keeps only each skill's name and description in context; when a task matches, the agent loads the full instructions, and reads deeper files only if needed. This **progressive disclosure** keeps context small while making a large library of know-how available."},
+        {"type": "code", "lang": "text", "caption": "A skill folder", "code": "skills/release/\n  SKILL.md          name, one-line description, then step-by-step instructions\n  checklist.md      detailed pre-release checks, read only when needed\n  scripts/\n    bump_version.py helper the instructions tell the agent to run"},
+        {"type": "p", "text": "Project instruction files (for example an AGENTS.md at the repository root) are the always-loaded counterpart: short, essential conventions such as build and test commands. Keep them brief and move long procedures into skills."}
+      ]
+    },
+    {
+      "heading": "Choosing a mechanism",
+      "blocks": [
+        {"type": "list", "items": [
+          "**New capability or data source** (query the ticket system): an MCP server, or a built-in tool.",
+          "**Rule that must always hold** (never edit migrations): a hook or permission rule.",
+          "**Procedure or expertise used sometimes** (how we release): a skill.",
+          "**Conventions needed almost every time** (test command, code style): project instructions."
+        ]}
+      ]
+    },
+    {
+      "heading": "Security of extensions",
+      "blocks": [
+        {"type": "p", "text": "Every extension runs with real power. A local MCP server is a program on your machine; a remote one sees the data you send it; a hook executes arbitrary commands; a skill's scripts run in your environment. Treat them as dependencies: install from trusted sources, pin versions, review code and permissions, and give remote servers the narrowest OAuth scopes. Watch for **tool poisoning**, where a malicious server's tool descriptions contain hidden instructions, and remember that tool results from an MCP server are untrusted content for prompt-injection purposes."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Extend an agent three ways",
+    "steps": [
+      "Build the orders MCP server above, run it, and inspect its tools with the MCP Inspector.",
+      "Connect it to any MCP-capable harness and ask a question that requires orders_search.",
+      "Write a pre-tool hook that blocks edits to tests/ and verify the block message reaches the agent.",
+      "Write a skill for a team procedure (for example a release checklist) with a SKILL.md and one helper script.",
+      "Check that only the skill's description is loaded until a matching task appears.",
+      "Review one third-party MCP server's code and list what data and permissions it would get."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "MCP: standard client-server protocol for tools, resources and prompts.",
+      "stdio for local servers, Streamable HTTP plus OAuth for remote ones.",
+      "Hooks always run: use them for rules that must hold.",
+      "Skills: name and description in context, full instructions on demand.",
+      "Project instructions: short, always-needed conventions.",
+      "Extensions are dependencies: trust, pin, review, scope."
+    ],
+    "groups": [
+      {"title": "MCP", "items": [
+        {"syntax": "FastMCP(\"name\") + @mcp.tool()", "desc": "Python server"},
+        {"syntax": "mcp.run()", "desc": "stdio by default"},
+        {"syntax": "tools / resources / prompts", "desc": "Primitives"},
+        {"syntax": "Streamable HTTP + OAuth", "desc": "Remote servers"},
+        {"syntax": "MCP Inspector", "desc": "Test before connecting"}
+      ]},
+      {"title": "Hooks", "items": [
+        {"syntax": "session start", "desc": "Add context"},
+        {"syntax": "before tool", "desc": "Block or modify"},
+        {"syntax": "after tool", "desc": "Format, lint, log"},
+        {"syntax": "on stop", "desc": "Require evidence"}
+      ]},
+      {"title": "Skills", "items": [
+        {"syntax": "SKILL.md: name, description, steps", "desc": "Entry point"},
+        {"syntax": "reference files", "desc": "Read only when needed"},
+        {"syntax": "scripts/", "desc": "Deterministic helpers"},
+        {"syntax": "progressive disclosure", "desc": "Small context"}
+      ]},
+      {"title": "Security", "items": [
+        {"syntax": "pin and review servers", "desc": "Supply chain"},
+        {"syntax": "narrow OAuth scopes", "desc": "Least privilege"},
+        {"syntax": "tool poisoning", "desc": "Malicious descriptions"},
+        {"syntax": "MCP results are untrusted", "desc": "Injection risk"}
+      ]}
+    ],
+    "pitfalls": [
+      "Must-hold rules written only in the prompt.",
+      "Every procedure pasted into the system prompt.",
+      "Installing unreviewed MCP servers with broad credentials.",
+      "Treating MCP tool output as trusted.",
+      "Thin MCP wrappers around every API endpoint."
+    ]
+  },
+  "quiz": [
+    {"q": "Edits to database migrations must never happen without a human. Which mechanism enforces this?", "options": ["A hook or permission rule", "A line in the system prompt", "A skill describing migrations", "A larger context window"], "answer": 0, "explain": "Hooks and permission rules run every time; prompt instructions can be ignored."},
+    {"q": "What is the main benefit of skills' progressive disclosure?", "options": ["Only short descriptions sit in context", "Skills run faster than tools", "Skills cannot be modified", "They replace MCP servers"], "answer": 0, "explain": "Full instructions load only when relevant, keeping the context small."},
+    {"q": "Which MCP transport is typical for a server running as a local subprocess?", "options": ["stdio", "Streamable HTTP", "WebSocket only", "gRPC"], "answer": 0, "explain": "Local servers usually communicate with the client over standard input and output."},
+    {"q": "A third-party MCP server's tool description contains hidden instructions to read ~/.ssh. What is this called?", "options": ["Tool poisoning", "Context compaction", "Reward hacking", "Routing"], "answer": 0, "explain": "Malicious descriptions inject instructions into the model's context."},
+    {"q": "Your team needs the agent to query the internal ticket system. Which mechanism fits?", "options": ["An MCP server exposing ticket tools", "A pre-tool hook", "A longer AGENTS.md", "A stop hook"], "answer": 0, "explain": "New capabilities and data sources are what MCP servers (or built-in tools) are for."}
+  ]
+}

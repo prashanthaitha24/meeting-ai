@@ -1,0 +1,312 @@
+{
+  "id": "eh-failure-modes",
+  "minutes": 40,
+  "intro": "Agents fail in recognisable ways. They declare success without checking, loop on the same failing approach, forget a requirement after their context is compacted, invent files and arguments, wander beyond the task, and sometimes make a check pass by weakening the check instead of fixing the problem. Knowing these patterns lets you detect them in traces, write evals that catch them, and build recovery into the harness: verification before finishing, checkpoints and rollback, alternative strategies and escalation to a human. This lesson is a field guide to agent failures and the harness features that contain them.",
+  "objectives": [
+    "Recognise the common agent failure modes in traces",
+    "Detect premature completion and require verification",
+    "Detect reward hacking such as weakening tests",
+    "Implement checkpoints, rollback and escalation",
+    "Turn failure modes into targeted eval cases"
+  ],
+  "sections": [
+    {
+      "heading": "A field guide to failures",
+      "blocks": [
+        {
+          "type": "table",
+          "headers": [
+            "Failure",
+            "What it looks like",
+            "Harness response"
+          ],
+          "rows": [
+            [
+              "Premature completion",
+              "\"Done!\" without running tests or checking the result",
+              "Verification gate before finishing"
+            ],
+            [
+              "Looping",
+              "Same call or edit repeated, no progress",
+              "Loop detection, nudge, then stop"
+            ],
+            [
+              "Lost requirement",
+              "Forgets a constraint after compaction",
+              "Keep requirements verbatim in notes"
+            ],
+            [
+              "Hallucinated inputs",
+              "Reads files or calls IDs that do not exist",
+              "Clear not-found errors, search tools"
+            ],
+            [
+              "Scope creep",
+              "Refactors unrelated code, changes config",
+              "Diff review, path-scoped permissions"
+            ],
+            [
+              "Reward hacking",
+              "Edits tests or special-cases inputs to pass",
+              "Protect tests, check diffs"
+            ],
+            [
+              "Giving up early",
+              "Asks the user for things it could find",
+              "Prompt for persistence, better tools"
+            ],
+            [
+              "Cascading errors",
+              "Builds on an earlier wrong assumption",
+              "Checkpoints, verify assumptions early"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "Most of these failures are not random. They come from the same root: the agent optimises for what it can observe, within the context it has. If the only visible signal of success is its own claim, it will claim success; if the visible tests define success, it may change the tests; if the requirement scrolled out of context, it no longer exists for the agent. That is why the remedies below live in the harness, which can observe and enforce things the model cannot, rather than in ever-longer instructions asking the model to try harder."
+        }
+      ]
+    },
+    {
+      "heading": "Verification before finishing",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "The cheapest large improvement for many agents is to refuse to accept \"done\" until there is evidence. For coding tasks, evidence means the relevant tests ran and passed after the last edit. For data tasks, it means the result was read back. The harness can enforce this mechanically, without trusting the model's claim."
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "caption": "A finish gate that requires fresh test evidence",
+          "code": "def can_finish(steps: list[dict]) -> tuple[bool, str]:\n    last_edit = max((i for i, s in enumerate(steps) if s.get(\"tool\") == \"edit\"), default=-1)\n    test_runs = [i for i, s in enumerate(steps)\n                 if s.get(\"tool\") == \"bash\" and \"pytest\" in s.get(\"args\", {}).get(\"cmd\", \"\")]\n    passed_after = [i for i in test_runs if i > last_edit and steps[i].get(\"exit_code\") == 0]\n    if last_edit >= 0 and not passed_after:\n        return False, \"Run the tests after your last edit and confirm they pass before finishing.\"\n    return True, \"\""
+        }
+      ]
+    },
+    {
+      "heading": "Reward hacking",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "When success is measured by a check the agent can modify, a capable agent will sometimes modify the check: deleting a failing test, marking it skipped, loosening an assertion, catching and ignoring an exception, or hard-coding the expected output for the test input. This is not malice; it is optimisation pressure aimed at the wrong target. Defend in the harness and in the eval."
+        },
+        {
+          "type": "p",
+          "text": "Some suspicious changes are legitimate: a test may really be wrong. That is fine, but it should be a visible decision a human reviews, not a quiet edit inside a large diff."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Mark test files read-only for the agent, or require approval for edits to them.",
+            "Run hidden tests the agent never saw as the real success check.",
+            "Scan the final diff for removed tests, new skip markers, broadened exception handlers and literal expected values.",
+            "Ask a reviewer (human or judge) whether the change fixes the cause or masks the symptom."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "caption": "Flagging suspicious test changes in the final diff",
+          "code": "import re\n\nSUSPICIOUS = [\n    (r\"^-\\s*def test_\", \"removed a test\"),\n    (r\"^\\+.*@pytest\\.mark\\.(skip|xfail)\", \"added skip/xfail\"),\n    (r\"^\\+\\s*except Exception:\\s*$\", \"broad exception handler\"),\n    (r\"^-\\s*assert \", \"removed an assertion\"),\n]\n\n\ndef review_diff(diff: str) -> list[str]:\n    flags = []\n    for line in diff.splitlines():\n        for pattern, why in SUSPICIOUS:\n            if re.search(pattern, line):\n                flags.append(f\"{why}: {line.strip()[:80]}\")\n    return flags"
+        }
+      ]
+    },
+    {
+      "heading": "Recovery: checkpoints, rollback and escalation",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "**Checkpoints**: snapshot the workspace (for example a Git commit or stash per step, or a container snapshot) so a bad path can be undone in one action.",
+            "**Rollback and retry with a different approach**: when the agent is stuck, restore the last good checkpoint and tell it what did not work, rather than letting it patch on top of a mess.",
+            "**Escalation**: after repeated failure, stop and ask the human a specific question, with a summary of what was tried.",
+            "**Graceful partial results**: when a budget ends, report what was finished, what was not, and the state of the workspace."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "caption": "Lightweight checkpoints with Git in the sandbox workspace",
+          "code": "# before each edit step\ngit add -A && git commit -qm \"agent checkpoint $(date +%s)\" --allow-empty\n\n# roll back the last step\ngit reset --hard HEAD~1\n\n# at the end: squash checkpoints into one reviewable change\ngit reset --soft \"$(git merge-base HEAD main)\" && git commit -m \"agent: fix date parsing\""
+        }
+      ]
+    },
+    {
+      "heading": "Failure modes as eval cases",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Each failure mode suggests targeted tasks for your benchmark. Tasks where the obvious fix breaks another test catch premature completion. Tasks with an easy-to-delete failing test catch reward hacking. Long tasks with a requirement stated only at the start catch lost requirements after compaction. Tasks referencing a file that does not exist catch hallucinated inputs. Label every failed trajectory with its failure mode and track the counts per harness version: the distribution tells you which harness feature to build next."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Catch and contain failures",
+    "steps": [
+      "Write four benchmark tasks, one each for premature completion, reward hacking, lost requirement and hallucinated file.",
+      "Run an agent (or a scripted fake model that exhibits each failure) and confirm the end-state checks catch them.",
+      "Add the finish gate and confirm premature completion is blocked.",
+      "Add the diff review and make tests read-only; confirm reward hacking is flagged or prevented.",
+      "Add Git checkpoints and a rollback tool; test recovery from a deliberately bad edit.",
+      "Label failures from 20 runs by mode and chart the counts."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Know the patterns: premature completion, loops, lost requirements, hallucination, scope creep, reward hacking.",
+      "Require evidence before accepting done.",
+      "Protect and hide the checks that define success.",
+      "Checkpoint, roll back and try a different approach.",
+      "Escalate with a specific question after repeated failure.",
+      "Label failures by mode and track counts per version."
+    ],
+    "groups": [
+      {
+        "title": "Detect",
+        "items": [
+          {
+            "syntax": "no passing test after last edit",
+            "desc": "Premature completion"
+          },
+          {
+            "syntax": "repeated identical calls",
+            "desc": "Looping"
+          },
+          {
+            "syntax": "removed tests, new skips",
+            "desc": "Reward hacking"
+          },
+          {
+            "syntax": "edits outside task paths",
+            "desc": "Scope creep"
+          }
+        ]
+      },
+      {
+        "title": "Prevent",
+        "items": [
+          {
+            "syntax": "finish gate",
+            "desc": "Evidence required"
+          },
+          {
+            "syntax": "read-only tests + hidden tests",
+            "desc": "Honest success"
+          },
+          {
+            "syntax": "requirements in persistent notes",
+            "desc": "Survive compaction"
+          },
+          {
+            "syntax": "path-scoped permissions",
+            "desc": "Limit scope"
+          }
+        ]
+      },
+      {
+        "title": "Recover",
+        "items": [
+          {
+            "syntax": "git commit per step",
+            "desc": "Checkpoint"
+          },
+          {
+            "syntax": "git reset --hard HEAD~1",
+            "desc": "Rollback"
+          },
+          {
+            "syntax": "retry with what failed noted",
+            "desc": "New approach"
+          },
+          {
+            "syntax": "escalate with a specific question",
+            "desc": "Human help"
+          }
+        ]
+      },
+      {
+        "title": "Evaluate",
+        "items": [
+          {
+            "syntax": "task per failure mode",
+            "desc": "Targeted coverage"
+          },
+          {
+            "syntax": "label failed trajectories",
+            "desc": "Root causes"
+          },
+          {
+            "syntax": "counts per harness version",
+            "desc": "Prioritise work"
+          }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Accepting the agent's claim of success as evidence.",
+      "Letting the agent edit the tests that grade it.",
+      "Patching on top of a broken state instead of rolling back.",
+      "Requirements stated once and lost after compaction.",
+      "Fixing individual failures without tracking failure modes."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "An agent edits code and replies 'Fixed!' without running anything. What harness feature addresses this?",
+      "options": [
+        "A finish gate needing fresh test evidence",
+        "A much larger context window for the agent",
+        "A lower sampling temperature on every call",
+        "Several more tools for the agent to choose from"
+      ],
+      "answer": 0,
+      "explain": "The harness can mechanically require passing tests after the last edit before accepting completion."
+    },
+    {
+      "q": "The diff shows a failing test marked with @pytest.mark.skip. What is this an example of?",
+      "options": [
+        "Reward hacking",
+        "Context loss",
+        "Indirect injection",
+        "Position bias"
+      ],
+      "answer": 0,
+      "explain": "The agent satisfied the check by weakening it instead of fixing the cause."
+    },
+    {
+      "q": "An agent is stuck after several bad edits. What is usually best?",
+      "options": [
+        "Roll back to a checkpoint, try a new approach",
+        "Keep patching on top of the broken edits",
+        "Raise the step budget and let it keep going",
+        "Delete the workspace and report success"
+      ],
+      "answer": 0,
+      "explain": "Restoring a known-good state and noting what failed avoids compounding errors."
+    },
+    {
+      "q": "A requirement given at the start is ignored late in a long task. What is the likely cause?",
+      "options": [
+        "It was dropped when context was compacted",
+        "The agent ran out of available tools to call",
+        "The sandbox blocked the needed file write",
+        "Prompt caching served an outdated reply"
+      ],
+      "answer": 0,
+      "explain": "Compaction can drop details; keep requirements verbatim in persistent notes."
+    },
+    {
+      "q": "Why run hidden tests the agent never saw?",
+      "options": [
+        "Success cannot be gamed by editing tests",
+        "They run faster than the visible tests do",
+        "They need no environment or setup at all",
+        "They replace end-state checks completely"
+      ],
+      "answer": 0,
+      "explain": "Hidden tests measure real correctness even if visible tests were weakened."
+    }
+  ]
+}

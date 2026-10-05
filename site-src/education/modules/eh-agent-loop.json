@@ -1,0 +1,294 @@
+{
+  "id": "eh-agent-loop",
+  "minutes": 40,
+  "intro": "The basic agent loop (call the model, run the tools it asks for, repeat) is simple. Making it robust is not: model calls time out, tools hang, the agent repeats itself, tasks need planning, users interrupt, and some work is better split across several model calls in a fixed pattern than left to one open-ended agent. This lesson covers the spectrum from fixed workflows to autonomous agents, the common orchestration patterns, planning with task lists, parallel tool calls, budgets and stop conditions, retries, and human checkpoints.",
+  "objectives": [
+    "Choose between a fixed workflow and an autonomous agent for a task",
+    "Apply chaining, routing, parallelisation, orchestrator-workers and evaluator-optimizer patterns",
+    "Add planning with an explicit task list",
+    "Implement budgets, stop conditions, retries and timeouts",
+    "Design human checkpoints and interruption"
+  ],
+  "sections": [
+    {
+      "heading": "Workflows versus agents",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A **workflow** runs model calls in a sequence your code defines: classify, then retrieve, then draft, then check. An **agent** lets the model decide the next step in a loop. Workflows are more predictable, cheaper and easier to evaluate; agents handle open-ended tasks where the steps cannot be known in advance, such as debugging. Use the simplest pattern that solves the task and add autonomy only when the evals show you need it."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Pattern",
+            "How it works",
+            "Good for"
+          ],
+          "rows": [
+            [
+              "Prompt chaining",
+              "Fixed steps, each using the previous output",
+              "Draft, then check, then format"
+            ],
+            [
+              "Routing",
+              "Classify input, send to a specialised handler",
+              "Support triage by intent"
+            ],
+            [
+              "Parallelisation",
+              "Independent calls at once, then combine",
+              "Review a document for several issues"
+            ],
+            [
+              "Orchestrator-workers",
+              "A planner splits work and delegates to workers",
+              "Changes across many files"
+            ],
+            [
+              "Evaluator-optimizer",
+              "One call drafts, another critiques; loop",
+              "Writing with clear quality criteria"
+            ],
+            [
+              "Autonomous agent",
+              "Model chooses tools in a loop until done",
+              "Open-ended, multi-step tasks"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "Patterns also combine. A support system might route each ticket, run a fixed workflow for simple intents, and hand only the complicated ones to an autonomous agent with a tighter budget and an approval step."
+        }
+      ]
+    },
+    {
+      "heading": "Planning with a task list",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "For multi-step work, asking the agent to keep an explicit task list improves focus and gives the user visibility. Expose the list as a tool (write and update items with a status) and render it compactly in context on each step. The list also survives compaction, so a long task does not lose its plan, and it gives a simple progress signal for the interface."
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "caption": "A task-list tool the harness renders back into context",
+          "code": "TODOS: list[dict] = []\n\n\ndef todo_write(items: list[dict]) -> str:\n    \"\"\"items: [{\"text\": str, \"status\": \"pending\" | \"in_progress\" | \"done\"}]\"\"\"\n    if sum(i[\"status\"] == \"in_progress\" for i in items) > 1:\n        return \"Only one item may be in_progress at a time.\"\n    TODOS[:] = items\n    return render_todos()\n\n\ndef render_todos() -> str:\n    mark = {\"pending\": \"[ ]\", \"in_progress\": \"[>]\", \"done\": \"[x]\"}\n    return \"\\n\".join(f\"{mark[i['status']]} {i['text']}\" for i in TODOS)"
+        }
+      ]
+    },
+    {
+      "heading": "Robust loop mechanics",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "**Budgets**: maximum steps, tokens, wall-clock time and cost per task. On reaching one, stop cleanly and report progress rather than cutting off mid-action.",
+            "**Stop conditions**: no tool call (final answer), an explicit finish tool, a budget, or a user interrupt.",
+            "**Loop detection**: the same tool with the same arguments several times in a row, or no change in state across steps; inject a note asking the agent to try a different approach, then stop if it persists.",
+            "**Retries**: retry model calls on rate limits and transient errors with exponential backoff and jitter; do not blindly retry non-idempotent tool calls.",
+            "**Timeouts**: every tool call has one; a hung command returns a timeout result the model can react to.",
+            "**Parallel tool calls**: run independent read-only calls concurrently; serialise writes."
+          ]
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "caption": "Budgets and backoff around the model call",
+          "code": "import random\nimport time\n\n\nclass Budget:\n    def __init__(self, steps=40, tokens=400_000, seconds=900):\n        self.steps, self.tokens, self.deadline = steps, tokens, time.time() + seconds\n\n    def spend(self, tokens: int) -> str | None:\n        self.steps -= 1\n        self.tokens -= tokens\n        if self.steps < 0 or self.tokens < 0 or time.time() > self.deadline:\n            return \"budget exhausted\"\n        return None\n\n\ndef call_with_backoff(messages, tools, attempts=5):\n    for i in range(attempts):\n        try:\n            return call_llm(messages, tools=tools, timeout=120)\n        except TransientError:\n            time.sleep(min(60, 2 ** i) + random.random())\n    raise RuntimeError(\"model unavailable after retries\")"
+        }
+      ]
+    },
+    {
+      "heading": "Multiple agents: when and how",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Splitting work across several agents helps when subtasks are independent and context-heavy, such as researching several topics in parallel or exploring different parts of a codebase. The orchestrator gives each worker a clear, self-contained brief with the output format it needs back, and combines short results. It hurts when subtasks are tightly coupled, because workers cannot see each other's decisions and may produce conflicting changes. Multi-agent runs also multiply token cost, so measure whether the quality gain is worth it."
+        },
+        {
+          "type": "callout",
+          "kind": "tip",
+          "text": "Write worker briefs as if for a contractor who has never seen the project: the goal, the relevant files or sources, what is out of scope, and the exact shape of the result to return."
+        }
+      ]
+    },
+    {
+      "heading": "Humans in the loop",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Design checkpoints where a human reviews before the agent continues: approving a plan before execution, approving consequential actions, and reviewing the final result. Support interruption at any time, so a user can stop, correct the direction and resume without losing state. Stream progress (current step, task list, tool calls) so the human can intervene early. Checkpoints cost attention, so place them where mistakes are expensive or irreversible rather than everywhere."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Harden an agent loop",
+    "steps": [
+      "Start with the minimal loop from the anatomy lesson and a scripted fake model that sometimes repeats calls.",
+      "Add a Budget with steps, tokens and time, and a clean progress report when it is exhausted.",
+      "Add loop detection for repeated identical calls and test it with the fake model.",
+      "Add backoff for transient model errors and a timeout for every tool call.",
+      "Add the todo_write tool and render the list into context each step.",
+      "Run the same task as a fixed workflow and as an agent; compare success, steps and cost."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Use the simplest pattern that works; add autonomy when evals demand it.",
+      "Workflows: chaining, routing, parallelisation, orchestrator-workers, evaluator-optimizer.",
+      "Task lists improve focus and survive compaction.",
+      "Budgets, stop conditions, loop detection, backoff and timeouts.",
+      "Parallel reads, serial writes.",
+      "Human checkpoints where mistakes are expensive."
+    ],
+    "groups": [
+      {
+        "title": "Patterns",
+        "items": [
+          {
+            "syntax": "chain: A -> B -> C",
+            "desc": "Fixed steps"
+          },
+          {
+            "syntax": "route: classify -> handler",
+            "desc": "Specialisation"
+          },
+          {
+            "syntax": "parallel: fan out, combine",
+            "desc": "Independent work"
+          },
+          {
+            "syntax": "orchestrator-workers",
+            "desc": "Dynamic delegation"
+          },
+          {
+            "syntax": "evaluator-optimizer",
+            "desc": "Draft and critique"
+          }
+        ]
+      },
+      {
+        "title": "Mechanics",
+        "items": [
+          {
+            "syntax": "max steps / tokens / seconds / cost",
+            "desc": "Budgets"
+          },
+          {
+            "syntax": "same call repeated -> nudge, then stop",
+            "desc": "Loop detection"
+          },
+          {
+            "syntax": "backoff: 2^i + jitter",
+            "desc": "Transient errors"
+          },
+          {
+            "syntax": "timeout per tool",
+            "desc": "No hangs"
+          }
+        ]
+      },
+      {
+        "title": "Planning",
+        "items": [
+          {
+            "syntax": "todo_write(items)",
+            "desc": "Explicit plan"
+          },
+          {
+            "syntax": "one in_progress at a time",
+            "desc": "Focus"
+          },
+          {
+            "syntax": "render list each step",
+            "desc": "Visible progress"
+          }
+        ]
+      },
+      {
+        "title": "Humans",
+        "items": [
+          {
+            "syntax": "approve plan",
+            "desc": "Before execution"
+          },
+          {
+            "syntax": "approve risky actions",
+            "desc": "During"
+          },
+          {
+            "syntax": "interrupt and resume",
+            "desc": "Course correction"
+          }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "An autonomous agent where a three-step workflow would do.",
+      "No budget, so a confused agent runs for hours.",
+      "Retrying non-idempotent writes after a timeout.",
+      "Multi-agent splits of tightly coupled work.",
+      "Approval prompts on everything, so users stop reading them."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "Support tickets must be classified, then answered by one of four specialised prompts. Which pattern fits?",
+      "options": [
+        "Routing",
+        "Autonomous agent",
+        "Evaluator-optimizer",
+        "Orchestrator-workers"
+      ],
+      "answer": 0,
+      "explain": "Routing classifies the input and sends it to a specialised handler, a predictable workflow."
+    },
+    {
+      "q": "The agent calls the same search with the same arguments five times in a row. What should the harness do?",
+      "options": [
+        "Nudge it to change approach, then stop",
+        "Keep looping until the budget ends",
+        "Raise the step budget",
+        "Clear the system prompt"
+      ],
+      "answer": 0,
+      "explain": "Loop detection with a nudge, then a clean stop, saves cost and surfaces the problem."
+    },
+    {
+      "q": "Which tool calls are safe to run in parallel by default?",
+      "options": [
+        "Independent read-only calls",
+        "All writes to the same file",
+        "Any calls the model requests",
+        "Only calls that failed before"
+      ],
+      "answer": 0,
+      "explain": "Reads without side effects can run concurrently; writes should be serialised to avoid conflicts."
+    },
+    {
+      "q": "A refund call timed out. Why should the harness not simply retry it?",
+      "options": [
+        "It may have succeeded; retrying could refund twice",
+        "Timeouts never happen twice",
+        "Models cannot see retries",
+        "Refunds are read-only"
+      ],
+      "answer": 0,
+      "explain": "Non-idempotent writes need an idempotency key or a state check before any retry."
+    },
+    {
+      "q": "When does splitting work across multiple agents tend to hurt?",
+      "options": [
+        "When subtasks are tightly coupled",
+        "When subtasks are independent",
+        "When research is broad",
+        "When context is limited"
+      ],
+      "answer": 0,
+      "explain": "Workers cannot see each other's decisions, so coupled work produces conflicts."
+    }
+  ]
+}
