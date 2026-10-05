@@ -1,0 +1,307 @@
+{
+  "id": "eh-llm-judges",
+  "minutes": 35,
+  "intro": "Many qualities that matter, such as whether an answer is faithful to the sources, complete, polite, or actually helpful, cannot be checked with string matching. The common solution is an LLM-as-judge: a model that grades outputs against a rubric. Judges scale where humans cannot, but an uncalibrated judge is just a confident random number generator. This lesson covers when to use a judge, pointwise versus pairwise judging, writing rubrics that produce consistent verdicts, the known biases of judges, and the calibration process that tells you whether to trust one.",
+  "objectives": [
+    "Decide when a judge is appropriate and when code or humans are better",
+    "Choose between pointwise, pairwise and reference-based judging",
+    "Write rubrics that produce consistent, explainable verdicts",
+    "Detect and mitigate position, verbosity and self-preference biases",
+    "Calibrate a judge against human labels and monitor it over time"
+  ],
+  "sections": [
+    {
+      "heading": "When to use a judge",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Use code first: if a check can be written as a rule (valid JSON, contains the order ID, called the refund tool), a rule is cheaper, faster and perfectly consistent. Use humans for ground truth and for high-stakes decisions. Use a **judge** for the large middle: qualities that need reading comprehension, applied to more outputs than humans can review."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Style",
+            "How it works",
+            "Best for"
+          ],
+          "rows": [
+            [
+              "Pointwise",
+              "Grade one output against a rubric (pass/fail or a small scale)",
+              "Tracking a metric over time"
+            ],
+            [
+              "Pairwise",
+              "Show outputs A and B, ask which is better",
+              "Comparing two versions; more sensitive"
+            ],
+            [
+              "Reference-based",
+              "Compare the output to a known good answer",
+              "Factual questions with a target"
+            ],
+            [
+              "Reference-free",
+              "Judge against the rubric and sources only",
+              "Open-ended tasks without one right answer"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "Rubrics that produce consistent verdicts",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Vague rubrics (\"rate helpfulness from 1 to 10\") produce vague, unstable scores. Good rubrics break quality into specific, mostly binary criteria, define each with an example, and ask the judge to reason before deciding. Binary or three-level scales are far more consistent than ten-point scales."
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "caption": "A faithfulness judge prompt",
+          "code": "You are grading an answer from a customer-support assistant.\n\nSOURCES:\n{sources}\n\nQUESTION:\n{question}\n\nANSWER:\n{answer}\n\nCheck each criterion:\n1. Every factual claim in the ANSWER is supported by the SOURCES.\n2. The ANSWER does not contradict the SOURCES.\n3. If the SOURCES do not contain the answer, the ANSWER says so instead of guessing.\n\nFirst write one sentence of reasoning per criterion.\nThen output exactly one line: VERDICT: PASS or VERDICT: FAIL\n(PASS only if all three criteria hold.)"
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "caption": "Calling the judge and parsing a strict verdict",
+          "code": "import re\n\n\ndef judge_faithfulness(sources: str, question: str, answer: str) -> tuple[bool, str]:\n    prompt = JUDGE_TEMPLATE.format(sources=sources, question=question, answer=answer)\n    out = call_llm(prompt, temperature=0)\n    m = re.search(r\"VERDICT:\\s*(PASS|FAIL)\", out)\n    if not m:\n        return False, \"unparseable verdict: \" + out[-200:]   # count as failure, investigate\n    return m.group(1) == \"PASS\", out"
+        }
+      ]
+    },
+    {
+      "heading": "Known judge biases",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "**Position bias**: in pairwise judging, preferring whichever answer is shown first (or second). Mitigation: judge both orders and count a win only if it holds in both.",
+            "**Verbosity bias**: preferring longer, more detailed answers even when they are worse. Mitigation: rubric criteria about concision and relevance; compare at similar lengths.",
+            "**Self-preference**: favouring outputs from the same model family as the judge. Mitigation: use a different family as judge where possible, and check against human labels.",
+            "**Leniency**: passing almost everything. Mitigation: binary criteria, explicit fail examples, calibration.",
+            "**Format sensitivity**: verdicts change with markdown, ordering or whitespace. Mitigation: normalise outputs before judging."
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "Pairwise judging in both orders",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Pairwise judging asks a simpler question than pointwise grading (which of these two is better?), so it detects smaller differences between versions. The price is position bias. Run every comparison twice with the answers swapped, and count a win only when both orders agree; a disagreement is recorded as a tie. The share of flipped verdicts is itself a useful health metric for the judge: if it is high, the rubric is too vague for the judge to apply."
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "caption": "A position-debiased pairwise comparison",
+          "code": "def pairwise(question: str, a: str, b: str) -> str:\n    first = call_llm(PAIR_TEMPLATE.format(q=question, x=a, y=b), temperature=0)\n    second = call_llm(PAIR_TEMPLATE.format(q=question, x=b, y=a), temperature=0)\n    win1 = \"A\" if \"WINNER: X\" in first else \"B\"\n    win2 = \"B\" if \"WINNER: X\" in second else \"A\"\n    return win1 if win1 == win2 else \"tie\"   # order-dependent verdicts count as ties"
+        }
+      ]
+    },
+    {
+      "heading": "Calibrating a judge",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A judge is an instrument, and instruments need calibration. Have humans label a sample of outputs (100 is a good start, covering passes, fails and borderline cases), run the judge on the same outputs, and compare. Look at overall agreement and, more importantly, at where they disagree: false passes are usually more dangerous than false fails."
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "caption": "Agreement and Cohen's kappa between human and judge labels",
+          "code": "def agreement(human: list[bool], judge: list[bool]) -> dict:\n    n = len(human)\n    agree = sum(h == j for h, j in zip(human, judge)) / n\n    ph, pj = sum(human) / n, sum(judge) / n\n    expected = ph * pj + (1 - ph) * (1 - pj)          # agreement by chance\n    kappa = (agree - expected) / (1 - expected) if expected < 1 else 1.0\n    false_pass = sum((not h) and j for h, j in zip(human, judge))\n    return {\"agreement\": agree, \"kappa\": kappa, \"false_passes\": false_pass}"
+        },
+        {
+          "type": "p",
+          "text": "**Cohen's kappa** corrects raw agreement for chance: with a 90% pass rate, two raters who both say PASS to everything agree 90% of the time but have a kappa of 0. As a rough guide, kappa above about 0.6 is substantial agreement and above 0.8 is strong. Iterate on the rubric until agreement is good, then freeze the judge prompt and model version. Re-run the calibration whenever you change either, because a judge upgrade silently changes every score you report."
+        }
+      ]
+    },
+    {
+      "heading": "Using judges responsibly",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Keep a human in the loop on a small, regular sample even after calibration, and route disagreements and low-confidence verdicts to review. Report judge-based scores with the judge version and its measured agreement, so readers know how much to trust them. Remember cost: a judge call per output can double the cost of an eval, so reserve judges for criteria code cannot check, and cache verdicts for unchanged outputs."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Build and calibrate a faithfulness judge",
+    "steps": [
+      "Collect 60 question, sources and answer triples from any RAG system (or write them), including some answers that invent facts.",
+      "Label each PASS or FAIL yourself against the three criteria above; ask a friend to label 20 as well and compare.",
+      "Implement the judge prompt and parser with any model you have access to.",
+      "Run it on all 60 and compute agreement, kappa and false passes against your labels.",
+      "Read every disagreement, improve the rubric, and re-run; record before and after kappa.",
+      "Run a pairwise comparison of two answer styles in both orders and measure how often the verdict flips."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Code checks first, judges for comprehension-level qualities, humans for ground truth.",
+      "Binary criteria with reasoning beat 1-10 scales.",
+      "Pairwise judging is more sensitive; always judge both orders.",
+      "Calibrate against human labels; watch false passes.",
+      "Freeze judge prompt and model version; recalibrate on change.",
+      "Report judge scores with version and measured agreement."
+    ],
+    "groups": [
+      {
+        "title": "Judge styles",
+        "items": [
+          {
+            "syntax": "pointwise: PASS/FAIL per rubric",
+            "desc": "Track a metric"
+          },
+          {
+            "syntax": "pairwise: A vs B, both orders",
+            "desc": "Compare versions"
+          },
+          {
+            "syntax": "reference-based",
+            "desc": "Compare to a known answer"
+          },
+          {
+            "syntax": "reference-free",
+            "desc": "Rubric and sources only"
+          },
+          {
+            "syntax": "flip rate (swapped order)",
+            "desc": "Judge health metric"
+          }
+        ]
+      },
+      {
+        "title": "Rubric rules",
+        "items": [
+          {
+            "syntax": "specific, mostly binary criteria",
+            "desc": "Consistency"
+          },
+          {
+            "syntax": "reason first, verdict last",
+            "desc": "Better and explainable"
+          },
+          {
+            "syntax": "strict output format: VERDICT: PASS|FAIL",
+            "desc": "Reliable parsing"
+          },
+          {
+            "syntax": "temperature 0",
+            "desc": "Reduce variance"
+          }
+        ]
+      },
+      {
+        "title": "Biases",
+        "items": [
+          {
+            "syntax": "position",
+            "desc": "Swap order, require agreement"
+          },
+          {
+            "syntax": "verbosity",
+            "desc": "Concision criterion"
+          },
+          {
+            "syntax": "self-preference",
+            "desc": "Different judge family, human checks"
+          },
+          {
+            "syntax": "leniency",
+            "desc": "Fail examples, calibration"
+          }
+        ]
+      },
+      {
+        "title": "Calibration",
+        "items": [
+          {
+            "syntax": "agreement = matches / n",
+            "desc": "Raw agreement"
+          },
+          {
+            "syntax": "kappa = (po - pe) / (1 - pe)",
+            "desc": "Chance-corrected agreement"
+          },
+          {
+            "syntax": "false passes",
+            "desc": "Most dangerous error"
+          },
+          {
+            "syntax": "recalibrate on judge change",
+            "desc": "Scores shift silently"
+          }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Using a judge for something a regular expression could check.",
+      "Ten-point scales with no anchors.",
+      "Pairwise judging in one order only.",
+      "Trusting a judge never compared with human labels.",
+      "Upgrading the judge model and comparing scores across the change."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "You need to check that answers are valid JSON with an order_id field. What should grade this?",
+      "options": [
+        "A code check",
+        "A pairwise judge",
+        "A 1-10 judge rubric",
+        "Human review of every case"
+      ],
+      "answer": 0,
+      "explain": "Rule-checkable properties should be checked by code: cheaper, faster and perfectly consistent."
+    },
+    {
+      "q": "In pairwise judging, A wins when shown first and B wins when shown first. What is this?",
+      "options": [
+        "Position bias",
+        "Verbosity bias",
+        "Self-preference",
+        "Leniency"
+      ],
+      "answer": 0,
+      "explain": "The verdict follows the order rather than the content; judging both orders and requiring agreement mitigates it."
+    },
+    {
+      "q": "A judge agrees with humans 92% of the time, but 92% of outputs pass and the judge passes everything. What does kappa reveal?",
+      "options": [
+        "Near-zero agreement beyond chance",
+        "Very strong agreement",
+        "Perfect calibration",
+        "Position bias"
+      ],
+      "answer": 0,
+      "explain": "Kappa corrects for chance; a judge that always says PASS matches the base rate but adds no information, giving kappa near 0."
+    },
+    {
+      "q": "Which rubric design tends to give the most consistent verdicts?",
+      "options": [
+        "Specific binary criteria with reasoning before the verdict",
+        "One overall helpfulness score from 1 to 10",
+        "Asking the judge for its opinion in free text",
+        "Letting the judge choose its own criteria"
+      ],
+      "answer": 0,
+      "explain": "Narrow binary checks with required reasoning reduce ambiguity and make verdicts explainable and stable."
+    },
+    {
+      "q": "Your team upgrades the judge model. What must happen before comparing new scores with last month's?",
+      "options": [
+        "Recalibrate against human labels",
+        "Nothing, scores are comparable",
+        "Delete last month's results",
+        "Increase the dataset size tenfold"
+      ],
+      "answer": 0,
+      "explain": "A new judge can grade differently; recalibration (and ideally re-scoring old outputs) keeps scores comparable."
+    }
+  ]
+}

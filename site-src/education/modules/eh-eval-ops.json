@@ -1,0 +1,290 @@
+{
+  "id": "eh-eval-ops",
+  "minutes": 40,
+  "intro": "An eval that only runs when someone remembers is a report, not a safety net. Eval operations means wiring evals into the places where change happens: every pull request, every model or prompt update, and continuously on production traffic. This lesson covers tiered offline evals in CI, regression gates that account for noise, caching and cost control, online evals on sampled live traffic, the user signals worth collecting, and the loop that turns production failures into new test cases.",
+  "objectives": [
+    "Design tiered eval suites for pull requests, nightly runs and releases",
+    "Write a regression gate that compares against a baseline with noise tolerance",
+    "Control eval cost with caching, sampling and cheap checks first",
+    "Run online evals on sampled production traces",
+    "Close the loop from production failures back into the dataset"
+  ],
+  "sections": [
+    {
+      "heading": "Tiered offline evals",
+      "blocks": [
+        {
+          "type": "table",
+          "headers": [
+            "Tier",
+            "When",
+            "Contents"
+          ],
+          "rows": [
+            [
+              "Smoke",
+              "Every pull request, minutes",
+              "30-100 critical cases, code checks, safety cases"
+            ],
+            [
+              "Full",
+              "Nightly and on prompt or model changes",
+              "Whole dev set, judges, several epochs"
+            ],
+            [
+              "Release",
+              "Before shipping a new version",
+              "Held-out set, pass^k for agents, human spot checks"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "The smoke tier must be fast and stable enough that engineers do not learn to ignore it. Put every safety and policy case in it, because those must never regress. The full tier can be slower and noisier, and runs where cost is less painful. The release tier is the one you use for go or no-go decisions, so it uses the held-out set that nobody tunes against."
+        },
+        {
+          "type": "p",
+          "text": "Treat the eval suite like production code. It lives in the same repository as the prompts and agent code, changes to it are reviewed, and the results of every run are stored with the commit, model version, prompt hash and dataset version. That history lets you answer questions such as \"when did refund accuracy start slipping?\" months later."
+        }
+      ]
+    },
+    {
+      "heading": "A regression gate that respects noise",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Comparing today's score with yesterday's and failing on any drop will flap constantly, because scores vary from run to run. Store a **baseline** result from the main branch, compare per case and per slice, and fail only on drops larger than the measured noise, or on any failure in must-pass cases."
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "caption": "gate.py: fail the build on real regressions",
+          "code": "import json\nimport sys\n\nbase = {r[\"id\"]: r for r in map(json.loads, open(\"baseline.jsonl\"))}\nnew = {r[\"id\"]: r for r in map(json.loads, open(\"results.jsonl\"))}\n\nmust_pass_failures = [i for i, r in new.items() if r.get(\"must_pass\") and not r[\"passed\"]]\nbroke = [i for i in new if base.get(i, {}).get(\"passed\") and not new[i][\"passed\"]]\nrate = lambda rs: sum(r[\"passed\"] for r in rs) / len(rs)\ndrop = rate(base.values()) - rate(new.values())\n\nprint(f\"pass rate drop: {drop:+.1%}; newly failing: {len(broke)}\")\nfor i in broke:\n    print(\"  regressed:\", i)\nif must_pass_failures or drop > 0.03:      # 3 points = measured run-to-run noise\n    sys.exit(1)"
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "caption": ".github/workflows/evals.yml: run the smoke tier on pull requests",
+          "code": "name: evals\non:\n  pull_request:\n    paths: [\"prompts/**\", \"src/agent/**\", \"evals/**\"]\njobs:\n  smoke:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-python@v5\n        with:\n          python-version: \"3.12\"\n      - run: pip install -r evals/requirements.txt\n      - run: python evals/run.py --tier smoke --out results.jsonl\n        env:\n          EVAL_API_KEY: ${{ secrets.EVAL_API_KEY }}\n      - run: python evals/gate.py\n      - uses: actions/upload-artifact@v4\n        if: always()\n        with:\n          name: eval-results\n          path: results.jsonl"
+        },
+        {
+          "type": "p",
+          "text": "Always upload the results, especially on failure, and print the IDs of newly failing cases so a reviewer can read them directly. A gate that says only \"score dropped\" sends people back to vibe-checking."
+        }
+      ]
+    },
+    {
+      "heading": "Keeping cost and time under control",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "**Cheap checks first**: run code scorers on everything; run judges only on cases code cannot decide.",
+            "**Cache**: key outputs and verdicts by (model version, prompt hash, input); unchanged cases need no new calls.",
+            "**Trigger by path**: only run evals when prompts, agent code or eval files change.",
+            "**Sample in the full tier**: stratified samples by slice can track trends between complete runs.",
+            "**Track eval spend** as a line item, so the team sees when a suite grows too expensive."
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "Online evals on production traffic",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Offline datasets age: users change, documents change, new intents appear. **Online evals** score a sample of real production traces continuously, with the same code checks and calibrated judges, and chart the results by slice and version. Alongside them, collect user signals: explicit thumbs up or down, and implicit ones such as the user rephrasing the same question, abandoning the session, escalating to a human, or editing the agent's draft heavily before sending it."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Sample traces with personal data redacted and respect retention rules.",
+            "Alert on sustained drops per slice, not on single bad outputs.",
+            "Compare versions during rollouts (canary or A/B) using the same online scorers.",
+            "Watch the distribution of inputs too: a new cluster of questions is an early warning."
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "Closing the loop",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "The most valuable output of online evals is new test cases. Route low-scoring and negatively rated traces to a review queue, have someone label the failure cause, and promote representative ones into the offline dataset with a reference answer. Over time the offline suite becomes a record of every way the system has failed, and each fix is protected by a case that will catch it if it returns. Review the suite every few months to retire cases that no longer reflect the product."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Put an eval suite behind a CI gate",
+    "steps": [
+      "Take an eval you built earlier and split it into a smoke tier (30 cases, including all safety cases) and a full tier.",
+      "Write run.py that writes results.jsonl with id, passed, must_pass and slice for each case.",
+      "Record a baseline from the main branch and implement gate.py.",
+      "Measure noise: run the smoke tier five times unchanged and record the spread of pass rates; set the threshold above it.",
+      "Add the GitHub Actions workflow, open a pull request with a deliberately harmful prompt change, and confirm the gate fails with useful output.",
+      "Add an output cache keyed by prompt hash and input, and measure how much a re-run costs."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Smoke tier on every PR; full nightly; held-out at release.",
+      "Every safety case is must-pass in the smoke tier.",
+      "Gate on drops larger than measured noise, plus must-pass failures.",
+      "Print regressed case IDs and upload results.",
+      "Cheap code checks, caching and path triggers keep cost down.",
+      "Online evals plus user signals; failures become new cases."
+    ],
+    "groups": [
+      {
+        "title": "Tiers",
+        "items": [
+          {
+            "syntax": "smoke: 30-100 cases per PR",
+            "desc": "Fast safety net"
+          },
+          {
+            "syntax": "full: dev set nightly",
+            "desc": "Trends, judges"
+          },
+          {
+            "syntax": "release: held-out + pass^k",
+            "desc": "Go / no-go"
+          },
+          {
+            "syntax": "must_pass: true",
+            "desc": "Zero tolerance cases"
+          }
+        ]
+      },
+      {
+        "title": "Gate",
+        "items": [
+          {
+            "syntax": "baseline.jsonl from main",
+            "desc": "Comparison point"
+          },
+          {
+            "syntax": "newly failing case IDs",
+            "desc": "What broke"
+          },
+          {
+            "syntax": "threshold > run-to-run noise",
+            "desc": "Avoid flapping"
+          },
+          {
+            "syntax": "upload results if: always()",
+            "desc": "Debuggable failures"
+          }
+        ]
+      },
+      {
+        "title": "Cost",
+        "items": [
+          {
+            "syntax": "cache key: model + prompt hash + input",
+            "desc": "Skip unchanged"
+          },
+          {
+            "syntax": "on.pull_request.paths",
+            "desc": "Run only when relevant"
+          },
+          {
+            "syntax": "judges only where code cannot",
+            "desc": "Fewer calls"
+          },
+          {
+            "syntax": "stratified sampling",
+            "desc": "Cheaper trends"
+          }
+        ]
+      },
+      {
+        "title": "Online",
+        "items": [
+          {
+            "syntax": "sample + redact traces",
+            "desc": "Score real traffic"
+          },
+          {
+            "syntax": "thumbs, rephrase, escalate",
+            "desc": "User signals"
+          },
+          {
+            "syntax": "alert on sustained slice drops",
+            "desc": "Not single outputs"
+          },
+          {
+            "syntax": "review queue -> new cases",
+            "desc": "Close the loop"
+          }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "A flaky gate that engineers learn to ignore.",
+      "Failing on any score drop without measuring noise.",
+      "Gate output that shows only a number, not the failing cases.",
+      "Offline datasets that never receive production failures.",
+      "Online scoring on unredacted personal data."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "Your PR eval gate fails about one run in four with no code changes. What is the best fix?",
+      "options": [
+        "Measure noise and set the threshold above it",
+        "Delete the eval from CI",
+        "Run it only once a month",
+        "Require a perfect score"
+      ],
+      "answer": 0,
+      "explain": "Gates should fail on drops larger than run-to-run variation; otherwise people stop trusting them."
+    },
+    {
+      "q": "Which cases belong in the fast smoke tier that runs on every pull request?",
+      "options": [
+        "All safety cases plus critical ones",
+        "Only the easiest cases",
+        "Only the held-out set",
+        "Randomly chosen cases each run"
+      ],
+      "answer": 0,
+      "explain": "Safety and critical cases must never regress, so they need checking on every change."
+    },
+    {
+      "q": "Which is an implicit user signal that an answer was poor?",
+      "options": [
+        "The user rephrases the same question",
+        "The session uses fewer tokens",
+        "The user says thank you",
+        "The response was cached"
+      ],
+      "answer": 0,
+      "explain": "Rephrasing, abandoning and escalating are common implicit signs of failure."
+    },
+    {
+      "q": "What makes eval caching safe?",
+      "options": [
+        "Keying on model version, prompt hash and input",
+        "Keying only on the input text",
+        "Caching only failures",
+        "Never expiring the cache"
+      ],
+      "answer": 0,
+      "explain": "If the model or prompt changes, the cached output no longer applies, so both must be in the key."
+    },
+    {
+      "q": "What should usually happen to low-scoring production traces?",
+      "options": [
+        "Review, label and add some to the dataset",
+        "Delete them to save storage",
+        "Ignore them unless they recur",
+        "Retrain the model on them at once"
+      ],
+      "answer": 0,
+      "explain": "Promoting real failures into the offline suite protects every future fix."
+    }
+  ]
+}

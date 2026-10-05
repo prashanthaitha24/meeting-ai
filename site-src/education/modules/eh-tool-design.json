@@ -1,0 +1,287 @@
+{
+  "id": "eh-tool-design",
+  "minutes": 40,
+  "intro": "Tools are the agent's hands and eyes. The model never sees your code, only each tool's name, description and argument schema, and then whatever text the tool returns. That makes tool design a kind of interface design for a very literal, very fast reader who cannot ask questions. Good tools are few, clearly named, hard to misuse, and return results that make the next step obvious. This lesson covers tool definitions and schemas, how to choose the right level of abstraction, designing results and errors, safety properties such as idempotency and dry runs, and how to evaluate tools.",
+  "objectives": [
+    "Write tool definitions with clear names, descriptions and JSON schemas",
+    "Choose task-level tools over thin wrappers around low-level APIs",
+    "Design concise, structured results and actionable error messages",
+    "Make tools safe with validation, idempotency, limits and dry runs",
+    "Evaluate and iterate on tools using agent transcripts"
+  ],
+  "sections": [
+    {
+      "heading": "What the model actually sees",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A tool is offered to the model as a name, a natural-language description and a JSON Schema for its arguments. The model decides whether to call it and with what arguments using only that text. Treat the description like documentation for a new colleague: say what the tool does, when to use it and when not to, what the arguments mean with formats and examples, and what it returns."
+        },
+        {
+          "type": "code",
+          "lang": "json",
+          "caption": "A tool definition with a precise schema",
+          "code": "{\n  \"name\": \"orders_search\",\n  \"description\": \"Find a customer's orders (max 10, newest first). Use before a refund.\",\n  \"input_schema\": {\n    \"type\": \"object\",\n    \"properties\": {\n      \"customer_email\": {\"type\": \"string\", \"format\": \"email\"},\n      \"status\": {\"type\": \"string\", \"enum\": [\"open\", \"shipped\", \"delivered\", \"refunded\"]},\n      \"placed_after\": {\"type\": \"string\", \"description\": \"ISO date, e.g. 2026-09-01\"}\n    },\n    \"required\": [\"customer_email\"],\n    \"additionalProperties\": false\n  }\n}"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Use **enums** for closed sets so the model cannot invent values.",
+            "Mark **required** fields and forbid extra properties.",
+            "Give **formats and examples** for dates, IDs and units.",
+            "Prefer **unambiguous names** with a namespace prefix (`orders_search`, `orders_refund`) when you have many tools."
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "The right level of abstraction",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Wrapping every REST endpoint as a tool is tempting and usually wrong. Low-level tools force the agent to chain many calls, carry IDs between them and handle pagination, and every extra step is a chance to fail and a cost in tokens. Design tools around the **tasks** the agent performs. If agents always look up a customer, then their orders, then the shipment, a single `orders_search` returning the joined, relevant fields serves them better."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Low-level",
+            "Task-level"
+          ],
+          "rows": [
+            [
+              "list_users, get_user, list_orders, get_shipment",
+              "orders_search(customer_email, status)"
+            ],
+            [
+              "read_file with no limits",
+              "read_file(path, offset, limit) with line numbers"
+            ],
+            [
+              "run_sql(query)",
+              "orders_report(period, group_by) with a fixed safe query"
+            ],
+            [
+              "send_http(method, url, body)",
+              "tickets_create(title, priority, body)"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "Fewer tools also help selection: when two tools overlap, the model has to guess, and it will guess differently on different runs. Merge or remove overlapping tools before writing longer descriptions to tell them apart."
+        }
+      ]
+    },
+    {
+      "heading": "Results and errors that drive the next step",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "The tool result is the agent's only view of what happened. Return what the next decision needs and little else: relevant fields rather than whole records, human-readable names next to opaque IDs, and a clear note when results were truncated and how to get more. Errors deserve the same care. A stack trace or \"400 Bad Request\" leaves the agent guessing; an error that says what was wrong and how to fix it usually leads to a correct retry."
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "caption": "Validated arguments, bounded output and actionable errors",
+          "code": "from pydantic import BaseModel, EmailStr, ValidationError\n\n\nclass SearchArgs(BaseModel):\n    customer_email: EmailStr\n    status: str | None = None\n\n\ndef orders_search(raw_args: dict) -> str:\n    try:\n        args = SearchArgs(**raw_args)\n    except ValidationError as e:\n        msg = e.errors()[0][\"msg\"]\n        return f\"Invalid arguments: {msg}. Pass customer_email as an email address.\"\n    rows = db.find_orders(args.customer_email, args.status)\n    if not rows:\n        return f\"No orders for {args.customer_email}. Check spelling or ask for the order ID.\"\n    lines = [f\"{r.id} | {r.placed:%Y-%m-%d} | {r.status} | {r.total:.2f}\" for r in rows[:10]]\n    more = \"\"\n    if len(rows) > 10:\n        more = f\"\\n({len(rows) - 10} older orders not shown; narrow with status)\"\n    return \"id | placed | status | total\\n\" + \"\\n\".join(lines) + more"
+        }
+      ]
+    },
+    {
+      "heading": "Safety properties",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "**Validate everything** on the server side; the schema guides the model but does not enforce anything.",
+            "**Idempotency**: write tools accept an idempotency key or check current state, so a retried call does not refund twice.",
+            "**Limits**: cap amounts, rows, file sizes and time; reject requests outside policy with a clear message.",
+            "**Dry runs and previews**: for consequential actions, a `preview` mode returns what would change, which a human or the agent can confirm.",
+            "**Least privilege**: tools act with the end user's permissions, not a superuser account.",
+            "**Mark side effects**: label tools read-only or write so the permission layer can treat them differently."
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "Evaluating and iterating on tools",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Tools are evaluated through the agent. Run a benchmark of realistic tasks and read the transcripts with tool design in mind: which tools were never used, which were used wrongly, which arguments were invalid, where the agent called three tools in a row to answer one question, and which results it misread. Count invalid-argument rates and calls per task. Then change one tool description, schema or result format at a time and re-run. Small edits to a description often fix errors that look like model failures."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Redesign a toolset",
+    "steps": [
+      "Start from a naive toolset: one tool per REST endpoint for a small order system (users, orders, shipments, refunds).",
+      "Write 10 realistic tasks and run an agent (or trace them by hand) noting calls per task and errors.",
+      "Replace the toolset with three task-level tools with enums, required fields and examples.",
+      "Add pydantic validation, bounded results with a truncation note, and actionable error messages.",
+      "Add an idempotency key and a preview mode to the refund tool.",
+      "Re-run the 10 tasks and compare calls per task, invalid-argument rate and success."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "The model sees only name, description, schema and results.",
+      "Design tools around tasks, not endpoints.",
+      "Few non-overlapping tools beat many similar ones.",
+      "Results: relevant fields, readable, bounded, with truncation notes.",
+      "Errors say what was wrong and how to fix it.",
+      "Validate server-side; idempotency, limits, previews, least privilege."
+    ],
+    "groups": [
+      {
+        "title": "Definition",
+        "items": [
+          {
+            "syntax": "name: namespace_verb",
+            "desc": "orders_search"
+          },
+          {
+            "syntax": "description: what, when, when not",
+            "desc": "Selection"
+          },
+          {
+            "syntax": "enum, format, required",
+            "desc": "Constrain arguments"
+          },
+          {
+            "syntax": "additionalProperties: false",
+            "desc": "No invented fields"
+          }
+        ]
+      },
+      {
+        "title": "Results",
+        "items": [
+          {
+            "syntax": "only fields the next step needs",
+            "desc": "Token-efficient"
+          },
+          {
+            "syntax": "names next to IDs",
+            "desc": "Readable"
+          },
+          {
+            "syntax": "\"N more not shown; narrow with X\"",
+            "desc": "Truncation note"
+          },
+          {
+            "syntax": "error: problem + how to fix",
+            "desc": "Self-correction"
+          }
+        ]
+      },
+      {
+        "title": "Safety",
+        "items": [
+          {
+            "syntax": "server-side validation",
+            "desc": "Schemas do not enforce"
+          },
+          {
+            "syntax": "idempotency_key",
+            "desc": "Safe retries"
+          },
+          {
+            "syntax": "preview / dry_run",
+            "desc": "Confirm before acting"
+          },
+          {
+            "syntax": "read-only vs write label",
+            "desc": "Permission routing"
+          }
+        ]
+      },
+      {
+        "title": "Evaluate",
+        "items": [
+          {
+            "syntax": "invalid-argument rate",
+            "desc": "Schema clarity"
+          },
+          {
+            "syntax": "calls per task",
+            "desc": "Abstraction level"
+          },
+          {
+            "syntax": "unused tools",
+            "desc": "Remove or rename"
+          },
+          {
+            "syntax": "one tool change per run",
+            "desc": "Attribution"
+          }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "One tool per API endpoint.",
+      "Overlapping tools with near-identical descriptions.",
+      "Returning entire records or unbounded output.",
+      "Errors like \"400 Bad Request\" with no guidance.",
+      "Write tools without idempotency or limits."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "Agents often call list_users, get_user, list_orders and get_shipment in sequence. What is the better design?",
+      "options": [
+        "One task-level orders_search tool",
+        "A longer description on each tool",
+        "A higher step budget",
+        "A separate tool per field"
+      ],
+      "answer": 0,
+      "explain": "Task-level tools reduce steps, carried IDs and chances to fail."
+    },
+    {
+      "q": "A tool returns \"400 Bad Request\" and the agent keeps retrying the same call. What should change?",
+      "options": [
+        "Return what was wrong and how to fix it",
+        "Hide errors from the agent",
+        "Lower the temperature",
+        "Add another overlapping tool"
+      ],
+      "answer": 0,
+      "explain": "Actionable error messages let the model correct its arguments."
+    },
+    {
+      "q": "Why must a refund tool support an idempotency key?",
+      "options": [
+        "Retries must not refund twice",
+        "It speeds up the database",
+        "Models require it",
+        "It shortens the description"
+      ],
+      "answer": 0,
+      "explain": "Agents and harnesses retry; idempotency makes a retried write safe."
+    },
+    {
+      "q": "What does a JSON Schema in a tool definition guarantee on its own?",
+      "options": [
+        "Nothing; validate on the server",
+        "That arguments are always valid",
+        "That the tool is read-only",
+        "That the model will call it"
+      ],
+      "answer": 0,
+      "explain": "The schema guides the model, but only server-side validation enforces it."
+    },
+    {
+      "q": "Transcripts show one tool is never used and another is often called with invalid dates. What do you do first?",
+      "options": [
+        "Remove or fix them, one change per run",
+        "Switch to a different model",
+        "Add five more tools",
+        "Raise the step budget"
+      ],
+      "answer": 0,
+      "explain": "Tool problems seen in transcripts are often fixed by description or schema changes, measured one at a time."
+    }
+  ]
+}

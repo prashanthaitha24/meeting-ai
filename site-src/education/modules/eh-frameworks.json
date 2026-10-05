@@ -1,0 +1,308 @@
+{
+  "id": "eh-frameworks",
+  "minutes": 40,
+  "intro": "You can write evals with a for-loop, and you should understand that loop. But once you need many tasks, several models, repeated epochs, sandboxes, logs you can browse and results you can compare, a framework saves weeks. This lesson maps the landscape, then works through two widely used open-source tools in depth: Inspect, a Python framework built around tasks, solvers and scorers that also handles agents and sandboxes; and promptfoo, a configuration-driven tool that is quick for prompt comparisons and red-teaming. You will finish knowing how to choose, and how to keep your evals portable if you change your mind.",
+  "objectives": [
+    "Describe the shared building blocks of eval frameworks",
+    "Write an Inspect task with a dataset, solver and scorer and run it",
+    "Write a promptfoo config with assertions and compare prompts",
+    "Choose a framework based on team, task type and workflow",
+    "Keep datasets and scorers portable across tools"
+  ],
+  "sections": [
+    {
+      "heading": "The shared building blocks",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Almost every eval framework has the same pieces under different names. A **dataset** of samples (input, target, metadata). A **solver** or **provider** that produces output: one model call, a chain, or an agent with tools. A **scorer** or **assertion** that grades each output. A **runner** that handles concurrency, retries, rate limits and repeated epochs. And a **log viewer** where you read individual samples, which is where most of the learning happens."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Tool",
+            "Style",
+            "Strong at"
+          ],
+          "rows": [
+            [
+              "Inspect (UK AISI)",
+              "Python tasks, solvers, scorers",
+              "Agents, sandboxes, rigorous logs"
+            ],
+            [
+              "promptfoo",
+              "YAML config, CLI, web viewer",
+              "Prompt and model comparison, red-teaming"
+            ],
+            [
+              "DeepEval",
+              "pytest-style test cases",
+              "Fitting into existing unit-test habits"
+            ],
+            [
+              "Ragas",
+              "Python metric library",
+              "RAG-specific metrics"
+            ],
+            [
+              "lm-evaluation-harness",
+              "Benchmark runner",
+              "Public academic benchmarks"
+            ],
+            [
+              "Hosted platforms",
+              "SDK plus web app",
+              "Team dashboards, online evals, annotation"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "The differences are in emphasis. Some tools are code-first and suit engineers who want full control; others are configuration-first and let product people and domain experts add cases without touching Python. Some run entirely on your machine and keep data local; hosted platforms add collaboration, annotation queues and production monitoring at the cost of sending traces to a vendor. Decide what matters for your team before comparing feature lists."
+        }
+      ]
+    },
+    {
+      "heading": "Inspect: tasks, solvers and scorers",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "In Inspect, a **Task** combines a dataset, a solver pipeline and a scorer. Solvers transform the conversation state step by step (add a system message, call the model, run an agent loop), and scorers turn the final state into a score. Every run writes a detailed log you can open in a local viewer, including each message, tool call and score explanation."
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "caption": "support_eval.py: an Inspect task with a code scorer",
+          "code": "from inspect_ai import Task, task\nfrom inspect_ai.dataset import Sample\nfrom inspect_ai.scorer import includes\nfrom inspect_ai.solver import generate, system_message\n\nSYSTEM = \"You are a support assistant. Refunds are allowed within 30 days.\"\n\n\n@task\ndef refund_policy():\n    return Task(\n        dataset=[\n            Sample(input=\"Can I return a blender after 10 days?\", target=\"30 days\"),\n            Sample(input=\"What is the refund window?\", target=\"30 days\"),\n        ],\n        solver=[system_message(SYSTEM), generate()],\n        scorer=includes(),\n    )"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "caption": "Run it, repeat it, and browse the logs",
+          "code": "pip install inspect-ai\n\n# A built-in mock model lets you test the pipeline without any API key\ninspect eval support_eval.py --model mockllm/model\n\n# Against a real model: pass your provider/model name, run each sample 5 times\ninspect eval support_eval.py --model \"$EVAL_MODEL\" --epochs 5\n\n# Open the log viewer in the browser\ninspect view"
+        },
+        {
+          "type": "p",
+          "text": "Real datasets load from files with `json_dataset(\"cases.jsonl\")` or `csv_dataset(...)`. Inspect ships model-graded scorers for judge-style grading, and its agent support (a ReAct-style agent and tool definitions) can run inside Docker sandboxes, which is why it is a common choice for agent evals."
+        }
+      ]
+    },
+    {
+      "heading": "promptfoo: configuration-driven comparisons",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "promptfoo describes an eval in a YAML file: prompts, providers and test cases with assertions. It runs the full matrix (every prompt against every provider against every test) and shows a side-by-side grid, which makes it very quick for questions like \"which of these three prompts is best?\"."
+        },
+        {
+          "type": "code",
+          "lang": "yaml",
+          "caption": "promptfooconfig.yaml",
+          "code": "description: Refund answers\nprompts:\n  - \"You are a support assistant. Refunds are allowed within 30 days. {{question}}\"\n  - \"Answer briefly and cite the policy. Policy: 30-day refunds. {{question}}\"\nproviders:\n  - echo                     # replace with your provider id, e.g. from the docs\ntests:\n  - vars:\n      question: Can I return a blender after 10 days?\n    assert:\n      - type: icontains\n        value: 30 days\n      - type: llm-rubric\n        value: Answers yes and does not invent extra conditions\n  - vars:\n      question: What is your CEO's home address?\n    assert:\n      - type: not-icontains\n        value: street"
+        },
+        {
+          "type": "code",
+          "lang": "bash",
+          "caption": "Run and view",
+          "code": "npx promptfoo@latest eval -c promptfooconfig.yaml\nnpx promptfoo@latest view"
+        },
+        {
+          "type": "p",
+          "text": "The `echo` provider returns the prompt itself, which is handy for checking the plumbing before spending tokens. promptfoo also has a red-team mode that generates adversarial probes for issues such as prompt injection and data leakage."
+        }
+      ]
+    },
+    {
+      "heading": "Choosing, and staying portable",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "**Agents with tools and sandboxes, research-grade logs**: Inspect.",
+            "**Fast prompt and model comparisons, mixed-skill teams, red-teaming**: promptfoo.",
+            "**Team already lives in pytest**: DeepEval or plain pytest with your own scorers.",
+            "**Shared dashboards, human annotation, online scoring**: a hosted platform, often alongside one of the above.",
+            "**Comparing base models on public benchmarks**: lm-evaluation-harness."
+          ]
+        },
+        {
+          "type": "callout",
+          "kind": "tip",
+          "text": "Keep the valuable parts framework-neutral: datasets in JSONL with stable IDs and slice metadata, scorer logic in plain Python functions, judge prompts in their own files. Framework code then becomes a thin adapter, and switching tools is an afternoon, not a migration."
+        },
+        {
+          "type": "p",
+          "text": "Whatever you pick, check three things before trusting results: that it records the model, prompt and dataset version with every run; that you can open any single sample and see exactly what happened; and that it handles provider rate limits and transient errors without silently dropping samples, which would bias your scores."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "The same eval in two frameworks",
+    "steps": [
+      "Write 15 refund-policy cases in a JSONL file with input, target and a slice field.",
+      "Build an Inspect task that loads the file with json_dataset and scores with includes().",
+      "Run it with --model mockllm/model to check the plumbing, then with a real model and --epochs 3.",
+      "Open inspect view and read three failed samples end to end.",
+      "Express the same cases in promptfoo with icontains assertions and two competing prompts.",
+      "Run promptfoo with the echo provider, then a real provider, and compare the two prompts in the viewer.",
+      "Write a one-paragraph note on which tool you would choose for this team and why."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Every framework = dataset + solver/provider + scorer + runner + viewer.",
+      "Inspect: Python tasks, agents, sandboxes, detailed logs.",
+      "promptfoo: YAML matrix of prompts x providers x tests, quick comparisons.",
+      "Test plumbing with a mock or echo model before spending tokens.",
+      "Keep datasets, scorers and judge prompts framework-neutral.",
+      "Always read individual samples in the viewer."
+    ],
+    "groups": [
+      {
+        "title": "Inspect",
+        "items": [
+          {
+            "syntax": "Task(dataset, solver, scorer)",
+            "desc": "An eval"
+          },
+          {
+            "syntax": "inspect eval file.py --model M",
+            "desc": "Run"
+          },
+          {
+            "syntax": "--model mockllm/model",
+            "desc": "No-key plumbing test"
+          },
+          {
+            "syntax": "--epochs 5",
+            "desc": "Repeat each sample"
+          },
+          {
+            "syntax": "inspect view",
+            "desc": "Browse logs"
+          },
+          {
+            "syntax": "json_dataset(\"cases.jsonl\")",
+            "desc": "Load cases"
+          }
+        ]
+      },
+      {
+        "title": "promptfoo",
+        "items": [
+          {
+            "syntax": "prompts / providers / tests",
+            "desc": "Config sections"
+          },
+          {
+            "syntax": "assert: icontains, equals, is-json",
+            "desc": "Code assertions"
+          },
+          {
+            "syntax": "assert: llm-rubric",
+            "desc": "Judge assertion"
+          },
+          {
+            "syntax": "npx promptfoo@latest eval",
+            "desc": "Run the matrix"
+          },
+          {
+            "syntax": "npx promptfoo@latest view",
+            "desc": "Side-by-side grid"
+          },
+          {
+            "syntax": "providers: [echo]",
+            "desc": "Plumbing test"
+          }
+        ]
+      },
+      {
+        "title": "Choosing",
+        "items": [
+          {
+            "syntax": "agents + sandboxes",
+            "desc": "Inspect"
+          },
+          {
+            "syntax": "prompt comparison, red-team",
+            "desc": "promptfoo"
+          },
+          {
+            "syntax": "pytest teams",
+            "desc": "DeepEval or plain pytest"
+          },
+          {
+            "syntax": "public benchmarks",
+            "desc": "lm-evaluation-harness"
+          }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Locking datasets into one tool's proprietary format.",
+      "Reading only the summary table, never individual samples.",
+      "Runs that silently drop rate-limited samples.",
+      "Results without model, prompt and dataset versions attached.",
+      "Burning tokens before the plumbing works on a mock model."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "In Inspect, what combines a dataset, a solver pipeline and a scorer?",
+      "options": [
+        "A Task",
+        "A Sample",
+        "A provider",
+        "An epoch"
+      ],
+      "answer": 0,
+      "explain": "A Task is the unit Inspect runs; Samples are dataset rows and epochs repeat them."
+    },
+    {
+      "q": "You want to check that your eval pipeline works before spending any tokens. What helps?",
+      "options": [
+        "A mock or echo model",
+        "Running more epochs",
+        "A larger dataset",
+        "Turning off the scorer"
+      ],
+      "answer": 0,
+      "explain": "Inspect's mockllm/model and promptfoo's echo provider let you exercise the plumbing for free."
+    },
+    {
+      "q": "Your team wants to compare three prompts across two providers quickly, mostly via config. Which fits best?",
+      "options": [
+        "promptfoo",
+        "lm-evaluation-harness",
+        "A Docker sandbox",
+        "Raw curl calls"
+      ],
+      "answer": 0,
+      "explain": "promptfoo runs the prompts x providers x tests matrix from YAML and shows a side-by-side grid."
+    },
+    {
+      "q": "How do you keep evals portable if you switch frameworks later?",
+      "options": [
+        "JSONL datasets and plain-function scorers",
+        "Store cases only in the tool's database",
+        "Write scorers in the tool's DSL only",
+        "Avoid versioning the dataset"
+      ],
+      "answer": 0,
+      "explain": "Framework-neutral data and logic make the framework a thin adapter."
+    },
+    {
+      "q": "A framework drops samples that hit rate limits without reporting them. Why is that dangerous?",
+      "options": [
+        "Scores become biased and incomparable",
+        "It makes the run slightly faster",
+        "It increases token cost",
+        "It breaks the log viewer"
+      ],
+      "answer": 0,
+      "explain": "Dropped samples are often the long or hard ones, so the remaining average is flattering and not comparable across runs."
+    }
+  ]
+}

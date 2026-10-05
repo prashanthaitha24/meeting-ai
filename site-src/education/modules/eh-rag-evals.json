@@ -1,0 +1,127 @@
+{
+  "id": "eh-rag-evals",
+  "minutes": 40,
+  "intro": "A retrieval-augmented generation (RAG) system can fail in two very different places: retrieval can miss the right passages, or generation can ignore, misread or embellish them. A single end-to-end score mixes those failures together and tells you nothing about which half to fix. This lesson splits RAG evaluation into retrieval metrics, generation metrics and end-to-end checks, shows how to build the labelled data each needs, and covers the RAG-specific traps: unanswerable questions, stale documents, and permissions.",
+  "objectives": [
+    "Evaluate retrieval separately with recall@k, precision@k and MRR",
+    "Evaluate generation for faithfulness, relevance and citation correctness",
+    "Build a labelled RAG dataset with relevant document IDs",
+    "Test unanswerable questions and permission boundaries",
+    "Diagnose whether a failure is a retrieval or a generation problem"
+  ],
+  "sections": [
+    {
+      "heading": "Split the pipeline",
+      "blocks": [
+        {"type": "p", "text": "Think of RAG as two systems in series. The **retriever** takes a question and returns the top-k chunks. The **generator** takes the question plus those chunks and writes an answer. Evaluate them separately, then together. If retrieval recall is low, no prompt will rescue the answer; if recall is high but answers are wrong, the problem is in generation or chunk quality."},
+        {"type": "table", "headers": ["Layer", "Question", "Typical metrics"], "rows": [
+          ["Retrieval", "Did we fetch the passages that contain the answer?", "recall@k, precision@k, MRR"],
+          ["Generation", "Did the answer use those passages correctly?", "faithfulness, answer relevance"],
+          ["Citations", "Do cited sources actually support each claim?", "citation precision"],
+          ["End to end", "Would a user be satisfied and correct?", "correctness vs reference, task success"]
+        ]}
+      ]
+    },
+    {
+      "heading": "Retrieval metrics",
+      "blocks": [
+        {"type": "p", "text": "For each question, label the document or chunk IDs that contain the answer. Then **recall@k** is the share of relevant chunks found in the top k, **precision@k** is the share of the top k that are relevant, and **MRR** (mean reciprocal rank) rewards putting the first relevant chunk near the top. Recall matters most for RAG, because the generator can ignore irrelevant chunks but cannot invent a missing one."},
+        {"type": "code", "lang": "python", "caption": "Retrieval metrics from labelled relevant IDs", "code": "def recall_at_k(retrieved: list[str], relevant: set[str], k: int) -> float:\n    return len(set(retrieved[:k]) & relevant) / len(relevant)\n\n\ndef reciprocal_rank(retrieved: list[str], relevant: set[str]) -> float:\n    for rank, doc_id in enumerate(retrieved, start=1):\n        if doc_id in relevant:\n            return 1 / rank\n    return 0.0\n\n\ndef retrieval_report(cases, search, k=5):\n    rec = [recall_at_k(search(c[\"q\"]), set(c[\"relevant\"]), k) for c in cases]\n    mrr = [reciprocal_rank(search(c[\"q\"]), set(c[\"relevant\"])) for c in cases]\n    return {f\"recall@{k}\": sum(rec) / len(rec), \"mrr\": sum(mrr) / len(mrr)}"},
+        {"type": "p", "text": "Because retrieval metrics need no model calls, they are fast and cheap: run them on every change to chunking, embeddings, hybrid weights or reranking, and sweep k to see where recall plateaus."}
+      ]
+    },
+    {
+      "heading": "Generation metrics",
+      "blocks": [
+        {"type": "list", "items": [
+          "**Faithfulness (groundedness)**: every claim in the answer is supported by the retrieved context. Usually judged by a calibrated LLM judge that lists claims and checks each against the context.",
+          "**Answer relevance**: the answer addresses the question that was asked, not a nearby one.",
+          "**Correctness**: the answer matches a reference answer or required facts (code checks where possible).",
+          "**Citation precision**: each citation points at a chunk that supports the sentence it is attached to; check by matching citation IDs to retrieved IDs and judging support.",
+          "**Abstention**: when the context does not contain the answer, the system says so instead of guessing."
+        ]},
+        {"type": "code", "lang": "python", "caption": "Cheap code checks before any judge", "code": "import re\n\n\ndef citation_checks(answer: str, retrieved_ids: list[str]) -> dict:\n    cited = set(re.findall(r\"\\[(doc-\\d+)\\]\", answer))\n    return {\n        \"has_citation\": bool(cited),\n        \"cites_only_retrieved\": cited <= set(retrieved_ids),   # no invented sources\n        \"n_citations\": len(cited),\n    }"}
+      ]
+    },
+    {
+      "heading": "Building the dataset",
+      "blocks": [
+        {"type": "p", "text": "A RAG eval case needs the question, the IDs of the chunks that answer it, a reference answer or required facts, and slice metadata such as document type and question type. Good sources are real user questions matched to documents by subject experts. You can also generate questions from chunks (the chunk becomes the relevant ID), but generated questions tend to copy the chunk's wording, which makes retrieval look better than it is; paraphrase them or prefer real questions."},
+        {"type": "list", "items": [
+          "**Unanswerable questions**: include 10-20% whose answer is not in the corpus; the expected behaviour is a clear \"I don't know\".",
+          "**Multi-hop questions**: need two or more chunks combined; they expose chunking and k problems.",
+          "**Stale or conflicting documents**: two versions of a policy; the expected answer uses the current one.",
+          "**Permissions**: questions asked by a user who must not see the answering document; the expected behaviour is not to reveal it."
+        ]}
+      ]
+    },
+    {
+      "heading": "Diagnosing failures",
+      "blocks": [
+        {"type": "p", "text": "For every failed end-to-end case, check retrieval first. If the relevant chunk was not retrieved, it is a retrieval failure: look at chunk boundaries, query wording versus document wording (consider hybrid keyword plus vector search), metadata filters and k. If it was retrieved but the answer is wrong, it is a generation failure: the chunk may be buried among irrelevant ones (try reranking or fewer chunks), the prompt may not insist on using the context, or the answer may require reasoning the model did poorly. Tag each failure with its layer and fix the biggest bucket first."},
+        {"type": "callout", "kind": "warning", "text": "Frameworks offer ready-made RAG metrics computed by an LLM. They are useful, but they are judges: calibrate them on a labelled sample from your own documents before trusting their numbers."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Evaluate a small RAG system layer by layer",
+    "steps": [
+      "Index 30-50 documents you know well (product docs, policies) with any vector or keyword search.",
+      "Write 40 questions with relevant chunk IDs and reference facts; include 6 unanswerable and 4 multi-hop questions.",
+      "Compute recall@k and MRR for k in 1, 3, 5, 10 and plot where recall levels off.",
+      "Generate answers and run the citation code checks.",
+      "Judge faithfulness with a calibrated judge on all answers, and abstention on the unanswerable set.",
+      "Tag every failure as retrieval or generation and fix the bigger bucket; re-run and compare."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Evaluate retrieval and generation separately, then end to end.",
+      "Recall@k first: generation cannot use a chunk it never saw.",
+      "Faithfulness: every claim supported by retrieved context.",
+      "Include unanswerable, multi-hop, stale and permission cases.",
+      "Diagnose failures by layer before changing anything.",
+      "Calibrate ready-made RAG judge metrics on your own data."
+    ],
+    "groups": [
+      {"title": "Retrieval", "items": [
+        {"syntax": "recall@k = found relevant / all relevant", "desc": "Most important for RAG"},
+        {"syntax": "precision@k = relevant in top k / k", "desc": "Noise in context"},
+        {"syntax": "MRR = mean(1 / rank of first hit)", "desc": "Ranking quality"},
+        {"syntax": "sweep k: 1, 3, 5, 10", "desc": "Find the plateau"}
+      ]},
+      {"title": "Generation", "items": [
+        {"syntax": "faithfulness", "desc": "Claims supported by context"},
+        {"syntax": "answer relevance", "desc": "Answers the actual question"},
+        {"syntax": "correctness vs reference", "desc": "Right facts"},
+        {"syntax": "citation precision", "desc": "Citations support claims"},
+        {"syntax": "abstention", "desc": "Says so when unanswerable"}
+      ]},
+      {"title": "Dataset", "items": [
+        {"syntax": "q, relevant_ids, facts, slice", "desc": "Case fields"},
+        {"syntax": "10-20% unanswerable", "desc": "Tests guessing"},
+        {"syntax": "multi-hop questions", "desc": "Tests chunking and k"},
+        {"syntax": "user without access", "desc": "Tests permissions"}
+      ]},
+      {"title": "Fixes by layer", "items": [
+        {"syntax": "retrieval miss", "desc": "Chunking, hybrid search, filters, k"},
+        {"syntax": "buried chunk", "desc": "Reranking, fewer chunks"},
+        {"syntax": "ignored context", "desc": "Prompt: answer only from sources"}
+      ]}
+    ],
+    "pitfalls": [
+      "One end-to-end score with no retrieval metrics.",
+      "Questions generated from chunks that copy their wording.",
+      "No unanswerable questions, so guessing is never punished.",
+      "Trusting framework RAG metrics without calibration.",
+      "Ignoring permission leaks in the eval."
+    ]
+  },
+  "quiz": [
+    {"q": "Recall@5 is 0.45, and answers are often wrong. What should you work on first?", "options": ["Retrieval: chunking, search and k", "The answer prompt's tone", "The judge's rubric wording", "Lower temperature"], "answer": 0, "explain": "With low recall, the needed passages never reach the generator, so retrieval is the bottleneck."},
+    {"q": "Why does recall usually matter more than precision for RAG retrieval?", "options": ["A missing chunk cannot be recovered", "Precision cannot be measured", "Precision is always high anyway", "Recall needs no labels"], "answer": 0, "explain": "The model can often ignore an irrelevant chunk, but it cannot use information that was never retrieved."},
+    {"q": "What is the right behaviour for a question whose answer is not in the corpus?", "options": ["Say it does not know", "Answer from general knowledge", "Cite the closest document anyway", "Return an empty response"], "answer": 0, "explain": "Unanswerable cases test abstention; a confident guess is a faithfulness failure."},
+    {"q": "Questions generated from chunks score very high on retrieval. What is a likely reason?", "options": ["They reuse the chunk's own wording", "The embedding model is perfect", "k is set too low", "The judge is too strict"], "answer": 0, "explain": "Generated questions often echo the chunk's phrasing, making retrieval easier than with real user questions."},
+    {"q": "An answer cites [doc-9], but doc-9 was never retrieved. What does this indicate?", "options": ["An invented citation", "High recall", "Correct abstention", "A multi-hop success"], "answer": 0, "explain": "A citation outside the retrieved set cannot be grounded; a simple code check catches it."}
+  ]
+}

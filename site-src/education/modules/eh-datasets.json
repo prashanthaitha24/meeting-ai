@@ -1,0 +1,270 @@
+{
+  "id": "eh-datasets",
+  "minutes": 35,
+  "intro": "An eval is only as good as its dataset. A set of easy, repetitive examples will report 95% while users struggle; a set nobody can explain will start arguments instead of ending them. This lesson covers where good eval cases come from, how to write expected answers and grading guidance that two people would apply the same way, when synthetic data helps and when it lies, slicing a dataset so averages do not hide failures, keeping a held-out set so you do not overfit your prompts, and versioning it all like code.",
+  "objectives": [
+    "Source eval cases from production, experts and known failures",
+    "Write targets and grading guidance that are unambiguous and checkable",
+    "Use synthetic data to fill gaps without letting it dominate",
+    "Slice datasets by intent, difficulty and risk, and report per slice",
+    "Keep development and held-out splits and version the dataset"
+  ],
+  "sections": [
+    {
+      "heading": "Where good cases come from",
+      "blocks": [
+        {
+          "type": "list",
+          "items": [
+            "**Production traffic**: real user inputs (sampled, with personal data removed) are the single best source, because they show how people actually phrase things.",
+            "**Support tickets and complaints**: failures users cared enough to report.",
+            "**Domain experts**: the cases they know are tricky, ambiguous or high-stakes.",
+            "**Your own failure analysis**: every bad output found in testing becomes a case.",
+            "**Adversarial cases**: prompt injection attempts, out-of-scope requests, requests that must be refused.",
+            "**Synthetic generation**: to fill gaps you cannot get real data for yet, covered below."
+          ]
+        },
+        {
+          "type": "p",
+          "text": "Start small and real: 30 to 100 carefully chosen cases beat 5,000 generated ones you have never read. Grow the set continuously, especially from production failures."
+        }
+      ]
+    },
+    {
+      "heading": "Targets and grading guidance",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "For each case, record what a good output looks like in a form a scorer can use. That might be an exact answer, a set of facts the answer must contain, a forbidden behaviour, the tool that should be called, or a rubric for a judge. If two careful people would grade the same output differently using your guidance, the guidance is not finished."
+        },
+        {
+          "type": "code",
+          "lang": "json",
+          "caption": "One case (stored as a single line in a JSONL file), with metadata for slicing",
+          "code": "{\n  \"id\": \"ref-017\",\n  \"input\": \"My blender arrived cracked, can I return it after 40 days?\",\n  \"target\": \"Explains the 30-day window and offers escalation for damaged items\",\n  \"must_include\": [\n    \"30 days\",\n    \"damaged\"\n  ],\n  \"must_not\": [\n    \"guarantee\"\n  ],\n  \"slice\": {\n    \"intent\": \"refund\",\n    \"difficulty\": \"hard\",\n    \"source\": \"ticket\"\n  }\n}"
+        },
+        {
+          "type": "list",
+          "items": [
+            "Write **labelling guidelines** with examples of pass and fail for borderline cases.",
+            "For judgement-heavy cases, have two people label a sample independently and measure how often they agree; low agreement means the task or the guidance is unclear.",
+            "Record the **reason** for tricky labels, so future you remembers why."
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "Synthetic data: useful, with care",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Models can generate eval inputs quickly: paraphrases of real questions, edge cases for a rare intent, translations, long documents. Synthetic data is useful for coverage, especially before launch, but it has predictable flaws: it is often cleaner and more uniform than real input, it inherits the generator's blind spots, and if the same model family generates and answers, results can be flattering."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Seed generation with real examples and explicit variation instructions (tone, length, typos, missing information).",
+            "Read and filter generated cases; discard the unrealistic ones.",
+            "Label synthetic cases as such in metadata and report their scores separately.",
+            "Replace synthetic cases with real ones as production data arrives."
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "Slices: averages hide failures",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A 90% average can hide a 40% score on the slice that matters most, such as refund requests, non-English users or long documents. Tag every case with slice metadata (intent, difficulty, language, length, source, risk) and always report scores per slice as well as overall. Make sure high-risk slices have enough cases to be measured at all."
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "caption": "Per-slice scores from a results file",
+          "code": "import json\nfrom collections import defaultdict\n\nby_slice = defaultdict(list)\nfor line in open(\"results.jsonl\"):\n    r = json.loads(line)\n    by_slice[r[\"slice\"][\"intent\"]].append(r[\"passed\"])\n\nfor intent, outcomes in sorted(by_slice.items()):\n    print(f\"{intent:12} {sum(outcomes) / len(outcomes):6.1%}  (n={len(outcomes)})\")"
+        }
+      ]
+    },
+    {
+      "heading": "Splits, contamination and versioning",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "If you tune prompts against the same cases you report, you will overfit: the prompt learns the dataset, not the task. Keep a **development set** you iterate on freely and a **held-out test set** you run rarely, for decisions such as releases and model swaps. When scores on the two diverge, you are overfitting."
+        },
+        {
+          "type": "list",
+          "items": [
+            "**Contamination**: public examples may be in a model's training data; prefer private, recent cases for decisions.",
+            "**Leakage**: do not put eval answers into few-shot examples or retrieval indexes the system can see.",
+            "**Versioning**: keep datasets in Git (or a data versioning tool) with a changelog; record the dataset version with every result.",
+            "**Privacy**: strip or pseudonymise personal data before cases enter the dataset."
+          ]
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Build a real dataset with slices and a held-out split",
+    "steps": [
+      "Collect 60 inputs for one AI task from logs, tickets or your own realistic writing; include 10 adversarial or out-of-scope cases.",
+      "Write a target and grading guidance for each in JSONL with slice metadata (intent, difficulty, source).",
+      "Have a second person label 15 cases independently and compute how often you agree; fix the guidance where you disagree.",
+      "Generate 20 synthetic cases for an under-covered intent, read them, keep the realistic ones and tag them synthetic.",
+      "Split into dev (70%) and held-out (30%), stratified by intent.",
+      "Run any baseline system and print scores overall, per slice, and dev versus held-out."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Real, read, and small beats large and generated.",
+      "Guidance two people would apply identically.",
+      "Report per slice; protect high-risk slices with enough cases.",
+      "Synthetic data fills gaps; label it and score it separately.",
+      "Dev set for iterating, held-out set for decisions.",
+      "Version the dataset; record its version with every result."
+    ],
+    "groups": [
+      {
+        "title": "Case fields",
+        "items": [
+          {
+            "syntax": "id, input",
+            "desc": "Stable ID and the input"
+          },
+          {
+            "syntax": "target / must_include / must_not",
+            "desc": "What good looks like"
+          },
+          {
+            "syntax": "rubric",
+            "desc": "Guidance for judge or human"
+          },
+          {
+            "syntax": "slice: intent, difficulty, source, risk",
+            "desc": "For per-slice reporting"
+          },
+          {
+            "syntax": "synthetic: true",
+            "desc": "Flag generated cases"
+          }
+        ]
+      },
+      {
+        "title": "Sources",
+        "items": [
+          {
+            "syntax": "production samples (PII removed)",
+            "desc": "Best realism"
+          },
+          {
+            "syntax": "tickets and complaints",
+            "desc": "Failures users noticed"
+          },
+          {
+            "syntax": "expert-written hard cases",
+            "desc": "Domain edge cases"
+          },
+          {
+            "syntax": "adversarial and out-of-scope",
+            "desc": "Safety and refusals"
+          },
+          {
+            "syntax": "your own failure analysis",
+            "desc": "Every bad output becomes a case"
+          }
+        ]
+      },
+      {
+        "title": "Hygiene",
+        "items": [
+          {
+            "syntax": "dev 70% / held-out 30%",
+            "desc": "Avoid overfitting"
+          },
+          {
+            "syntax": "inter-annotator agreement",
+            "desc": "Is the guidance clear?"
+          },
+          {
+            "syntax": "no eval answers in few-shot or index",
+            "desc": "Avoid leakage"
+          },
+          {
+            "syntax": "dataset version in results",
+            "desc": "Comparable over time"
+          },
+          {
+            "syntax": "label + reason for tricky cases",
+            "desc": "Remember why"
+          }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Thousands of generated cases nobody has read.",
+      "Reporting only the overall average.",
+      "Tuning prompts on the same cases used for release decisions.",
+      "Eval answers leaking into retrieval or few-shot examples.",
+      "Personal data copied into eval datasets."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "Overall accuracy is 91%, but refund questions score 52%. What practice revealed this?",
+      "options": [
+        "Reporting scores per slice",
+        "Adding a lot more synthetic data",
+        "Switching to a larger model",
+        "Raising the sampling temperature"
+      ],
+      "answer": 0,
+      "explain": "Per-slice reporting exposes weak areas that a single average hides."
+    },
+    {
+      "q": "Dev-set scores keep rising while held-out scores stay flat. What is happening?",
+      "options": [
+        "The prompt is overfitting to the dev set",
+        "The held-out set is far too easy",
+        "The model is getting faster each run",
+        "The scorer has quietly broken"
+      ],
+      "answer": 0,
+      "explain": "Gains that appear only on the data you tune against are memorised quirks, not real improvement on the task."
+    },
+    {
+      "q": "Two reviewers agree on only 60% of labels for the same outputs. What should you fix first?",
+      "options": [
+        "The grading guidance or task definition",
+        "The model's sampling temperature",
+        "The size of the held-out test set",
+        "The number of slices reported"
+      ],
+      "answer": 0,
+      "explain": "Low agreement means the standard is unclear; scores built on it are noise until the guidance is fixed."
+    },
+    {
+      "q": "What is a sound use of synthetic eval data?",
+      "options": [
+        "Filling gaps, tagged and scored separately",
+        "Replacing all real cases to save time",
+        "Generating answers to use as targets unread",
+        "Training the production model on the eval set"
+      ],
+      "answer": 0,
+      "explain": "Synthetic data helps coverage but is cleaner than reality and inherits generator blind spots, so it must be read, labelled and scored separately."
+    },
+    {
+      "q": "Why must eval answers never appear in the system's few-shot examples or retrieval index?",
+      "options": [
+        "The system would copy them and inflate scores",
+        "It makes the prompts far too long to run",
+        "Retrieval indexes cannot store answers",
+        "It changes the dataset version"
+      ],
+      "answer": 0,
+      "explain": "Leakage lets the system see the answers, so the eval measures lookup rather than ability."
+    }
+  ]
+}

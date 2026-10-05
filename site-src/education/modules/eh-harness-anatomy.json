@@ -1,0 +1,133 @@
+{
+  "id": "eh-harness-anatomy",
+  "minutes": 40,
+  "intro": "A language model on its own only turns text into text. Everything that makes it an agent, such as reading files, running commands, remembering what it did, asking permission and stopping at the right time, is built around it by the harness. Two products using the same model can behave completely differently because their harnesses differ. Harness engineering is the discipline of designing that surrounding system. This lesson takes a harness apart into its components, follows one request through all of them, and explains which design decisions have the biggest effect on quality, safety and cost.",
+  "objectives": [
+    "Define an agent harness and list its main components",
+    "Trace one user request through the loop, tools and context",
+    "Explain why the same model behaves differently in different harnesses",
+    "Identify the design decisions that matter most in a harness",
+    "Read an open-source harness's code and map it to the components"
+  ],
+  "sections": [
+    {
+      "heading": "Agent = model + harness",
+      "blocks": [
+        {"type": "p", "text": "The **harness** is the software that runs a model as an agent. It builds the prompt, offers tools, executes the tool calls the model requests, feeds results back, manages what fits in the context window, enforces permissions, isolates side effects, records what happened and decides when to stop. Coding agents in a terminal or IDE, browser-using agents and customer-support agents all contain the same components in different proportions."},
+        {"type": "table", "headers": ["Component", "Responsibility"], "rows": [
+          ["System prompt and instructions", "Role, rules, project conventions, output style"],
+          ["Tool layer", "Tool definitions, argument validation, execution, result formatting"],
+          ["Agent loop", "Call model, run tools, repeat; stop conditions and budgets"],
+          ["Context manager", "What goes into each request; truncation, summaries, retrieval"],
+          ["Permissions", "Which actions run automatically, need approval or are denied"],
+          ["Sandbox", "Isolates commands and files from the host and network"],
+          ["State and memory", "Session history, task lists, persistent notes"],
+          ["Extension points", "Hooks, plugins, MCP servers, skills"],
+          ["Telemetry", "Traces of every step, tokens, cost, errors"],
+          ["Interface", "Terminal, IDE, web or API; streaming and interruption"]
+        ]}
+      ]
+    },
+    {
+      "heading": "Following one request",
+      "blocks": [
+        {"type": "steps", "items": [
+          "The user types \"fix the failing date test\". The interface sends it to the harness with the session state.",
+          "The context manager assembles a request: system prompt, project instructions, tool definitions, recent history and the new message.",
+          "The model replies with reasoning and a tool call: run the test suite.",
+          "The permission layer checks the call. Running tests is allowed automatically; the command runs in the sandbox.",
+          "The tool layer captures output, truncates it to fit, and appends it to the history as a tool result.",
+          "The loop calls the model again. It reads the failing file, proposes an edit, and the permission layer asks the user to approve the write.",
+          "After tests pass, the model replies with a summary and no tool call, so the loop stops. Telemetry records every step."
+        ]},
+        {"type": "p", "text": "Every numbered step is a design decision. How much test output to keep, whether edits need approval, what the project instructions say, and when to stop all change the outcome more than many model upgrades do."}
+      ]
+    },
+    {
+      "heading": "The minimal loop",
+      "blocks": [
+        {"type": "code", "lang": "python", "caption": "The core of every harness, stripped down", "code": "def run_agent(task: str, tools: dict, max_steps: int = 30) -> str:\n    messages = [{\"role\": \"system\", \"content\": SYSTEM_PROMPT},\n                {\"role\": \"user\", \"content\": task}]\n    for step in range(max_steps):\n        reply = call_llm(messages, tools=[t.schema for t in tools.values()])\n        messages.append(reply.as_message())\n        if not reply.tool_calls:                 # no tool requested: final answer\n            return reply.text\n        for call in reply.tool_calls:\n            if not permitted(call):\n                result = \"denied by policy\"\n            else:\n                result = tools[call.name].run(**call.args)\n            messages.append({\"role\": \"tool\", \"id\": call.id, \"content\": fit(result)})\n        log_step(step, reply, messages)\n    return \"stopped: step budget reached\""},
+        {"type": "p", "text": "Everything else in a production harness elaborates on this loop: `permitted` grows into a policy engine, `fit` into a context manager, `tools` into a registry with schemas and sandboxes, and `log_step` into tracing. Later lessons in this track build out each of those pieces."}
+      ]
+    },
+    {
+      "heading": "Decisions that matter most",
+      "blocks": [
+        {"type": "list", "items": [
+          "**Tool surface**: few, well-described, composable tools beat many overlapping ones.",
+          "**Tool result design**: concise, structured and actionable results (including helpful error messages) drive the next step.",
+          "**Context policy**: what is always present, what is fetched on demand, and what gets summarised or dropped.",
+          "**Autonomy level**: which actions need approval; too strict and the agent is useless, too loose and it is dangerous.",
+          "**Isolation**: whether commands run on the host, in a container, or in a remote sandbox.",
+          "**Stop conditions and budgets**: step, token, time and cost limits, and what happens when they are hit.",
+          "**Observability**: whether you can replay exactly what the agent saw and did."
+        ]},
+        {"type": "callout", "kind": "tip", "text": "To learn harness design fast, read the source of an open-source coding agent and find each component in this lesson's table. Note where the system prompt lives, how a tool is defined, how output is truncated and where approvals happen."}
+      ]
+    },
+    {
+      "heading": "Why the harness is an engineering discipline",
+      "blocks": [
+        {"type": "p", "text": "Harness changes are product changes, and they interact. Adding a tool changes which tools the model chooses; a longer system prompt pushes history out of the context window; a stricter permission rule changes how often users approve without reading. That is why harness engineering pairs naturally with the evals in the first half of this track: every harness change should be measured on a benchmark of realistic tasks, with success, cost and safety reported together."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Map a real harness",
+    "steps": [
+      "Pick an open-source agent harness (any coding agent or agent framework on GitHub).",
+      "Find where the system prompt is built and list what goes into it.",
+      "Find one tool definition and its execution code; note how errors and long outputs are handled.",
+      "Find the main loop and its stop conditions and budgets.",
+      "Find the permission or approval logic and any sandboxing.",
+      "Draw the components as a diagram matching this lesson's table, and list three design choices you would change and why."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Agent = model + harness; the harness often matters as much as the model.",
+      "Components: prompt, tools, loop, context, permissions, sandbox, state, extensions, telemetry, interface.",
+      "The loop: call model, run requested tools, append results, repeat until no tool call or budget hit.",
+      "Tool surface and result design drive behaviour.",
+      "Autonomy and isolation decide the blast radius.",
+      "Measure every harness change with evals."
+    ],
+    "groups": [
+      {"title": "Components", "items": [
+        {"syntax": "system prompt + project instructions", "desc": "Behaviour and rules"},
+        {"syntax": "tool registry (schema, run, format)", "desc": "Actions"},
+        {"syntax": "agent loop + budgets", "desc": "Control flow"},
+        {"syntax": "context manager", "desc": "What the model sees"},
+        {"syntax": "permissions + sandbox", "desc": "Safety"},
+        {"syntax": "tracing", "desc": "Replay and debug"}
+      ]},
+      {"title": "Loop", "items": [
+        {"syntax": "reply.tool_calls empty -> stop", "desc": "Final answer"},
+        {"syntax": "append tool result with call id", "desc": "Feed back"},
+        {"syntax": "max_steps / tokens / cost", "desc": "Budgets"},
+        {"syntax": "fit(result)", "desc": "Truncate to budget"}
+      ]},
+      {"title": "Design levers", "items": [
+        {"syntax": "fewer, clearer tools", "desc": "Better selection"},
+        {"syntax": "actionable errors", "desc": "Self-correction"},
+        {"syntax": "approval for writes", "desc": "Human control"},
+        {"syntax": "container per session", "desc": "Isolation"},
+        {"syntax": "on-demand context", "desc": "Smaller prompts"}
+      ]}
+    ],
+    "pitfalls": [
+      "Blaming the model for what is a harness problem.",
+      "Dumping full tool output into context.",
+      "No step or cost budget, so loops run forever.",
+      "Running agent commands directly on the host.",
+      "Changing harness behaviour without an eval."
+    ]
+  },
+  "quiz": [
+    {"q": "Two products use the same model, but one solves far more coding tasks. What is the most likely explanation?", "options": ["Their harnesses differ", "The model is non-deterministic", "One uses more GPUs", "One has a longer product name"], "answer": 0, "explain": "Tools, context, prompts and loop design change outcomes substantially even with the same model."},
+    {"q": "In the minimal loop, what signals that the agent is finished?", "options": ["The model replies with no tool calls", "A tool returns an error", "The context window is half full", "The user is idle"], "answer": 0, "explain": "A reply with no tool request is treated as the final answer; budgets are the backstop."},
+    {"q": "Which component decides whether a requested file write runs automatically or needs approval?", "options": ["The permission layer", "The context manager", "The telemetry system", "The interface"], "answer": 0, "explain": "Permissions classify actions as allowed, needing approval or denied."},
+    {"q": "Why should tool output pass through something like fit() before going back to the model?", "options": ["Long outputs crowd out other context", "Models cannot read tool output", "It makes the tool run faster", "It hides errors from the user"], "answer": 0, "explain": "Untrimmed output wastes tokens and pushes important history out of the context window."},
+    {"q": "What should accompany every change to a harness?", "options": ["An eval on realistic tasks", "A bigger model", "A longer system prompt", "Removing all budgets"], "answer": 0, "explain": "Harness changes interact in non-obvious ways; only measurement shows whether they helped."}
+  ]
+}

@@ -1,0 +1,324 @@
+{
+  "id": "eh-metrics",
+  "minutes": 35,
+  "intro": "An eval produces numbers, and numbers invite over-confident conclusions. Is 84% really better than 81%? Is an agent that succeeds 80% of the time good enough if users try three times? This lesson covers the scoring methods you will use most, the two metrics every agent team must understand (pass@k and pass^k), cost and latency as first-class metrics, and just enough statistics to know when a difference is real: standard errors, confidence intervals, paired comparisons and repeated runs.",
+  "objectives": [
+    "Choose between exact, normalised, code-based, rubric and judge scoring",
+    "Compute and interpret pass@k and pass^k",
+    "Track cost and latency per case alongside quality",
+    "Compute a confidence interval for a pass rate and size a dataset",
+    "Compare two systems with paired comparisons and repeated runs"
+  ],
+  "sections": [
+    {
+      "heading": "Scoring methods",
+      "blocks": [
+        {
+          "type": "table",
+          "headers": [
+            "Method",
+            "Good for",
+            "Watch out for"
+          ],
+          "rows": [
+            [
+              "Exact match",
+              "Classification, short factual answers, IDs",
+              "Formatting differences count as wrong"
+            ],
+            [
+              "Normalised match",
+              "Answers that vary in case, spacing, punctuation",
+              "Normalising away real differences"
+            ],
+            [
+              "Code-based assertions",
+              "Valid JSON, required fields, tool called, contains/excludes",
+              "Only checks what you thought to check"
+            ],
+            [
+              "Overlap metrics (F1, ROUGE)",
+              "Rough similarity for extraction or summaries",
+              "Reward wording over correctness"
+            ],
+            [
+              "Rubric / judge model",
+              "Helpfulness, faithfulness, tone, completeness",
+              "Needs calibration (next lesson)"
+            ],
+            [
+              "Human review",
+              "Ground truth for subjective quality",
+              "Slow and costly; use to calibrate the others"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "Prefer the cheapest scorer that measures what you actually care about. A typical eval combines several: code checks for format and safety rules, exact match where answers are crisp, and a judge for the qualities code cannot capture. Report each scorer separately as well as combined, so you can see which aspect moved."
+        }
+      ]
+    },
+    {
+      "heading": "pass@k and pass^k",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Agents and code generators are often run several times per task. Two metrics describe very different things. **pass@k** is the probability that at least one of k attempts succeeds: right when a human or a test suite will pick the best attempt. **pass^k** (pass hat k) is the probability that all k attempts succeed: right when every user gets one attempt and you need consistency, which is most production agents."
+        },
+        {
+          "type": "code",
+          "lang": "text",
+          "caption": "Same 80% single-attempt success, very different stories",
+          "code": "single-attempt success p = 0.8 (independent attempts)\n\npass@3 = 1 - (1 - 0.8)^3 = 0.992   -> 'nearly always solvable with retries'\npass^3 = 0.8^3            = 0.512   -> 'only half of users get three good runs in a row'"
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "caption": "Unbiased pass@k from n samples with c successes",
+          "code": "from math import comb\n\n\ndef pass_at_k(n: int, c: int, k: int) -> float:\n    \"\"\"Probability that at least one of k draws (without replacement) from n samples is correct.\"\"\"\n    if n - c < k:\n        return 1.0\n    return 1 - comb(n - c, k) / comb(n, k)\n\n\nprint(round(pass_at_k(n=10, c=3, k=5), 3))   # 0.917"
+        }
+      ]
+    },
+    {
+      "heading": "Cost and latency are metrics too",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A change that adds three points of quality and doubles cost or latency may be a bad trade. Record, per case, input and output tokens, number of model and tool calls, wall-clock time and the cost those imply, and report them next to quality. For agents, steps per task is a good proxy for both cost and the risk of wandering."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Plot quality against cost per task for each configuration; prefer the frontier.",
+            "Report latency percentiles (p50, p95), not only means.",
+            "Watch for configurations that win by spending more: longer context, more retries, more samples."
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "Is the difference real?",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "A pass rate measured on n cases has a **standard error** of about sqrt(p(1-p)/n), and a 95% confidence interval of roughly plus or minus 1.96 standard errors. With small datasets, the intervals are wide."
+        },
+        {
+          "type": "table",
+          "headers": [
+            "Cases (n)",
+            "95% interval at an 80% pass rate"
+          ],
+          "rows": [
+            [
+              "50",
+              "about ±11 points"
+            ],
+            [
+              "100",
+              "about ±8 points"
+            ],
+            [
+              "400",
+              "about ±4 points"
+            ],
+            [
+              "1,000",
+              "about ±2.5 points"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "So 84% versus 81% on 100 cases is not evidence of anything by itself. Two techniques help a lot. **Paired comparison**: run both systems on the same cases and count only the cases where they disagree (one passed, the other failed); this removes the noise of case difficulty. **Repeated runs**: because outputs vary, run each configuration several times and look at the spread, or report mean and interval across runs. A **bootstrap** (resampling cases with replacement many times) gives intervals for any metric without formulas."
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "caption": "Bootstrap interval for the difference between two systems on the same cases",
+          "code": "import random\n\n\ndef bootstrap_diff(a: list[int], b: list[int], iters: int = 5000) -> tuple[float, float]:\n    \"\"\"a, b: 1/0 outcomes for the same cases under systems A and B.\"\"\"\n    n, diffs = len(a), []\n    for _ in range(iters):\n        idx = [random.randrange(n) for _ in range(n)]\n        diffs.append(sum(a[i] - b[i] for i in idx) / n)\n    diffs.sort()\n    return diffs[int(0.025 * iters)], diffs[int(0.975 * iters)]\n\n\n# if the interval excludes 0, the difference is unlikely to be noise"
+        }
+      ]
+    },
+    {
+      "heading": "A worked comparison",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Suppose a support assistant passes 160 of 200 cases with the old prompt and 172 of 200 with the new one. The headline says 80% to 86%. Looking at pairs, 20 cases flipped from fail to pass and 8 flipped from pass to fail; the other 172 cases did not change. The net gain of 12 cases comes from 28 disagreements, which is a much smaller and noisier signal than the headline suggests."
+        },
+        {
+          "type": "p",
+          "text": "A bootstrap on the paired outcomes gives an interval for the difference of roughly two to ten points, which excludes zero: the change probably helps. But the 8 cases that got worse deserve a careful read before shipping. If they are all refunds, or all in Spanish, you may be trading one slice for another, which per-slice reporting from the datasets lesson would show immediately. Finally, check cost: if the new prompt is twice as long, the cost per conversation rises, and the decision becomes a business trade-off rather than a pure quality win."
+        },
+        {
+          "type": "p",
+          "text": "Write the conclusion the same way every time: what changed, the paired difference with its interval, the slices that moved, the cost and latency change, and a recommendation. That habit keeps reviews short and stops arguments based on a few memorable examples."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Measure honestly",
+    "steps": [
+      "Take the eval from the previous lessons and add per-case token counts, model calls and latency to the results.",
+      "Run the same configuration five times and record the spread of pass rates.",
+      "Compute the 95% interval for your pass rate with the standard-error formula.",
+      "Make one change, run both versions on the same cases, and compute the bootstrap interval for the paired difference.",
+      "For an agent task, run each case three times and report both pass@3 and pass^3.",
+      "Write one paragraph stating whether the change helped, with the interval and the cost difference."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Cheapest scorer that measures what you care about; combine several.",
+      "pass@k: at least one of k succeeds. pass^k: all k succeed.",
+      "Production agents usually need pass^k, not pass@k.",
+      "Cost, tokens, steps and latency belong next to quality.",
+      "100 cases at 80% is about ±8 points: small differences are noise.",
+      "Paired comparisons and repeated runs separate signal from noise."
+    ],
+    "groups": [
+      {
+        "title": "Formulas",
+        "items": [
+          {
+            "syntax": "SE = sqrt(p(1-p)/n)",
+            "desc": "Standard error of a pass rate"
+          },
+          {
+            "syntax": "95% CI = p ± 1.96 x SE",
+            "desc": "Rough confidence interval"
+          },
+          {
+            "syntax": "pass@k = 1 - C(n-c,k)/C(n,k)",
+            "desc": "Unbiased estimate from n samples, c correct"
+          },
+          {
+            "syntax": "pass^k ~ p^k",
+            "desc": "All k independent attempts succeed"
+          },
+          {
+            "syntax": "n ~ (1.96^2 x p(1-p)) / margin^2",
+            "desc": "Cases needed for a target margin"
+          }
+        ]
+      },
+      {
+        "title": "Scorers",
+        "items": [
+          {
+            "syntax": "exact / normalised match",
+            "desc": "Crisp answers"
+          },
+          {
+            "syntax": "code assertions",
+            "desc": "Format, fields, tool calls, safety rules"
+          },
+          {
+            "syntax": "judge with rubric",
+            "desc": "Subjective qualities"
+          },
+          {
+            "syntax": "human review",
+            "desc": "Ground truth and calibration"
+          },
+          {
+            "syntax": "overlap metrics (F1, ROUGE)",
+            "desc": "Rough similarity; reward wording"
+          }
+        ]
+      },
+      {
+        "title": "Comparing systems",
+        "items": [
+          {
+            "syntax": "same cases, count disagreements",
+            "desc": "Paired comparison"
+          },
+          {
+            "syntax": "bootstrap the paired difference",
+            "desc": "Interval for the improvement"
+          },
+          {
+            "syntax": "3-5 repeated runs",
+            "desc": "Measure non-determinism"
+          },
+          {
+            "syntax": "quality vs cost frontier",
+            "desc": "Choose the trade-off"
+          },
+          {
+            "syntax": "report each scorer separately",
+            "desc": "See which aspect moved"
+          }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Declaring a winner from a two-point difference on 100 cases.",
+      "Reporting pass@k for a product where users get one attempt.",
+      "Ignoring cost and latency when a change wins on quality.",
+      "Comparing systems on different case sets.",
+      "Single runs of a non-deterministic system."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "System B scores 84% and system A 81% on the same 100 cases, one run each. What can you conclude?",
+      "options": [
+        "Not much: the difference is within noise",
+        "B is clearly better and should ship now",
+        "A is better because it is more stable",
+        "The dataset is far too large to compare"
+      ],
+      "answer": 0,
+      "explain": "At about 80% on 100 cases the interval is roughly ±8 points; a 3-point gap needs paired analysis or more data before it means anything."
+    },
+    {
+      "q": "A support agent succeeds on 80% of single attempts. Each user gets exactly one attempt per request. Which metric fits best?",
+      "options": [
+        "pass^k or the single-attempt rate",
+        "pass@k with k = 5",
+        "BLEU score",
+        "Number of tool calls"
+      ],
+      "answer": 0,
+      "explain": "Users experience one attempt and expect consistency, so the relevant measure is per-attempt success and its consistency across runs, not best-of-k."
+    },
+    {
+      "q": "With per-attempt success of 0.8 and independent attempts, what is pass^3?",
+      "options": [
+        "About 0.51",
+        "About 0.99",
+        "Exactly 0.8",
+        "About 0.24"
+      ],
+      "answer": 0,
+      "explain": "pass^3 is the chance all three succeed: 0.8 x 0.8 x 0.8 = 0.512."
+    },
+    {
+      "q": "Why compare two systems on the same cases and count only disagreements?",
+      "options": [
+        "It removes noise from varying case difficulty",
+        "It makes the whole eval run much faster",
+        "It avoids needing any scorer at all",
+        "It increases the measured pass rate"
+      ],
+      "answer": 0,
+      "explain": "Cases both systems pass or both fail say nothing about the difference; focusing on disagreements on paired cases gives a much more sensitive comparison."
+    },
+    {
+      "q": "A new prompt raises quality 4 points but doubles tokens per request. What should the report include?",
+      "options": [
+        "Quality and cost side by side",
+        "Only the quality gain, since that is the goal",
+        "Only the token increase, since cost matters most",
+        "Neither, until a larger model is tried"
+      ],
+      "answer": 0,
+      "explain": "Cost and latency are first-class metrics; decision makers need both to judge whether the gain is worth it."
+    }
+  ]
+}

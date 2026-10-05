@@ -1,0 +1,118 @@
+{
+  "id": "eh-agent-evals",
+  "minutes": 45,
+  "intro": "An agent does not produce one answer: it takes a sequence of actions in an environment, calling tools, reading results and deciding what to do next. That makes evaluation harder in three ways. There are many valid paths to the same goal, so comparing to one reference trajectory is too strict. Runs are long and non-deterministic, so one success proves little. And the agent changes things, so you need an environment you can reset. This lesson covers outcome-based grading with end-state checks, trajectory checks for safety and efficiency, reliability metrics such as pass^k, simulated users, and how to build environments that make all of this repeatable.",
+  "objectives": [
+    "Grade agents by verifying the end state of the environment",
+    "Add trajectory checks for forbidden actions, efficiency and policy",
+    "Compute pass@k and pass^k and explain what each says about reliability",
+    "Design resettable environments with fake tools and simulated users",
+    "Measure cost, steps and latency alongside success"
+  ],
+  "sections": [
+    {
+      "heading": "Grade outcomes, not paths",
+      "blocks": [
+        {"type": "p", "text": "The most robust way to grade an agent is to check what is true at the end. Did the order get refunded in the database? Do the repository's tests pass? Does the file contain the right content? This **end-state check** is written as code against the environment, so it is objective and tolerant of the many different routes an agent might take. Benchmarks such as SWE-bench (do the hidden tests pass after the agent's patch?) and tau-bench (does the database match the expected state?) are built this way."},
+        {"type": "code", "lang": "python", "caption": "An end-state check for a support-agent task", "code": "def check_refund_task(db) -> dict:\n    order = db.get_order(\"A-1042\")\n    return {\n        \"refunded\": order[\"status\"] == \"refunded\",\n        \"correct_amount\": order[\"refund_amount\"] == 59.00,\n        \"other_orders_untouched\": db.count_changed(exclude=[\"A-1042\"]) == 0,\n    }\n\n\ndef passed(result: dict) -> bool:\n    return all(result.values())"},
+        {"type": "p", "text": "Note the third check. Agents can reach the goal while causing collateral damage, so good end-state checks also verify that nothing else changed."}
+      ]
+    },
+    {
+      "heading": "Trajectory checks: how it got there",
+      "blocks": [
+        {"type": "p", "text": "Outcomes are not everything. An agent that refunds the right order but first emails the customer's details to the wrong address has failed. Record the full trajectory (every message, tool call, argument and result) and add checks on it."},
+        {"type": "list", "items": [
+          "**Forbidden actions**: never called `delete_account`; never wrote outside the workspace.",
+          "**Required actions**: verified identity before changing an order; asked for confirmation before an irreversible step.",
+          "**Policy compliance**: did not offer a refund outside the policy window, even when the user pushed.",
+          "**Efficiency**: number of steps, tool calls and tokens compared with a reasonable budget.",
+          "**Tool-call validity**: share of calls with schema-valid arguments; repeated identical calls indicate loops."
+        ]},
+        {"type": "code", "lang": "python", "caption": "Trajectory checks over a recorded run", "code": "def trajectory_checks(steps: list[dict]) -> dict:\n    calls = [s for s in steps if s[\"type\"] == \"tool_call\"]\n    names = [c[\"name\"] for c in calls]\n    verified_before_write = (\n        \"verify_identity\" in names\n        and names.index(\"verify_identity\") < names.index(\"refund_order\")\n    ) if \"refund_order\" in names else True\n    return {\n        \"no_forbidden\": \"delete_account\" not in names,\n        \"verified_first\": verified_before_write,\n        \"within_budget\": len(calls) <= 12,\n        \"no_loops\": len(calls) - len({(c[\"name\"], str(c[\"args\"])) for c in calls}) <= 2,\n    }"}
+      ]
+    },
+    {
+      "heading": "Reliability: pass@k versus pass^k",
+      "blocks": [
+        {"type": "p", "text": "Run every task several times. **pass@k** asks whether at least one of k attempts succeeds; it suits settings where you can check and retry, such as generating code against tests. **pass^k** asks whether all k attempts succeed; it measures consistency, which is what a customer-facing agent needs. An agent that succeeds 70% of the time per attempt has a much lower chance of succeeding on every one of 8 conversations in a row."},
+        {"type": "code", "lang": "python", "caption": "Unbiased estimates from n trials with c successes", "code": "from math import comb\n\n\ndef pass_at_k(n: int, c: int, k: int) -> float:\n    \"\"\"P(at least one of k sampled attempts succeeds).\"\"\"\n    if n - c < k:\n        return 1.0\n    return 1 - comb(n - c, k) / comb(n, k)\n\n\ndef pass_hat_k(n: int, c: int, k: int) -> float:\n    \"\"\"P(all k sampled attempts succeed).\"\"\"\n    return comb(c, k) / comb(n, k)\n\n\nprint(pass_at_k(10, 7, 3), pass_hat_k(10, 7, 3))   # about 0.99 and 0.29"}
+      ]
+    },
+    {
+      "heading": "Environments and simulated users",
+      "blocks": [
+        {"type": "p", "text": "Agent evals need an **environment**: the tools, the data behind them and a way to reset to a known state before each run. Use fake implementations backed by an in-memory or containerised database for business tools, a fresh container or temporary directory for coding and file tools, and recorded or stubbed responses for external APIs. Never point evals at production systems."},
+        {"type": "p", "text": "Conversational agents also need a counterpart. A **simulated user** is a model prompted with a persona and a hidden goal (\"you want a refund for order A-1042, you are impatient, you only reveal the order number when asked\"). It makes multi-turn evals repeatable, but it is itself a model: check samples of simulated conversations to make sure the user behaves realistically and does not leak the answer or give up too early."},
+        {"type": "callout", "kind": "tip", "text": "Give every task an ID, a starting state, the user goal, the end-state check and the trajectory checks. With those five things you can rerun any task at any time and compare agents fairly."}
+      ]
+    },
+    {
+      "heading": "What to report",
+      "blocks": [
+        {"type": "p", "text": "Report task success with confidence intervals, pass^k for reliability, and per-slice results (task type, difficulty). Next to them, report the costs of success: median and p90 steps, tokens and wall-clock time per task, and the rate of forbidden or unsafe actions, which should be zero. Finally, read failed trajectories and label the cause (wrong tool, bad arguments, misread result, gave up, looped, policy violation), because those labels tell you whether to change tools, prompts, context or the model."}
+      ]
+    }
+  ],
+  "practice": {
+    "title": "A five-task agent benchmark",
+    "steps": [
+      "Write five tasks for a support agent over a small SQLite database: refund, address change, order lookup, a refused request and a two-step task.",
+      "For each, write the starting data, the user goal and an end-state check that also verifies nothing else changed.",
+      "Add trajectory checks: identity verified before writes, no forbidden tools, a step budget.",
+      "Run any agent (or a scripted stand-in) 5 times per task, resetting the database each time.",
+      "Compute success rate, pass^3 and median steps per task.",
+      "Label the cause of every failure and write down which change would fix the largest group."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Grade the end state of the environment, not a reference path.",
+      "Check that nothing else changed (collateral damage).",
+      "Trajectory checks for forbidden actions, policy and budgets.",
+      "pass@k for retryable tasks, pass^k for consistency.",
+      "Resettable environments with fake tools; never production.",
+      "Report cost, steps and unsafe-action rate alongside success."
+    ],
+    "groups": [
+      {"title": "Grading", "items": [
+        {"syntax": "end-state check (code)", "desc": "Objective, path-tolerant"},
+        {"syntax": "nothing else changed", "desc": "Collateral damage"},
+        {"syntax": "hidden tests pass", "desc": "Coding tasks"},
+        {"syntax": "judge on final message", "desc": "Communication quality"}
+      ]},
+      {"title": "Trajectory", "items": [
+        {"syntax": "forbidden tools never called", "desc": "Safety"},
+        {"syntax": "required order of steps", "desc": "Policy, verification"},
+        {"syntax": "steps / tokens <= budget", "desc": "Efficiency"},
+        {"syntax": "repeated identical calls", "desc": "Loop detection"}
+      ]},
+      {"title": "Reliability", "items": [
+        {"syntax": "pass@k = 1 - C(n-c,k)/C(n,k)", "desc": "At least one success"},
+        {"syntax": "pass^k = C(c,k)/C(n,k)", "desc": "All k succeed"},
+        {"syntax": "n trials per task", "desc": "Needed for both"},
+        {"syntax": "CI on success rate", "desc": "Uncertainty"}
+      ]},
+      {"title": "Environment", "items": [
+        {"syntax": "reset to known state per run", "desc": "Repeatability"},
+        {"syntax": "fake tools over test DB", "desc": "Safe and fast"},
+        {"syntax": "simulated user + hidden goal", "desc": "Multi-turn"},
+        {"syntax": "task: id, state, goal, checks", "desc": "Task record"}
+      ]}
+    ],
+    "pitfalls": [
+      "Grading by exact match against one reference trajectory.",
+      "Running each task once and calling it reliable.",
+      "Evaluating against production systems.",
+      "Ignoring side effects outside the task's target.",
+      "Simulated users that leak the answer or give up instantly."
+    ]
+  },
+  "quiz": [
+    {"q": "Two agents both refund the right order, by different sequences of tool calls. How should an outcome-based eval score them?", "options": ["Both pass if the end state is correct", "Only the one matching the reference path", "Neither, since paths differ", "The shorter one fails"], "answer": 0, "explain": "End-state checks accept any valid path; efficiency can be reported separately."},
+    {"q": "An agent succeeds on 70% of attempts. Which metric shows the chance it succeeds on all of a user's next 3 tasks?", "options": ["pass^k", "pass@k", "recall@k", "MRR"], "answer": 0, "explain": "pass^k measures consistency: the probability that all k attempts succeed."},
+    {"q": "The refund is correct, but two unrelated orders were also modified. What check catches this?", "options": ["Verify nothing else changed", "A faithfulness judge", "A latency budget", "A pass@k estimate"], "answer": 0, "explain": "End-state checks should verify both the target change and the absence of collateral changes."},
+    {"q": "Why must the environment reset to a known state before each run?", "options": ["So runs are repeatable and comparable", "To reduce token usage per run", "Because tools cannot be called twice", "To make the agent faster"], "answer": 0, "explain": "Agents change state; without resets, earlier runs contaminate later ones."},
+    {"q": "What is a key risk of using a model as a simulated user?", "options": ["It may behave unrealistically or leak the goal", "It makes evals fully deterministic", "It cannot hold a persona at all", "It removes the need for end-state checks"], "answer": 0, "explain": "The simulator is a model too; sample and read its conversations to check realism."}
+  ]
+}

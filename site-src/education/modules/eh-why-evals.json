@@ -1,0 +1,287 @@
+{
+  "id": "eh-why-evals",
+  "minutes": 30,
+  "intro": "An eval is a repeatable test of how well an AI system does a task. Without evals, every prompt change, model upgrade or new tool is judged by trying a few examples and getting a feeling, which is how teams ship regressions they never notice. This lesson explains what evals are, the different kinds you need over a product's life, how eval-driven development works, and the habits that separate teams who improve their AI systems steadily from teams who go round in circles.",
+  "objectives": [
+    "Define an eval and its parts: inputs, the system under test, and a scoring method",
+    "Distinguish capability, regression, safety and production evals",
+    "Explain eval-driven development and apply it to a prompt change",
+    "Recognise vibe-checking and the failures it causes",
+    "Plan a minimal eval for an AI feature on its first day"
+  ],
+  "sections": [
+    {
+      "heading": "What an eval is",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "Every eval has three parts. A **dataset** of inputs, ideally with the expected output or grading guidance for each. A **system under test**: a single prompt, a RAG pipeline, or a whole agent with tools. And a **scorer** that turns each output into a number or a pass/fail, by exact comparison, by code, by a judge model, or by a human. Running the system over the dataset and aggregating the scores gives you a number you can compare across versions."
+        },
+        {
+          "type": "p",
+          "text": "Language models are non-deterministic and sensitive to tiny changes in wording, so the only way to know whether a change helped is to measure it on enough cases. An eval is to an AI feature what a test suite is to ordinary code, with one difference: scores are usually percentages, not all-green, and the goal is to move them in the right direction without breaking anything else."
+        },
+        {
+          "type": "code",
+          "lang": "python",
+          "caption": "The smallest useful eval, framework-free",
+          "code": "cases = [\n    {\"input\": \"Refund policy for damaged items?\", \"must_mention\": \"30 days\"},\n    {\"input\": \"Do you ship to Canada?\", \"must_mention\": \"Canada\"},\n    {\"input\": \"What is your CEO's home address?\", \"must_mention\": \"can't share\"},\n]\n\n\ndef run_eval(system) -> float:\n    passed = 0\n    for c in cases:\n        output = system(c[\"input\"])\n        ok = c[\"must_mention\"].lower() in output.lower()\n        passed += ok\n        print(\"PASS\" if ok else \"FAIL\", c[\"input\"])\n    return passed / len(cases)\n\n\nprint(f\"score: {run_eval(my_support_bot):.0%}\")"
+        }
+      ]
+    },
+    {
+      "heading": "The kinds of evals you will need",
+      "blocks": [
+        {
+          "type": "table",
+          "headers": [
+            "Kind",
+            "Question it answers",
+            "When it runs"
+          ],
+          "rows": [
+            [
+              "Capability",
+              "How good is the system at the task?",
+              "While developing; when comparing models or designs"
+            ],
+            [
+              "Regression",
+              "Did this change break anything that used to work?",
+              "On every change, in CI"
+            ],
+            [
+              "Safety and policy",
+              "Does it refuse, redact and stay in scope when it should?",
+              "On every change and before release"
+            ],
+            [
+              "Production / online",
+              "How is it doing on real traffic right now?",
+              "Continuously, on sampled live requests"
+            ],
+            [
+              "Benchmarks",
+              "How does a model compare on a public, standard task?",
+              "When choosing models; never as your only eval"
+            ]
+          ]
+        },
+        {
+          "type": "p",
+          "text": "Public benchmarks are useful for shortlisting models but tell you little about your product: your users, documents and edge cases are not in them, and popular benchmarks may have leaked into training data. The evals that matter most are the ones built from your own task."
+        }
+      ]
+    },
+    {
+      "heading": "Eval-driven development",
+      "blocks": [
+        {
+          "type": "steps",
+          "items": [
+            "**Write the eval first.** Collect 20-50 real examples of the task and decide how each should be scored.",
+            "**Get a baseline** with the simplest reasonable system.",
+            "**Look at the failures**, not just the score. Group them into causes.",
+            "**Change one thing** aimed at the biggest group of failures: the prompt, retrieval, a tool, the model.",
+            "**Re-run and compare.** Keep the change only if the target failures improved without regressions elsewhere.",
+            "**Grow the dataset** with every new failure you find in testing or production, so it never happens again silently."
+          ]
+        },
+        {
+          "type": "callout",
+          "kind": "tip",
+          "text": "Reading 30 failed outputs teaches you more than any aggregate number. Every eval run should end with someone scrolling through the failures and naming their causes."
+        }
+      ]
+    },
+    {
+      "heading": "Vibe-checking and what it costs",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "**Vibe-checking** means trying a handful of prompts by hand and deciding the system feels better. It is fine for the first hour of a prototype and dangerous after that. Typical consequences: a prompt fix for one complaint quietly breaks three other cases; a cheaper model looks fine on the examples you remembered and fails on the long tail; two engineers argue for days because each tested different examples; and nobody can say whether last month's release was better than the one before."
+        },
+        {
+          "type": "list",
+          "items": [
+            "Non-determinism means one good answer proves little; you need many samples.",
+            "Humans remember striking examples and forget boring successes and failures.",
+            "Changes interact: a system prompt edit can change tool use, refusals and tone at once.",
+            "Without a fixed dataset, scores are not comparable across time or people."
+          ]
+        }
+      ]
+    },
+    {
+      "heading": "A day-one eval plan",
+      "blocks": [
+        {
+          "type": "p",
+          "text": "You can start useful evals on the first day of any AI feature. Gather 30 realistic inputs from users, logs or domain experts, including a few hard and adversarial ones. Write down, for each, what a good answer must do. Start with cheap code checks (contains, matches a format, calls the right tool), add a judge for qualities code cannot check, and keep the script and data in version control next to the prompt. The rest of this track makes each of those steps rigorous."
+        }
+      ]
+    }
+  ],
+  "practice": {
+    "title": "Your first eval, today",
+    "steps": [
+      "Pick an LLM feature you use or can build in a few lines (a support answerer, a summariser, a classifier).",
+      "Write 30 test inputs, including five tricky or adversarial ones, and for each a check a script can run (must contain, must be valid JSON, must refuse).",
+      "Implement `run_eval` as above and record the baseline score.",
+      "Read every failure and group them into three to five causes.",
+      "Change one thing aimed at the biggest cause, re-run, and record the before and after per case.",
+      "Commit the dataset, the script and the results table to a repository."
+    ]
+  },
+  "cheatsheet": {
+    "focus": [
+      "Eval = dataset + system under test + scorer, run repeatably.",
+      "Capability, regression, safety, production evals answer different questions.",
+      "Public benchmarks shortlist models; your own evals decide.",
+      "Eval-driven: dataset first, baseline, read failures, change one thing, compare.",
+      "Every production failure becomes a new eval case.",
+      "Vibe-checks do not survive non-determinism or interacting changes."
+    ],
+    "groups": [
+      {
+        "title": "Eval parts",
+        "items": [
+          {
+            "syntax": "dataset: input + target/guidance",
+            "desc": "What to test"
+          },
+          {
+            "syntax": "system under test",
+            "desc": "Prompt, pipeline or agent"
+          },
+          {
+            "syntax": "scorer: exact | code | judge | human",
+            "desc": "How to grade"
+          },
+          {
+            "syntax": "aggregate: mean, pass rate, CI",
+            "desc": "One comparable number"
+          },
+          {
+            "syntax": "version dataset + script with the prompt",
+            "desc": "Reproducible results"
+          },
+          {
+            "syntax": "30 real cases on day one",
+            "desc": "Enough to start"
+          }
+        ]
+      },
+      {
+        "title": "Eval kinds",
+        "items": [
+          {
+            "syntax": "capability",
+            "desc": "How good is it?"
+          },
+          {
+            "syntax": "regression",
+            "desc": "Did it break anything?"
+          },
+          {
+            "syntax": "safety / policy",
+            "desc": "Does it stay in bounds?"
+          },
+          {
+            "syntax": "online",
+            "desc": "How is it doing on live traffic?"
+          },
+          {
+            "syntax": "benchmark",
+            "desc": "Standard comparison, not your product"
+          }
+        ]
+      },
+      {
+        "title": "Loop",
+        "items": [
+          {
+            "syntax": "baseline -> read failures -> cluster",
+            "desc": "Find the biggest cause"
+          },
+          {
+            "syntax": "change one thing -> re-run",
+            "desc": "Attribute the effect"
+          },
+          {
+            "syntax": "keep if target up, nothing else down",
+            "desc": "Decision rule"
+          },
+          {
+            "syntax": "new failure -> new case",
+            "desc": "Dataset grows forever"
+          }
+        ]
+      }
+    ],
+    "pitfalls": [
+      "Judging changes by a few hand-picked prompts.",
+      "Relying only on public benchmarks for a product decision.",
+      "Looking at the aggregate score and never at individual failures.",
+      "Changing prompt, model and retrieval at once.",
+      "Keeping eval data outside version control, so results cannot be reproduced."
+    ]
+  },
+  "quiz": [
+    {
+      "q": "A teammate improves the prompt for one customer complaint and ships it after trying five examples. What is the main risk?",
+      "options": [
+        "Other cases may regress unnoticed",
+        "The model will refuse to answer",
+        "Latency will always increase",
+        "The prompt will be too long to send"
+      ],
+      "answer": 0,
+      "explain": "Prompt changes interact with many behaviours. Without a regression eval across many cases, breakage elsewhere goes unseen."
+    },
+    {
+      "q": "Which eval best answers 'did this change break something that used to work?'",
+      "options": [
+        "A regression eval run on every change",
+        "A public leaderboard benchmark",
+        "A one-off user survey",
+        "A latency load test"
+      ],
+      "answer": 0,
+      "explain": "Regression evals rerun a fixed set of known cases on each change, which is exactly what detects breakage."
+    },
+    {
+      "q": "Why are public benchmarks insufficient for choosing a model for your product?",
+      "options": [
+        "They do not contain your users, documents or edge cases",
+        "They are always older than any model",
+        "They only measure speed",
+        "They cannot be run more than once"
+      ],
+      "answer": 0,
+      "explain": "Benchmarks measure generic capability; product quality depends on your specific task and data, which only your own evals capture."
+    },
+    {
+      "q": "What should happen after every eval run, beyond recording the score?",
+      "options": [
+        "Read the failures and group them by cause",
+        "Delete the hardest cases",
+        "Raise the passing threshold",
+        "Switch to a larger model"
+      ],
+      "answer": 0,
+      "explain": "Failure analysis tells you what to change next; the aggregate alone does not."
+    },
+    {
+      "q": "A user reports a bad answer in production. What does eval-driven development say to do with it?",
+      "options": [
+        "Add it to the eval dataset",
+        "Fix it with a one-off prompt rule",
+        "Ignore it as a single case",
+        "Disable the feature for that user"
+      ],
+      "answer": 0,
+      "explain": "Turning real failures into eval cases makes sure the same problem cannot silently return after future changes."
+    }
+  ]
+}
