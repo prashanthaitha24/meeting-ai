@@ -28,6 +28,12 @@ SCRIPT_OR_STYLE = re.compile(r"<script\b.*?</script>|<style\b.*?</style>", re.S 
 
 # Pages that legitimately have no top <nav> (standalone utility/legal pages we don't own the chrome of).
 NAV_EXEMPT = {"feedback.html", "privacy.html", "terms.html"}
+# Standalone, unlisted pages (by path) that deliberately carry no site chrome, e.g. the personal profile.
+NAV_EXEMPT_PATHS = {"prashanth-ai-infra-sre-devops/index.html"}
+
+
+def nav_exempt(page: Path) -> bool:
+    return page.name in NAV_EXEMPT or str(page.relative_to(DOCS)) in NAV_EXEMPT_PATHS
 
 
 def is_redirect(html: str) -> bool:
@@ -74,7 +80,7 @@ def test_key_pages_exist(built_site):
 
 def test_every_page_has_a_nav(built_site):
     missing = [str(p.relative_to(DOCS)) for p in all_pages()
-               if p.name not in NAV_EXEMPT and not is_redirect(p.read_text()) and not NAV.search(p.read_text())]
+               if not nav_exempt(p) and not is_redirect(p.read_text()) and not NAV.search(p.read_text())]
     assert not missing, "pages with no <nav>:\n  " + "\n  ".join(missing)
 
 
@@ -83,7 +89,7 @@ def test_home_link_on_every_page(built_site):
     no_index, no_home_text = [], []
     for page in all_pages():
         html = page.read_text()
-        if page.name in NAV_EXEMPT or is_redirect(html):
+        if nav_exempt(page) or is_redirect(html):
             continue
         nav = NAV.search(html)
         if not nav:
