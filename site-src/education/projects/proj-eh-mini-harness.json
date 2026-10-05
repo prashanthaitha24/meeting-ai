@@ -1,0 +1,286 @@
+{
+  "id": "proj-eh-mini-harness",
+  "track": "evals",
+  "title": "Build a minimal agent harness",
+  "summary": "Build a small but real coding-agent harness in about 400 lines of Python: a model adapter for any OpenAI-compatible endpoint, typed tools with validation and bounded results, a permission policy, a locked-down Docker sandbox, redacted JSONL traces, and an agent loop with budgets, loop detection and a finish gate. A scripted model drives every test, so you can prove each safety property without an API key before pointing it at a real model.",
+  "outcome": "A Python package `harness` with a `harness` command, eleven passing tests (including real sandbox tests proving there is no network access and that timeouts are contained), a key-free demo that fixes a bug inside the sandbox, and traces you can query with jq.",
+  "hours": 8,
+  "level": "Advanced",
+  "prereqs": [
+    "Comfortable Python (dataclasses, type hints)",
+    "Docker installed and running",
+    "The harness fundamentals lessons of this track"
+  ],
+  "tools": [
+    {
+      "name": "Docker",
+      "why": "the per-session sandbox: no network, read-only root, non-root user",
+      "url": "https://docs.docker.com/"
+    },
+    {
+      "name": "pydantic",
+      "why": "typed tool arguments, JSON schemas and validation errors",
+      "url": "https://docs.pydantic.dev/"
+    },
+    {
+      "name": "httpx",
+      "why": "HTTP client for the OpenAI-compatible model adapter",
+      "url": "https://www.python-httpx.org/"
+    },
+    {
+      "name": "pytest",
+      "why": "scripted-model tests for every harness property",
+      "url": "https://docs.pytest.org/"
+    },
+    {
+      "name": "jq",
+      "why": "querying JSONL traces",
+      "url": "https://jqlang.org/"
+    }
+  ],
+  "layout": "mini-harness/\n├── Dockerfile.sandbox        # python + pytest, nothing else\n├── pyproject.toml            # harness = harness.cli:main\n├── src/harness/\n│   ├── model.py              # Reply, ToolCall, ScriptedModel, OpenAICompatModel\n│   ├── tools.py              # typed tools, bounded results, Context\n│   ├── policy.py             # deny > allow > ask\n│   ├── sandbox.py            # one container per session\n│   ├── trace.py              # JSONL + redaction\n│   ├── loop.py               # the agent loop\n│   └── cli.py\n├── scripts/demo.py           # key-free demo in the real sandbox\n└── tests/\n    ├── conftest.py\n    ├── test_loop.py\n    └── test_model.py",
+  "phases": [
+    {
+      "title": "Project and sandbox image",
+      "goal": "A Python package with its dependencies and a minimal sandbox image that has Python and pytest but no network tools.",
+      "steps": [
+        {
+          "text": "Create the package and install dependencies.",
+          "code": {
+            "lang": "bash",
+            "code": "mkdir mini-harness && cd mini-harness && git init\nuv init --lib --name harness .\nuv add httpx pydantic\nuv add --dev pytest ruff"
+          }
+        },
+        {
+          "text": "Write the sandbox image. It holds only what the agent needs to run tests; there is no network inside the container, so anything else must be baked in here.",
+          "code": {
+            "lang": "text",
+            "code": "# Dockerfile.sandbox\nFROM python:3.12-slim\nRUN pip install --no-cache-dir pytest==8.3.3"
+          }
+        },
+        {
+          "text": "Build the sandbox image.",
+          "code": {
+            "lang": "bash",
+            "code": "docker build -t harness-sandbox:latest -f Dockerfile.sandbox ."
+          }
+        },
+        {
+          "text": "Register the command-line entry point by adding this section to pyproject.toml (above [build-system]).",
+          "code": {
+            "lang": "text",
+            "code": "[project.scripts]\nharness = \"harness.cli:main\""
+          }
+        }
+      ]
+    },
+    {
+      "title": "The model interface",
+      "goal": "A tiny interface the loop depends on, a scripted model for tests and an adapter for any OpenAI-compatible endpoint.",
+      "steps": [
+        {
+          "text": "Write the model module. The loop only ever calls complete(messages, tools) and gets back text, tool calls and token counts, so swapping providers or scripting a model for tests never touches the loop.",
+          "code": {
+            "lang": "python",
+            "code": "# src/harness/model.py\n\"\"\"Model adapters. The loop only needs complete(messages, tools) -> Reply.\"\"\"\n\nimport json\nfrom dataclasses import dataclass, field\n\nimport httpx\n\n\n@dataclass\nclass ToolCall:\n    id: str\n    name: str\n    args: dict\n\n\n@dataclass\nclass Reply:\n    text: str = \"\"\n    tool_calls: list[ToolCall] = field(default_factory=list)\n    input_tokens: int = 0\n    output_tokens: int = 0\n\n\nclass ScriptedModel:\n    \"\"\"Returns pre-written replies in order and records every request. For tests.\"\"\"\n\n    def __init__(self, replies: list[Reply]):\n        self.replies = list(replies)\n        self.requests: list[dict] = []\n\n    def complete(self, messages: list[dict], tools: list[dict]) -> Reply:\n        self.requests.append({\"messages\": [dict(m) for m in messages], \"tools\": tools})\n        return self.replies.pop(0) if self.replies else Reply(text=\"(script exhausted)\")\n\n\nclass OpenAICompatModel:\n    \"\"\"Any provider or local server that speaks the OpenAI-style /chat/completions API.\"\"\"\n\n    def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 120):\n        self.url = base_url.rstrip(\"/\") + \"/chat/completions\"\n        self.headers = {\"Authorization\": f\"Bearer {api_key}\"}\n        self.model, self.timeout = model, timeout\n\n    def complete(self, messages: list[dict], tools: list[dict]) -> Reply:\n        body = {\n            \"model\": self.model,\n            \"messages\": messages,\n            \"tools\": [{\"type\": \"function\", \"function\": t} for t in tools],\n        }\n        r = httpx.post(self.url, json=body, headers=self.headers, timeout=self.timeout)\n        r.raise_for_status()\n        data = r.json()\n        msg = data[\"choices\"][0][\"message\"]\n        calls = [\n            ToolCall(\n                c[\"id\"], c[\"function\"][\"name\"], json.loads(c[\"function\"][\"arguments\"] or \"{}\")\n            )\n            for c in msg.get(\"tool_calls\") or []\n        ]\n        usage = data.get(\"usage\") or {}\n        return Reply(\n            msg.get(\"content\") or \"\",\n            calls,\n            usage.get(\"prompt_tokens\", 0),\n            usage.get(\"completion_tokens\", 0),\n        )"
+          }
+        },
+        {
+          "text": "Note the message format: assistant messages carry tool_calls, and each tool result is a message with role tool and the matching tool_call_id. Many hosted providers and local servers (vLLM, Ollama, LM Studio and others) accept this OpenAI-style format, which is why one adapter goes a long way."
+        }
+      ]
+    },
+    {
+      "title": "Typed tools with bounded results",
+      "goal": "Four tools whose arguments are validated server-side, whose errors say how to recover, and whose output can never flood the context.",
+      "steps": [
+        {
+          "text": "Write the tools module. Each tool has a pydantic argument model (which also produces the JSON schema the model sees), a function, and a run method that validates, catches errors and bounds the result.",
+          "code": {
+            "lang": "python",
+            "code": "# src/harness/tools.py\n\"\"\"Typed tools: pydantic arguments, server-side validation, bounded results.\"\"\"\n\nfrom collections.abc import Callable\nfrom dataclasses import dataclass\nfrom pathlib import Path\n\nfrom pydantic import BaseModel, Field, ValidationError\n\nMAX_CHARS = 4000\n\n\ndef bound(text: str, limit: int = MAX_CHARS) -> str:\n    if len(text) <= limit:\n        return text\n    return text[:limit] + f\"\\n[truncated: {len(text) - limit} more characters; narrow the request]\"\n\n\n@dataclass\nclass Context:\n    \"\"\"Per-session state the tools share.\"\"\"\n\n    root: Path\n    sandbox: object\n    dirty: bool = False  # files changed since the last passing test run\n\n    def resolve(self, path: str) -> Path:\n        p = (self.root / path).resolve()\n        if not p.is_relative_to(self.root.resolve()):\n            raise ValueError(f\"{path} is outside the workspace\")\n        return p\n\n\n@dataclass\nclass Tool:\n    name: str\n    description: str\n    args_model: type[BaseModel]\n    fn: Callable[[BaseModel, Context], str]\n\n    def schema(self) -> dict:\n        return {\n            \"name\": self.name,\n            \"description\": self.description,\n            \"parameters\": self.args_model.model_json_schema(),\n        }\n\n    def run(self, raw_args: dict, ctx: Context) -> str:\n        try:\n            args = self.args_model(**raw_args)\n        except ValidationError as e:\n            err = e.errors()[0]\n            field = \".\".join(map(str, err[\"loc\"]))\n            return f\"Invalid arguments for {self.name}: {field}: {err['msg']}\"\n        try:\n            return bound(self.fn(args, ctx))\n        except ValueError as e:\n            return f\"Error: {e}\"\n\n\nclass ReadArgs(BaseModel):\n    path: str = Field(description=\"File path relative to the workspace, e.g. src/app.py\")\n    offset: int = Field(0, ge=0, description=\"First line to show, 0-based\")\n    limit: int = Field(200, ge=1, le=500, description=\"Number of lines to show\")\n\n\nclass WriteArgs(BaseModel):\n    path: str = Field(description=\"File path relative to the workspace\")\n    content: str = Field(description=\"The complete new file content\")\n\n\nclass ListArgs(BaseModel):\n    path: str = Field(\".\", description=\"Directory relative to the workspace\")\n\n\nclass RunArgs(BaseModel):\n    cmd: str = Field(description=\"Shell command to run in the sandbox, e.g. python -m pytest -q\")\n    timeout: int = Field(60, ge=1, le=600)\n\n\ndef read_file(a: ReadArgs, ctx: Context) -> str:\n    p = ctx.resolve(a.path)\n    if not p.is_file():\n        return f\"No such file: {a.path}. Use list_dir to see what exists.\"\n    lines = p.read_text().splitlines()\n    chunk = lines[a.offset : a.offset + a.limit]\n    body = \"\\n\".join(f\"{a.offset + i + 1:5} {line}\" for i, line in enumerate(chunk))\n    rest = len(lines) - a.offset - len(chunk)\n    return body + (\n        f\"\\n[{rest} more lines; call again with offset={a.offset + len(chunk)}]\"\n        if rest > 0\n        else \"\"\n    )\n\n\ndef write_file(a: WriteArgs, ctx: Context) -> str:\n    p = ctx.resolve(a.path)\n    p.parent.mkdir(parents=True, exist_ok=True)\n    p.write_text(a.content)\n    ctx.dirty = True\n    return f\"Wrote {len(a.content.splitlines())} lines to {a.path}.\"\n\n\ndef list_dir(a: ListArgs, ctx: Context) -> str:\n    p = ctx.resolve(a.path)\n    if not p.is_dir():\n        return f\"No such directory: {a.path}.\"\n    names = sorted(\n        x.name + (\"/\" if x.is_dir() else \"\") for x in p.iterdir() if not x.name.startswith(\".\")\n    )\n    return \"\\n\".join(names) or \"(empty)\"\n\n\ndef run(a: RunArgs, ctx: Context) -> str:\n    code, out = ctx.sandbox.exec(a.cmd, timeout=a.timeout)\n    if code == 0 and \"pytest\" in a.cmd:\n        ctx.dirty = False\n    return f\"exit code: {code}\\n{out[-3000:]}\"\n\n\ndef default_tools() -> dict[str, Tool]:\n    tools = [\n        Tool(\"read_file\", \"Read lines of a text file. Read before editing.\", ReadArgs, read_file),\n        Tool(\n            \"write_file\", \"Replace a file's whole content. Needs approval.\", WriteArgs, write_file\n        ),\n        Tool(\"list_dir\", \"List files and folders in a directory.\", ListArgs, list_dir),\n        Tool(\"run\", \"Run a shell command in the isolated sandbox (no network).\", RunArgs, run),\n    ]\n    return {t.name: t for t in tools}"
+          }
+        },
+        {
+          "text": "Read the details that matter: read_file numbers lines and tells the model how to fetch more; list_dir hides dotfiles such as .env; write_file marks the session dirty so the loop knows tests are stale; run keeps only the tail of long output and clears the dirty flag only when pytest succeeds."
+        },
+        {
+          "text": "Notice that Context.resolve refuses paths outside the workspace even though the policy also checks: defence in depth means a policy bug alone cannot let a tool escape."
+        }
+      ]
+    },
+    {
+      "title": "Permission policy",
+      "goal": "Deterministic allow, ask and deny decisions for every call, including path traversal, secrets and compound shell commands.",
+      "steps": [
+        {
+          "text": "Write the policy. Paths are resolved before checking; secret patterns are denied; writes ask unless the session auto-approves them; shell commands with ; & | ` $ ( ) < or > always ask, because an allow rule for one command must not allow a second one chained after it.",
+          "code": {
+            "lang": "python",
+            "code": "# src/harness/policy.py\n\"\"\"Permission policy: deny beats allow, anything unmatched asks a human.\"\"\"\n\nimport fnmatch\nimport shlex\nfrom pathlib import Path\n\nDENY_CMDS = [\"rm -rf *\", \"sudo *\", \"curl *\", \"wget *\", \"git push*\"]\nALLOW_CMDS = [\"python -m pytest*\", \"pytest*\", \"ls*\", \"cat *\", \"git status\", \"git diff*\"]\nSECRET_PATHS = [\"*.env\", \"*/.ssh/*\", \"*id_rsa*\"]\n\n\nclass Policy:\n    def __init__(self, root: Path, auto_approve_writes: bool = False):\n        self.root = root.resolve()\n        self.auto_approve_writes = auto_approve_writes\n\n    def decide(self, tool: str, args: dict) -> tuple[str, str]:\n        if tool in (\"read_file\", \"write_file\", \"list_dir\"):\n            path = (self.root / args.get(\"path\", \".\")).resolve()\n            if not path.is_relative_to(self.root):\n                return \"deny\", \"path is outside the workspace\"\n            if any(fnmatch.fnmatch(str(path), p) for p in SECRET_PATHS):\n                return \"deny\", \"secret files are off limits\"\n            if tool == \"write_file\" and not self.auto_approve_writes:\n                return \"ask\", \"file writes need approval\"\n            return \"allow\", \"\"\n        if tool == \"run\":\n            cmd = args.get(\"cmd\", \"\")\n            if any(c in cmd for c in \";&|`$()<>\"):\n                return \"ask\", \"compound commands need approval\"\n            try:\n                cmd = \" \".join(shlex.split(cmd))\n            except ValueError:\n                return \"deny\", \"could not parse the command\"\n            if any(fnmatch.fnmatch(cmd, p) for p in DENY_CMDS):\n                return \"deny\", \"this command is not allowed\"\n            if any(fnmatch.fnmatch(cmd, p) for p in ALLOW_CMDS):\n                return \"allow\", \"\"\n            return \"ask\", \"command not on the allow list\"\n        return \"deny\", f\"unknown tool {tool}\""
+          }
+        },
+        {
+          "text": "Try it in a Python shell against a few calls: reading ../../etc/passwd, reading .env, running pytest, and running git status; curl example.com.",
+          "code": {
+            "lang": "bash",
+            "code": "uv run python -c \"\nfrom pathlib import Path\nfrom harness.policy import Policy\np = Policy(Path('.'))\nfor tool, args in [('read_file', {'path': '../../etc/passwd'}), ('read_file', {'path': '.env'}),\n                   ('run', {'cmd': 'python -m pytest -q'}), ('run', {'cmd': 'git status; curl example.com'})]:\n    print(tool, args, p.decide(tool, args))\n\""
+          }
+        },
+        {
+          "text": "Decide where your own line sits. In this harness, anything the policy does not recognise asks a human, which is safe but can cause approval fatigue; the auto_approve_writes switch is for sessions where the sandbox already contains the blast radius."
+        }
+      ]
+    },
+    {
+      "title": "Sandbox and traces",
+      "goal": "One locked-down container per session and an append-only trace with secrets redacted before they are written.",
+      "steps": [
+        {
+          "text": "Write the sandbox. The container sleeps while commands run inside it with docker exec; it has no network, a read-only root with a small /tmp, your user ID, no capabilities and resource limits. A timed-out command restarts the container, which kills the stuck process without losing the workspace.",
+          "code": {
+            "lang": "python",
+            "code": "# src/harness/sandbox.py\n\"\"\"One locked-down container per session; commands run inside it with docker exec.\"\"\"\n\nimport os\nimport subprocess\nimport uuid\nfrom pathlib import Path\n\n\nclass DockerSandbox:\n    def __init__(self, workspace: Path, image: str = \"harness-sandbox:latest\"):\n        self.workspace, self.image = workspace.resolve(), image\n        self.name = f\"harness-{uuid.uuid4().hex[:8]}\"\n\n    def __enter__(self):\n        subprocess.run(\n            [\n                \"docker\",\n                \"run\",\n                \"-d\",\n                \"--rm\",\n                \"--name\",\n                self.name,\n                \"--network\",\n                \"none\",\n                \"--read-only\",\n                \"--tmpfs\",\n                \"/tmp:rw,size=64m\",\n                \"--user\",\n                f\"{os.getuid()}:{os.getgid()}\",\n                \"--cap-drop\",\n                \"ALL\",\n                \"--security-opt\",\n                \"no-new-privileges\",\n                \"--pids-limit\",\n                \"128\",\n                \"--memory\",\n                \"512m\",\n                \"--cpus\",\n                \"1\",\n                \"-e\",\n                \"HOME=/tmp\",\n                \"-v\",\n                f\"{self.workspace}:/workspace:rw\",\n                \"-w\",\n                \"/workspace\",\n                self.image,\n                \"sleep\",\n                \"infinity\",\n            ],\n            check=True,\n            capture_output=True,\n        )\n        return self\n\n    def exec(self, cmd: str, timeout: int = 60) -> tuple[int, str]:\n        try:\n            p = subprocess.run(\n                [\"docker\", \"exec\", self.name, \"sh\", \"-c\", cmd],\n                capture_output=True,\n                text=True,\n                timeout=timeout,\n                check=False,\n            )\n            return p.returncode, p.stdout + p.stderr\n        except subprocess.TimeoutExpired:\n            subprocess.run(\n                [\"docker\", \"restart\", \"-t\", \"0\", self.name], capture_output=True, check=False\n            )\n            return 124, f\"Command timed out after {timeout}s and was killed.\"\n\n    def __exit__(self, *exc):\n        subprocess.run([\"docker\", \"rm\", \"-f\", self.name], capture_output=True, check=False)"
+          }
+        },
+        {
+          "text": "Write the tracer. Every event gets a timestamp and run ID, and anything that looks like an API key is redacted at the source, so it never reaches the file.",
+          "code": {
+            "lang": "python",
+            "code": "# src/harness/trace.py\n\"\"\"Append-only JSONL traces with secret redaction at the source.\"\"\"\n\nimport json\nimport re\nimport time\nimport uuid\n\nSECRET = re.compile(r\"(sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16})\")\n\n\ndef redact(value):\n    if isinstance(value, str):\n        return SECRET.sub(\"[REDACTED]\", value)\n    if isinstance(value, dict):\n        return {k: redact(v) for k, v in value.items()}\n    if isinstance(value, list):\n        return [redact(v) for v in value]\n    return value\n\n\nclass Tracer:\n    def __init__(self, path: str):\n        self.path, self.run_id = path, uuid.uuid4().hex[:12]\n\n    def event(self, kind: str, **data) -> None:\n        row = {\"ts\": round(time.time(), 3), \"run\": self.run_id, \"kind\": kind, **redact(data)}\n        with open(self.path, \"a\") as f:\n            f.write(json.dumps(row) + \"\\n\")"
+          }
+        },
+        {
+          "text": "Check the sandbox by hand: start a container the same way and confirm there is no network.",
+          "code": {
+            "lang": "bash",
+            "code": "docker run --rm --network none --read-only --user \"$(id -u):$(id -g)\" \\\n  harness-sandbox:latest python -c \"import urllib.request; urllib.request.urlopen('http://example.com', timeout=5)\"\n# expect: URLError (no network)"
+          }
+        }
+      ]
+    },
+    {
+      "title": "The agent loop",
+      "goal": "A loop that calls the model, applies policy and approval to every requested call, detects loops, enforces budgets and refuses an unverified 'done' once.",
+      "steps": [
+        {
+          "text": "Write the loop. Read it top to bottom: it is the whole control flow of the agent.",
+          "code": {
+            "lang": "python",
+            "code": "# src/harness/loop.py\n\"\"\"The agent loop: budgets, permissions, loop detection and a finish gate.\"\"\"\n\nimport json\nimport time\nfrom collections import Counter\nfrom collections.abc import Callable\nfrom dataclasses import dataclass\n\nfrom .model import Reply, ToolCall\nfrom .policy import Policy\nfrom .tools import Context, Tool\nfrom .trace import Tracer\n\nSYSTEM = \"\"\"You are a careful coding agent. The project is in your working directory.\nInspect files before editing them. After any edit, run the tests with: python -m pytest -q\nWhen the task is done, reply without calling a tool and summarise what you changed.\"\"\"\n\n\n@dataclass\nclass Budget:\n    steps: int = 30\n    tokens: int = 200_000\n    seconds: float = 600\n\n\n@dataclass\nclass Result:\n    status: str\n    summary: str\n    steps: int\n    tokens: int\n\n\ndef assistant_message(reply: Reply) -> dict:\n    msg = {\"role\": \"assistant\", \"content\": reply.text}\n    if reply.tool_calls:\n        msg[\"tool_calls\"] = [\n            {\n                \"id\": c.id,\n                \"type\": \"function\",\n                \"function\": {\"name\": c.name, \"arguments\": json.dumps(c.args)},\n            }\n            for c in reply.tool_calls\n        ]\n    return msg\n\n\ndef run_agent(\n    task: str,\n    model,\n    tools: dict[str, Tool],\n    policy: Policy,\n    ctx: Context,\n    tracer: Tracer,\n    approve: Callable[[ToolCall], bool] = lambda call: False,\n    budget: Budget | None = None,\n) -> Result:\n    budget = budget or Budget()\n    messages = [{\"role\": \"system\", \"content\": SYSTEM}, {\"role\": \"user\", \"content\": task}]\n    schemas = [t.schema() for t in tools.values()]\n    start, tokens, seen, loop_warnings, nudged = time.time(), 0, Counter(), 0, False\n    tracer.event(\"start\", task=task)\n\n    for step in range(1, budget.steps + 1):\n        reply = model.complete(messages, schemas)\n        tokens += reply.input_tokens + reply.output_tokens\n        tracer.event(\n            \"model\",\n            step=step,\n            text=reply.text[:500],\n            tokens=tokens,\n            calls=[{\"name\": c.name, \"args\": c.args} for c in reply.tool_calls],\n        )\n        messages.append(assistant_message(reply))\n\n        if not reply.tool_calls:\n            if ctx.dirty and not nudged:  # finish gate: evidence before \"done\"\n                nudged = True\n                messages.append(\n                    {\n                        \"role\": \"user\",\n                        \"content\": \"You changed files since the last passing test run. \"\n                        \"Run python -m pytest -q and confirm the result before finishing.\",\n                    }\n                )\n                tracer.event(\"finish_gate\", step=step)\n                continue\n            status = \"done (unverified)\" if ctx.dirty else \"done\"\n            return finish(tracer, status, reply.text, step, tokens)\n\n        for call in reply.tool_calls:\n            key = (call.name, json.dumps(call.args, sort_keys=True))\n            seen[key] += 1\n            if seen[key] > 2:\n                loop_warnings += 1\n                decision, result = (\n                    \"loop\",\n                    (\"You have made this exact call several times. Try a different approach.\"),\n                )\n            else:\n                decision, reason = policy.decide(call.name, call.args)\n                if decision == \"ask\":\n                    decision = \"approved\" if approve(call) else \"deny\"\n                    reason = reason if decision == \"deny\" else \"\"\n                if decision in (\"allow\", \"approved\") and call.name in tools:\n                    result = tools[call.name].run(call.args, ctx)\n                else:\n                    result = f\"Denied: {reason or 'not approved'}. Choose another approach.\"\n            tracer.event(\n                \"tool\",\n                step=step,\n                name=call.name,\n                args=call.args,\n                decision=decision,\n                result=result[:500],\n            )\n            messages.append({\"role\": \"tool\", \"tool_call_id\": call.id, \"content\": result})\n\n        if loop_warnings >= 3:\n            return finish(tracer, \"stopped: looping\", \"\", step, tokens)\n        if tokens > budget.tokens:\n            return finish(tracer, \"stopped: token budget\", \"\", step, tokens)\n        if time.time() - start > budget.seconds:\n            return finish(tracer, \"stopped: time budget\", \"\", step, tokens)\n    return finish(tracer, \"stopped: step budget\", \"\", budget.steps, tokens)\n\n\ndef finish(tracer: Tracer, status: str, summary: str, steps: int, tokens: int) -> Result:\n    tracer.event(\"end\", status=status, steps=steps, tokens=tokens)\n    return Result(status, summary, steps, tokens)"
+          }
+        },
+        {
+          "text": "Trace the finish gate: if the model replies without a tool call while files have changed since the last passing test run, the loop adds one user message asking for test evidence and continues. A second unverified finish is accepted but labelled done (unverified), so evals can count it."
+        },
+        {
+          "text": "Write the command-line interface. It reads the endpoint, model and key from environment variables, asks a human on the terminal for anything the policy marks ask, and prints the result.",
+          "code": {
+            "lang": "python",
+            "code": "# src/harness/cli.py\n\"\"\"Run the harness on a task:  harness \"fix the failing test\" --workspace ./demo\n\nModel settings come from the environment, for any OpenAI-compatible endpoint:\n  HARNESS_BASE_URL, HARNESS_MODEL, HARNESS_API_KEY\"\"\"\n\nimport argparse\nimport json\nimport os\nfrom pathlib import Path\n\nfrom .loop import run_agent\nfrom .model import OpenAICompatModel\nfrom .policy import Policy\nfrom .sandbox import DockerSandbox\nfrom .tools import Context, default_tools\nfrom .trace import Tracer\n\n\ndef ask_human(call) -> bool:\n    print(f\"\\n[approval] {call.name} {json.dumps(call.args)[:400]}\")\n    return input(\"allow? [y/N] \").strip().lower() == \"y\"\n\n\ndef main() -> None:\n    ap = argparse.ArgumentParser()\n    ap.add_argument(\"task\")\n    ap.add_argument(\"--workspace\", default=\".\")\n    ap.add_argument(\"--trace\", default=\"trace.jsonl\")\n    ap.add_argument(\"--auto-approve-writes\", action=\"store_true\")\n    args = ap.parse_args()\n\n    root = Path(args.workspace).resolve()\n    model = OpenAICompatModel(\n        os.environ[\"HARNESS_BASE_URL\"],\n        os.environ.get(\"HARNESS_API_KEY\", \"\"),\n        os.environ[\"HARNESS_MODEL\"],\n    )\n    with DockerSandbox(root) as box:\n        result = run_agent(\n            args.task,\n            model,\n            default_tools(),\n            Policy(root, args.auto_approve_writes),\n            Context(root, box),\n            Tracer(args.trace),\n            approve=ask_human,\n        )\n    print(\n        f\"\\n{result.status} after {result.steps} steps, {result.tokens} tokens\\n{result.summary}\"\n    )\n\n\nif __name__ == \"__main__\":\n    main()"
+          }
+        }
+      ]
+    },
+    {
+      "title": "Prove it with a scripted model",
+      "goal": "Tests that pin down every property: a bug fixed end to end in the sandbox, no network, denied escapes and secrets, approvals, actionable errors, loop detection, the finish gate, budgets, redaction and the model adapter.",
+      "steps": [
+        {
+          "text": "Write the fixtures: a workspace with a buggy calc.py, its test and a fake .env; a guard that skips sandbox tests when Docker or the image is missing; and a sandbox per test.",
+          "code": {
+            "lang": "python",
+            "code": "# tests/conftest.py\nimport shutil\nimport subprocess\n\nimport pytest\n\nfrom harness.policy import Policy\nfrom harness.sandbox import DockerSandbox\nfrom harness.tools import Context, default_tools\nfrom harness.trace import Tracer\n\nBUGGY = \"def add(a, b):\\n    return a - b\\n\"\nTEST = \"from calc import add\\n\\n\\ndef test_add():\\n    assert add(2, 3) == 5\\n\"\n\nhas_docker = (\n    shutil.which(\"docker\")\n    and subprocess.run(\n        [\"docker\", \"image\", \"inspect\", \"harness-sandbox:latest\"], capture_output=True, check=False\n    ).returncode\n    == 0\n)\nneeds_docker = pytest.mark.skipif(not has_docker, reason=\"docker and harness-sandbox image needed\")\n\n\n@pytest.fixture\ndef workspace(tmp_path):\n    ws = tmp_path / \"ws\"\n    ws.mkdir()\n    (ws / \"calc.py\").write_text(BUGGY)\n    (ws / \"test_calc.py\").write_text(TEST)\n    (ws / \".env\").write_text(\"API_KEY=sk-test-0000000000000000000000\\n\")\n    return ws\n\n\nclass NoSandbox:\n    def exec(self, cmd, timeout=60):\n        raise AssertionError(\"this test should not run commands\")\n\n\n@pytest.fixture\ndef setup(workspace, tmp_path):\n    def make(sandbox=None, auto_writes=False):\n        ctx = Context(workspace, sandbox or NoSandbox())\n        return (\n            default_tools(),\n            Policy(workspace, auto_writes),\n            ctx,\n            Tracer(str(tmp_path / \"trace.jsonl\")),\n        )\n\n    return make\n\n\n@pytest.fixture\ndef sandbox(workspace):\n    with DockerSandbox(workspace) as box:\n        yield box"
+          }
+        },
+        {
+          "text": "Write the loop tests. Each one scripts the model's replies, runs the real loop and asserts on what the model would have seen next.",
+          "code": {
+            "lang": "python",
+            "code": "# tests/test_loop.py\nimport json\n\nfrom conftest import needs_docker\n\nfrom harness.loop import Budget, run_agent\nfrom harness.model import Reply, ScriptedModel, ToolCall\n\n\ndef call(name, i=1, **args):\n    return Reply(tool_calls=[ToolCall(f\"c{i}\", name, args)])\n\n\nFIXED = \"def add(a, b):\\n    return a + b\\n\"\n\n\n@needs_docker\ndef test_fixes_bug_end_to_end_in_sandbox(setup, sandbox, workspace, tmp_path):\n    model = ScriptedModel(\n        [\n            call(\"list_dir\", 1, path=\".\"),\n            call(\"read_file\", 2, path=\"calc.py\"),\n            call(\"write_file\", 3, path=\"calc.py\", content=FIXED),\n            call(\"run\", 4, cmd=\"python -m pytest -q\"),\n            Reply(text=\"Fixed add() to use +; 1 test passes.\"),\n        ]\n    )\n    tools, policy, ctx, tracer = setup(sandbox)\n    result = run_agent(\n        \"Fix the failing test\", model, tools, policy, ctx, tracer, approve=lambda c: True\n    )\n    assert result.status == \"done\"\n    assert (workspace / \"calc.py\").read_text() == FIXED\n    tool_msgs = [m for m in model.requests[-1][\"messages\"] if m[\"role\"] == \"tool\"]\n    assert \"calc.py\" in tool_msgs[0][\"content\"] and \".env\" not in tool_msgs[0][\"content\"]\n    assert \"exit code: 0\" in tool_msgs[3][\"content\"] and \"1 passed\" in tool_msgs[3][\"content\"]\n    kinds = [\n        json.loads(line)[\"kind\"] for line in (tmp_path / \"trace.jsonl\").read_text().splitlines()\n    ]\n    assert kinds[0] == \"start\" and kinds[-1] == \"end\" and kinds.count(\"tool\") == 4\n\n\n@needs_docker\ndef test_sandbox_has_no_network(setup, sandbox):\n    probe = (\n        'python -c \"import urllib.request; '\n        \"urllib.request.urlopen('http://example.com', timeout=5)\\\"\"\n    )\n    model = ScriptedModel([call(\"run\", 1, cmd=probe), Reply(text=\"done\")])\n    tools, policy, ctx, tracer = setup(sandbox)\n    run_agent(\"probe\", model, tools, policy, ctx, tracer, approve=lambda c: True)\n    out = model.requests[-1][\"messages\"][-1][\"content\"]\n    assert \"exit code: 0\" not in out and \"URLError\" in out\n\n\ndef test_path_escape_and_secrets_are_denied(setup):\n    model = ScriptedModel(\n        [\n            call(\"read_file\", 1, path=\"../../etc/passwd\"),\n            call(\"read_file\", 2, path=\".env\"),\n            Reply(text=\"ok\"),\n        ]\n    )\n    tools, policy, ctx, tracer = setup()\n    run_agent(\"t\", model, tools, policy, ctx, tracer, approve=lambda c: True)\n    tool_msgs = [m[\"content\"] for m in model.requests[-1][\"messages\"] if m[\"role\"] == \"tool\"]\n    assert tool_msgs[0].startswith(\"Denied: path is outside the workspace\")\n    assert tool_msgs[1].startswith(\"Denied: secret files are off limits\")\n\n\ndef test_write_without_approval_is_denied(setup, workspace):\n    model = ScriptedModel([call(\"write_file\", 1, path=\"calc.py\", content=FIXED), Reply(text=\"ok\")])\n    tools, policy, ctx, tracer = setup()\n    run_agent(\"t\", model, tools, policy, ctx, tracer, approve=lambda c: False)\n    assert \"return a - b\" in (workspace / \"calc.py\").read_text()\n\n\ndef test_invalid_arguments_get_an_actionable_error(setup):\n    model = ScriptedModel([call(\"read_file\", 1, path=\"calc.py\", limit=10_000), Reply(text=\"ok\")])\n    tools, policy, ctx, tracer = setup()\n    run_agent(\"t\", model, tools, policy, ctx, tracer)\n    msg = model.requests[-1][\"messages\"][-1][\"content\"]\n    assert msg.startswith(\"Invalid arguments for read_file: limit\")\n\n\ndef test_loop_detection_stops_the_run(setup):\n    model = ScriptedModel([call(\"read_file\", i, path=\"calc.py\") for i in range(10)])\n    tools, policy, ctx, tracer = setup()\n    result = run_agent(\"t\", model, tools, policy, ctx, tracer)\n    assert result.status == \"stopped: looping\" and result.steps == 5\n\n\ndef test_finish_gate_requires_tests_after_edits(setup):\n    model = ScriptedModel(\n        [\n            call(\"write_file\", 1, path=\"calc.py\", content=FIXED),\n            Reply(text=\"Done!\"),\n            Reply(text=\"Really done.\"),\n        ]\n    )\n    tools, policy, ctx, tracer = setup(auto_writes=True)\n    result = run_agent(\"t\", model, tools, policy, ctx, tracer)\n    assert result.status == \"done (unverified)\"\n    nudges = [m for m in model.requests[-1][\"messages\"] if m[\"role\"] == \"user\"][1:]\n    assert \"Run python -m pytest -q\" in nudges[0][\"content\"]\n\n\ndef test_step_budget(setup):\n    model = ScriptedModel(\n        [\n            call(\"list_dir\", i, path=\".\")\n            if i % 2\n            else call(\"read_file\", i, path=\"calc.py\", offset=i)\n            for i in range(20)\n        ]\n    )\n    tools, policy, ctx, tracer = setup()\n    assert (\n        run_agent(\"t\", model, tools, policy, ctx, tracer, budget=Budget(steps=4)).status\n        == \"stopped: step budget\"\n    )\n\n\ndef test_trace_redacts_secrets(setup, tmp_path):\n    model = ScriptedModel([Reply(text=\"the key is sk-abcdefghijklmnopqrstuvwxyz\")])\n    tools, policy, ctx, tracer = setup()\n    run_agent(\"t\", model, tools, policy, ctx, tracer)\n    trace = (tmp_path / \"trace.jsonl\").read_text()\n    assert \"sk-abc\" not in trace and \"[REDACTED]\" in trace\n\n\n@needs_docker\ndef test_command_timeout_is_reported_and_sandbox_survives(sandbox):\n    code, out = sandbox.exec(\"sleep 30\", timeout=2)\n    assert code == 124 and \"timed out\" in out\n    assert sandbox.exec(\"echo alive\")[1].strip() == \"alive\""
+          }
+        },
+        {
+          "text": "Write the adapter test against a stub HTTP server, so the request shape and response parsing are verified without a real provider.",
+          "code": {
+            "lang": "python",
+            "code": "# tests/test_model.py\nimport json\nimport threading\nfrom http.server import BaseHTTPRequestHandler, HTTPServer\n\nfrom harness.model import OpenAICompatModel\n\nSEEN = {}\n\n\nclass Stub(BaseHTTPRequestHandler):\n    def do_POST(self):\n        SEEN[\"path\"] = self.path\n        SEEN[\"auth\"] = self.headers[\"Authorization\"]\n        SEEN[\"body\"] = json.loads(self.rfile.read(int(self.headers[\"Content-Length\"])))\n        reply = {\n            \"choices\": [\n                {\n                    \"message\": {\n                        \"content\": None,\n                        \"tool_calls\": [\n                            {\n                                \"id\": \"call_1\",\n                                \"type\": \"function\",\n                                \"function\": {\n                                    \"name\": \"read_file\",\n                                    \"arguments\": '{\"path\": \"calc.py\"}',\n                                },\n                            }\n                        ],\n                    }\n                }\n            ],\n            \"usage\": {\"prompt_tokens\": 120, \"completion_tokens\": 15},\n        }\n        data = json.dumps(reply).encode()\n        self.send_response(200)\n        self.send_header(\"Content-Type\", \"application/json\")\n        self.send_header(\"Content-Length\", str(len(data)))\n        self.end_headers()\n        self.wfile.write(data)\n\n    def log_message(self, *args):\n        pass\n\n\ndef test_openai_compatible_adapter_round_trip():\n    server = HTTPServer((\"127.0.0.1\", 0), Stub)\n    threading.Thread(target=server.serve_forever, daemon=True).start()\n    model = OpenAICompatModel(f\"http://127.0.0.1:{server.server_port}/v1\", \"test-key\", \"any-model\")\n    reply = model.complete(\n        [{\"role\": \"user\", \"content\": \"hi\"}],\n        [{\"name\": \"read_file\", \"description\": \"d\", \"parameters\": {\"type\": \"object\"}}],\n    )\n    server.shutdown()\n    assert SEEN[\"path\"] == \"/v1/chat/completions\" and SEEN[\"auth\"] == \"Bearer test-key\"\n    assert SEEN[\"body\"][\"tools\"][0][\"type\"] == \"function\"\n    assert reply.tool_calls[0].name == \"read_file\" and reply.tool_calls[0].args == {\n        \"path\": \"calc.py\"\n    }\n    assert (reply.input_tokens, reply.output_tokens) == (120, 15)"
+          }
+        },
+        {
+          "text": "Run everything. All eleven tests pass in about fifteen seconds, including the sandbox ones.",
+          "code": {
+            "lang": "bash",
+            "code": "uv run pytest -q"
+          }
+        },
+        {
+          "text": "Break something on purpose to see the tests earn their keep: remove the path check in Policy.decide, or the dirty flag in write_file, and re-run. Then restore it."
+        }
+      ]
+    },
+    {
+      "title": "Run it",
+      "goal": "Watch the harness work in the sandbox without a key, then drive it with a real model and read its traces.",
+      "steps": [
+        {
+          "text": "Write a demo that scripts a short session: look around, run the failing test, read the file, fix it, claim success too early (the finish gate pushes back), run the tests and finish.",
+          "code": {
+            "lang": "python",
+            "code": "# scripts/demo.py\n\"\"\"Watch the harness fix a bug with a scripted model, in the real sandbox, no API key.\nUsage: uv run scripts/demo.py\"\"\"\n\nimport json\nimport tempfile\nfrom pathlib import Path\n\nfrom harness.loop import run_agent\nfrom harness.model import Reply, ScriptedModel, ToolCall\nfrom harness.policy import Policy\nfrom harness.sandbox import DockerSandbox\nfrom harness.tools import Context, default_tools\nfrom harness.trace import Tracer\n\nws = Path(tempfile.mkdtemp()) / \"demo\"\nws.mkdir()\n(ws / \"calc.py\").write_text(\"def add(a, b):\\n    return a - b\\n\")\n(ws / \"test_calc.py\").write_text(\n    \"from calc import add\\n\\n\\ndef test_add():\\n    assert add(2, 3) == 5\\n\"\n)\n\nsteps = [\n    (\"list_dir\", {\"path\": \".\"}),\n    (\"run\", {\"cmd\": \"python -m pytest -q\"}),\n    (\"read_file\", {\"path\": \"calc.py\"}),\n    (\"write_file\", {\"path\": \"calc.py\", \"content\": \"def add(a, b):\\n    return a + b\\n\"}),\n]\nscript = [Reply(tool_calls=[ToolCall(f\"c{i}\", n, a)]) for i, (n, a) in enumerate(steps)]\nscript += [\n    Reply(text=\"Fixed add().\"),\n    Reply(tool_calls=[ToolCall(\"c9\", \"run\", {\"cmd\": \"python -m pytest -q\"})]),\n    Reply(text=\"Fixed add() to use +; the test passes.\"),\n]\n\nwith DockerSandbox(ws) as box:\n    result = run_agent(\n        \"Make the tests pass\",\n        ScriptedModel(script),\n        default_tools(),\n        Policy(ws),\n        Context(ws, box),\n        Tracer(str(ws / \"trace.jsonl\")),\n        approve=lambda call: True,\n    )\n\nfor line in (ws / \"trace.jsonl\").read_text().splitlines():\n    e = json.loads(line)\n    detail = e.get(\"name\") or e.get(\"status\") or e.get(\"text\", \"\")[:60] or e.get(\"task\", \"\")\n    print(f\"{e['kind']:12} {detail} {e.get('decision', '')}\")\nprint(result)\nprint(\"trace:\", ws / \"trace.jsonl\")"
+          }
+        },
+        {
+          "text": "Run the demo. The trace shows the write as approved, a finish_gate event after the premature claim, and the final status done after 7 steps.",
+          "code": {
+            "lang": "bash",
+            "code": "uv run scripts/demo.py"
+          }
+        },
+        {
+          "text": "Query the trace with jq, using the path the demo printed: every tool call with its decision, and a count of decisions.",
+          "code": {
+            "lang": "bash",
+            "code": "TRACE=/path/printed/by/the/demo/trace.jsonl\njq -c 'select(.kind == \"tool\") | {step, name, decision}' \"$TRACE\"\njq -s -c 'map(select(.kind == \"tool\")) | group_by(.decision)\n  | map({decision: .[0].decision, n: length})' \"$TRACE\""
+          }
+        },
+        {
+          "text": "Point it at a real model on any OpenAI-compatible endpoint (a hosted provider or a local server) and give it a real task in a throwaway copy of a small repository. Approve or refuse each write as it asks.",
+          "code": {
+            "lang": "bash",
+            "code": "export HARNESS_BASE_URL=\"https://your-endpoint.example/v1\"\nexport HARNESS_MODEL=\"$YOUR_MODEL\"\nexport HARNESS_API_KEY=\"$YOUR_KEY\"\ncp -r ~/code/small-repo /tmp/agent-demo\nuv run harness \"Make the failing test pass\" --workspace /tmp/agent-demo"
+          }
+        }
+      ]
+    }
+  ],
+  "troubleshooting": [
+    {
+      "symptom": "Sandbox tests are skipped",
+      "fix": "Docker is not running or the image is missing. Start Docker and run docker build -t harness-sandbox:latest -f Dockerfile.sandbox . then re-run pytest."
+    },
+    {
+      "symptom": "docker: Error response ... mounts denied on macOS",
+      "fix": "Docker Desktop can only mount shared folders. Use a workspace under your home directory or add the path in Docker Desktop's file sharing settings."
+    },
+    {
+      "symptom": "PermissionError writing .pytest_cache inside the sandbox",
+      "fix": "The container runs as your user ID; make sure the workspace directory is owned by you and is not on a read-only mount."
+    },
+    {
+      "symptom": "The real model never calls tools",
+      "fix": "Check that your endpoint supports tool calling for that model and that the request includes the tools array; some local models need a tool-capable chat template."
+    },
+    {
+      "symptom": "The agent keeps getting 'Denied: command not on the allow list'",
+      "fix": "That is the policy asking and you refusing (or no approver). Add safe commands to ALLOW_CMDS, or run with --auto-approve-writes only inside the sandbox."
+    }
+  ],
+  "next": [
+    "Add an edit tool that applies a search-and-replace instead of rewriting whole files, and compare steps per task.",
+    "Add compaction: summarise history beyond a token budget into decisions, changes and next steps.",
+    "Export traces as OpenTelemetry spans with gen_ai attributes and view them in Jaeger or Phoenix.",
+    "Add an egress proxy with an allowlist so the sandbox can install packages from one index only.",
+    "Benchmark your harness on the tasks from the next project and run an ablation of the finish gate."
+  ]
+}
