@@ -1,0 +1,279 @@
+{
+  "id": "kit-evals",
+  "role": "AI Evals & Agent Harness Engineer",
+  "tracks": [
+    "evals"
+  ],
+  "summary": "Teams building with LLMs now hire specifically for two skills: proving that an AI system works (evals) and building the software that turns a model into a dependable agent (harness engineering). Interviews probe whether you can design a measurement you would bet a release on, reason about statistics and judges without hand-waving, and build agents with tools, context management, permissions and sandboxes that hold up in production. These questions and model answers cover both halves, with the trade-offs interviewers listen for.",
+  "rounds": [
+    {
+      "name": "Recruiter or hiring-manager screen",
+      "what": "Your background and one AI system you evaluated or built. They listen for whether you measured quality or only demoed it.",
+      "tip": "Have a two-minute story: the task, how you measured it, the number before and after, and one failure you found by reading outputs."
+    },
+    {
+      "name": "Evals design",
+      "what": "Design an evaluation for a product scenario (a support bot, a RAG search, a coding agent): dataset, scorers, metrics, and how it gates releases.",
+      "tip": "Start with what failure costs the business, then the dataset, then scoring. Mention slices, held-out data and noise before anyone asks."
+    },
+    {
+      "name": "Agent or harness system design",
+      "what": "Design an agent and its harness: tools, loop, context, permissions, sandboxing, observability, and how you would evaluate it.",
+      "tip": "Draw the loop and the trust boundaries. Say where untrusted content enters and what the agent can do after it reads it."
+    },
+    {
+      "name": "Coding exercise",
+      "what": "Implement something small and concrete: a scorer, a pass^k function, a tool with validation, a minimal agent loop with a fake model, or a regression gate.",
+      "tip": "Write a scripted fake model first so you can test the loop deterministically; interviewers love seeing that instinct."
+    },
+    {
+      "name": "Behavioural and judgement",
+      "what": "Shipping under uncertainty, disagreeing with a team about a metric, handling an agent incident, explaining eval results to non-experts.",
+      "tip": "Use real numbers and real failures. 'The judge agreed with humans at kappa 0.4, so we did not trust it yet' is a strong answer."
+    }
+  ],
+  "sections": [
+    {
+      "title": "Evaluation fundamentals",
+      "questions": [
+        {
+          "q": "A team wants to launch an LLM-powered support assistant next month. How would you set up its evaluation?",
+          "tests": "Whether you can turn a vague product goal into a concrete, trustworthy measurement plan.",
+          "answer": "Start from what failure costs: wrong refund promises, leaked personal data, confident guesses on questions the policy does not cover. Those become must-pass cases. Then build a **dataset** of real questions (sampled from tickets and chat logs with personal data removed), plus expert-written hard cases and adversarial ones, each with a target or grading guidance and **slice** tags such as intent, language and risk. Score with **code checks first** (must mention the 30-day window, must not include an email address, valid JSON), and add a **calibrated LLM judge** only for qualities code cannot check, such as faithfulness to the policy. Split into a **dev set** for iterating and a **held-out set** for go/no-go decisions. Run a fast smoke tier with all safety cases on every pull request, the full suite nightly, and the held-out suite before release, always reporting per slice with confidence intervals. After launch, sample production traffic into online evals and promote real failures into the dataset. The answer interviewers want is a loop, not a one-off test.",
+          "followups": [
+            "What would you do if you had no real user data yet?",
+            "Which cases are must-pass and why?"
+          ]
+        },
+        {
+          "q": "What is the difference between capability, regression, safety and online evals?",
+          "tests": "Whether you know evals answer different questions at different times.",
+          "answer": "**Capability** evals ask how good the system is at the task, used while developing and when comparing models or designs. **Regression** evals ask whether a change broke something that used to work; they rerun a fixed set of known cases on every change and are judged by what newly fails, not just the average. **Safety and policy** evals check refusals, redaction, scope and resistance to injection; they are usually must-pass with zero tolerance. **Online** evals score sampled production traffic continuously, catching drift and new intents that the offline dataset does not contain. Public **benchmarks** are a fifth kind, useful for shortlisting models but not for product decisions, because your users and documents are not in them and they may have leaked into training data. A mature team runs all of these and connects them: online failures become new regression cases."
+        },
+        {
+          "q": "Prompt B scores 84% and prompt A 81% on 200 cases. Should you ship B?",
+          "tests": "Statistical literacy: noise, paired comparisons and practical significance.",
+          "answer": "Not on that evidence alone. With 200 cases, a 95% confidence interval on an 84% pass rate is roughly plus or minus 5 points, so the intervals overlap heavily, and LLM outputs vary between runs as well. Because both prompts ran on the same cases, the right analysis is **paired**: look at the per-case differences (cases B fixed versus cases B broke) and compute a bootstrap confidence interval on the mean difference, or a McNemar-style test on the discordant pairs. Run several epochs per case to average out sampling noise. Then check **slices**: B might gain on easy cases while losing on refunds or on the safety slice, which would make it a worse product despite a higher average. Finally, read the cases that B broke. If the interval on the difference excludes zero, no slice regressed, and nothing safety-related broke, ship it; otherwise get more data or treat the prompts as equivalent and choose on cost or simplicity.",
+          "followups": [
+            "How many cases would you need to detect a 3-point difference?",
+            "What is a paired bootstrap?"
+          ]
+        },
+        {
+          "q": "How do you keep an eval set from being overfitted by prompt tuning?",
+          "tests": "Understanding of data hygiene for evals.",
+          "answer": "Separate the data you iterate on from the data you decide on. Keep a **dev set** that engineers tune against freely and a **held-out set** that is run rarely, for release decisions and model swaps, and is never used to choose wording. If dev scores climb while held-out scores stay flat, the prompt has learned the dataset rather than the task. Refresh the held-out set over time with new production cases, because a set that has been looked at many times slowly stops being held out. Avoid **leakage**: eval answers must never appear in few-shot examples or retrieval indexes. Prefer private, recent cases for decisions to avoid **contamination** from public data in model training. Version the dataset and record its version with every result so comparisons are honest."
+        },
+        {
+          "q": "Write a function that computes pass@k and pass^k from n trials with c successes, and explain when each matters.",
+          "tests": "Coding plus understanding of reliability metrics for agents.",
+          "answer": "pass@k is the probability that at least one of k attempts succeeds, which matters when you can verify and retry, for example code generation checked by tests. pass^k is the probability that all k attempts succeed, which measures consistency, which is what users of a customer-facing agent experience. Both use unbiased estimators over n trials rather than raising the success rate to a power, which would be biased for small n. An agent with 70% per-attempt success has a high pass@3 but a low pass^3, so reporting only average success hides how unreliable it feels in use.",
+          "followups": [
+            "Why not just compute p ** k?",
+            "How many trials per task would you run?"
+          ],
+          "code": {
+            "lang": "python",
+            "code": "from math import comb\n\n\ndef pass_at_k(n: int, c: int, k: int) -> float:\n    if n - c < k:\n        return 1.0\n    return 1 - comb(n - c, k) / comb(n, k)\n\n\ndef pass_hat_k(n: int, c: int, k: int) -> float:\n    return comb(c, k) / comb(n, k)"
+          }
+        }
+      ]
+    },
+    {
+      "title": "LLM judges and RAG evaluation",
+      "questions": [
+        {
+          "q": "When would you use an LLM-as-judge, and how do you know you can trust it?",
+          "tests": "Judgement about scorer choice and the discipline of calibration.",
+          "answer": "Use code for anything a rule can check, humans for ground truth and high-stakes calls, and a **judge** for comprehension-level qualities at a scale humans cannot cover: faithfulness, completeness, tone. Trust comes from **calibration**: have humans label a sample (around 100 outputs covering passes, fails and borderline cases), run the judge on the same outputs, and compute agreement and **Cohen's kappa**, which corrects for chance agreement. Look hardest at **false passes**, where the judge passes something a human failed, because those let bad outputs ship. Iterate on the rubric (specific binary criteria, reasoning before the verdict, a strict parseable output line) until kappa is substantial, then freeze the judge prompt and model version, recalibrate whenever either changes, and keep a small ongoing human spot-check. Report judge scores with the judge version and its measured agreement.",
+          "followups": [
+            "Why can raw agreement be misleading?",
+            "What if humans disagree with each other?"
+          ]
+        },
+        {
+          "q": "Name the main biases of LLM judges and how you mitigate each.",
+          "tests": "Depth of practical experience with judges.",
+          "answer": "**Position bias**: in pairwise comparisons the judge favours the first or second answer; run both orders and count a win only when both agree, treating flips as ties, and track the flip rate as a health metric. **Verbosity bias**: longer answers look better; add concision and relevance criteria and compare at similar lengths. **Self-preference**: judges favour outputs from their own model family; use a different family as the judge and confirm with human labels. **Leniency**: passing nearly everything; use binary criteria, include explicit failing examples, and calibrate. **Format sensitivity**: verdicts change with markdown or ordering; normalise outputs before judging. And judges are models too, so they drift when the provider updates them, which is why you pin versions and recalibrate."
+        },
+        {
+          "q": "A RAG assistant gives wrong answers. How do you find out whether retrieval or generation is at fault?",
+          "tests": "Ability to decompose a pipeline for evaluation.",
+          "answer": "Evaluate the layers separately. Label the chunks that contain each question's answer, then measure **recall@k** and **MRR** for retrieval: if the right chunk is not in the top k, generation never had a chance, and the fix is in chunking, hybrid keyword plus vector search, metadata filters, reranking or k. If retrieval found it but the answer is wrong, it is a **generation** problem: the chunk may be buried among irrelevant ones (rerank or send fewer), the prompt may not insist on answering from sources, or the answer may need multi-hop reasoning. Measure **faithfulness** (claims supported by the retrieved context) with a calibrated judge, check that **citations** point at retrieved chunks with a cheap code check, and include **unanswerable** questions to test abstention. Tag every failure with its layer and fix the biggest bucket first.",
+          "followups": [
+            "Why does recall usually matter more than precision for RAG?",
+            "How would you test permissions in a RAG eval?"
+          ]
+        },
+        {
+          "q": "How would you build a dataset for a RAG eval if you only have the documents?",
+          "tests": "Practical dataset-building judgement, including the traps of synthetic data.",
+          "answer": "Start with people: ask domain experts and support staff for the questions users actually ask and the ones that are hard, and map each to the chunks that answer it. Supplement with **synthetic** questions generated from chunks, but be careful: generated questions tend to reuse the chunk's own wording, which makes retrieval look far better than with real user phrasing, so paraphrase them, read and filter them, tag them as synthetic and report them separately. Deliberately add **unanswerable** questions (10 to 20 percent), **multi-hop** questions that need two chunks, **conflicting or stale** document versions where the current one should win, and **permission** cases where the asking user must not see the answering document. Replace synthetic cases with real ones as production traffic arrives."
+        },
+        {
+          "q": "Your judge and your human labellers agree 92% of the time. Is that good?",
+          "tests": "Understanding of chance-corrected agreement.",
+          "answer": "It depends on the base rate, which is why raw agreement is not enough. If 92% of outputs pass and the judge simply passes everything, it agrees with humans 92% of the time while adding no information; Cohen's kappa would be about zero. Compute kappa: observed agreement minus the agreement expected by chance, divided by one minus the chance agreement. Then look at the confusion matrix, especially false passes, and at agreement per slice, since a judge can be good on easy cases and useless on the hard ones that matter. Also check inter-human agreement: if two humans only agree at kappa 0.5, the rubric is unclear and no judge can be held to a higher standard than the task definition allows."
+        }
+      ]
+    },
+    {
+      "title": "Agent evaluation",
+      "questions": [
+        {
+          "q": "How do you evaluate an agent when there are many valid ways to complete a task?",
+          "tests": "Whether you grade outcomes rather than paths.",
+          "answer": "Grade the **end state** of the environment with code: was the right order refunded with the right amount, do the hidden tests pass, does the file contain the right content, and did nothing else change. That is objective and tolerant of different routes, which is how benchmarks like SWE-bench and tau-bench work. Add **trajectory checks** for things the end state cannot show: forbidden tools never called, identity verified before any write, no writes to records the task did not need, steps and tokens within budget. Use a judge only for the quality of communication in the final message. Run each task several times in a **resettable environment** (fake tools over a test database, a fresh container), and report success with intervals, pass^k for consistency, cost per task and the unsafe-action rate, which must be zero.",
+          "followups": [
+            "Why does the 'nothing else changed' check matter?",
+            "What can the end state miss?"
+          ]
+        },
+        {
+          "q": "What is a simulated user, and what can go wrong with one?",
+          "tests": "Experience with multi-turn agent evals.",
+          "answer": "A simulated user is a counterpart for conversational agents: usually a model prompted with a persona and a hidden goal (\"you want a refund for order A-1042, you only give the order number when asked\"), or a rule-based responder for deterministic tests. It makes multi-turn evals repeatable without humans. Risks: the simulator is a model too, so it can **leak the goal** (stating everything up front), **give up too early**, **agree with whatever the agent says**, or behave unrealistically politely, all of which inflate scores. It can also vary between runs, adding noise. Mitigate by keeping personas specific, reading samples of simulated conversations regularly, adding rules about what may be revealed when, and checking that a reference agent can solve every task with the simulator, which tests the benchmark itself."
+        },
+        {
+          "q": "A coding agent's success rate jumped after a change. What would you check before celebrating?",
+          "tests": "Awareness of reward hacking and eval validity.",
+          "answer": "First, whether success is still honest. Inspect the diffs of newly passing tasks for **reward hacking**: deleted or skipped tests, loosened assertions, broad exception handlers, or hard-coded expected outputs. Make sure success is measured by **hidden tests** the agent could not see or edit, and that test files are read-only or edits to them are flagged. Second, the statistics: is the improvement larger than run-to-run noise with paired comparisons over several epochs, and did any slice regress? Third, the costs: did steps, tokens or time per task rise sharply? Fourth, safety: did forbidden-action or unverified-write counts change? Finally, read a sample of newly passing trajectories end to end; a real improvement looks like better reasoning or tool use, not a shortcut."
+        },
+        {
+          "q": "How would you build a small benchmark to compare two agent harnesses fairly?",
+          "tests": "Experimental design for harness work.",
+          "answer": "Collect 30 to 200 realistic tasks from real work, each with a starting state, a goal, an end-state check and trajectory checks, and make the environment resettable so every run starts identically. Hold the **model fixed** and change only the harness (or one component of it, as an ablation), keep the dataset and epochs the same, and run each task several times. Compare with **paired** per-task differences and bootstrap intervals, report pass^k, cost per successful task, steps and unsafe actions together, and break results down by task type. Check that a reference solution passes every task so the benchmark itself is valid. If you support several models, run the grid of harness versions against models: a change that helps one model and hurts another is encoding a quirk, not a general improvement."
+        }
+      ]
+    },
+    {
+      "title": "Harness engineering",
+      "questions": [
+        {
+          "q": "What is an agent harness, and which components would you build for a coding agent?",
+          "tests": "Whether you see the agent as a system, not a prompt.",
+          "answer": "The harness is everything around the model that turns it into an agent. For a coding agent: a **system prompt** plus project instructions; a **tool layer** (read with offsets, search, edit, run commands) with schemas, server-side validation and bounded, actionable results; the **agent loop** that calls the model, executes requested tools and feeds results back, with stop conditions and budgets; a **context manager** that decides what goes into each request, truncates results, compacts history and keeps persistent notes; a **permission layer** with allow, ask and deny rules; a **sandbox** (a container with no network and only the workspace writable); **state** such as a task list and checkpoints; **extension points** like MCP servers, hooks and skills; **tracing** of every step; and the **interface** with streaming and interruption. Then an eval benchmark, because every one of these choices changes success, cost and safety.",
+          "followups": [
+            "Which of these has the biggest effect on quality in your experience?"
+          ]
+        },
+        {
+          "q": "How do you design good tools for an agent?",
+          "tests": "Practical tool-design knowledge, a core harness skill.",
+          "answer": "Design for the model as the reader: it sees only the name, description, argument schema and the result text. Prefer a few **task-level** tools over one tool per API endpoint, because chaining low-level calls costs steps and creates chances to fail. Make names unambiguous and namespaced, descriptions say what, when and when not to use the tool, and schemas constrain arguments with enums, formats, required fields and no extra properties. **Validate on the server** anyway. Return only what the next step needs, in readable form, bounded in size with a note when truncated and how to get more. Make **errors actionable** (what was wrong and how to fix it) rather than raw status codes. For write tools, add idempotency keys, limits, preview or dry-run modes and least-privilege credentials. Then evaluate tools through agent transcripts: invalid-argument rate, unused tools, calls per task.",
+          "followups": [
+            "How would you notice that two tools overlap too much?"
+          ]
+        },
+        {
+          "q": "How would you keep a long-running agent effective when its context window fills up?",
+          "tests": "Context-engineering depth.",
+          "answer": "First measure: log tokens per context layer per call, because tool results usually grow fastest. Then reduce what goes in: bounded tool results with truncation notes, just-in-time retrieval through search and read tools instead of preloading, and clearing stale tool outputs. For long tasks, **compact** older history into a summary of decisions, changes, open problems and next steps, keeping user requirements verbatim; keep **persistent notes** or a task list outside the window that the agent re-reads, so state survives compaction and new sessions; and delegate self-contained exploration to **sub-agents** with clean contexts that return short results. Order the prompt with stable content first for prefix caching. Finally, evaluate compaction itself, since it loses information: run long tasks with and without it and check which details were dropped."
+        },
+        {
+          "q": "Implement a minimal agent loop that you can test without calling a real model.",
+          "tests": "Coding skill and the testing instinct for non-deterministic systems.",
+          "answer": "Separate the model behind a tiny interface so a scripted fake can stand in for it. The loop appends the assistant message, stops when there are no tool calls, otherwise runs each requested tool through a policy check and appends results with the matching call ID, and enforces a step budget. With a scripted model you can write deterministic tests for every property: a denied path returns a reason, a loop of identical calls is stopped, a budget ends the run cleanly, and the final answer is returned.",
+          "followups": [
+            "How would you add loop detection?",
+            "What would a finish gate check for a coding agent?"
+          ],
+          "code": {
+            "lang": "python",
+            "code": "def run_agent(task, model, tools, policy, max_steps=30):\n    messages = [{\"role\": \"user\", \"content\": task}]\n    for _ in range(max_steps):\n        reply = model.complete(messages, [t.schema() for t in tools.values()])\n        messages.append(reply.as_message())\n        if not reply.tool_calls:\n            return reply.text\n        for call in reply.tool_calls:\n            decision, reason = policy.decide(call.name, call.args)\n            result = (tools[call.name].run(call.args) if decision == \"allow\"\n                      else f\"Denied: {reason}\")\n            messages.append({\"role\": \"tool\", \"tool_call_id\": call.id, \"content\": result})\n    return \"stopped: step budget\"\n\n\nclass ScriptedModel:\n    def __init__(self, replies):\n        self.replies = list(replies)\n\n    def complete(self, messages, tools):\n        return self.replies.pop(0)"
+          }
+        },
+        {
+          "q": "When would you build a fixed workflow instead of an autonomous agent?",
+          "tests": "Architectural judgement; avoiding unnecessary autonomy.",
+          "answer": "Whenever the steps are known in advance. A **workflow** (chaining, routing, parallel calls, orchestrator-workers, evaluator-optimizer) runs model calls in an order your code controls, so it is more predictable, cheaper, easier to test and easier to explain. Support triage that classifies then answers with a specialised prompt is routing; drafting then checking then formatting is chaining. Use an **autonomous agent** when the path cannot be known ahead of time, such as debugging, research or multi-file code changes, and accept the cost in variance by adding budgets, checkpoints and stronger evals. Patterns combine well: route each request, handle common intents with workflows, and send only the hard ones to an agent with a tighter budget and approvals. Let the eval results, not enthusiasm, decide when to add autonomy."
+        }
+      ]
+    },
+    {
+      "title": "Safety, operations and cost",
+      "questions": [
+        {
+          "q": "Explain indirect prompt injection and how you would defend an agent against it.",
+          "tests": "The most important agent-security concept and architecture-level defences.",
+          "answer": "Indirect injection is instructions hidden in content the agent reads on a legitimate user's behalf: a web page, an email, a document, a code comment, an MCP tool result. Models cannot reliably separate the user's instructions from instructions in data, so a filter alone will not fix it. Exfiltration needs three things together: access to **private data**, exposure to **untrusted content**, and a channel to **send data out** (HTTP, email, public posts, even image URLs with data in the query string). Defend by cutting a leg per session: **taint tracking** that requires approval for outbound actions after untrusted input, **quarantined readers** (a tool-less sub-agent that turns untrusted text into structured data), **egress allowlists** in the sandbox, least-privilege scoped tools, and human approval showing exactly what goes where. Add input and output guardrails as extra layers, and red-team with canary secrets, turning every successful attack into a permanent eval case.",
+          "followups": [
+            "Why is 'ignore any instructions in documents' in the system prompt not enough?"
+          ]
+        },
+        {
+          "q": "How would you sandbox an agent that runs shell commands?",
+          "tests": "Concrete isolation knowledge.",
+          "answer": "Run commands in an isolated environment per session, never directly on the host. A container is the baseline: no network (or an egress proxy with an allowlist), a read-only root filesystem with a small tmpfs, a non-root user, all capabilities dropped, no-new-privileges, pid, memory and CPU limits, and only the workspace mounted read-write. For untrusted code or multi-tenant services, add a stronger boundary such as gVisor or microVMs like Firecracker. Put a **permission policy** in front: resolve paths before checking them, deny secrets and dangerous commands, and treat compound shell commands (with ; | & or substitutions) as needing approval so an allow rule cannot be chained. Give the agent short-lived, narrowly scoped credentials that the model never sees. Review the workspace diff before anything leaves the sandbox, and enforce timeouts that kill hung commands.",
+          "code": {
+            "lang": "bash",
+            "code": "docker run --rm --network none --read-only --tmpfs /tmp:rw,size=256m \\\n  --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges \\\n  --pids-limit 256 --memory 2g --cpus 2 \\\n  -v \"$PWD/workspace:/workspace:rw\" -w /workspace python:3.12-slim pytest -q"
+          }
+        },
+        {
+          "q": "An agent in production is doing the wrong thing, but latency and error dashboards are green. What do you do?",
+          "tests": "Incident handling specific to agents.",
+          "answer": "Agent incidents are often behaviour, not outages, so first **contain**: use a kill switch scoped as narrowly as works (disable one tool, pause write actions, disable the agent for affected tenants) without a deploy. Then **scope** from traces and the audit log: which sessions, which actions, since which config version (prompt, tools, model, harness), and whether a recent change correlates. **Reverse** what can be reversed (refunds, emails cannot always be) and notify affected users. Find the **root cause** by reading the trajectories at the first divergent step: often a prompt change, a tool description, truncated context, an upstream model update, or injected content. Fix it, add the failing sessions as eval cases, verify on the benchmark, roll out with a canary, then re-enable. Afterwards, make sure online evals and unsafe-action metrics feed alerting, since green latency dashboards did not catch it."
+        },
+        {
+          "q": "How would you reduce the cost of an agent by half without hurting quality?",
+          "tests": "Cost engineering with measurement discipline.",
+          "answer": "Measure **cost per successful task**, not per token, on a benchmark, alongside success and time. Profile traces: in a loop every call resends the growing context, so input tokens from history and tool results usually dominate and grow roughly with the square of the step count. Then apply one lever at a time: fewer steps (task-level tools, actionable errors, parallel read calls), smaller contexts (bounded results, compaction, just-in-time retrieval), **prompt caching** with a stable prefix, **routing** easy tasks to a smaller model with escalation on failure (counting both attempts), cheaper sub-agents for search and summarisation, and batch endpoints for offline evals. Re-run the benchmark after each change and keep it only if success holds. Plot configurations on success versus cost per success and choose from the frontier; do not cut verification steps to save tokens."
+        },
+        {
+          "q": "What would you include in a production-readiness review for an agent?",
+          "tests": "Breadth: whether you can ship and operate, not just build.",
+          "answer": "**Evals**: held-out benchmark at target with intervals, pass^k for key tasks, safety suite at zero failures, red-team findings fixed and added as cases. **Isolation and permissions**: per-session sandboxes, no network by default, least-privilege short-lived credentials, approvals on irreversible actions. **Architecture**: stateless workers with durable session state so tasks survive restarts, a model gateway with quotas, retries and an evaluated fallback model, per-tenant budgets and spend alerts. **Operations**: tracing with gen_ai attributes and redaction, dashboards for success, cost and unsafe actions, alerts, an on-call owner, runbooks, kill switches tested in staging. **Change management**: prompts, tools and budgets versioned as config, CI evals, canary rollout with a guardrail metric and a rehearsed rollback. **Compliance**: data retention, audit log, user disclosure and a human escalation path."
+        }
+      ]
+    }
+  ],
+  "task": {
+    "title": "Take-home: an evaluated agent with a harness you can defend",
+    "brief": "Take-homes for this role usually ask for one of two things: evaluate an AI system rigorously, or build a small agent and show it is safe and measured. The ThavionAI **eval suite with a CI gate**, **minimal agent harness** and **agent benchmark** projects build exactly these, tested end to end with scripted models. Do them and use the repositories as evidence. Below is what a strong submission demonstrates.",
+    "checklist": [
+      "A dataset of realistic cases with slices, must-pass safety cases and a held-out split, versioned in the repository.",
+      "Code scorers first, plus an LLM judge that has been calibrated against human labels with agreement, kappa and false passes reported.",
+      "Statistics that respect noise: several epochs, confidence intervals, paired comparisons and per-slice results.",
+      "A regression gate in CI that names newly failing cases and fails on must-pass failures, with tests that run without an API key.",
+      "For agents: end-state and trajectory checks in a resettable environment, pass^k, cost per successful task and labelled failure categories.",
+      "A harness with typed, validated tools, a permission policy, a real sandbox, budgets, loop detection and a finish gate, all covered by scripted-model tests.",
+      "Traces you can query, with secrets redacted at the source.",
+      "A short write-up: what you measured, what failed, what you changed and the evidence that it helped."
+    ]
+  },
+  "standout": [
+    "Lead with measurement. In any design question, say how you would know it works, with which data and which metric, before drawing the architecture.",
+    "Show you read outputs. Quote a specific failure you found by reading transcripts and the change it led to; interviewers trust that more than any aggregate number.",
+    "Treat the model as fallible and its inputs as untrusted. Talk about containment (sandboxes, permissions, taint, kill switches), not about trusting the prompt.",
+    "Use scripted fake models for testing harness code. It shows you can bring determinism to non-deterministic systems.",
+    "Quantify trade-offs. Report success, cost per success, latency and safety together, and explain which one you would trade for which, and why."
+  ],
+  "resources": [
+    {
+      "label": "Evals & Harness Engineering track",
+      "href": "../../education.html#evals",
+      "note": "the 20 lessons behind every answer, from eval statistics to production agents"
+    },
+    {
+      "label": "Project: Build an eval suite with a CI gate",
+      "href": "../projects/proj-eh-eval-suite.html",
+      "note": "Inspect, judge calibration with kappa, and a regression gate tested with scripted models"
+    },
+    {
+      "label": "Project: Build a minimal agent harness",
+      "href": "../projects/proj-eh-mini-harness.html",
+      "note": "typed tools, permissions, a Docker sandbox, traces and a finish gate"
+    },
+    {
+      "label": "Project: Benchmark an agent with state-checked tasks",
+      "href": "../projects/proj-eh-agent-benchmark.html",
+      "note": "end-state checks, pass^k and error analysis"
+    },
+    {
+      "label": "AI / ML Engineer interview kit",
+      "href": "kit-ai.html",
+      "note": "the broader LLM application and ML fundamentals questions"
+    }
+  ]
+}

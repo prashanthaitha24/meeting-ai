@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tracing and debugging agents — Evals &amp; Harness | ThavionAI Education</title>
+  <meta name="description" content="Traces and spans for every step, replay, cost and latency accounting, and error analysis." />
+  <meta property="og:title" content="Tracing and debugging agents — ThavionAI Education" />
+  <meta property="og:description" content="Traces and spans for every step, replay, cost and latency accounting, and error analysis." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/eh-observability.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-evals" data-module="eh-observability">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=eh-observability&amp;page=/education/eh-observability.html&amp;title=Tracing%20and%20debugging%20agents">Feedback</a>
+    <a href="../education.html#evals" class="nav-cta">All Evals &amp; Harness modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#evals">Evals &amp; Harness</a> › Stage 4: Safety, sandboxes &amp; reliability</div>
+    <h1>Tracing and debugging agents</h1>
+    <p class="lede">Traces and spans for every step, replay, cost and latency accounting, and error analysis.</p>
+    <div class="meta">
+      <span class="chip">Advanced</span>
+      <span class="chip">~40 min read</span>
+      <span class="chip">Module 15 of 20</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">When an agent fails, the question is always the same: what did it see, and what did it decide at each step? Without a trace, you are left guessing from the final answer. Observability for agents means recording every model call and tool call as a structured trace, with the inputs, outputs, tokens, latency and errors of each step, so you can replay a run, find where it went wrong, and aggregate behaviour across thousands of runs. This lesson covers trace structure, OpenTelemetry's generative AI conventions, what to record and redact, a debugging workflow, and the metrics worth charting.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Structure agent runs as traces with spans for model and tool calls</li><li>Instrument a harness with OpenTelemetry using generative AI attributes</li><li>Decide what to record, what to redact and how long to keep it</li><li>Debug a failed run step by step from its trace</li><li>Chart the aggregate metrics that reveal harness problems</li></ul>
+    </div>
+    <section id="traces-spans-and-runs"><h2>Traces, spans and runs</h2>
+    <p>A <strong>trace</strong> is one agent run. Inside it, each model call and each tool call is a <strong>span</strong> with a start time, duration, attributes and status. Spans nest: a sub-agent's work appears under the step that delegated to it. With this structure you can see the whole run as a timeline, open any step to read the exact messages the model received, and compare runs side by side.</p>
+    <div class="table-wrap"><table><thead><tr><th>Span</th><th>Key attributes</th></tr></thead><tbody><tr><td>agent run (root)</td><td>task ID, user or session ID (hashed), harness version, outcome</td></tr><tr><td>model call</td><td>model, input and output tokens, latency, stop reason, tool calls requested</td></tr><tr><td>tool call</td><td>tool name, arguments, result size, duration, error, permission decision</td></tr><tr><td>sub-agent</td><td>brief, nested spans, returned summary</td></tr></tbody></table></div></section>
+  <section id="instrumenting-with-opentelemetry"><h2>Instrumenting with OpenTelemetry</h2>
+    <p>OpenTelemetry defines semantic conventions for generative AI (attribute names prefixed <code>gen_ai.</code>), so traces from different harnesses and libraries can be read by the same backends. Open-source tools such as Langfuse and Arize Phoenix, and general tracing backends such as Jaeger or Grafana Tempo, can receive them. The conventions are still evolving, so pin the version you follow.</p>
+    <div class="code"><div class="code-cap">Spans around model and tool calls</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>from opentelemetry import trace
+
+tracer = trace.get_tracer("my-harness")
+
+
+def traced_model_call(messages, tools, model: str):
+    with tracer.start_as_current_span(f"chat {model}") as span:
+        span.set_attribute("gen_ai.operation.name", "chat")
+        span.set_attribute("gen_ai.request.model", model)
+        reply = call_llm(messages, tools=tools)
+        span.set_attribute("gen_ai.usage.input_tokens", reply.usage.input_tokens)
+        span.set_attribute("gen_ai.usage.output_tokens", reply.usage.output_tokens)
+        span.set_attribute("harness.tool_calls", len(reply.tool_calls))
+        return reply
+
+
+def traced_tool_call(name: str, args: dict, run):
+    with tracer.start_as_current_span(f"execute_tool {name}") as span:
+        span.set_attribute("gen_ai.operation.name", "execute_tool")
+        span.set_attribute("gen_ai.tool.name", name)
+        try:
+            result = run(**args)
+            span.set_attribute("harness.result_chars", len(result))
+            return result
+        except Exception as e:
+            span.record_exception(e)
+            span.set_status(trace.Status(trace.StatusCode.ERROR))
+            raise</code></pre></div>
+    <figure class="diagram" id="fig-trace-pipeline"><div class="diagram-scroll"><svg viewBox="0 0 740 248" role="img" aria-label="The harness creates spans for runs, model calls and tool calls using gen_ai attributes. Spans go through the OpenTelemetry SDK to a collector that redacts secrets and samples. The tracing backend stores traces, which you replay to debug runs, and feeds dashboards that raise alerts to on-call." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="trace-pipeline-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="trace-pipeline-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="trace-pipeline-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="trace-pipeline-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="trace-pipeline-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><polyline points="171.0,70.0 201.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#trace-pipeline-arrow-default)"/><rect x="165.8" y="24.0" width="40.5" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">spans</text><polyline points="341.0,70.0 371.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#trace-pipeline-arrow-default)"/><rect x="338.8" y="24.0" width="34.4" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">OTLP</text><polyline points="511.0,70.0 541.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#trace-pipeline-arrow-default)"/><polyline points="611.0,98.0 611.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#trace-pipeline-arrow-default)"/><rect x="614.0" y="116.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="618.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">metrics</text><polyline points="541.0,178.0 511.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#trace-pipeline-arrow-default)"/><rect x="502.7" y="132.0" width="46.6" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">alerts</text><rect x="31" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Harness</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">run, chat, tool spans</text><rect x="201" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">OTel SDK</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">gen_ai attributes</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Collector</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">redact, sample</text><path d="M541,49.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M541,49.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Trace backend</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">Jaeger, Phoenix</text><rect x="541" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="611.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Dashboards</text><text x="611.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">by harness version</text><rect x="371" y="150.0" width="140" height="56" rx="28.0" class="dg-node dg-actor"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Engineer</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">replay a run</text></svg></div><figcaption>The harness emits OpenTelemetry spans for every model and tool call; a collector redacts and samples them before a backend stores traces for replay, dashboards and alerts.</figcaption></figure>
+    <p>Instrument in one place. If every model call goes through a single client function and every tool call through a single dispatcher, two wrappers trace the whole harness, and nothing new can slip through untraced. Export through an OpenTelemetry Collector, which can batch, sample and apply redaction rules before data leaves your network, so you can switch backends without touching the harness code.</p></section>
+  <section id="what-to-record-and-what-to-redact"><h2>What to record and what to redact</h2>
+    <ul><li>Record full prompts and responses in development and evals, where replay is essential.</li><li>In production, record content only where you have a lawful basis and a retention limit; otherwise record metadata (sizes, tokens, tool names, outcomes) and sample content with consent.</li><li>Redact secrets, credentials and personal data before export, at the harness, not later in the backend.</li><li>Hash user identifiers so runs can be grouped without exposing identity.</li><li>Record the harness version, prompt hash and model with every trace, so behaviour changes can be tied to releases.</li></ul></section>
+  <section id="a-debugging-workflow"><h2>A debugging workflow</h2>
+    <ol><li>Start at the outcome: what was wrong with the final state or answer?</li><li>Find the first step where the run diverged from what a competent human would do.</li><li>Read exactly what the model received at that step: was the needed information present, visible and unambiguous?</li><li>Classify the cause: missing context, misleading tool result, bad tool choice, bad arguments, policy denial, budget hit, or a genuinely wrong decision with good inputs.</li><li>Fix the harness layer responsible (tool, context, prompt, policy), add the run as an eval case, and re-run.</li></ol>
+    <p>Most agent failures turn out to be harness failures: a truncated result cut off the important line, an error message gave no guidance, or the needed file was never offered. Only the trace shows that.</p></section>
+  <section id="aggregate-metrics"><h2>Aggregate metrics</h2>
+    <p>Across many traces, chart the signals that reveal harness health: success rate by task type, steps and tokens per task (median and p90), cost per successful task, tool error rate and invalid-argument rate per tool, permission denials and approvals per task, loop detections, budget exhaustions, and latency per step. Break them down by harness version so a release that doubles steps per task is caught the same day.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Trace and debug an agent</h2>
+    <ol><li>Run a tracing backend locally (for example Jaeger or Phoenix in Docker).</li><li>Instrument your agent loop with spans for runs, model calls and tool calls using gen_ai attributes.</li><li>Add redaction for a fake secret pattern before export and verify it never reaches the backend.</li><li>Run ten benchmark tasks and open a failed trace; walk the debugging workflow to the first divergence.</li><li>Classify the cause, fix the responsible layer and add the case to your eval set.</li><li>Build a small chart of steps per task and tool error rate by harness version.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Tracing and debugging agents — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Trace = run; spans = model calls and tool calls, nested.</li><li>Use OpenTelemetry gen_ai attributes; pin the convention version.</li><li>Record version, prompt hash and model on every trace.</li><li>Redact at the harness; hash user IDs; limit retention.</li><li>Debug from the first divergent step; most failures are harness failures.</li><li>Chart steps, tokens, cost, tool errors and denials by version.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Span attributes</h3><table><tbody><tr><td><code>gen_ai.operation.name</code></td><td>chat, execute_tool</td></tr><tr><td><code>gen_ai.request.model</code></td><td>Model used</td></tr><tr><td><code>gen_ai.usage.input_tokens / output_tokens</code></td><td>Tokens</td></tr><tr><td><code>gen_ai.tool.name</code></td><td>Tool called</td></tr><tr><td><code>span.record_exception(e)</code></td><td>Errors</td></tr></tbody></table></div><div class="cheat-group"><h3>Backends</h3><table><tbody><tr><td><code>Langfuse, Arize Phoenix</code></td><td>LLM-focused, open source</td></tr><tr><td><code>Jaeger, Grafana Tempo</code></td><td>General tracing</td></tr><tr><td><code>OTel Collector</code></td><td>Route, redact, sample</td></tr></tbody></table></div><div class="cheat-group"><h3>Debug causes</h3><table><tbody><tr><td><code>missing context</code></td><td>Info not offered</td></tr><tr><td><code>misleading result</code></td><td>Truncation, vague errors</td></tr><tr><td><code>bad tool or arguments</code></td><td>Tool design</td></tr><tr><td><code>policy denial / budget</code></td><td>Harness limits</td></tr></tbody></table></div><div class="cheat-group"><h3>Metrics</h3><table><tbody><tr><td><code>steps, tokens per task (p50, p90)</code></td><td>Efficiency</td></tr><tr><td><code>cost per successful task</code></td><td>Economics</td></tr><tr><td><code>tool error rate per tool</code></td><td>Tool quality</td></tr><tr><td><code>denials, loops, budget hits</code></td><td>Harness health</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Logging only the final answer.</li><li>Exporting raw prompts with secrets or personal data.</li><li>Traces without harness version or prompt hash.</li><li>Blaming the model before reading the step where it diverged.</li><li>Metrics averaged over all versions, hiding a bad release.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "What is a span in an agent trace?", "options": ["One step, such as a model or tool call", "The whole conversation history", "A summary of the final answer", "A token budget"], "answer": 0, "explain": "Spans are timed, attributed units of work inside the trace of a run."}, {"q": "Where should secrets and personal data be redacted from traces?", "options": ["In the harness, before export", "Only in the dashboard view", "Never, traces must be complete", "After a month of retention"], "answer": 0, "explain": "Redacting at the source keeps sensitive data from ever reaching the backend."}, {"q": "A trace shows the model chose a wrong file because the search result was cut off before the right match. What kind of failure is it?", "options": ["A harness failure", "Pure model reasoning failure", "A network outage", "A permission denial"], "answer": 0, "explain": "Truncation in the tool layer hid the needed information, so the fix belongs in the harness."}, {"q": "Why record the harness version and prompt hash on every trace?", "options": ["To tie behaviour changes to releases", "To reduce token usage", "Because OpenTelemetry requires it", "To speed up tool calls"], "answer": 0, "explain": "Version-tagged traces let you break metrics down by release and spot regressions."}, {"q": "After a release, median steps per task doubles while success is flat. What does that suggest?", "options": ["A harness regression in efficiency", "A clear quality improvement", "Nothing worth investigating", "A cheaper model"], "answer": 0, "explain": "More steps for the same success means higher cost and latency; inspect traces from the new version."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="eh-guardrails.html"><span>← Previous</span><strong>Guardrails and prompt injection</strong></a>
+    <a class="pager-up" href="../education.html#evals">All Evals &amp; Harness modules</a>
+    <a class="pager-link pager-next" href="eh-failure-modes.html"><span>Next →</span><strong>Agent failure modes and recovery</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=eh-observability&amp;page=/education/eh-observability.html&amp;title=Tracing%20and%20debugging%20agents">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=eh-observability&amp;page=/education/eh-observability.html&amp;title=Tracing%20and%20debugging%20agents">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

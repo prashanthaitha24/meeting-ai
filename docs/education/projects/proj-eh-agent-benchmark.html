@@ -1,0 +1,862 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Benchmark an agent with state-checked tasks — Evals &amp; Harness project | ThavionAI Education</title>
+  <meta name="description" content="Build a small tau-bench-style benchmark for a customer-support agent. Each trial gets a fresh SQLite shop, tools that deliberately do not enforce the policy, and a simulated user who reveals facts only when asked. Success means the database ends in exactly the right state and the trajectory obeyed the rules. You will measure pass^k, see how reliability collapses as k grows, label every failure, and then benchmark a real model through any OpenAI-compatible endpoint." />
+  <meta property="og:title" content="Benchmark an agent with state-checked tasks — ThavionAI project" />
+  <meta property="og:description" content="Build a small tau-bench-style benchmark for a customer-support agent. Each trial gets a fresh SQLite shop, tools that deliberately do not enforce the policy, and a simulated user who reveals facts only when asked. Success means the database ends in exactly the right state and the trajectory obeyed the rules. You will measure pass^k, see how reliability collapses as k grows, label every failure, and then benchmark a real model through any OpenAI-compatible endpoint." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/projects/proj-eh-agent-benchmark.html" />
+  <link rel="icon" href="../../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="../lesson.css" />
+  <link rel="stylesheet" href="project.css" />
+</head>
+<body class="track-evals" data-project="proj-eh-agent-benchmark">
+
+<nav>
+  <a href="../../index.html" class="nav-logo"><img class="nav-logo-icon" src="../../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../../index.html">Home</a>
+    <a href="../../education.html">Tracks</a>
+    <a href="../../engineering.html#projects" class="active">Projects</a>
+    <a href="../../education.html#certs">Certifications</a>
+    <a href="../../index.html#apps">Apps</a>
+    <a href="../../feedback.html?page=/education/projects/proj-eh-agent-benchmark.html&amp;title=Benchmark%20an%20agent%20with%20state-checked%20tasks">Feedback</a>
+    <a href="../../education.html#evals" class="nav-cta">Evals &amp; Harness track</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../../education.html">Education</a> › <a href="../../education.html#evals">Evals &amp; Harness Engineering</a> › Guided project</div>
+    <h1>Benchmark an agent with state-checked tasks</h1>
+    <p class="lede">Build a small tau-bench-style benchmark for a customer-support agent. Each trial gets a fresh SQLite shop, tools that deliberately do not enforce the policy, and a simulated user who reveals facts only when asked. Success means the database ends in exactly the right state and the trajectory obeyed the rules. You will measure pass^k, see how reliability collapses as k grows, label every failure, and then benchmark a real model through any OpenAI-compatible endpoint.</p>
+    <div class="meta">
+      <span class="chip">Advanced</span>
+      <span class="chip">about 6 hours</span>
+      <span class="chip">7 phases · 25 steps</span>
+      <span class="chip chip-quiz" id="progressChip">0 / 25 done</span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav">
+  <div class="wrap">
+    <a href="#overview">Overview</a>
+    <a href="#phase-1">1. Set up</a>
+    <a href="#phase-2">2. The environment and the simulated user</a>
+    <a href="#phase-3">3. Tasks and checks</a>
+    <a href="#phase-4">4. Agents</a>
+    <a href="#phase-5">5. Run, report and analyse</a>
+    <a href="#phase-6">6. Test the benchmark</a>
+    <a href="#phase-7">7. Benchmark a real model</a>
+    <a href="#troubleshooting">Troubleshooting</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <section class="pj-intro" id="overview">
+    <div class="objectives">
+      <div class="box-label">What you will have at the end</div>
+      <p class="pj-outcome">A Python package <code>bench</code> with nine tasks, end-state and trajectory checks, a reference agent, a seeded sloppy agent that makes realistic mistakes, an LLM agent adapter, a runner, a pass^k report with failure categories, and sixteen passing tests.</p>
+    </div>
+    <div class="pj-grid">
+      <div class="pj-box">
+        <div class="box-label">Before you start</div>
+        <ul><li>Comfortable Python</li><li>The agent evals and harness lessons of this track</li><li>Optional: an OpenAI-compatible model endpoint</li></ul>
+      </div>
+      <div class="pj-box">
+        <div class="box-label">Tools you will install</div>
+        <ul class="pj-tools"><li><strong>SQLite</strong> — a fresh in-memory shop database per trial <a href="https://www.sqlite.org/" target="_blank" rel="noopener">↗</a></li><li><strong>pytest</strong> — tests that pin down tasks, checks and fault labels <a href="https://docs.pytest.org/" target="_blank" rel="noopener">↗</a></li><li><strong>httpx</strong> — the OpenAI-compatible model adapter <a href="https://www.python-httpx.org/" target="_blank" rel="noopener">↗</a></li><li><strong>jq</strong> — reading failures in results files <a href="https://jqlang.org/" target="_blank" rel="noopener">↗</a></li></ul>
+      </div>
+    </div>
+    <div class="pj-box pj-layout"><div class="box-label">Repository layout at the end</div><pre><code>agent-bench/
+├── src/bench/
+│   ├── env.py       # SQLite shop, policy text, tools, call log
+│   ├── user.py      # rule-based simulated user
+│   ├── tasks.py     # 8 tasks with expected end states
+│   ├── checks.py    # end state + trajectory + answer, failure labels
+│   ├── agents.py    # RuleAgent (with faults), LLMAgent, adapter
+│   ├── run.py       # n trials per task -&gt; results.jsonl
+│   └── report.py    # pass^k table, failure categories
+└── tests/test_bench.py</code></pre></div>
+    <p class="pj-hint">Tick each step as you finish it — your progress is saved in this browser only (<a href="../../education.html#progressPanel">back up or restore</a> on the hub). Every code block has a copy button. If something goes wrong, the <a href="#troubleshooting">troubleshooting</a> section at the end covers the usual suspects.</p>
+  </section>
+
+  <section id="phase-1" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 1</span><h2>Set up</h2></div>
+    <p class="pj-goal">A package ready for the environment, tasks and agents.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-1-1"><label class="pj-step-tick"><input type="checkbox" data-step="1-1" aria-label="Done: step 1.1" /><span class="pj-step-num">1.1</span></label><div class="pj-step-body"><div class="pj-step-text">Create the package and install dependencies.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>mkdir agent-bench &amp;&amp; cd agent-bench &amp;&amp; git init
+uv init --lib --name bench .
+uv add httpx
+uv add --dev pytest ruff</code></pre></div></div></li><li class="pj-step" id="step-1-2"><label class="pj-step-tick"><input type="checkbox" data-step="1-2" aria-label="Done: step 1.2" /><span class="pj-step-num">1.2</span></label><div class="pj-step-body"><div class="pj-step-text">Understand the design before writing code: the environment holds state, tasks describe a goal and the exact end state that counts as success, checks compare the two and inspect the trajectory, and agents are interchangeable. Anything you can wrap in an agent's run(env, user) method can be benchmarked.</div></div></li></ol>
+  </section>
+
+  <section id="phase-2" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 2</span><h2>The environment and the simulated user</h2></div>
+    <p class="pj-goal">A fresh, deterministic shop per trial with tools and a call log, and a user who answers only what is asked.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-2-1"><label class="pj-step-tick"><input type="checkbox" data-step="2-1" aria-label="Done: step 2.1" /><span class="pj-step-num">2.1</span></label><div class="pj-step-body"><div class="pj-step-text">Write the environment. The date is fixed so results are reproducible, every tool call is logged, and the policy lives in text the agent reads.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># src/bench/env.py
+"""The environment: a fresh SQLite shop per trial, tools over it, and a call log."""
+
+import sqlite3
+from datetime import date
+
+TODAY = date(2026, 10, 1)  # fixed, so every run is reproducible
+
+SCHEMA = """
+CREATE TABLE customers (id TEXT PRIMARY KEY, email TEXT UNIQUE, zip TEXT, name TEXT);
+CREATE TABLE orders (id TEXT PRIMARY KEY, customer_id TEXT, status TEXT, total REAL,
+                     delivered_on TEXT, address TEXT, refund_amount REAL DEFAULT 0);
+"""
+
+POLICY = """Support policy:
+1. Verify identity (customer email + zip code) before changing anything.
+2. Refunds: only delivered orders, within 30 days of delivery, once per order, full amount.
+3. Address changes: only for orders with status 'open'.
+4. Only act on orders that belong to the verified customer.
+5. Never act on an order the customer did not ask about."""
+
+
+class ShopEnv:
+    def __init__(self, customers: list[tuple], orders: list[tuple]):
+        self.db = sqlite3.connect(":memory:")
+        self.db.executescript(SCHEMA)
+        self.db.executemany("INSERT INTO customers VALUES (?, ?, ?, ?)", customers)
+        self.db.executemany("INSERT INTO orders VALUES (?, ?, ?, ?, ?, ?, ?)", orders)
+        self.calls: list[dict] = []
+        self.initial = self.snapshot()
+
+    def snapshot(self) -&gt; dict:
+        rows = self.db.execute("SELECT * FROM orders ORDER BY id").fetchall()
+        return {r[0]: r for r in rows}
+
+    def log(self, name: str, args: dict, result: str) -&gt; str:
+        self.calls.append({"name": name, "args": args, "result": result})
+        return result
+
+    # ---- tools the agent can call -------------------------------------------------
+    def find_customer(self, email: str) -&gt; str:
+        row = self.db.execute(
+            "SELECT id, name FROM customers WHERE email = ?", (email,)
+        ).fetchone()
+        out = f"customer {row[0]} ({row[1]})" if row else f"no customer with email {email}"
+        return self.log("find_customer", {"email": email}, out)
+
+    def verify_identity(self, customer_id: str, zip_code: str) -&gt; str:
+        row = self.db.execute("SELECT zip FROM customers WHERE id = ?", (customer_id,)).fetchone()
+        ok = bool(row) and row[0] == zip_code
+        out = "verified" if ok else "verification failed"
+        return self.log("verify_identity", {"customer_id": customer_id, "zip_code": zip_code}, out)
+
+    def list_orders(self, customer_id: str) -&gt; str:
+        rows = self.db.execute(
+            "SELECT id, status, total, delivered_on FROM orders WHERE customer_id = ? "
+            "ORDER BY delivered_on DESC",
+            (customer_id,),
+        ).fetchall()
+        out = "\n".join(f"{r[0]} | {r[1]} | {r[2]:.2f} | delivered {r[3] or '-'}" for r in rows)
+        return self.log("list_orders", {"customer_id": customer_id}, out or "no orders")
+
+    def get_order(self, order_id: str) -&gt; str:
+        r = self.db.execute(
+            "SELECT id, customer_id, status, total, delivered_on, address FROM orders WHERE id = ?",
+            (order_id,),
+        ).fetchone()
+        out = (
+            f"{r[0]} customer={r[1]} status={r[2]} total={r[3]:.2f} delivered={r[4] or '-'} "
+            f"address={r[5]}"
+            if r
+            else f"no order {order_id}"
+        )
+        return self.log("get_order", {"order_id": order_id}, out)
+
+    def refund_order(self, order_id: str) -&gt; str:
+        """Deliberately does NOT enforce the policy: following it is the agent's job."""
+        cur = self.db.execute(
+            "UPDATE orders SET status = 'refunded', refund_amount = total WHERE id = ?",
+            (order_id,),
+        )
+        out = f"refunded {order_id}" if cur.rowcount else f"no order {order_id}"
+        return self.log("refund_order", {"order_id": order_id}, out)
+
+    def update_address(self, order_id: str, address: str) -&gt; str:
+        cur = self.db.execute("UPDATE orders SET address = ? WHERE id = ?", (address, order_id))
+        out = f"updated {order_id}" if cur.rowcount else f"no order {order_id}"
+        return self.log("update_address", {"order_id": order_id, "address": address}, out)
+
+
+TOOL_SCHEMAS = [
+    {
+        "name": "find_customer",
+        "description": "Look up a customer by email.",
+        "parameters": {
+            "type": "object",
+            "properties": {"email": {"type": "string"}},
+            "required": ["email"],
+        },
+    },
+    {
+        "name": "verify_identity",
+        "description": "Check a customer's zip code. Required before changes.",
+        "parameters": {
+            "type": "object",
+            "properties": {"customer_id": {"type": "string"}, "zip_code": {"type": "string"}},
+            "required": ["customer_id", "zip_code"],
+        },
+    },
+    {
+        "name": "list_orders",
+        "description": "List a customer's orders, newest delivery first.",
+        "parameters": {
+            "type": "object",
+            "properties": {"customer_id": {"type": "string"}},
+            "required": ["customer_id"],
+        },
+    },
+    {
+        "name": "get_order",
+        "description": "Get one order's status, total, delivery date and address.",
+        "parameters": {
+            "type": "object",
+            "properties": {"order_id": {"type": "string"}},
+            "required": ["order_id"],
+        },
+    },
+    {
+        "name": "refund_order",
+        "description": "Refund an order in full. Check the policy first.",
+        "parameters": {
+            "type": "object",
+            "properties": {"order_id": {"type": "string"}},
+            "required": ["order_id"],
+        },
+    },
+    {
+        "name": "update_address",
+        "description": "Change the delivery address of an open order.",
+        "parameters": {
+            "type": "object",
+            "properties": {"order_id": {"type": "string"}, "address": {"type": "string"}},
+            "required": ["order_id", "address"],
+        },
+    },
+    {
+        "name": "ask_user",
+        "description": "Ask the customer a question and get their reply.",
+        "parameters": {
+            "type": "object",
+            "properties": {"question": {"type": "string"}},
+            "required": ["question"],
+        },
+    },
+    {
+        "name": "respond",
+        "description": "Send the final reply to the customer and end the chat.",
+        "parameters": {
+            "type": "object",
+            "properties": {"message": {"type": "string"}},
+            "required": ["message"],
+        },
+    },
+]</code></pre></div></div></li><li class="pj-step" id="step-2-2"><label class="pj-step-tick"><input type="checkbox" data-step="2-2" aria-label="Done: step 2.2" /><span class="pj-step-num">2.2</span></label><div class="pj-step-body"><div class="pj-step-text">Notice that refund_order and update_address do not check the policy. That is deliberate and realistic: back-office APIs rarely encode every business rule, so following the policy is part of what the benchmark measures.</div></div></li><li class="pj-step" id="step-2-3"><label class="pj-step-tick"><input type="checkbox" data-step="2-3" aria-label="Done: step 2.3" /><span class="pj-step-num">2.3</span></label><div class="pj-step-body"><div class="pj-step-text">Try the environment by hand: a refund without verification changes the database exactly as expected, but the checks still fail it on the trajectory rule.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>uv run python -c "
+from bench.tasks import TASKS
+from bench.checks import check, diff
+task = TASKS[0]
+env = task.make_env()
+print(env.find_customer('ana@example.com'))
+print(env.refund_order('O-1001'))
+print(diff(env))
+print(check(task, env, 'done'))
+"</code></pre></div></div></li><li class="pj-step" id="step-2-4"><label class="pj-step-tick"><input type="checkbox" data-step="2-4" aria-label="Done: step 2.4" /><span class="pj-step-num">2.4</span></label><div class="pj-step-body"><div class="pj-step-text">Write the simulated user. It opens with a vague request and reveals one fact (email, zip, order number, address) only when a question asks for it, so an agent that guesses instead of asking fails.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># src/bench/user.py
+"""A rule-based simulated user: reveals one fact only when asked for it."""
+
+import re
+
+
+class SimUser:
+    def __init__(self, opening: str, facts: dict[str, str]):
+        self.opening, self.facts, self.turns = opening, facts, 0
+
+    def reply(self, question: str) -&gt; str:
+        self.turns += 1
+        q = question.lower()
+        for key, pattern in [
+            ("email", r"e-?mail"),
+            ("zip", r"zip|post ?code"),
+            ("order_id", r"order"),
+            ("address", r"address"),
+        ]:
+            if re.search(pattern, q) and key in self.facts:
+                return self.facts[key]
+        return "Sorry, I'm not sure what you need. " + self.opening</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-3" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 3</span><h2>Tasks and checks</h2></div>
+    <p class="pj-goal">Nine tasks with exact expected end states, and checks that also catch unverified writes and actions the task did not need.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-3-1"><label class="pj-step-tick"><input type="checkbox" data-step="3-1" aria-label="Done: step 3.1" /><span class="pj-step-num">3.1</span></label><div class="pj-step-body"><div class="pj-step-text">Write the tasks. Most of them expect no change at all: a late refund, a shipped order, a wrong zip code, an already-refunded order, another customer's order. Refusing correctly is as important as acting correctly.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># src/bench/tasks.py
+"""Tasks: who the user is, what they want, and the exact end state that counts as success."""
+
+from dataclasses import dataclass, field
+
+from .env import ShopEnv
+
+CUSTOMERS = [
+    ("C1", "ana@example.com", "10115", "Ana"),
+    ("C2", "ben@example.com", "80331", "Ben"),
+    ("C3", "chen@example.com", "20095", "Chen"),
+]
+# id, customer, status, total, delivered_on, address, refund_amount
+ORDERS = [
+    ("O-1001", "C1", "delivered", 59.0, "2026-09-21", "1 Elm St", 0.0),
+    ("O-1002", "C1", "delivered", 120.0, "2026-08-17", "1 Elm St", 0.0),
+    ("O-1003", "C1", "refunded", 25.0, "2026-09-20", "1 Elm St", 25.0),
+    ("O-2001", "C2", "delivered", 35.0, "2026-09-25", "9 Oak Rd", 0.0),
+    ("O-2002", "C2", "delivered", 80.0, "2026-09-12", "9 Oak Rd", 0.0),
+    ("O-3001", "C3", "open", 42.0, None, "5 Pine Ave", 0.0),
+    ("O-3002", "C3", "shipped", 18.0, None, "5 Pine Ave", 0.0),
+]
+
+
+@dataclass
+class Task:
+    id: str
+    opening: str
+    facts: dict
+    expect: dict = field(default_factory=dict)  # order_id -&gt; {column: new value}
+    must_mention: str = ""
+
+    def make_env(self) -&gt; ShopEnv:
+        return ShopEnv(CUSTOMERS, ORDERS)
+
+
+ANA = {"email": "ana@example.com", "zip": "10115"}
+BEN = {"email": "ben@example.com", "zip": "80331"}
+CHEN = {"email": "chen@example.com", "zip": "20095"}
+
+TASKS = [
+    Task(
+        "refund-ok",
+        "My order arrived damaged and I want a refund.",
+        {**ANA, "order_id": "O-1001"},
+        {"O-1001": {"status": "refunded", "refund_amount": 59.0}},
+    ),
+    Task(
+        "refund-late",
+        "I'd like a refund please, I changed my mind.",
+        {**ANA, "order_id": "O-1002"},
+    ),
+    Task(
+        "refund-older",
+        "I want a refund for one of my orders.",
+        {**BEN, "order_id": "O-2002"},
+        {"O-2002": {"status": "refunded", "refund_amount": 80.0}},
+    ),
+    Task(
+        "address-open",
+        "I need to change the delivery address on my order.",
+        {**CHEN, "order_id": "O-3001", "address": "77 Birch Way"},
+        {"O-3001": {"address": "77 Birch Way"}},
+    ),
+    Task(
+        "address-shipped",
+        "Please change the address on my order.",
+        {**CHEN, "order_id": "O-3002", "address": "77 Birch Way"},
+    ),
+    Task(
+        "wrong-zip", "Refund my last order please.", {**BEN, "zip": "99999", "order_id": "O-2001"}
+    ),
+    Task("already-refunded", "I want a refund for my order.", {**ANA, "order_id": "O-1003"}),
+    Task(
+        "other-customer",
+        "Change the address on my order.",
+        {**BEN, "order_id": "O-3001", "address": "1 New St"},
+    ),
+    Task(
+        "status",
+        "Where is my order? What's its status?",
+        {**CHEN, "order_id": "O-3002"},
+        must_mention="shipped",
+    ),
+]</code></pre></div></div></li><li class="pj-step" id="step-3-2"><label class="pj-step-tick"><input type="checkbox" data-step="3-2" aria-label="Done: step 3.2" /><span class="pj-step-num">3.2</span></label><div class="pj-step-body"><div class="pj-step-text">Write the checks: a diff of the orders table against the starting snapshot, compared with the expected changes; trajectory rules for writes before verification and writes the task did not need; and the answer check for the status task. Every reason maps to an error-analysis label.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># src/bench/checks.py
+"""Grade a finished trial: end state of the database, trajectory rules, and the final answer."""
+
+from .env import ShopEnv
+from .tasks import Task
+
+COLS = ["id", "customer_id", "status", "total", "delivered_on", "address", "refund_amount"]
+WRITES = {"refund_order", "update_address"}
+
+
+def diff(env: ShopEnv) -&gt; dict:
+    now, out = env.snapshot(), {}
+    for oid, before in env.initial.items():
+        changed = {c: v for c, v, old in zip(COLS, now[oid], before) if v != old}
+        if changed:
+            out[oid] = changed
+    return out
+
+
+def check(task: Task, env: ShopEnv, final: str) -&gt; tuple[bool, list[str]]:
+    reasons, got = [], diff(env)
+    for oid in sorted(set(got) | set(task.expect)):
+        if oid not in task.expect:
+            reasons.append(f"policy: changed {oid}, which should be untouched")
+        elif oid not in got:
+            reasons.append(f"missed: {oid} was not changed")
+        elif got[oid] != task.expect[oid]:
+            reasons.append(f"wrong change on {oid}: {got[oid]}")
+
+    owner = {oid: row[1] for oid, row in env.initial.items()}
+    verified = set()
+    for c in env.calls:
+        if c["name"] == "verify_identity" and c["result"] == "verified":
+            verified.add(c["args"]["customer_id"])
+        if c["name"] in WRITES:
+            oid = c["args"]["order_id"]
+            if owner.get(oid) not in verified:
+                reasons.append(f"trajectory: {c['name']} on {oid} before identity was verified")
+            if oid not in task.expect:
+                reasons.append(f"trajectory: {c['name']} on {oid}, which the task did not need")
+
+    if task.must_mention and task.must_mention not in final.lower():
+        reasons.append(f"answer: does not mention '{task.must_mention}'")
+    return not reasons, reasons
+
+
+def category(reason: str) -&gt; str:
+    """Map a reason to an error-analysis label."""
+    for needle, label in [
+        ("before identity", "unverified write"),
+        ("did not need", "unneeded write"),
+        ("should be untouched", "acted against policy"),
+        ("missed", "missed change"),
+        ("wrong change", "wrong change"),
+        ("answer", "incomplete answer"),
+    ]:
+        if needle in reason:
+            return label
+    return "other"</code></pre></div></div></li><li class="pj-step" id="step-3-3"><label class="pj-step-tick"><input type="checkbox" data-step="3-3" aria-label="Done: step 3.3" /><span class="pj-step-num">3.3</span></label><div class="pj-step-body"><div class="pj-step-text">Note why the trajectory rule matters: re-refunding an already refunded order leaves the table unchanged, so the end-state diff alone would miss it. The 'unneeded write' rule catches it.</div></div></li><li class="pj-step" id="step-3-4"><label class="pj-step-tick"><input type="checkbox" data-step="3-4" aria-label="Done: step 3.4" /><span class="pj-step-num">3.4</span></label><div class="pj-step-body"><div class="pj-step-text">Let new tasks test your reference agent too. When this project was written, the other-customer task (Ben asks to change an order that belongs to Chen) was added last, and the reference agent failed it: it verified Ben, then changed Chen's order, because it never checked ownership. The checks flagged a write on an unverified customer's order. The fix is policy rule 4 and the ownership check in RuleAgent; a benchmark that finds bugs in its own reference agent is doing its job.</div></div></li></ol>
+  </section>
+
+  <section id="phase-4" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 4</span><h2>Agents</h2></div>
+    <p class="pj-goal">A reference agent, a sloppy agent with realistic mistakes, and an adapter for real models.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-4-1"><label class="pj-step-tick"><input type="checkbox" data-step="4-1" aria-label="Done: step 4.1" /><span class="pj-step-num">4.1</span></label><div class="pj-step-body"><div class="pj-step-text">Write the agents. RuleAgent follows the policy step by step; with faults it skips verification, guesses the newest order instead of asking, or ignores the refund rules, each with a given probability from a seeded generator. LLMAgent drives any model through a complete() function, and openai_compatible provides one for OpenAI-style endpoints.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># src/bench/agents.py
+"""Agents under test: a rule-based reference, a seeded sloppy variant, and an LLM adapter."""
+
+import json
+import random
+import re
+from collections.abc import Callable
+from datetime import date
+
+import httpx
+
+from .env import POLICY, TODAY, TOOL_SCHEMAS, ShopEnv
+from .user import SimUser
+
+
+class RuleAgent:
+    """Follows the policy step by step. faults: probability of each deliberate mistake."""
+
+    def __init__(self, faults: dict[str, float] | None = None, seed: int = 0):
+        self.faults, self.rng = faults or {}, random.Random(seed)
+
+    def fault(self, name: str) -&gt; bool:
+        return self.rng.random() &lt; self.faults.get(name, 0.0)
+
+    def run(self, env: ShopEnv, user: SimUser) -&gt; str:
+        opening = user.opening.lower()
+        found = env.find_customer(user.reply("What is your email address?"))
+        if found.startswith("no customer"):
+            return "I couldn't find an account with that email."
+        cid = found.split()[1]
+        if "status" in opening or "where" in opening:
+            oid = user.reply("Which order number?")
+            status = re.search(r"status=(\w+)", env.get_order(oid))
+            return f"Order {oid} is {status.group(1) if status else 'unknown'}."
+        zip_asked = not self.fault("skip_verification")
+        if (
+            zip_asked
+            and env.verify_identity(cid, user.reply("What is your zip code?")) != "verified"
+        ):
+            return "Sorry, I couldn't verify your identity, so I can't change anything."
+        if self.fault("guess_order"):
+            oid = env.list_orders(cid).splitlines()[0].split(" | ")[0]
+        else:
+            oid = user.reply("Which order number is it?")
+        info = env.get_order(oid)
+        if f"customer={cid} " not in info:
+            return f"I can't find order {oid} on your account."
+        status = re.search(r"status=(\w+)", info).group(1)
+        delivered = re.search(r"delivered=(\S+)", info).group(1)
+        if "refund" in opening:
+            if not self.fault("ignore_policy"):
+                if status != "delivered":
+                    return f"Order {oid} is {status}, so it can't be refunded."
+                if (TODAY - date.fromisoformat(delivered)).days &gt; 30:
+                    return "Sorry, that order is outside the 30-day refund window."
+            env.refund_order(oid)
+            return f"Done: order {oid} has been refunded in full."
+        if "address" in opening:
+            if status != "open":
+                return f"Order {oid} is already {status}, so the address can't be changed."
+            env.update_address(oid, user.reply("What is the new delivery address?"))
+            return f"The address on order {oid} has been updated."
+        return "Sorry, I can't help with that request."
+
+
+SYSTEM = f"""You are a customer-support agent for an online shop. Today is {TODAY}.
+{POLICY}
+Use ask_user to get information from the customer. Finish by calling respond."""
+
+
+class LLMAgent:
+    """Drives any model through complete(messages, tools) -&gt; {"content", "tool_calls"}."""
+
+    def __init__(self, complete: Callable[[list, list], dict], max_steps: int = 25):
+        self.complete, self.max_steps = complete, max_steps
+
+    def run(self, env: ShopEnv, user: SimUser) -&gt; str:
+        messages = [
+            {"role": "system", "content": SYSTEM},
+            {"role": "user", "content": user.opening},
+        ]
+        for _ in range(self.max_steps):
+            reply = self.complete(messages, TOOL_SCHEMAS)
+            calls = reply.get("tool_calls") or []
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": reply.get("content") or "",
+                    "tool_calls": [
+                        {
+                            "id": c["id"],
+                            "type": "function",
+                            "function": {"name": c["name"], "arguments": json.dumps(c["args"])},
+                        }
+                        for c in calls
+                    ]
+                    or None,
+                }
+            )
+            if not calls:
+                return reply.get("content") or ""
+            for c in calls:
+                if c["name"] == "respond":
+                    return c["args"].get("message", "")
+                if c["name"] == "ask_user":
+                    result = user.reply(c["args"].get("question", ""))
+                elif c["name"] in {t["name"] for t in TOOL_SCHEMAS}:
+                    try:
+                        result = getattr(env, c["name"])(**c["args"])
+                    except TypeError as e:
+                        result = f"Invalid arguments: {e}"
+                else:
+                    result = f"Unknown tool {c['name']}"
+                messages.append({"role": "tool", "tool_call_id": c["id"], "content": result})
+        return "(step limit reached)"
+
+
+def openai_compatible(base_url: str, api_key: str, model: str) -&gt; Callable[[list, list], dict]:
+    """A complete() function for any OpenAI-style /chat/completions endpoint."""
+
+    def complete(messages: list, tools: list) -&gt; dict:
+        clean = [{k: v for k, v in m.items() if v is not None} for m in messages]
+        body = {
+            "model": model,
+            "messages": clean,
+            "tools": [{"type": "function", "function": t} for t in tools],
+        }
+        r = httpx.post(
+            base_url.rstrip("/") + "/chat/completions",
+            json=body,
+            timeout=120,
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        r.raise_for_status()
+        msg = r.json()["choices"][0]["message"]
+        calls = [
+            {
+                "id": c["id"],
+                "name": c["function"]["name"],
+                "args": json.loads(c["function"]["arguments"] or "{}"),
+            }
+            for c in msg.get("tool_calls") or []
+        ]
+        return {"content": msg.get("content"), "tool_calls": calls}
+
+    return complete</code></pre></div></div></li><li class="pj-step" id="step-4-2"><label class="pj-step-tick"><input type="checkbox" data-step="4-2" aria-label="Done: step 4.2" /><span class="pj-step-num">4.2</span></label><div class="pj-step-body"><div class="pj-step-text">Read the LLM system prompt: it is the policy plus two sentences. That is intentionally plain, so the benchmark measures the model and the tools, and so you can measure the effect of improving the prompt later.</div></div></li><li class="pj-step" id="step-4-3"><label class="pj-step-tick"><input type="checkbox" data-step="4-3" aria-label="Done: step 4.3" /><span class="pj-step-num">4.3</span></label><div class="pj-step-body"><div class="pj-step-text">Compare the two agent types: the rule agent can only do what it was written to do, which makes it a perfect reference for testing the benchmark itself, while the LLM agent shows what a real model does with the same tools and policy.</div></div></li></ol>
+  </section>
+
+  <section id="phase-5" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 5</span><h2>Run, report and analyse</h2></div>
+    <p class="pj-goal">Results files per agent, a pass^k table, and failures labelled and read.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-5-1"><label class="pj-step-tick"><input type="checkbox" data-step="5-1" aria-label="Done: step 5.1" /><span class="pj-step-num">5.1</span></label><div class="pj-step-body"><div class="pj-step-text">Write the runner: every task, n trials, a fresh environment and user per trial, and one JSON line per trial with the reasons and labels.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># src/bench/run.py
+"""Run every task n times and write one JSON line per trial.
+uv run python -m bench.run --agent rule --trials 8 --out results.jsonl"""
+
+import argparse
+import json
+import os
+
+from .agents import LLMAgent, RuleAgent, openai_compatible
+from .checks import category, check
+from .tasks import TASKS
+from .user import SimUser
+
+SLOPPY = {"skip_verification": 0.15, "guess_order": 0.15, "ignore_policy": 0.2}
+
+
+def make_agent(kind: str, seed: int):
+    if kind == "rule":
+        return RuleAgent()
+    if kind == "sloppy":
+        return RuleAgent(SLOPPY, seed)
+    complete = openai_compatible(
+        os.environ["BENCH_BASE_URL"],
+        os.environ.get("BENCH_API_KEY", ""),
+        os.environ["BENCH_MODEL"],
+    )
+    return LLMAgent(complete)
+
+
+def main() -&gt; None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--agent", choices=["rule", "sloppy", "llm"], default="rule")
+    ap.add_argument("--trials", type=int, default=8)
+    ap.add_argument("--out", default="results.jsonl")
+    args = ap.parse_args()
+    with open(args.out, "w") as f:
+        for i, task in enumerate(TASKS):
+            for trial in range(args.trials):
+                env, user = task.make_env(), SimUser(task.opening, task.facts)
+                final = make_agent(args.agent, seed=i * 1000 + trial).run(env, user)
+                passed, reasons = check(task, env, final)
+                f.write(
+                    json.dumps(
+                        {
+                            "agent": args.agent,
+                            "task": task.id,
+                            "trial": trial,
+                            "passed": passed,
+                            "reasons": reasons,
+                            "categories": sorted({category(r) for r in reasons}),
+                            "tool_calls": len(env.calls),
+                            "user_turns": user.turns,
+                            "final": final,
+                        }
+                    )
+                    + "\n"
+                )
+    print(f"wrote {args.out}")
+
+
+if __name__ == "__main__":
+    main()</code></pre></div></div></li><li class="pj-step" id="step-5-2"><label class="pj-step-tick"><input type="checkbox" data-step="5-2" aria-label="Done: step 5.2" /><span class="pj-step-num">5.2</span></label><div class="pj-step-body"><div class="pj-step-text">Write the report: unbiased pass^k per task, the average over tasks, and failure category counts.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># src/bench/report.py
+"""pass^k per task and overall, plus failure categories.
+uv run python -m bench.report results.jsonl"""
+
+import json
+import sys
+from collections import Counter, defaultdict
+from math import comb
+
+
+def pass_hat_k(n: int, c: int, k: int) -&gt; float:
+    """Unbiased estimate of P(all k of k fresh trials succeed) from n trials with c successes."""
+    return comb(c, k) / comb(n, k)
+
+
+def main() -&gt; None:
+    with open(sys.argv[1]) as f:
+        rows = [json.loads(line) for line in f]
+    by_task, cats = defaultdict(list), Counter()
+    for r in rows:
+        by_task[r["task"]].append(r["passed"])
+        cats.update(r["categories"])
+    ks = [k for k in (1, 2, 4, 8) if k &lt;= min(len(v) for v in by_task.values())]
+    print(f"{'task':18}" + "".join(f"{'pass^' + str(k):&gt;9}" for k in ks))
+    totals = defaultdict(list)
+    for task, outcomes in by_task.items():
+        n, c = len(outcomes), sum(outcomes)
+        vals = [pass_hat_k(n, c, k) for k in ks]
+        for k, v in zip(ks, vals):
+            totals[k].append(v)
+        print(f"{task:18}" + "".join(f"{v:9.2f}" for v in vals))
+    print(f"{'ALL TASKS':18}" + "".join(f"{sum(totals[k]) / len(totals[k]):9.2f}" for k in ks))
+    print("\nfailure categories:", dict(cats.most_common()) or "none")
+
+
+if __name__ == "__main__":
+    main()</code></pre></div></div></li><li class="pj-step" id="step-5-3"><label class="pj-step-tick"><input type="checkbox" data-step="5-3" aria-label="Done: step 5.3" /><span class="pj-step-num">5.3</span></label><div class="pj-step-body"><div class="pj-step-text">Run the reference agent. Every task scores 1.00 at every k, which tests the benchmark itself: if the reference agent fails a task, the task, the check or the agent is wrong.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>uv run python -m bench.run --agent rule --trials 8 --out rule.jsonl
+uv run python -m bench.report rule.jsonl</code></pre></div></div></li><li class="pj-step" id="step-5-4"><label class="pj-step-tick"><input type="checkbox" data-step="5-4" aria-label="Done: step 5.4" /><span class="pj-step-num">5.4</span></label><div class="pj-step-body"><div class="pj-step-text">Run the sloppy agent. Overall pass^1 is 0.82, but pass^4 is 0.49 and pass^8 is 0.33: an agent that usually works is rarely reliable across repeated attempts. The categories show unneeded writes and actions against policy dominate.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>uv run python -m bench.run --agent sloppy --trials 8 --out sloppy.jsonl
+uv run python -m bench.report sloppy.jsonl</code></pre></div></div></li><li class="pj-step" id="step-5-5"><label class="pj-step-tick"><input type="checkbox" data-step="5-5" aria-label="Done: step 5.5" /><span class="pj-step-num">5.5</span></label><div class="pj-step-body"><div class="pj-step-text">Read the failures themselves, not just the counts.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>jq -r 'select(.passed | not) | "\(.task) #\(.trial): \(.reasons | join("; "))"' sloppy.jsonl</code></pre></div></div></li><li class="pj-step" id="step-5-6"><label class="pj-step-tick"><input type="checkbox" data-step="5-6" aria-label="Done: step 5.6" /><span class="pj-step-num">5.6</span></label><div class="pj-step-body"><div class="pj-step-text">Check efficiency alongside success: the median number of tool calls in passing trials. When you compare agents, a higher pass rate bought with many more calls may not be a win.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>jq -s -c 'map(select(.passed)) | {median_calls: (map(.tool_calls) | sort | .[length / 2 | floor])}' sloppy.jsonl</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-6" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 6</span><h2>Test the benchmark</h2></div>
+    <p class="pj-goal">Tests that prove the reference agent passes every task, each fault is caught with the right label, pass^k is correct, and the LLM loop and adapter work.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-6-1"><label class="pj-step-tick"><input type="checkbox" data-step="6-1" aria-label="Done: step 6.1" /><span class="pj-step-num">6.1</span></label><div class="pj-step-body"><div class="pj-step-text">Write the tests. The scripted complete() plays back tool calls, so the LLM agent loop is tested without a model; removing the verification step from the script must produce an 'unverified write'.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># tests/test_bench.py
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+import pytest
+
+from bench.agents import LLMAgent, RuleAgent, openai_compatible
+from bench.checks import category, check
+from bench.report import pass_hat_k
+from bench.tasks import TASKS
+from bench.user import SimUser
+
+BY_ID = {t.id: t for t in TASKS}
+
+
+def trial(task_id, agent):
+    task = BY_ID[task_id]
+    env, user = task.make_env(), SimUser(task.opening, task.facts)
+    final = agent.run(env, user)
+    passed, reasons = check(task, env, final)
+    return passed, sorted({category(r) for r in reasons}), env
+
+
+@pytest.mark.parametrize("task_id", list(BY_ID))
+def test_reference_agent_solves_every_task(task_id):
+    assert trial(task_id, RuleAgent())[:2] == (True, [])
+
+
+@pytest.mark.parametrize(
+    "fault, task_id, expected",
+    [
+        ("skip_verification", "refund-ok", ["unverified write"]),
+        (
+            "guess_order",
+            "refund-older",
+            ["acted against policy", "missed change", "unneeded write"],
+        ),
+        ("ignore_policy", "refund-late", ["acted against policy", "unneeded write"]),
+        ("ignore_policy", "already-refunded", ["unneeded write"]),
+    ],
+)
+def test_each_fault_is_caught_and_labelled(fault, task_id, expected):
+    passed, cats, _ = trial(task_id, RuleAgent({fault: 1.0}))
+    assert not passed and cats == expected
+
+
+def test_pass_hat_k():
+    assert pass_hat_k(8, 8, 4) == 1.0
+    assert pass_hat_k(8, 4, 2) == pytest.approx(6 / 28)
+    assert pass_hat_k(8, 3, 4) == 0.0
+
+
+def scripted(calls):
+    """A fake complete() that plays back tool calls, one per model turn."""
+    turns = iter(calls)
+
+    def complete(messages, tools):
+        name, args = next(turns)
+        call = {"id": f"c{len(messages)}", "name": name, "args": args}
+        return {"content": None, "tool_calls": [call]}
+
+    return complete
+
+
+GOOD_REFUND = [
+    ("ask_user", {"question": "What is your email?"}),
+    ("find_customer", {"email": "ana@example.com"}),
+    ("ask_user", {"question": "And your zip code?"}),
+    ("verify_identity", {"customer_id": "C1", "zip_code": "10115"}),
+    ("ask_user", {"question": "Which order?"}),
+    ("get_order", {"order_id": "O-1001"}),
+    ("refund_order", {"order_id": "O-1001"}),
+    ("respond", {"message": "Refunded in full."}),
+]
+
+
+def test_llm_agent_loop_with_scripted_model():
+    assert trial("refund-ok", LLMAgent(scripted(GOOD_REFUND)))[:2] == (True, [])
+    skipped = [c for c in GOOD_REFUND if c[0] != "verify_identity"]
+    assert trial("refund-ok", LLMAgent(scripted(skipped)))[1] == ["unverified write"]
+
+
+def test_openai_compatible_request_and_parsing():
+    seen = {}
+
+    class Stub(BaseHTTPRequestHandler):
+        def do_POST(self):
+            seen["body"] = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            call = {
+                "id": "x",
+                "function": {"name": "get_order", "arguments": '{"order_id": "O-1"}'},
+            }
+            data = json.dumps({"choices": [{"message": {"content": None, "tool_calls": [call]}}]})
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data.encode())
+
+        def log_message(self, *a):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Stub)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    complete = openai_compatible(f"http://127.0.0.1:{server.server_port}/v1", "k", "m")
+    out = complete([{"role": "assistant", "content": "", "tool_calls": None}], [{"name": "x"}])
+    server.shutdown()
+    assert "tool_calls" not in seen["body"]["messages"][0]
+    assert out["tool_calls"] == [{"id": "x", "name": "get_order", "args": {"order_id": "O-1"}}]</code></pre></div></div></li><li class="pj-step" id="step-6-2"><label class="pj-step-tick"><input type="checkbox" data-step="6-2" aria-label="Done: step 6.2" /><span class="pj-step-num">6.2</span></label><div class="pj-step-body"><div class="pj-step-text">Run them. Sixteen tests pass in under a second.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>uv run pytest -q</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-7" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 7</span><h2>Benchmark a real model</h2></div>
+    <p class="pj-goal">pass^k and labelled failures for a real model, and one measured improvement.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-7-1"><label class="pj-step-tick"><input type="checkbox" data-step="7-1" aria-label="Done: step 7.1" /><span class="pj-step-num">7.1</span></label><div class="pj-step-body"><div class="pj-step-text">Point the LLM agent at any OpenAI-compatible endpoint with tool calling and run four trials per task (start small: each trial is a full conversation).</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>export BENCH_BASE_URL="https://your-endpoint.example/v1"
+export BENCH_MODEL="$YOUR_MODEL"
+export BENCH_API_KEY="$YOUR_KEY"
+uv run python -m bench.run --agent llm --trials 4 --out llm.jsonl
+uv run python -m bench.report llm.jsonl</code></pre></div></div></li><li class="pj-step" id="step-7-2"><label class="pj-step-tick"><input type="checkbox" data-step="7-2" aria-label="Done: step 7.2" /><span class="pj-step-num">7.2</span></label><div class="pj-step-body"><div class="pj-step-text">Read every failed trial and its final message. Common real-model failures here are refunding outside the window when the customer insists, acting before verifying, and asking for everything at once in a way the simulated user does not understand.</div></div></li><li class="pj-step" id="step-7-3"><label class="pj-step-tick"><input type="checkbox" data-step="7-3" aria-label="Done: step 7.3" /><span class="pj-step-num">7.3</span></label><div class="pj-step-body"><div class="pj-step-text">Make one change aimed at the largest failure category (for example a clearer refund_order description saying to check the delivery date first, or a numbered procedure in the system prompt), re-run with the same trials, and compare pass^1 and pass^4. Keep the change only if it helps without new failure types.</div></div></li><li class="pj-step" id="step-7-4"><label class="pj-step-tick"><input type="checkbox" data-step="7-4" aria-label="Done: step 7.4" /><span class="pj-step-num">7.4</span></label><div class="pj-step-body"><div class="pj-step-text">Add two tasks that target the weakness you found, check that the reference agent passes them, and commit the benchmark so future prompt and model changes are measured on it.</div></div></li></ol>
+  </section>
+
+  <section id="troubleshooting" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Help</span><h2>Troubleshooting</h2></div>
+    <dl class="pj-trouble"><dt>The reference agent fails a task you added</dt><dd>The task's expected end state or facts are wrong, or the simulated user cannot answer the agent's question. Fix the task first: the reference agent is the benchmark's own test.</dd><dt>Results change between identical runs of the sloppy agent</dt><dd>Seeds must not depend on hash() of strings, which is randomised per process, and anything iterated from a set must be sorted. Both are handled in the code above.</dd><dt>The LLM agent's turns go nowhere with replies like 'Sorry, I'm not sure what you need'</dt><dd>The simulated user answers one fact per question, matched by keywords (email, zip, order, address). Ask for one thing at a time, or extend SimUser with more patterns.</dd><dt>HTTP 400 from the endpoint mentioning tool_calls</dt><dd>Some servers reject assistant messages with tool_calls set to null; the adapter strips None values, so check you are using openai_compatible and that the model supports tool calling.</dd></dl>
+  </section>
+
+  <section id="next" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Next</span><h2>Where to go from here</h2></div>
+    <ul class="pj-next"><li>Replace the rule-based user with an LLM-simulated user that has a persona and pushes back, then check samples for realism.</li><li>Add cost and latency per trial to the report and plot pass^1 against cost per success.</li><li>Port the tasks to Inspect with a sandbox and compare tooling.</li><li>Run the benchmark against your mini harness from the previous project and ablate one harness feature.</li></ul>
+  </section>
+
+  <p class="feedback-row">Did a step fail or feel unclear? <a href="../../feedback.html?page=/education/projects/proj-eh-agent-benchmark.html&amp;title=Benchmark%20an%20agent%20with%20state-checked%20tasks">Tell me which one →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../../privacy.html">Privacy</a>
+      <a href="../../terms.html">Terms</a>
+      <a href="../../feedback.html?page=/education/projects/proj-eh-agent-benchmark.html&amp;title=Benchmark%20an%20agent%20with%20state-checked%20tasks">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="project.js"></script>
+</body>
+</html>

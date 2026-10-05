@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Evaluating agents — Evals &amp; Harness | ThavionAI Education</title>
+  <meta name="description" content="Outcome vs trajectory, environments with state checks, benchmarks, flakiness and cost." />
+  <meta property="og:title" content="Evaluating agents — ThavionAI Education" />
+  <meta property="og:description" content="Outcome vs trajectory, environments with state checks, benchmarks, flakiness and cost." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/eh-agent-evals.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-evals" data-module="eh-agent-evals">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=eh-agent-evals&amp;page=/education/eh-agent-evals.html&amp;title=Evaluating%20agents">Feedback</a>
+    <a href="../education.html#evals" class="nav-cta">All Evals &amp; Harness modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#evals">Evals &amp; Harness</a> › Stage 2: Evals in practice</div>
+    <h1>Evaluating agents</h1>
+    <p class="lede">Outcome vs trajectory, environments with state checks, benchmarks, flakiness and cost.</p>
+    <div class="meta">
+      <span class="chip">Intermediate</span>
+      <span class="chip">~45 min read</span>
+      <span class="chip">Module 7 of 20</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">An agent does not produce one answer: it takes a sequence of actions in an environment, calling tools, reading results and deciding what to do next. That makes evaluation harder in three ways. There are many valid paths to the same goal, so comparing to one reference trajectory is too strict. Runs are long and non-deterministic, so one success proves little. And the agent changes things, so you need an environment you can reset. This lesson covers outcome-based grading with end-state checks, trajectory checks for safety and efficiency, reliability metrics such as pass^k, simulated users, and how to build environments that make all of this repeatable.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Grade agents by verifying the end state of the environment</li><li>Add trajectory checks for forbidden actions, efficiency and policy</li><li>Compute pass@k and pass^k and explain what each says about reliability</li><li>Design resettable environments with fake tools and simulated users</li><li>Measure cost, steps and latency alongside success</li></ul>
+    </div>
+    <section id="grade-outcomes-not-paths"><h2>Grade outcomes, not paths</h2>
+    <p>The most robust way to grade an agent is to check what is true at the end. Did the order get refunded in the database? Do the repository's tests pass? Does the file contain the right content? This <strong>end-state check</strong> is written as code against the environment, so it is objective and tolerant of the many different routes an agent might take. Benchmarks such as SWE-bench (do the hidden tests pass after the agent's patch?) and tau-bench (does the database match the expected state?) are built this way.</p>
+    <div class="code"><div class="code-cap">An end-state check for a support-agent task</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>def check_refund_task(db) -&gt; dict:
+    order = db.get_order("A-1042")
+    return {
+        "refunded": order["status"] == "refunded",
+        "correct_amount": order["refund_amount"] == 59.00,
+        "other_orders_untouched": db.count_changed(exclude=["A-1042"]) == 0,
+    }
+
+
+def passed(result: dict) -&gt; bool:
+    return all(result.values())</code></pre></div>
+    <p>Note the third check. Agents can reach the goal while causing collateral damage, so good end-state checks also verify that nothing else changed.</p></section>
+  <section id="trajectory-checks-how-it-got-there"><h2>Trajectory checks: how it got there</h2>
+    <p>Outcomes are not everything. An agent that refunds the right order but first emails the customer's details to the wrong address has failed. Record the full trajectory (every message, tool call, argument and result) and add checks on it.</p>
+    <ul><li><strong>Forbidden actions</strong>: never called <code>delete_account</code>; never wrote outside the workspace.</li><li><strong>Required actions</strong>: verified identity before changing an order; asked for confirmation before an irreversible step.</li><li><strong>Policy compliance</strong>: did not offer a refund outside the policy window, even when the user pushed.</li><li><strong>Efficiency</strong>: number of steps, tool calls and tokens compared with a reasonable budget.</li><li><strong>Tool-call validity</strong>: share of calls with schema-valid arguments; repeated identical calls indicate loops.</li></ul>
+    <div class="code"><div class="code-cap">Trajectory checks over a recorded run</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>def trajectory_checks(steps: list[dict]) -&gt; dict:
+    calls = [s for s in steps if s["type"] == "tool_call"]
+    names = [c["name"] for c in calls]
+    verified_before_write = (
+        "verify_identity" in names
+        and names.index("verify_identity") &lt; names.index("refund_order")
+    ) if "refund_order" in names else True
+    return {
+        "no_forbidden": "delete_account" not in names,
+        "verified_first": verified_before_write,
+        "within_budget": len(calls) &lt;= 12,
+        "no_loops": len(calls) - len({(c["name"], str(c["args"])) for c in calls}) &lt;= 2,
+    }</code></pre></div></section>
+  <section id="reliability-pass-k-versus-pass-k"><h2>Reliability: pass@k versus pass^k</h2>
+    <p>Run every task several times. <strong>pass@k</strong> asks whether at least one of k attempts succeeds; it suits settings where you can check and retry, such as generating code against tests. <strong>pass^k</strong> asks whether all k attempts succeed; it measures consistency, which is what a customer-facing agent needs. An agent that succeeds 70% of the time per attempt has a much lower chance of succeeding on every one of 8 conversations in a row.</p>
+    <div class="code"><div class="code-cap">Unbiased estimates from n trials with c successes</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>from math import comb
+
+
+def pass_at_k(n: int, c: int, k: int) -&gt; float:
+    """P(at least one of k sampled attempts succeeds)."""
+    if n - c &lt; k:
+        return 1.0
+    return 1 - comb(n - c, k) / comb(n, k)
+
+
+def pass_hat_k(n: int, c: int, k: int) -&gt; float:
+    """P(all k sampled attempts succeed)."""
+    return comb(c, k) / comb(n, k)
+
+
+print(pass_at_k(10, 7, 3), pass_hat_k(10, 7, 3))   # about 0.99 and 0.29</code></pre></div></section>
+  <section id="environments-and-simulated-users"><h2>Environments and simulated users</h2>
+    <p>Agent evals need an <strong>environment</strong>: the tools, the data behind them and a way to reset to a known state before each run. Use fake implementations backed by an in-memory or containerised database for business tools, a fresh container or temporary directory for coding and file tools, and recorded or stubbed responses for external APIs. Never point evals at production systems.</p>
+    <figure class="diagram" id="fig-agent-eval-env"><div class="diagram-scroll"><svg viewBox="0 0 740 248" role="img" aria-label="A task specification resets the test database and gives the agent its goal. The agent converses with a simulated user and calls tools that read and write the test database. Recorded tool calls feed trajectory checks for forbidden actions and budgets, and the final database state feeds the end-state check." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="agent-eval-env-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="agent-eval-env-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="agent-eval-env-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="agent-eval-env-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="agent-eval-env-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><polyline points="171.0,70.0 201.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#agent-eval-env-arrow-default)"/><rect x="168.8" y="24.0" width="34.4" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">goal</text><polyline points="341.0,70.0 371.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#agent-eval-env-arrow-default)"/><rect x="335.8" y="24.0" width="40.5" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">calls</text><polyline points="511.0,70.0 541.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#agent-eval-env-arrow-default)"/><rect x="484.4" y="24.0" width="83.2" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">read / write</text><polyline points="241.0,98.0 241.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#agent-eval-env-arrow-default)"/><rect x="244.0" y="116.0" width="34.4" height="16" rx="4" class="dg-label-bg"/><text x="248.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">asks</text><polyline points="301.0,150.0 301.0,98.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#agent-eval-env-arrow-default)"/><rect x="304.0" y="116.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="308.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">replies</text><polyline points="441.0,98.0 441.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#agent-eval-env-arrow-default)"/><rect x="444.0" y="116.0" width="95.4" height="16" rx="4" class="dg-label-bg"/><text x="448.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">recorded calls</text><polyline points="611.0,98.0 611.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#agent-eval-env-arrow-default)"/><rect x="614.0" y="116.0" width="77.1" height="16" rx="4" class="dg-label-bg"/><text x="618.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">final state</text><polyline points="101.0,42.0 101.0,20.0 611.0,20.0 611.0,42.0" fill="none" style="stroke:rgba(148,163,184,0.55)" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#agent-eval-env-arrow-muted)"/><rect x="335.8" y="1.0" width="40.5" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="9.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">reset</text><rect x="31" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Task spec</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">goal, start state</text><rect x="201" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Agent</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">under test</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Fake tools</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">same schemas</text><path d="M541,49.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M541,49.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Test DB</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">reset per run</text><rect x="201" y="150.0" width="140" height="56" rx="28.0" class="dg-node dg-actor"/><text x="271.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Simulated user</text><text x="271.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">persona + goal</text><rect x="371" y="150.0" width="140" height="56" rx="8" class="dg-node dg-ok"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#6ee7b7">Trajectory check</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">forbidden, budget</text><rect x="541" y="150.0" width="140" height="56" rx="8" class="dg-node dg-ok"/><text x="611.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#6ee7b7">End-state check</text><text x="611.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">nothing else changed</text></svg></div><figcaption>An agent eval runs the agent against fake tools over a resettable test database, with a simulated user, then grades the end state and the recorded trajectory.</figcaption></figure>
+    <p>Conversational agents also need a counterpart. A <strong>simulated user</strong> is a model prompted with a persona and a hidden goal ("you want a refund for order A-1042, you are impatient, you only reveal the order number when asked"). It makes multi-turn evals repeatable, but it is itself a model: check samples of simulated conversations to make sure the user behaves realistically and does not leak the answer or give up too early.</p>
+    <div class="callout callout-tip"><strong>Tip</strong><p>Give every task an ID, a starting state, the user goal, the end-state check and the trajectory checks. With those five things you can rerun any task at any time and compare agents fairly.</p></div></section>
+  <section id="what-to-report"><h2>What to report</h2>
+    <p>Report task success with confidence intervals, pass^k for reliability, and per-slice results (task type, difficulty). Next to them, report the costs of success: median and p90 steps, tokens and wall-clock time per task, and the rate of forbidden or unsafe actions, which should be zero. Finally, read failed trajectories and label the cause (wrong tool, bad arguments, misread result, gave up, looped, policy violation), because those labels tell you whether to change tools, prompts, context or the model.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>A five-task agent benchmark</h2>
+    <ol><li>Write five tasks for a support agent over a small SQLite database: refund, address change, order lookup, a refused request and a two-step task.</li><li>For each, write the starting data, the user goal and an end-state check that also verifies nothing else changed.</li><li>Add trajectory checks: identity verified before writes, no forbidden tools, a step budget.</li><li>Run any agent (or a scripted stand-in) 5 times per task, resetting the database each time.</li><li>Compute success rate, pass^3 and median steps per task.</li><li>Label the cause of every failure and write down which change would fix the largest group.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Evaluating agents — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Grade the end state of the environment, not a reference path.</li><li>Check that nothing else changed (collateral damage).</li><li>Trajectory checks for forbidden actions, policy and budgets.</li><li>pass@k for retryable tasks, pass^k for consistency.</li><li>Resettable environments with fake tools; never production.</li><li>Report cost, steps and unsafe-action rate alongside success.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Grading</h3><table><tbody><tr><td><code>end-state check (code)</code></td><td>Objective, path-tolerant</td></tr><tr><td><code>nothing else changed</code></td><td>Collateral damage</td></tr><tr><td><code>hidden tests pass</code></td><td>Coding tasks</td></tr><tr><td><code>judge on final message</code></td><td>Communication quality</td></tr></tbody></table></div><div class="cheat-group"><h3>Trajectory</h3><table><tbody><tr><td><code>forbidden tools never called</code></td><td>Safety</td></tr><tr><td><code>required order of steps</code></td><td>Policy, verification</td></tr><tr><td><code>steps / tokens &lt;= budget</code></td><td>Efficiency</td></tr><tr><td><code>repeated identical calls</code></td><td>Loop detection</td></tr></tbody></table></div><div class="cheat-group"><h3>Reliability</h3><table><tbody><tr><td><code>pass@k = 1 - C(n-c,k)/C(n,k)</code></td><td>At least one success</td></tr><tr><td><code>pass^k = C(c,k)/C(n,k)</code></td><td>All k succeed</td></tr><tr><td><code>n trials per task</code></td><td>Needed for both</td></tr><tr><td><code>CI on success rate</code></td><td>Uncertainty</td></tr></tbody></table></div><div class="cheat-group"><h3>Environment</h3><table><tbody><tr><td><code>reset to known state per run</code></td><td>Repeatability</td></tr><tr><td><code>fake tools over test DB</code></td><td>Safe and fast</td></tr><tr><td><code>simulated user + hidden goal</code></td><td>Multi-turn</td></tr><tr><td><code>task: id, state, goal, checks</code></td><td>Task record</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Grading by exact match against one reference trajectory.</li><li>Running each task once and calling it reliable.</li><li>Evaluating against production systems.</li><li>Ignoring side effects outside the task's target.</li><li>Simulated users that leak the answer or give up instantly.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "Two agents both refund the right order, by different sequences of tool calls. How should an outcome-based eval score them?", "options": ["Both pass if the end state is correct", "Only the one matching the reference path", "Neither, since paths differ", "The shorter one fails"], "answer": 0, "explain": "End-state checks accept any valid path; efficiency can be reported separately."}, {"q": "An agent succeeds on 70% of attempts. Which metric shows the chance it succeeds on all of a user's next 3 tasks?", "options": ["pass^k", "pass@k", "recall@k", "MRR"], "answer": 0, "explain": "pass^k measures consistency: the probability that all k attempts succeed."}, {"q": "The refund is correct, but two unrelated orders were also modified. What check catches this?", "options": ["Verify nothing else changed", "A faithfulness judge", "A latency budget", "A pass@k estimate"], "answer": 0, "explain": "End-state checks should verify both the target change and the absence of collateral changes."}, {"q": "Why must the environment reset to a known state before each run?", "options": ["So runs are repeatable and comparable", "To reduce token usage per run", "Because tools cannot be called twice", "To make the agent faster"], "answer": 0, "explain": "Agents change state; without resets, earlier runs contaminate later ones."}, {"q": "What is a key risk of using a model as a simulated user?", "options": ["It may behave unrealistically or leak the goal", "It makes evals fully deterministic", "It cannot hold a persona at all", "It removes the need for end-state checks"], "answer": 0, "explain": "The simulator is a model too; sample and read its conversations to check realism."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="eh-rag-evals.html"><span>← Previous</span><strong>Evaluating RAG systems</strong></a>
+    <a class="pager-up" href="../education.html#evals">All Evals &amp; Harness modules</a>
+    <a class="pager-link pager-next" href="eh-eval-ops.html"><span>Next →</span><strong>Evals in CI and production</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=eh-agent-evals&amp;page=/education/eh-agent-evals.html&amp;title=Evaluating%20agents">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=eh-agent-evals&amp;page=/education/eh-agent-evals.html&amp;title=Evaluating%20agents">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

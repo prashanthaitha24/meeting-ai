@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Optimising cost, latency and quality — Evals &amp; Harness | ThavionAI Education</title>
+  <meta name="description" content="Model routing, caching, parallel tool calls, shorter context and the trade-offs between them." />
+  <meta property="og:title" content="Optimising cost, latency and quality — ThavionAI Education" />
+  <meta property="og:description" content="Model routing, caching, parallel tool calls, shorter context and the trade-offs between them." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/eh-optimization.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-evals" data-module="eh-optimization">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=eh-optimization&amp;page=/education/eh-optimization.html&amp;title=Optimising%20cost%2C%20latency%20and%20quality">Feedback</a>
+    <a href="../education.html#evals" class="nav-cta">All Evals &amp; Harness modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#evals">Evals &amp; Harness</a> › Stage 5: Building &amp; improving harnesses</div>
+    <h1>Optimising cost, latency and quality</h1>
+    <p class="lede">Model routing, caching, parallel tool calls, shorter context and the trade-offs between them.</p>
+    <div class="meta">
+      <span class="chip">Advanced</span>
+      <span class="chip">~40 min read</span>
+      <span class="chip">Module 19 of 20</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">Once an agent works, the next questions are how much it costs and how long users wait. Agent runs can involve dozens of model calls, each re-sending a growing context, so cost and latency grow quickly with task length. Optimising them without hurting quality needs the same discipline as everything else in this track: measure, change one thing, and compare on the benchmark. This lesson covers the right unit of measurement, where tokens and time actually go, and the main levers: fewer steps, smaller contexts, caching, model routing, parallelism, streaming and batch processing.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Measure cost and latency per successful task, not per call</li><li>Profile where tokens and time are spent in agent runs</li><li>Reduce steps and context with better tools and context policy</li><li>Use caching, routing, parallelism and batching appropriately</li><li>Choose configurations on the quality-cost frontier</li></ul>
+    </div>
+    <section id="the-right-unit-cost-per-successful-task"><h2>The right unit: cost per successful task</h2>
+    <p>Cost per call or per token is misleading for agents. A cheaper model that needs twice as many steps, or fails more often and gets retried, can cost more per completed task. Measure <strong>cost per successful task</strong> (total spend on a benchmark divided by tasks solved) and <strong>time to completion</strong>, alongside success rate. A change is only an optimisation if quality holds.</p>
+    <div class="code"><div class="code-cap">Comparing configurations by cost per success</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>def summarise(runs: list[dict], price_in: float, price_out: float) -&gt; dict:
+    """price_* = your provider's price per token for input and output."""
+    cost = sum(r["input_tokens"] * price_in + r["output_tokens"] * price_out for r in runs)
+    solved = sum(r["passed"] for r in runs)
+    secs = sorted(r["seconds"] for r in runs)
+    return {
+        "success": solved / len(runs),
+        "cost_per_success": cost / solved if solved else float("inf"),
+        "p50_seconds": secs[len(secs) // 2],
+        "p90_seconds": secs[int(len(secs) * 0.9)],
+    }</code></pre></div></section>
+  <section id="where-the-tokens-go"><h2>Where the tokens go</h2>
+    <p>In a loop, each model call re-sends the whole context. If the context grows by a few thousand tokens per step, total input tokens grow roughly with the square of the number of steps, so long runs are disproportionately expensive. Profile real traces: input versus output tokens, tokens per step over a run, and which layer (system prompt, tools, history, results) dominates. Usually input tokens from accumulated history and tool results dominate, which points at the biggest levers: fewer steps and smaller contexts.</p>
+    <ul><li><strong>Fewer steps</strong>: task-level tools, better error messages, clearer instructions, and parallel independent calls in one step.</li><li><strong>Smaller contexts</strong>: bounded tool results, compaction, just-in-time retrieval, clearing stale tool outputs.</li><li><strong>Shorter outputs</strong>: ask for concise reasoning and structured outputs where free text is not needed.</li></ul></section>
+  <section id="caching-routing-and-batching"><h2>Caching, routing and batching</h2>
+    <p>After reducing how many tokens a run needs, reduce what each token costs. These levers are powerful but each has a failure mode, so evaluate them on the benchmark like any other change and count every attempt, including escalations and retries, in the cost.</p>
+    <div class="table-wrap"><table><thead><tr><th>Lever</th><th>How</th><th>Watch out for</th></tr></thead><tbody><tr><td>Prompt caching</td><td>Stable prefix first so providers can reuse it</td><td>Anything dynamic near the top breaks it</td></tr><tr><td>Model routing</td><td>Smaller model for simple steps or tasks, larger for hard ones</td><td>Routing errors; measure end to end</td></tr><tr><td>Sub-agents on smaller models</td><td>Search and summarise with a cheaper model</td><td>Quality of returned summaries</td></tr><tr><td>Batch processing</td><td>Asynchronous batch endpoints for evals and offline jobs</td><td>Not for interactive use; slower turnaround</td></tr><tr><td>Result caching</td><td>Reuse tool results and outputs for identical inputs</td><td>Stale data; key on everything that matters</td></tr></tbody></table></div>
+    <div class="code"><div class="code-cap">A simple router with an escalation path</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>def route(task: dict) -&gt; str:
+    """Pick a model tier from cheap task features; escalate on failure."""
+    hard = task["files_touched_estimate"] &gt; 3 or task["type"] in {"debug", "design"}
+    return "large" if hard else "small"
+
+
+def run_with_escalation(task):
+    tier = route(task)
+    result = run_task(task, model_tier=tier)
+    if not result.passed and tier == "small":
+        result = run_task(task, model_tier="large")     # count both runs in the cost
+    return result</code></pre></div>
+    <p>Routing deserves particular care. A router that sends a hard task to a small model wastes the small model's attempt and then pays for the large one anyway, so a bad router can cost more than always using the large model. Start with simple, explainable rules based on task features, measure the escalation rate, and only consider a learned router once you have enough labelled runs to train and evaluate it.</p></section>
+  <section id="latency"><h2>Latency</h2>
+    <p>Latency in agents comes mostly from the number of sequential model calls and slow tools, not from any single call. Users also judge speed by how soon they see something useful, so visible progress matters as much as total time.</p>
+    <ul><li><strong>Stream</strong> model output and progress (current step, task list) so users see work immediately; perceived latency matters as much as total time.</li><li><strong>Parallelise</strong> independent tool calls and sub-agents.</li><li><strong>Prefer fast tools</strong>: an indexed code search beats scanning files; a precomputed summary beats reading a long document every time.</li><li><strong>Cut wasted steps</strong>: loops, re-reading the same file, and retries caused by vague errors.</li><li><strong>Set time budgets</strong> and return partial results rather than making users wait indefinitely.</li></ul></section>
+  <section id="choosing-on-the-frontier"><h2>Choosing on the frontier</h2>
+    <p>Plot each configuration's success rate against its cost per success (or latency). Configurations that are worse on both axes than another are dominated and can be discarded; the rest form a <strong>frontier</strong> of sensible trade-offs. The product decides where to sit on it: an interactive assistant may favour latency, a nightly batch job cost, and a high-stakes workflow quality. Re-run the comparison whenever models or prices change, because the frontier moves.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Halve the cost without losing quality</h2>
+    <ol><li>Run your benchmark and record success, cost per success, p50 and p90 time.</li><li>Profile tokens per step and per layer from traces; find the biggest consumer.</li><li>Apply one lever (bounded results, compaction or caching-friendly ordering) and re-run.</li><li>Add a small-model route with escalation for easy tasks and re-run, counting both attempts.</li><li>Parallelise independent read-only tool calls and measure latency change.</li><li>Plot all configurations on success versus cost per success and pick one from the frontier.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Optimising cost, latency and quality — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Measure cost per successful task and time to completion.</li><li>Input tokens grow fast with steps; fewer steps and smaller contexts win.</li><li>Stable prefixes for caching; routing with escalation.</li><li>Batch endpoints for evals and offline work.</li><li>Stream and parallelise for latency.</li><li>Pick from the success versus cost frontier; re-check when things change.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Measure</h3><table><tbody><tr><td><code>cost / tasks solved</code></td><td>Cost per success</td></tr><tr><td><code>p50 / p90 seconds</code></td><td>Time to completion</td></tr><tr><td><code>tokens per step over the run</code></td><td>Context growth</td></tr><tr><td><code>tokens per layer</code></td><td>Biggest consumer</td></tr></tbody></table></div><div class="cheat-group"><h3>Fewer tokens</h3><table><tbody><tr><td><code>bounded tool results</code></td><td>Smaller history</td></tr><tr><td><code>compaction</code></td><td>Long runs</td></tr><tr><td><code>task-level tools</code></td><td>Fewer steps</td></tr><tr><td><code>concise structured outputs</code></td><td>Fewer output tokens</td></tr></tbody></table></div><div class="cheat-group"><h3>Cheaper tokens</h3><table><tbody><tr><td><code>prompt caching</code></td><td>Stable prefix</td></tr><tr><td><code>route small -&gt; escalate large</code></td><td>Model tiers</td></tr><tr><td><code>cheaper sub-agents</code></td><td>Search, summarise</td></tr><tr><td><code>batch API for evals</code></td><td>Offline work</td></tr></tbody></table></div><div class="cheat-group"><h3>Faster</h3><table><tbody><tr><td><code>stream progress</code></td><td>Perceived latency</td></tr><tr><td><code>parallel reads</code></td><td>Wall-clock</td></tr><tr><td><code>indexed search</code></td><td>Fast tools</td></tr><tr><td><code>time budget + partial result</code></td><td>Bounded waits</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Optimising price per token while cost per success rises.</li><li>Routing to a small model without counting escalations.</li><li>Dynamic content at the top of the prompt defeating caching.</li><li>Optimising latency by cutting verification steps.</li><li>Not re-running comparisons when models or prices change.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "A cheaper model halves the price per token but needs three times as many steps per task. What should you compare?", "options": ["Cost per successful task", "Price per token only", "Output tokens per call", "Model parameter count"], "answer": 0, "explain": "More steps and failures can make a cheaper model more expensive per completed task."}, {"q": "Why do long agent runs cost disproportionately more?", "options": ["Each call re-sends a growing context", "Providers charge more after an hour", "Tool calls are billed per step", "Output tokens double each step"], "answer": 0, "explain": "Total input tokens grow roughly with the square of the step count when context grows each step."}, {"q": "Where are batch processing endpoints most appropriate?", "options": ["Offline evals and bulk jobs", "Interactive chat sessions", "Approval prompts", "Streaming progress updates"], "answer": 0, "explain": "Batch processing trades turnaround time for cost, which suits work no user is waiting on."}, {"q": "A configuration has lower success and higher cost than another. What is it on the frontier?", "options": ["Dominated, so discard it", "The best trade-off", "The latency winner", "The default choice"], "answer": 0, "explain": "It is worse on both axes, so another configuration is better in every respect."}, {"q": "What is a risky way to reduce latency?", "options": ["Skipping verification steps", "Streaming progress", "Parallel read-only calls", "Faster indexed search"], "answer": 0, "explain": "Removing verification trades correctness for speed, which usually costs more later."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="eh-harness-evals.html"><span>← Previous</span><strong>Evaluating the harness itself</strong></a>
+    <a class="pager-up" href="../education.html#evals">All Evals &amp; Harness modules</a>
+    <a class="pager-link pager-next" href="eh-production.html"><span>Next →</span><strong>Shipping agents to production</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=eh-optimization&amp;page=/education/eh-optimization.html&amp;title=Optimising%20cost%2C%20latency%20and%20quality">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=eh-optimization&amp;page=/education/eh-optimization.html&amp;title=Optimising%20cost%2C%20latency%20and%20quality">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

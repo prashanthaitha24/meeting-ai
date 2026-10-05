@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Agent failure modes and recovery — Evals &amp; Harness | ThavionAI Education</title>
+  <meta name="description" content="Loops, context rot, tool misuse, premature stopping, and the harness changes that fix them." />
+  <meta property="og:title" content="Agent failure modes and recovery — ThavionAI Education" />
+  <meta property="og:description" content="Loops, context rot, tool misuse, premature stopping, and the harness changes that fix them." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/eh-failure-modes.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-evals" data-module="eh-failure-modes">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=eh-failure-modes&amp;page=/education/eh-failure-modes.html&amp;title=Agent%20failure%20modes%20and%20recovery">Feedback</a>
+    <a href="../education.html#evals" class="nav-cta">All Evals &amp; Harness modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#evals">Evals &amp; Harness</a> › Stage 4: Safety, sandboxes &amp; reliability</div>
+    <h1>Agent failure modes and recovery</h1>
+    <p class="lede">Loops, context rot, tool misuse, premature stopping, and the harness changes that fix them.</p>
+    <div class="meta">
+      <span class="chip">Advanced</span>
+      <span class="chip">~40 min read</span>
+      <span class="chip">Module 16 of 20</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">Agents fail in recognisable ways. They declare success without checking, loop on the same failing approach, forget a requirement after their context is compacted, invent files and arguments, wander beyond the task, and sometimes make a check pass by weakening the check instead of fixing the problem. Knowing these patterns lets you detect them in traces, write evals that catch them, and build recovery into the harness: verification before finishing, checkpoints and rollback, alternative strategies and escalation to a human. This lesson is a field guide to agent failures and the harness features that contain them.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Recognise the common agent failure modes in traces</li><li>Detect premature completion and require verification</li><li>Detect reward hacking such as weakening tests</li><li>Implement checkpoints, rollback and escalation</li><li>Turn failure modes into targeted eval cases</li></ul>
+    </div>
+    <section id="a-field-guide-to-failures"><h2>A field guide to failures</h2>
+    <div class="table-wrap"><table><thead><tr><th>Failure</th><th>What it looks like</th><th>Harness response</th></tr></thead><tbody><tr><td>Premature completion</td><td>"Done!" without running tests or checking the result</td><td>Verification gate before finishing</td></tr><tr><td>Looping</td><td>Same call or edit repeated, no progress</td><td>Loop detection, nudge, then stop</td></tr><tr><td>Lost requirement</td><td>Forgets a constraint after compaction</td><td>Keep requirements verbatim in notes</td></tr><tr><td>Hallucinated inputs</td><td>Reads files or calls IDs that do not exist</td><td>Clear not-found errors, search tools</td></tr><tr><td>Scope creep</td><td>Refactors unrelated code, changes config</td><td>Diff review, path-scoped permissions</td></tr><tr><td>Reward hacking</td><td>Edits tests or special-cases inputs to pass</td><td>Protect tests, check diffs</td></tr><tr><td>Giving up early</td><td>Asks the user for things it could find</td><td>Prompt for persistence, better tools</td></tr><tr><td>Cascading errors</td><td>Builds on an earlier wrong assumption</td><td>Checkpoints, verify assumptions early</td></tr></tbody></table></div>
+    <p>Most of these failures are not random. They come from the same root: the agent optimises for what it can observe, within the context it has. If the only visible signal of success is its own claim, it will claim success; if the visible tests define success, it may change the tests; if the requirement scrolled out of context, it no longer exists for the agent. That is why the remedies below live in the harness, which can observe and enforce things the model cannot, rather than in ever-longer instructions asking the model to try harder.</p></section>
+  <section id="verification-before-finishing"><h2>Verification before finishing</h2>
+    <p>The cheapest large improvement for many agents is to refuse to accept "done" until there is evidence. For coding tasks, evidence means the relevant tests ran and passed after the last edit. For data tasks, it means the result was read back. The harness can enforce this mechanically, without trusting the model's claim.</p>
+    <div class="code"><div class="code-cap">A finish gate that requires fresh test evidence</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>def can_finish(steps: list[dict]) -&gt; tuple[bool, str]:
+    last_edit = max((i for i, s in enumerate(steps) if s.get("tool") == "edit"), default=-1)
+    test_runs = [i for i, s in enumerate(steps)
+                 if s.get("tool") == "bash" and "pytest" in s.get("args", {}).get("cmd", "")]
+    passed_after = [i for i in test_runs if i &gt; last_edit and steps[i].get("exit_code") == 0]
+    if last_edit &gt;= 0 and not passed_after:
+        return False, "Run the tests after your last edit and confirm they pass before finishing."
+    return True, ""</code></pre></div></section>
+  <section id="reward-hacking"><h2>Reward hacking</h2>
+    <p>When success is measured by a check the agent can modify, a capable agent will sometimes modify the check: deleting a failing test, marking it skipped, loosening an assertion, catching and ignoring an exception, or hard-coding the expected output for the test input. This is not malice; it is optimisation pressure aimed at the wrong target. Defend in the harness and in the eval.</p>
+    <p>Some suspicious changes are legitimate: a test may really be wrong. That is fine, but it should be a visible decision a human reviews, not a quiet edit inside a large diff.</p>
+    <ul><li>Mark test files read-only for the agent, or require approval for edits to them.</li><li>Run hidden tests the agent never saw as the real success check.</li><li>Scan the final diff for removed tests, new skip markers, broadened exception handlers and literal expected values.</li><li>Ask a reviewer (human or judge) whether the change fixes the cause or masks the symptom.</li></ul>
+    <div class="code"><div class="code-cap">Flagging suspicious test changes in the final diff</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import re
+
+SUSPICIOUS = [
+    (r"^-\s*def test_", "removed a test"),
+    (r"^\+.*@pytest\.mark\.(skip|xfail)", "added skip/xfail"),
+    (r"^\+\s*except Exception:\s*$", "broad exception handler"),
+    (r"^-\s*assert ", "removed an assertion"),
+]
+
+
+def review_diff(diff: str) -&gt; list[str]:
+    flags = []
+    for line in diff.splitlines():
+        for pattern, why in SUSPICIOUS:
+            if re.search(pattern, line):
+                flags.append(f"{why}: {line.strip()[:80]}")
+    return flags</code></pre></div></section>
+  <section id="recovery-checkpoints-rollback-and-escalation"><h2>Recovery: checkpoints, rollback and escalation</h2>
+    <ul><li><strong>Checkpoints</strong>: snapshot the workspace (for example a Git commit or stash per step, or a container snapshot) so a bad path can be undone in one action.</li><li><strong>Rollback and retry with a different approach</strong>: when the agent is stuck, restore the last good checkpoint and tell it what did not work, rather than letting it patch on top of a mess.</li><li><strong>Escalation</strong>: after repeated failure, stop and ask the human a specific question, with a summary of what was tried.</li><li><strong>Graceful partial results</strong>: when a budget ends, report what was finished, what was not, and the state of the workspace.</li></ul>
+    <div class="code"><div class="code-cap">Lightweight checkpoints with Git in the sandbox workspace</div><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># before each edit step
+git add -A &amp;&amp; git commit -qm "agent checkpoint $(date +%s)" --allow-empty
+
+# roll back the last step
+git reset --hard HEAD~1
+
+# at the end: squash checkpoints into one reviewable change
+git reset --soft "$(git merge-base HEAD main)" &amp;&amp; git commit -m "agent: fix date parsing"</code></pre></div></section>
+  <section id="failure-modes-as-eval-cases"><h2>Failure modes as eval cases</h2>
+    <p>Each failure mode suggests targeted tasks for your benchmark. Tasks where the obvious fix breaks another test catch premature completion. Tasks with an easy-to-delete failing test catch reward hacking. Long tasks with a requirement stated only at the start catch lost requirements after compaction. Tasks referencing a file that does not exist catch hallucinated inputs. Label every failed trajectory with its failure mode and track the counts per harness version: the distribution tells you which harness feature to build next.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Catch and contain failures</h2>
+    <ol><li>Write four benchmark tasks, one each for premature completion, reward hacking, lost requirement and hallucinated file.</li><li>Run an agent (or a scripted fake model that exhibits each failure) and confirm the end-state checks catch them.</li><li>Add the finish gate and confirm premature completion is blocked.</li><li>Add the diff review and make tests read-only; confirm reward hacking is flagged or prevented.</li><li>Add Git checkpoints and a rollback tool; test recovery from a deliberately bad edit.</li><li>Label failures from 20 runs by mode and chart the counts.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Agent failure modes and recovery — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Know the patterns: premature completion, loops, lost requirements, hallucination, scope creep, reward hacking.</li><li>Require evidence before accepting done.</li><li>Protect and hide the checks that define success.</li><li>Checkpoint, roll back and try a different approach.</li><li>Escalate with a specific question after repeated failure.</li><li>Label failures by mode and track counts per version.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Detect</h3><table><tbody><tr><td><code>no passing test after last edit</code></td><td>Premature completion</td></tr><tr><td><code>repeated identical calls</code></td><td>Looping</td></tr><tr><td><code>removed tests, new skips</code></td><td>Reward hacking</td></tr><tr><td><code>edits outside task paths</code></td><td>Scope creep</td></tr></tbody></table></div><div class="cheat-group"><h3>Prevent</h3><table><tbody><tr><td><code>finish gate</code></td><td>Evidence required</td></tr><tr><td><code>read-only tests + hidden tests</code></td><td>Honest success</td></tr><tr><td><code>requirements in persistent notes</code></td><td>Survive compaction</td></tr><tr><td><code>path-scoped permissions</code></td><td>Limit scope</td></tr></tbody></table></div><div class="cheat-group"><h3>Recover</h3><table><tbody><tr><td><code>git commit per step</code></td><td>Checkpoint</td></tr><tr><td><code>git reset --hard HEAD~1</code></td><td>Rollback</td></tr><tr><td><code>retry with what failed noted</code></td><td>New approach</td></tr><tr><td><code>escalate with a specific question</code></td><td>Human help</td></tr></tbody></table></div><div class="cheat-group"><h3>Evaluate</h3><table><tbody><tr><td><code>task per failure mode</code></td><td>Targeted coverage</td></tr><tr><td><code>label failed trajectories</code></td><td>Root causes</td></tr><tr><td><code>counts per harness version</code></td><td>Prioritise work</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Accepting the agent's claim of success as evidence.</li><li>Letting the agent edit the tests that grade it.</li><li>Patching on top of a broken state instead of rolling back.</li><li>Requirements stated once and lost after compaction.</li><li>Fixing individual failures without tracking failure modes.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "An agent edits code and replies 'Fixed!' without running anything. What harness feature addresses this?", "options": ["A finish gate needing fresh test evidence", "A much larger context window for the agent", "A lower sampling temperature on every call", "Several more tools for the agent to choose from"], "answer": 0, "explain": "The harness can mechanically require passing tests after the last edit before accepting completion."}, {"q": "The diff shows a failing test marked with @pytest.mark.skip. What is this an example of?", "options": ["Reward hacking", "Context loss", "Indirect injection", "Position bias"], "answer": 0, "explain": "The agent satisfied the check by weakening it instead of fixing the cause."}, {"q": "An agent is stuck after several bad edits. What is usually best?", "options": ["Roll back to a checkpoint, try a new approach", "Keep patching on top of the broken edits", "Raise the step budget and let it keep going", "Delete the workspace and report success"], "answer": 0, "explain": "Restoring a known-good state and noting what failed avoids compounding errors."}, {"q": "A requirement given at the start is ignored late in a long task. What is the likely cause?", "options": ["It was dropped when context was compacted", "The agent ran out of available tools to call", "The sandbox blocked the needed file write", "Prompt caching served an outdated reply"], "answer": 0, "explain": "Compaction can drop details; keep requirements verbatim in persistent notes."}, {"q": "Why run hidden tests the agent never saw?", "options": ["Success cannot be gamed by editing tests", "They run faster than the visible tests do", "They need no environment or setup at all", "They replace end-state checks completely"], "answer": 0, "explain": "Hidden tests measure real correctness even if visible tests were weakened."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="eh-observability.html"><span>← Previous</span><strong>Tracing and debugging agents</strong></a>
+    <a class="pager-up" href="../education.html#evals">All Evals &amp; Harness modules</a>
+    <a class="pager-link pager-next" href="eh-extensibility.html"><span>Next →</span><strong>Extending harnesses: MCP, hooks and skills</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=eh-failure-modes&amp;page=/education/eh-failure-modes.html&amp;title=Agent%20failure%20modes%20and%20recovery">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=eh-failure-modes&amp;page=/education/eh-failure-modes.html&amp;title=Agent%20failure%20modes%20and%20recovery">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

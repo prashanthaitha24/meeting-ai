@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Designing tools for agents — Evals &amp; Harness | ThavionAI Education</title>
+  <meta name="description" content="Granularity, names and descriptions, schemas, errors as feedback, idempotency and output size." />
+  <meta property="og:title" content="Designing tools for agents — ThavionAI Education" />
+  <meta property="og:description" content="Granularity, names and descriptions, schemas, errors as feedback, idempotency and output size." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/eh-tool-design.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-evals" data-module="eh-tool-design">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=eh-tool-design&amp;page=/education/eh-tool-design.html&amp;title=Designing%20tools%20for%20agents">Feedback</a>
+    <a href="../education.html#evals" class="nav-cta">All Evals &amp; Harness modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#evals">Evals &amp; Harness</a> › Stage 3: Harness fundamentals</div>
+    <h1>Designing tools for agents</h1>
+    <p class="lede">Granularity, names and descriptions, schemas, errors as feedback, idempotency and output size.</p>
+    <div class="meta">
+      <span class="chip">Intermediate to advanced</span>
+      <span class="chip">~40 min read</span>
+      <span class="chip">Module 10 of 20</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">Tools are the agent's hands and eyes. The model never sees your code, only each tool's name, description and argument schema, and then whatever text the tool returns. That makes tool design a kind of interface design for a very literal, very fast reader who cannot ask questions. Good tools are few, clearly named, hard to misuse, and return results that make the next step obvious. This lesson covers tool definitions and schemas, how to choose the right level of abstraction, designing results and errors, safety properties such as idempotency and dry runs, and how to evaluate tools.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Write tool definitions with clear names, descriptions and JSON schemas</li><li>Choose task-level tools over thin wrappers around low-level APIs</li><li>Design concise, structured results and actionable error messages</li><li>Make tools safe with validation, idempotency, limits and dry runs</li><li>Evaluate and iterate on tools using agent transcripts</li></ul>
+    </div>
+    <section id="what-the-model-actually-sees"><h2>What the model actually sees</h2>
+    <p>A tool is offered to the model as a name, a natural-language description and a JSON Schema for its arguments. The model decides whether to call it and with what arguments using only that text. Treat the description like documentation for a new colleague: say what the tool does, when to use it and when not to, what the arguments mean with formats and examples, and what it returns.</p>
+    <div class="code"><div class="code-cap">A tool definition with a precise schema</div><div class="code-head"><span>json</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>{
+  "name": "orders_search",
+  "description": "Find a customer's orders (max 10, newest first). Use before a refund.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "customer_email": {"type": "string", "format": "email"},
+      "status": {"type": "string", "enum": ["open", "shipped", "delivered", "refunded"]},
+      "placed_after": {"type": "string", "description": "ISO date, e.g. 2026-09-01"}
+    },
+    "required": ["customer_email"],
+    "additionalProperties": false
+  }
+}</code></pre></div>
+    <ul><li>Use <strong>enums</strong> for closed sets so the model cannot invent values.</li><li>Mark <strong>required</strong> fields and forbid extra properties.</li><li>Give <strong>formats and examples</strong> for dates, IDs and units.</li><li>Prefer <strong>unambiguous names</strong> with a namespace prefix (<code>orders_search</code>, <code>orders_refund</code>) when you have many tools.</li></ul></section>
+  <section id="the-right-level-of-abstraction"><h2>The right level of abstraction</h2>
+    <p>Wrapping every REST endpoint as a tool is tempting and usually wrong. Low-level tools force the agent to chain many calls, carry IDs between them and handle pagination, and every extra step is a chance to fail and a cost in tokens. Design tools around the <strong>tasks</strong> the agent performs. If agents always look up a customer, then their orders, then the shipment, a single <code>orders_search</code> returning the joined, relevant fields serves them better.</p>
+    <div class="table-wrap"><table><thead><tr><th>Low-level</th><th>Task-level</th></tr></thead><tbody><tr><td>list_users, get_user, list_orders, get_shipment</td><td>orders_search(customer_email, status)</td></tr><tr><td>read_file with no limits</td><td>read_file(path, offset, limit) with line numbers</td></tr><tr><td>run_sql(query)</td><td>orders_report(period, group_by) with a fixed safe query</td></tr><tr><td>send_http(method, url, body)</td><td>tickets_create(title, priority, body)</td></tr></tbody></table></div>
+    <p>Fewer tools also help selection: when two tools overlap, the model has to guess, and it will guess differently on different runs. Merge or remove overlapping tools before writing longer descriptions to tell them apart.</p></section>
+  <section id="results-and-errors-that-drive-the-next-step"><h2>Results and errors that drive the next step</h2>
+    <p>The tool result is the agent's only view of what happened. Return what the next decision needs and little else: relevant fields rather than whole records, human-readable names next to opaque IDs, and a clear note when results were truncated and how to get more. Errors deserve the same care. A stack trace or "400 Bad Request" leaves the agent guessing; an error that says what was wrong and how to fix it usually leads to a correct retry.</p>
+    <figure class="diagram" id="fig-tool-call-path"><div class="diagram-scroll"><svg viewBox="0 0 740 248" role="img" aria-label="The model requests a tool call. Arguments are validated on the server; invalid ones return an actionable error message to the model. Valid calls run the tool logic against the business system, and the result is formatted, trimmed and annotated with a truncation note before returning to the model." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="tool-call-path-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="tool-call-path-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="tool-call-path-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="tool-call-path-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="tool-call-path-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><polyline points="171.0,70.0 201.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#tool-call-path-arrow-default)"/><rect x="153.6" y="24.0" width="64.9" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">arguments</text><polyline points="341.0,70.0 371.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#tool-call-path-arrow-default)"/><rect x="335.8" y="24.0" width="40.5" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">valid</text><polyline points="511.0,70.0 541.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#tool-call-path-arrow-default)"/><rect x="484.4" y="24.0" width="83.2" height="16" rx="4" class="dg-label-bg"/><text x="526.0" y="32.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">read / write</text><polyline points="441.0,98.0 441.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#tool-call-path-arrow-default)"/><polyline points="371.0,178.0 101.0,178.0 101.0,98.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#tool-call-path-arrow-default)"/><rect x="188.3" y="159.0" width="95.4" height="16" rx="4" class="dg-label-bg"/><text x="236.0" y="167.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">concise result</text><polyline points="271.0,42.0 271.0,20.0 101.0,20.0 101.0,42.0" fill="none" style="stroke:#f87171" stroke-width="1.6" marker-end="url(#tool-call-path-arrow-danger)"/><rect x="132.2" y="1.0" width="107.6" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="9.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:#f87171">actionable error</text><rect x="31" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Model</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">requests call</text><rect x="201" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="271.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Validate args</text><text x="271.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">schema + policy</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="441.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Tool logic</text><text x="441.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">idempotent</text><path d="M541,49.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M541,49.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Business system</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">user&#x27;s permissions</text><rect x="371" y="150.0" width="140" height="56" rx="8" class="dg-node dg-ok"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#6ee7b7">Format result</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">fields + trunc. note</text></svg></div><figcaption>A tool call passes server-side validation before any logic runs; invalid arguments return an actionable error, and results are trimmed and formatted for the next step.</figcaption></figure>
+    <div class="code"><div class="code-cap">Validated arguments, bounded output and actionable errors</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>from pydantic import BaseModel, EmailStr, ValidationError
+
+
+class SearchArgs(BaseModel):
+    customer_email: EmailStr
+    status: str | None = None
+
+
+def orders_search(raw_args: dict) -&gt; str:
+    try:
+        args = SearchArgs(**raw_args)
+    except ValidationError as e:
+        msg = e.errors()[0]["msg"]
+        return f"Invalid arguments: {msg}. Pass customer_email as an email address."
+    rows = db.find_orders(args.customer_email, args.status)
+    if not rows:
+        return f"No orders for {args.customer_email}. Check spelling or ask for the order ID."
+    lines = [f"{r.id} | {r.placed:%Y-%m-%d} | {r.status} | {r.total:.2f}" for r in rows[:10]]
+    more = ""
+    if len(rows) &gt; 10:
+        more = f"\n({len(rows) - 10} older orders not shown; narrow with status)"
+    return "id | placed | status | total\n" + "\n".join(lines) + more</code></pre></div></section>
+  <section id="safety-properties"><h2>Safety properties</h2>
+    <ul><li><strong>Validate everything</strong> on the server side; the schema guides the model but does not enforce anything.</li><li><strong>Idempotency</strong>: write tools accept an idempotency key or check current state, so a retried call does not refund twice.</li><li><strong>Limits</strong>: cap amounts, rows, file sizes and time; reject requests outside policy with a clear message.</li><li><strong>Dry runs and previews</strong>: for consequential actions, a <code>preview</code> mode returns what would change, which a human or the agent can confirm.</li><li><strong>Least privilege</strong>: tools act with the end user's permissions, not a superuser account.</li><li><strong>Mark side effects</strong>: label tools read-only or write so the permission layer can treat them differently.</li></ul></section>
+  <section id="evaluating-and-iterating-on-tools"><h2>Evaluating and iterating on tools</h2>
+    <p>Tools are evaluated through the agent. Run a benchmark of realistic tasks and read the transcripts with tool design in mind: which tools were never used, which were used wrongly, which arguments were invalid, where the agent called three tools in a row to answer one question, and which results it misread. Count invalid-argument rates and calls per task. Then change one tool description, schema or result format at a time and re-run. Small edits to a description often fix errors that look like model failures.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Redesign a toolset</h2>
+    <ol><li>Start from a naive toolset: one tool per REST endpoint for a small order system (users, orders, shipments, refunds).</li><li>Write 10 realistic tasks and run an agent (or trace them by hand) noting calls per task and errors.</li><li>Replace the toolset with three task-level tools with enums, required fields and examples.</li><li>Add pydantic validation, bounded results with a truncation note, and actionable error messages.</li><li>Add an idempotency key and a preview mode to the refund tool.</li><li>Re-run the 10 tasks and compare calls per task, invalid-argument rate and success.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Designing tools for agents — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>The model sees only name, description, schema and results.</li><li>Design tools around tasks, not endpoints.</li><li>Few non-overlapping tools beat many similar ones.</li><li>Results: relevant fields, readable, bounded, with truncation notes.</li><li>Errors say what was wrong and how to fix it.</li><li>Validate server-side; idempotency, limits, previews, least privilege.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Definition</h3><table><tbody><tr><td><code>name: namespace_verb</code></td><td>orders_search</td></tr><tr><td><code>description: what, when, when not</code></td><td>Selection</td></tr><tr><td><code>enum, format, required</code></td><td>Constrain arguments</td></tr><tr><td><code>additionalProperties: false</code></td><td>No invented fields</td></tr></tbody></table></div><div class="cheat-group"><h3>Results</h3><table><tbody><tr><td><code>only fields the next step needs</code></td><td>Token-efficient</td></tr><tr><td><code>names next to IDs</code></td><td>Readable</td></tr><tr><td><code>"N more not shown; narrow with X"</code></td><td>Truncation note</td></tr><tr><td><code>error: problem + how to fix</code></td><td>Self-correction</td></tr></tbody></table></div><div class="cheat-group"><h3>Safety</h3><table><tbody><tr><td><code>server-side validation</code></td><td>Schemas do not enforce</td></tr><tr><td><code>idempotency_key</code></td><td>Safe retries</td></tr><tr><td><code>preview / dry_run</code></td><td>Confirm before acting</td></tr><tr><td><code>read-only vs write label</code></td><td>Permission routing</td></tr></tbody></table></div><div class="cheat-group"><h3>Evaluate</h3><table><tbody><tr><td><code>invalid-argument rate</code></td><td>Schema clarity</td></tr><tr><td><code>calls per task</code></td><td>Abstraction level</td></tr><tr><td><code>unused tools</code></td><td>Remove or rename</td></tr><tr><td><code>one tool change per run</code></td><td>Attribution</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>One tool per API endpoint.</li><li>Overlapping tools with near-identical descriptions.</li><li>Returning entire records or unbounded output.</li><li>Errors like "400 Bad Request" with no guidance.</li><li>Write tools without idempotency or limits.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "Agents often call list_users, get_user, list_orders and get_shipment in sequence. What is the better design?", "options": ["One task-level orders_search tool", "A longer description on each tool", "A higher step budget", "A separate tool per field"], "answer": 0, "explain": "Task-level tools reduce steps, carried IDs and chances to fail."}, {"q": "A tool returns \"400 Bad Request\" and the agent keeps retrying the same call. What should change?", "options": ["Return what was wrong and how to fix it", "Hide errors from the agent", "Lower the temperature", "Add another overlapping tool"], "answer": 0, "explain": "Actionable error messages let the model correct its arguments."}, {"q": "Why must a refund tool support an idempotency key?", "options": ["Retries must not refund twice", "It speeds up the database", "Models require it", "It shortens the description"], "answer": 0, "explain": "Agents and harnesses retry; idempotency makes a retried write safe."}, {"q": "What does a JSON Schema in a tool definition guarantee on its own?", "options": ["Nothing; validate on the server", "That arguments are always valid", "That the tool is read-only", "That the model will call it"], "answer": 0, "explain": "The schema guides the model, but only server-side validation enforces it."}, {"q": "Transcripts show one tool is never used and another is often called with invalid dates. What do you do first?", "options": ["Remove or fix them, one change per run", "Switch to a different model", "Add five more tools", "Raise the step budget"], "answer": 0, "explain": "Tool problems seen in transcripts are often fixed by description or schema changes, measured one at a time."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="eh-harness-anatomy.html"><span>← Previous</span><strong>Anatomy of an agent harness</strong></a>
+    <a class="pager-up" href="../education.html#evals">All Evals &amp; Harness modules</a>
+    <a class="pager-link pager-next" href="eh-context-engineering.html"><span>Next →</span><strong>Context engineering</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=eh-tool-design&amp;page=/education/eh-tool-design.html&amp;title=Designing%20tools%20for%20agents">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=eh-tool-design&amp;page=/education/eh-tool-design.html&amp;title=Designing%20tools%20for%20agents">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

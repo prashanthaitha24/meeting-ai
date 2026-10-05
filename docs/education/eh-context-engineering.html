@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Context engineering — Evals &amp; Harness | ThavionAI Education</title>
+  <meta name="description" content="System prompts, what to load when, compaction and summaries, memory files, token budgets and caching." />
+  <meta property="og:title" content="Context engineering — ThavionAI Education" />
+  <meta property="og:description" content="System prompts, what to load when, compaction and summaries, memory files, token budgets and caching." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/eh-context-engineering.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-evals" data-module="eh-context-engineering">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=eh-context-engineering&amp;page=/education/eh-context-engineering.html&amp;title=Context%20engineering">Feedback</a>
+    <a href="../education.html#evals" class="nav-cta">All Evals &amp; Harness modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#evals">Evals &amp; Harness</a> › Stage 3: Harness fundamentals</div>
+    <h1>Context engineering</h1>
+    <p class="lede">System prompts, what to load when, compaction and summaries, memory files, token budgets and caching.</p>
+    <div class="meta">
+      <span class="chip">Intermediate to advanced</span>
+      <span class="chip">~40 min read</span>
+      <span class="chip">Module 11 of 20</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">Everything an agent knows at a given step is what the harness put into the context window for that request. Context engineering is the practice of deciding what goes in, in what order, in what form, and what gets left out, summarised or fetched later. It matters because context is finite, costs money on every call, and degrades in quality when it is cluttered: models attend less reliably to details buried in long, noisy prompts. This lesson covers the layers of context, budgeting, just-in-time retrieval, compaction, persistent notes, sub-agents for isolation, and ordering for prompt caching.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>List the layers of an agent's context and what belongs in each</li><li>Budget the context window and measure what consumes it</li><li>Prefer just-in-time retrieval over preloading large content</li><li>Apply compaction, persistent notes and sub-agents to long tasks</li><li>Order context to take advantage of prompt caching</li></ul>
+    </div>
+    <section id="the-layers-of-context"><h2>The layers of context</h2>
+    <div class="table-wrap"><table><thead><tr><th>Layer</th><th>Changes</th><th>Contents</th></tr></thead><tbody><tr><td>System prompt</td><td>Rarely</td><td>Role, rules, safety policy, output format</td></tr><tr><td>Tool definitions</td><td>Rarely</td><td>Names, descriptions, schemas</td></tr><tr><td>Project instructions</td><td>Per project</td><td>Conventions, commands, gotchas (for example an AGENTS.md file)</td></tr><tr><td>Retrieved knowledge</td><td>Per task</td><td>Docs, code, records fetched for this task</td></tr><tr><td>Conversation history</td><td>Every turn</td><td>User messages, model replies, tool calls</td></tr><tr><td>Tool results</td><td>Every step</td><td>Outputs of commands, searches and reads</td></tr></tbody></table></div>
+    <p>Each layer competes for the same window. In long agent sessions, tool results usually grow fastest: a few test runs, file reads and search results can dwarf everything else. Context engineering starts with measuring which layer is consuming the budget.</p></section>
+  <section id="budgets-and-measurement"><h2>Budgets and measurement</h2>
+    <p>Give each layer a budget and enforce it when assembling the request. Log the token count of each layer on every call, so you can see when a session is approaching its limit and which layer caused it. Treat the window as a scarce resource even when the model offers a very large one: more context means more cost and latency on every step, and important details are easier to miss in a long, noisy prompt.</p>
+    <figure class="diagram" id="fig-context-assembly"><div class="diagram-scroll"><svg viewBox="0 0 740 248" role="img" aria-label="A stable prefix of system prompt, tool definitions and project instructions goes straight into the model request and can be cached. Conversation history, retrieved knowledge and tool results change every step, so they pass through per-layer budgets and compaction before joining the request." style="width:100%;max-width:740px;min-width:540px;height:auto;display:block"><defs><marker id="context-assembly-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="context-assembly-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="context-assembly-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="context-assembly-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="context-assembly-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><rect x="20" y="19" width="502" height="102" rx="10" class="dg-group"/><text x="30" y="114" font-size="10" font-weight="700" letter-spacing="1" class="dg-group-label">STABLE PREFIX (CACHEABLE)</text><rect x="20" y="127" width="502" height="102" rx="10" class="dg-group"/><text x="30" y="222" font-size="10" font-weight="700" letter-spacing="1" class="dg-group-label">CHANGES EVERY STEP</text><polyline points="522.0,70.0 541.0,70.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#context-assembly-arrow-default)"/><polyline points="522.0,178.0 541.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#context-assembly-arrow-default)"/><polyline points="611.0,150.0 611.0,98.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#context-assembly-arrow-default)"/><rect x="614.0" y="116.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="618.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">trimmed</text><rect x="31" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="101.0" y="70.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">System prompt</text><rect x="201" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="271.0" y="70.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Tool definitions</text><rect x="371" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="441.0" y="70.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Project notes</text><rect x="31" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="101.0" y="178.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">History</text><rect x="201" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="271.0" y="178.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Retrieved docs</text><rect x="371" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="441.0" y="178.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Tool results</text><rect x="541" y="42.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="611.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Model request</text><text x="611.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">prefix first</text><rect x="541" y="150.0" width="140" height="56" rx="8" class="dg-node dg-ok"/><text x="611.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#6ee7b7">Budget + compact</text><text x="611.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">per-layer limits</text></svg></div><figcaption>Each request combines a stable, cacheable prefix with layers that change every step; the changing layers pass through budgets and compaction before the request is sent.</figcaption></figure>
+    <div class="code"><div class="code-cap">Assembling a request under per-layer budgets</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>BUDGET = {"system": 3_000, "tools": 4_000, "project": 2_000,
+          "history": 40_000, "results": 20_000}
+
+
+def assemble(state) -&gt; list[dict]:
+    msgs = [system_msg(clip(state.system, BUDGET["system"]))]
+    msgs.append(project_msg(clip(state.project_notes, BUDGET["project"])))
+    history = recent_within(state.history, BUDGET["history"])   # newest turns first
+    if len(history) &lt; len(state.history):
+        msgs.append(summary_msg(state.summary))                  # compacted older turns
+    msgs += history
+    log_tokens({k: count_tokens(v) for k, v in by_layer(msgs).items()})
+    return msgs</code></pre></div></section>
+  <section id="just-in-time-beats-preloading"><h2>Just-in-time beats preloading</h2>
+    <p>Early RAG systems stuffed every possibly relevant document into the prompt up front. Agents can do better: give them lightweight references (file paths, document titles, search tools) and let them fetch details when needed. A coding agent that can list directories, search for a symbol and read a range of lines needs far less context than one given the whole repository, and it reads what is relevant to the current step.</p>
+    <ul><li>Preload only what is needed on almost every step: rules, conventions, the task itself.</li><li>Expose search and read tools with limits and offsets for everything else.</li><li>Return file and document references in results, so the agent can choose to open them.</li><li>Keep a short index (names and one-line descriptions) in context instead of full contents.</li></ul></section>
+  <section id="long-tasks-compaction-notes-and-sub-agents"><h2>Long tasks: compaction, notes and sub-agents</h2>
+    <ul><li><strong>Compaction</strong>: when history nears its budget, summarise older turns into decisions made, files changed, open problems and next steps, then drop the raw turns. Clear old tool results first; they are rarely needed verbatim.</li><li><strong>Persistent notes</strong>: let the agent write a progress file or task list outside the context window and re-read it, so state survives compaction and even new sessions.</li><li><strong>Sub-agents</strong>: delegate a self-contained subtask (search the codebase for usages, read these ten documents) to a fresh agent with its own clean context, and return only a short result to the main agent.</li><li><strong>Structured state</strong>: keep facts the harness can track (current branch, files edited, test status) in data structures and render a compact view, rather than relying on the model to remember them from history.</li></ul>
+    <div class="callout callout-warning"><strong>Watch out</strong><p>Compaction loses information. Test it: run long tasks with and without compaction on your benchmark and check which details the summary dropped. Keep anything the user stated as a requirement verbatim.</p></div></section>
+  <section id="order-for-caching-and-clarity"><h2>Order for caching and clarity</h2>
+    <p>Many providers can cache a prompt prefix that repeats across requests, which reduces cost and latency for the cached part. Put stable content first (system prompt, tool definitions, project instructions) and changing content last (history and new results), and avoid inserting timestamps or random IDs near the top, which break the cache on every call. The same ordering helps clarity: rules first, then background, then the current situation and the immediate request at the end.</p>
+    <p>Finally, evaluate context changes like any other harness change. A different summary prompt, a smaller result budget or a new project instruction can raise or lower task success; measure success, tokens per task and cost together on the benchmark before keeping the change.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Instrument and tighten an agent's context</h2>
+    <ol><li>Add per-layer token logging to an agent loop (yours or the minimal loop from the anatomy lesson).</li><li>Run five long tasks and chart which layer grows fastest.</li><li>Cap tool results with a truncation note and re-run; compare success and tokens per task.</li><li>Implement compaction that summarises history beyond a budget into decisions, changes, open issues and next steps.</li><li>Add a persistent progress file the agent updates and re-reads; test a task across two sessions.</li><li>Reorder the prompt so stable content comes first and measure the cache hit rate if your provider reports it.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Context engineering — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Context = everything the model knows at this step.</li><li>Measure tokens per layer; tool results usually grow fastest.</li><li>Preload rules and the task; fetch the rest just in time.</li><li>Compaction, persistent notes and sub-agents for long tasks.</li><li>Stable content first for caching; current request last.</li><li>Evaluate context changes on success, tokens and cost.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Layers</h3><table><tbody><tr><td><code>system prompt</code></td><td>Rules, role, format</td></tr><tr><td><code>tool definitions</code></td><td>Schemas</td></tr><tr><td><code>project instructions (AGENTS.md)</code></td><td>Conventions</td></tr><tr><td><code>history + tool results</code></td><td>Grows every step</td></tr></tbody></table></div><div class="cheat-group"><h3>Techniques</h3><table><tbody><tr><td><code>per-layer budgets</code></td><td>Enforced at assembly</td></tr><tr><td><code>search/read tools with limits</code></td><td>Just-in-time</td></tr><tr><td><code>compaction summary</code></td><td>Decisions, changes, next steps</td></tr><tr><td><code>progress file</code></td><td>State outside the window</td></tr><tr><td><code>sub-agent</code></td><td>Isolated context, short result</td></tr></tbody></table></div><div class="cheat-group"><h3>Caching</h3><table><tbody><tr><td><code>stable prefix first</code></td><td>Cache hits</td></tr><tr><td><code>no timestamps at the top</code></td><td>Avoid cache breaks</td></tr><tr><td><code>request last</code></td><td>Clarity</td></tr></tbody></table></div><div class="cheat-group"><h3>Measure</h3><table><tbody><tr><td><code>tokens per layer per call</code></td><td>Find the hog</td></tr><tr><td><code>tokens per task</code></td><td>Cost</td></tr><tr><td><code>success with vs without compaction</code></td><td>Information loss</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Preloading whole repositories or document sets.</li><li>Unbounded tool output in history.</li><li>Compaction that drops user requirements.</li><li>Timestamps at the top of the prompt breaking the cache.</li><li>Changing context policy without measuring task success.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "In a long coding session, which context layer usually grows fastest?", "options": ["Tool results", "System prompt", "Tool definitions", "Project instructions"], "answer": 0, "explain": "Test output, file reads and search results accumulate on every step."}, {"q": "What does just-in-time context mean for an agent?", "options": ["Fetch details with tools when needed", "Preload every relevant document", "Retrain the model per task", "Send the system prompt last"], "answer": 0, "explain": "Lightweight references plus search and read tools let the agent pull only what the current step needs."}, {"q": "Why delegate a broad codebase search to a sub-agent?", "options": ["Its exploration stays out of the main context", "Sub-agents are always more accurate", "It avoids needing tools", "It disables compaction"], "answer": 0, "explain": "The sub-agent uses its own context and returns a short result, keeping the main context clean."}, {"q": "A harness puts the current timestamp at the start of every prompt. What is the side effect?", "options": ["Prompt prefix caching stops working", "The model refuses to answer", "Tool calls become invalid", "History is compacted"], "answer": 0, "explain": "Caches match a stable prefix; changing text at the top invalidates it on each call."}, {"q": "What is the main risk of compaction?", "options": ["Losing details the task still needs", "Using more tokens than before", "Breaking tool schemas", "Making runs deterministic"], "answer": 0, "explain": "Summaries drop information; test them and keep stated requirements verbatim."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="eh-tool-design.html"><span>← Previous</span><strong>Designing tools for agents</strong></a>
+    <a class="pager-up" href="../education.html#evals">All Evals &amp; Harness modules</a>
+    <a class="pager-link pager-next" href="eh-agent-loop.html"><span>Next →</span><strong>The agent loop and orchestration</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=eh-context-engineering&amp;page=/education/eh-context-engineering.html&amp;title=Context%20engineering">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=eh-context-engineering&amp;page=/education/eh-context-engineering.html&amp;title=Context%20engineering">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

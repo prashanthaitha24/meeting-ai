@@ -1,0 +1,1024 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Build a minimal agent harness — Evals &amp; Harness project | ThavionAI Education</title>
+  <meta name="description" content="Build a small but real coding-agent harness in about 400 lines of Python: a model adapter for any OpenAI-compatible endpoint, typed tools with validation and bounded results, a permission policy, a locked-down Docker sandbox, redacted JSONL traces, and an agent loop with budgets, loop detection and a finish gate. A scripted model drives every test, so you can prove each safety property without an API key before pointing it at a real model." />
+  <meta property="og:title" content="Build a minimal agent harness — ThavionAI project" />
+  <meta property="og:description" content="Build a small but real coding-agent harness in about 400 lines of Python: a model adapter for any OpenAI-compatible endpoint, typed tools with validation and bounded results, a permission policy, a locked-down Docker sandbox, redacted JSONL traces, and an agent loop with budgets, loop detection and a finish gate. A scripted model drives every test, so you can prove each safety property without an API key before pointing it at a real model." />
+  <meta property="og:type" content="article" />
+  <meta property="og:image" content="https://thavionai.com/assets/og-education.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="canonical" href="https://thavionai.com/education/projects/proj-eh-mini-harness.html" />
+  <link rel="icon" href="../../assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="../../assets/logo-32.png" />
+  <link rel="apple-touch-icon" href="../../assets/apple-touch-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="../lesson.css" />
+  <link rel="stylesheet" href="project.css" />
+</head>
+<body class="track-evals" data-project="proj-eh-mini-harness">
+
+<nav>
+  <a href="../../index.html" class="nav-logo"><img class="nav-logo-icon" src="../../assets/logo.png" alt="" width="32" height="32" />ThavionAI</a>
+  <div class="nav-links" id="navLinks">
+    <a href="../../index.html">Home</a>
+    <a href="../../education.html">Tracks</a>
+    <a href="../../engineering.html#projects" class="active">Projects</a>
+    <a href="../../education.html#certs">Certifications</a>
+    <a href="../../index.html#apps">Apps</a>
+    <a href="../../feedback.html?page=/education/projects/proj-eh-mini-harness.html&amp;title=Build%20a%20minimal%20agent%20harness">Feedback</a>
+    <a href="../../education.html#evals" class="nav-cta">Evals &amp; Harness track</a>
+  </div>
+  <div class="hamburger" id="hamburger"><span></span><span></span><span></span></div>
+</nav>
+
+<header class="lesson-hero">
+  <div class="wrap">
+    <div class="crumbs"><a href="../../education.html">Education</a> › <a href="../../education.html#evals">Evals &amp; Harness Engineering</a> › Guided project</div>
+    <h1>Build a minimal agent harness</h1>
+    <p class="lede">Build a small but real coding-agent harness in about 400 lines of Python: a model adapter for any OpenAI-compatible endpoint, typed tools with validation and bounded results, a permission policy, a locked-down Docker sandbox, redacted JSONL traces, and an agent loop with budgets, loop detection and a finish gate. A scripted model drives every test, so you can prove each safety property without an API key before pointing it at a real model.</p>
+    <div class="meta">
+      <span class="chip">Advanced</span>
+      <span class="chip">about 8 hours</span>
+      <span class="chip">8 phases · 27 steps</span>
+      <span class="chip chip-quiz" id="progressChip">0 / 27 done</span>
+    </div>
+  </div>
+</header>
+
+<div class="subnav">
+  <div class="wrap">
+    <a href="#overview">Overview</a>
+    <a href="#phase-1">1. Project and sandbox image</a>
+    <a href="#phase-2">2. The model interface</a>
+    <a href="#phase-3">3. Typed tools with bounded results</a>
+    <a href="#phase-4">4. Permission policy</a>
+    <a href="#phase-5">5. Sandbox and traces</a>
+    <a href="#phase-6">6. The agent loop</a>
+    <a href="#phase-7">7. Prove it with a scripted model</a>
+    <a href="#phase-8">8. Run it</a>
+    <a href="#troubleshooting">Troubleshooting</a>
+  </div>
+</div>
+
+<main class="wrap">
+  <section class="pj-intro" id="overview">
+    <div class="objectives">
+      <div class="box-label">What you will have at the end</div>
+      <p class="pj-outcome">A Python package <code>harness</code> with a <code>harness</code> command, eleven passing tests (including real sandbox tests proving there is no network access and that timeouts are contained), a key-free demo that fixes a bug inside the sandbox, and traces you can query with jq.</p>
+    </div>
+    <div class="pj-grid">
+      <div class="pj-box">
+        <div class="box-label">Before you start</div>
+        <ul><li>Comfortable Python (dataclasses, type hints)</li><li>Docker installed and running</li><li>The harness fundamentals lessons of this track</li></ul>
+      </div>
+      <div class="pj-box">
+        <div class="box-label">Tools you will install</div>
+        <ul class="pj-tools"><li><strong>Docker</strong> — the per-session sandbox: no network, read-only root, non-root user <a href="https://docs.docker.com/" target="_blank" rel="noopener">↗</a></li><li><strong>pydantic</strong> — typed tool arguments, JSON schemas and validation errors <a href="https://docs.pydantic.dev/" target="_blank" rel="noopener">↗</a></li><li><strong>httpx</strong> — HTTP client for the OpenAI-compatible model adapter <a href="https://www.python-httpx.org/" target="_blank" rel="noopener">↗</a></li><li><strong>pytest</strong> — scripted-model tests for every harness property <a href="https://docs.pytest.org/" target="_blank" rel="noopener">↗</a></li><li><strong>jq</strong> — querying JSONL traces <a href="https://jqlang.org/" target="_blank" rel="noopener">↗</a></li></ul>
+      </div>
+    </div>
+    <div class="pj-box pj-layout"><div class="box-label">Repository layout at the end</div><pre><code>mini-harness/
+├── Dockerfile.sandbox        # python + pytest, nothing else
+├── pyproject.toml            # harness = harness.cli:main
+├── src/harness/
+│   ├── model.py              # Reply, ToolCall, ScriptedModel, OpenAICompatModel
+│   ├── tools.py              # typed tools, bounded results, Context
+│   ├── policy.py             # deny &gt; allow &gt; ask
+│   ├── sandbox.py            # one container per session
+│   ├── trace.py              # JSONL + redaction
+│   ├── loop.py               # the agent loop
+│   └── cli.py
+├── scripts/demo.py           # key-free demo in the real sandbox
+└── tests/
+    ├── conftest.py
+    ├── test_loop.py
+    └── test_model.py</code></pre></div>
+    <p class="pj-hint">Tick each step as you finish it — your progress is saved in this browser only (<a href="../../education.html#progressPanel">back up or restore</a> on the hub). Every code block has a copy button. If something goes wrong, the <a href="#troubleshooting">troubleshooting</a> section at the end covers the usual suspects.</p>
+  </section>
+
+  <section id="phase-1" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 1</span><h2>Project and sandbox image</h2></div>
+    <p class="pj-goal">A Python package with its dependencies and a minimal sandbox image that has Python and pytest but no network tools.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-1-1"><label class="pj-step-tick"><input type="checkbox" data-step="1-1" aria-label="Done: step 1.1" /><span class="pj-step-num">1.1</span></label><div class="pj-step-body"><div class="pj-step-text">Create the package and install dependencies.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>mkdir mini-harness &amp;&amp; cd mini-harness &amp;&amp; git init
+uv init --lib --name harness .
+uv add httpx pydantic
+uv add --dev pytest ruff</code></pre></div></div></li><li class="pj-step" id="step-1-2"><label class="pj-step-tick"><input type="checkbox" data-step="1-2" aria-label="Done: step 1.2" /><span class="pj-step-num">1.2</span></label><div class="pj-step-body"><div class="pj-step-text">Write the sandbox image. It holds only what the agent needs to run tests; there is no network inside the container, so anything else must be baked in here.</div><div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># Dockerfile.sandbox
+FROM python:3.12-slim
+RUN pip install --no-cache-dir pytest==8.3.3</code></pre></div></div></li><li class="pj-step" id="step-1-3"><label class="pj-step-tick"><input type="checkbox" data-step="1-3" aria-label="Done: step 1.3" /><span class="pj-step-num">1.3</span></label><div class="pj-step-body"><div class="pj-step-text">Build the sandbox image.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>docker build -t harness-sandbox:latest -f Dockerfile.sandbox .</code></pre></div></div></li><li class="pj-step" id="step-1-4"><label class="pj-step-tick"><input type="checkbox" data-step="1-4" aria-label="Done: step 1.4" /><span class="pj-step-num">1.4</span></label><div class="pj-step-body"><div class="pj-step-text">Register the command-line entry point by adding this section to pyproject.toml (above [build-system]).</div><div class="code"><div class="code-head"><span>text</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>[project.scripts]
+harness = "harness.cli:main"</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-2" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 2</span><h2>The model interface</h2></div>
+    <p class="pj-goal">A tiny interface the loop depends on, a scripted model for tests and an adapter for any OpenAI-compatible endpoint.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-2-1"><label class="pj-step-tick"><input type="checkbox" data-step="2-1" aria-label="Done: step 2.1" /><span class="pj-step-num">2.1</span></label><div class="pj-step-body"><div class="pj-step-text">Write the model module. The loop only ever calls complete(messages, tools) and gets back text, tool calls and token counts, so swapping providers or scripting a model for tests never touches the loop.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># src/harness/model.py
+"""Model adapters. The loop only needs complete(messages, tools) -&gt; Reply."""
+
+import json
+from dataclasses import dataclass, field
+
+import httpx
+
+
+@dataclass
+class ToolCall:
+    id: str
+    name: str
+    args: dict
+
+
+@dataclass
+class Reply:
+    text: str = ""
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+class ScriptedModel:
+    """Returns pre-written replies in order and records every request. For tests."""
+
+    def __init__(self, replies: list[Reply]):
+        self.replies = list(replies)
+        self.requests: list[dict] = []
+
+    def complete(self, messages: list[dict], tools: list[dict]) -&gt; Reply:
+        self.requests.append({"messages": [dict(m) for m in messages], "tools": tools})
+        return self.replies.pop(0) if self.replies else Reply(text="(script exhausted)")
+
+
+class OpenAICompatModel:
+    """Any provider or local server that speaks the OpenAI-style /chat/completions API."""
+
+    def __init__(self, base_url: str, api_key: str, model: str, timeout: float = 120):
+        self.url = base_url.rstrip("/") + "/chat/completions"
+        self.headers = {"Authorization": f"Bearer {api_key}"}
+        self.model, self.timeout = model, timeout
+
+    def complete(self, messages: list[dict], tools: list[dict]) -&gt; Reply:
+        body = {
+            "model": self.model,
+            "messages": messages,
+            "tools": [{"type": "function", "function": t} for t in tools],
+        }
+        r = httpx.post(self.url, json=body, headers=self.headers, timeout=self.timeout)
+        r.raise_for_status()
+        data = r.json()
+        msg = data["choices"][0]["message"]
+        calls = [
+            ToolCall(
+                c["id"], c["function"]["name"], json.loads(c["function"]["arguments"] or "{}")
+            )
+            for c in msg.get("tool_calls") or []
+        ]
+        usage = data.get("usage") or {}
+        return Reply(
+            msg.get("content") or "",
+            calls,
+            usage.get("prompt_tokens", 0),
+            usage.get("completion_tokens", 0),
+        )</code></pre></div></div></li><li class="pj-step" id="step-2-2"><label class="pj-step-tick"><input type="checkbox" data-step="2-2" aria-label="Done: step 2.2" /><span class="pj-step-num">2.2</span></label><div class="pj-step-body"><div class="pj-step-text">Note the message format: assistant messages carry tool_calls, and each tool result is a message with role tool and the matching tool_call_id. Many hosted providers and local servers (vLLM, Ollama, LM Studio and others) accept this OpenAI-style format, which is why one adapter goes a long way.</div></div></li></ol>
+  </section>
+
+  <section id="phase-3" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 3</span><h2>Typed tools with bounded results</h2></div>
+    <p class="pj-goal">Four tools whose arguments are validated server-side, whose errors say how to recover, and whose output can never flood the context.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-3-1"><label class="pj-step-tick"><input type="checkbox" data-step="3-1" aria-label="Done: step 3.1" /><span class="pj-step-num">3.1</span></label><div class="pj-step-body"><div class="pj-step-text">Write the tools module. Each tool has a pydantic argument model (which also produces the JSON schema the model sees), a function, and a run method that validates, catches errors and bounds the result.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># src/harness/tools.py
+"""Typed tools: pydantic arguments, server-side validation, bounded results."""
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+from pydantic import BaseModel, Field, ValidationError
+
+MAX_CHARS = 4000
+
+
+def bound(text: str, limit: int = MAX_CHARS) -&gt; str:
+    if len(text) &lt;= limit:
+        return text
+    return text[:limit] + f"\n[truncated: {len(text) - limit} more characters; narrow the request]"
+
+
+@dataclass
+class Context:
+    """Per-session state the tools share."""
+
+    root: Path
+    sandbox: object
+    dirty: bool = False  # files changed since the last passing test run
+
+    def resolve(self, path: str) -&gt; Path:
+        p = (self.root / path).resolve()
+        if not p.is_relative_to(self.root.resolve()):
+            raise ValueError(f"{path} is outside the workspace")
+        return p
+
+
+@dataclass
+class Tool:
+    name: str
+    description: str
+    args_model: type[BaseModel]
+    fn: Callable[[BaseModel, Context], str]
+
+    def schema(self) -&gt; dict:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "parameters": self.args_model.model_json_schema(),
+        }
+
+    def run(self, raw_args: dict, ctx: Context) -&gt; str:
+        try:
+            args = self.args_model(**raw_args)
+        except ValidationError as e:
+            err = e.errors()[0]
+            field = ".".join(map(str, err["loc"]))
+            return f"Invalid arguments for {self.name}: {field}: {err['msg']}"
+        try:
+            return bound(self.fn(args, ctx))
+        except ValueError as e:
+            return f"Error: {e}"
+
+
+class ReadArgs(BaseModel):
+    path: str = Field(description="File path relative to the workspace, e.g. src/app.py")
+    offset: int = Field(0, ge=0, description="First line to show, 0-based")
+    limit: int = Field(200, ge=1, le=500, description="Number of lines to show")
+
+
+class WriteArgs(BaseModel):
+    path: str = Field(description="File path relative to the workspace")
+    content: str = Field(description="The complete new file content")
+
+
+class ListArgs(BaseModel):
+    path: str = Field(".", description="Directory relative to the workspace")
+
+
+class RunArgs(BaseModel):
+    cmd: str = Field(description="Shell command to run in the sandbox, e.g. python -m pytest -q")
+    timeout: int = Field(60, ge=1, le=600)
+
+
+def read_file(a: ReadArgs, ctx: Context) -&gt; str:
+    p = ctx.resolve(a.path)
+    if not p.is_file():
+        return f"No such file: {a.path}. Use list_dir to see what exists."
+    lines = p.read_text().splitlines()
+    chunk = lines[a.offset : a.offset + a.limit]
+    body = "\n".join(f"{a.offset + i + 1:5} {line}" for i, line in enumerate(chunk))
+    rest = len(lines) - a.offset - len(chunk)
+    return body + (
+        f"\n[{rest} more lines; call again with offset={a.offset + len(chunk)}]"
+        if rest &gt; 0
+        else ""
+    )
+
+
+def write_file(a: WriteArgs, ctx: Context) -&gt; str:
+    p = ctx.resolve(a.path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(a.content)
+    ctx.dirty = True
+    return f"Wrote {len(a.content.splitlines())} lines to {a.path}."
+
+
+def list_dir(a: ListArgs, ctx: Context) -&gt; str:
+    p = ctx.resolve(a.path)
+    if not p.is_dir():
+        return f"No such directory: {a.path}."
+    names = sorted(
+        x.name + ("/" if x.is_dir() else "") for x in p.iterdir() if not x.name.startswith(".")
+    )
+    return "\n".join(names) or "(empty)"
+
+
+def run(a: RunArgs, ctx: Context) -&gt; str:
+    code, out = ctx.sandbox.exec(a.cmd, timeout=a.timeout)
+    if code == 0 and "pytest" in a.cmd:
+        ctx.dirty = False
+    return f"exit code: {code}\n{out[-3000:]}"
+
+
+def default_tools() -&gt; dict[str, Tool]:
+    tools = [
+        Tool("read_file", "Read lines of a text file. Read before editing.", ReadArgs, read_file),
+        Tool(
+            "write_file", "Replace a file's whole content. Needs approval.", WriteArgs, write_file
+        ),
+        Tool("list_dir", "List files and folders in a directory.", ListArgs, list_dir),
+        Tool("run", "Run a shell command in the isolated sandbox (no network).", RunArgs, run),
+    ]
+    return {t.name: t for t in tools}</code></pre></div></div></li><li class="pj-step" id="step-3-2"><label class="pj-step-tick"><input type="checkbox" data-step="3-2" aria-label="Done: step 3.2" /><span class="pj-step-num">3.2</span></label><div class="pj-step-body"><div class="pj-step-text">Read the details that matter: read_file numbers lines and tells the model how to fetch more; list_dir hides dotfiles such as .env; write_file marks the session dirty so the loop knows tests are stale; run keeps only the tail of long output and clears the dirty flag only when pytest succeeds.</div></div></li><li class="pj-step" id="step-3-3"><label class="pj-step-tick"><input type="checkbox" data-step="3-3" aria-label="Done: step 3.3" /><span class="pj-step-num">3.3</span></label><div class="pj-step-body"><div class="pj-step-text">Notice that Context.resolve refuses paths outside the workspace even though the policy also checks: defence in depth means a policy bug alone cannot let a tool escape.</div></div></li></ol>
+  </section>
+
+  <section id="phase-4" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 4</span><h2>Permission policy</h2></div>
+    <p class="pj-goal">Deterministic allow, ask and deny decisions for every call, including path traversal, secrets and compound shell commands.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-4-1"><label class="pj-step-tick"><input type="checkbox" data-step="4-1" aria-label="Done: step 4.1" /><span class="pj-step-num">4.1</span></label><div class="pj-step-body"><div class="pj-step-text">Write the policy. Paths are resolved before checking; secret patterns are denied; writes ask unless the session auto-approves them; shell commands with ; &amp; | ` $ ( ) &lt; or &gt; always ask, because an allow rule for one command must not allow a second one chained after it.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># src/harness/policy.py
+"""Permission policy: deny beats allow, anything unmatched asks a human."""
+
+import fnmatch
+import shlex
+from pathlib import Path
+
+DENY_CMDS = ["rm -rf *", "sudo *", "curl *", "wget *", "git push*"]
+ALLOW_CMDS = ["python -m pytest*", "pytest*", "ls*", "cat *", "git status", "git diff*"]
+SECRET_PATHS = ["*.env", "*/.ssh/*", "*id_rsa*"]
+
+
+class Policy:
+    def __init__(self, root: Path, auto_approve_writes: bool = False):
+        self.root = root.resolve()
+        self.auto_approve_writes = auto_approve_writes
+
+    def decide(self, tool: str, args: dict) -&gt; tuple[str, str]:
+        if tool in ("read_file", "write_file", "list_dir"):
+            path = (self.root / args.get("path", ".")).resolve()
+            if not path.is_relative_to(self.root):
+                return "deny", "path is outside the workspace"
+            if any(fnmatch.fnmatch(str(path), p) for p in SECRET_PATHS):
+                return "deny", "secret files are off limits"
+            if tool == "write_file" and not self.auto_approve_writes:
+                return "ask", "file writes need approval"
+            return "allow", ""
+        if tool == "run":
+            cmd = args.get("cmd", "")
+            if any(c in cmd for c in ";&amp;|`$()&lt;&gt;"):
+                return "ask", "compound commands need approval"
+            try:
+                cmd = " ".join(shlex.split(cmd))
+            except ValueError:
+                return "deny", "could not parse the command"
+            if any(fnmatch.fnmatch(cmd, p) for p in DENY_CMDS):
+                return "deny", "this command is not allowed"
+            if any(fnmatch.fnmatch(cmd, p) for p in ALLOW_CMDS):
+                return "allow", ""
+            return "ask", "command not on the allow list"
+        return "deny", f"unknown tool {tool}"</code></pre></div></div></li><li class="pj-step" id="step-4-2"><label class="pj-step-tick"><input type="checkbox" data-step="4-2" aria-label="Done: step 4.2" /><span class="pj-step-num">4.2</span></label><div class="pj-step-body"><div class="pj-step-text">Try it in a Python shell against a few calls: reading ../../etc/passwd, reading .env, running pytest, and running git status; curl example.com.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>uv run python -c "
+from pathlib import Path
+from harness.policy import Policy
+p = Policy(Path('.'))
+for tool, args in [('read_file', {'path': '../../etc/passwd'}), ('read_file', {'path': '.env'}),
+                   ('run', {'cmd': 'python -m pytest -q'}), ('run', {'cmd': 'git status; curl example.com'})]:
+    print(tool, args, p.decide(tool, args))
+"</code></pre></div></div></li><li class="pj-step" id="step-4-3"><label class="pj-step-tick"><input type="checkbox" data-step="4-3" aria-label="Done: step 4.3" /><span class="pj-step-num">4.3</span></label><div class="pj-step-body"><div class="pj-step-text">Decide where your own line sits. In this harness, anything the policy does not recognise asks a human, which is safe but can cause approval fatigue; the auto_approve_writes switch is for sessions where the sandbox already contains the blast radius.</div></div></li></ol>
+  </section>
+
+  <section id="phase-5" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 5</span><h2>Sandbox and traces</h2></div>
+    <p class="pj-goal">One locked-down container per session and an append-only trace with secrets redacted before they are written.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-5-1"><label class="pj-step-tick"><input type="checkbox" data-step="5-1" aria-label="Done: step 5.1" /><span class="pj-step-num">5.1</span></label><div class="pj-step-body"><div class="pj-step-text">Write the sandbox. The container sleeps while commands run inside it with docker exec; it has no network, a read-only root with a small /tmp, your user ID, no capabilities and resource limits. A timed-out command restarts the container, which kills the stuck process without losing the workspace.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># src/harness/sandbox.py
+"""One locked-down container per session; commands run inside it with docker exec."""
+
+import os
+import subprocess
+import uuid
+from pathlib import Path
+
+
+class DockerSandbox:
+    def __init__(self, workspace: Path, image: str = "harness-sandbox:latest"):
+        self.workspace, self.image = workspace.resolve(), image
+        self.name = f"harness-{uuid.uuid4().hex[:8]}"
+
+    def __enter__(self):
+        subprocess.run(
+            [
+                "docker",
+                "run",
+                "-d",
+                "--rm",
+                "--name",
+                self.name,
+                "--network",
+                "none",
+                "--read-only",
+                "--tmpfs",
+                "/tmp:rw,size=64m",
+                "--user",
+                f"{os.getuid()}:{os.getgid()}",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--pids-limit",
+                "128",
+                "--memory",
+                "512m",
+                "--cpus",
+                "1",
+                "-e",
+                "HOME=/tmp",
+                "-v",
+                f"{self.workspace}:/workspace:rw",
+                "-w",
+                "/workspace",
+                self.image,
+                "sleep",
+                "infinity",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return self
+
+    def exec(self, cmd: str, timeout: int = 60) -&gt; tuple[int, str]:
+        try:
+            p = subprocess.run(
+                ["docker", "exec", self.name, "sh", "-c", cmd],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            return p.returncode, p.stdout + p.stderr
+        except subprocess.TimeoutExpired:
+            subprocess.run(
+                ["docker", "restart", "-t", "0", self.name], capture_output=True, check=False
+            )
+            return 124, f"Command timed out after {timeout}s and was killed."
+
+    def __exit__(self, *exc):
+        subprocess.run(["docker", "rm", "-f", self.name], capture_output=True, check=False)</code></pre></div></div></li><li class="pj-step" id="step-5-2"><label class="pj-step-tick"><input type="checkbox" data-step="5-2" aria-label="Done: step 5.2" /><span class="pj-step-num">5.2</span></label><div class="pj-step-body"><div class="pj-step-text">Write the tracer. Every event gets a timestamp and run ID, and anything that looks like an API key is redacted at the source, so it never reaches the file.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># src/harness/trace.py
+"""Append-only JSONL traces with secret redaction at the source."""
+
+import json
+import re
+import time
+import uuid
+
+SECRET = re.compile(r"(sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16})")
+
+
+def redact(value):
+    if isinstance(value, str):
+        return SECRET.sub("[REDACTED]", value)
+    if isinstance(value, dict):
+        return {k: redact(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [redact(v) for v in value]
+    return value
+
+
+class Tracer:
+    def __init__(self, path: str):
+        self.path, self.run_id = path, uuid.uuid4().hex[:12]
+
+    def event(self, kind: str, **data) -&gt; None:
+        row = {"ts": round(time.time(), 3), "run": self.run_id, "kind": kind, **redact(data)}
+        with open(self.path, "a") as f:
+            f.write(json.dumps(row) + "\n")</code></pre></div></div></li><li class="pj-step" id="step-5-3"><label class="pj-step-tick"><input type="checkbox" data-step="5-3" aria-label="Done: step 5.3" /><span class="pj-step-num">5.3</span></label><div class="pj-step-body"><div class="pj-step-text">Check the sandbox by hand: start a container the same way and confirm there is no network.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>docker run --rm --network none --read-only --user "$(id -u):$(id -g)" \
+  harness-sandbox:latest python -c "import urllib.request; urllib.request.urlopen('http://example.com', timeout=5)"
+# expect: URLError (no network)</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-6" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 6</span><h2>The agent loop</h2></div>
+    <p class="pj-goal">A loop that calls the model, applies policy and approval to every requested call, detects loops, enforces budgets and refuses an unverified 'done' once.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-6-1"><label class="pj-step-tick"><input type="checkbox" data-step="6-1" aria-label="Done: step 6.1" /><span class="pj-step-num">6.1</span></label><div class="pj-step-body"><div class="pj-step-text">Write the loop. Read it top to bottom: it is the whole control flow of the agent.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># src/harness/loop.py
+"""The agent loop: budgets, permissions, loop detection and a finish gate."""
+
+import json
+import time
+from collections import Counter
+from collections.abc import Callable
+from dataclasses import dataclass
+
+from .model import Reply, ToolCall
+from .policy import Policy
+from .tools import Context, Tool
+from .trace import Tracer
+
+SYSTEM = """You are a careful coding agent. The project is in your working directory.
+Inspect files before editing them. After any edit, run the tests with: python -m pytest -q
+When the task is done, reply without calling a tool and summarise what you changed."""
+
+
+@dataclass
+class Budget:
+    steps: int = 30
+    tokens: int = 200_000
+    seconds: float = 600
+
+
+@dataclass
+class Result:
+    status: str
+    summary: str
+    steps: int
+    tokens: int
+
+
+def assistant_message(reply: Reply) -&gt; dict:
+    msg = {"role": "assistant", "content": reply.text}
+    if reply.tool_calls:
+        msg["tool_calls"] = [
+            {
+                "id": c.id,
+                "type": "function",
+                "function": {"name": c.name, "arguments": json.dumps(c.args)},
+            }
+            for c in reply.tool_calls
+        ]
+    return msg
+
+
+def run_agent(
+    task: str,
+    model,
+    tools: dict[str, Tool],
+    policy: Policy,
+    ctx: Context,
+    tracer: Tracer,
+    approve: Callable[[ToolCall], bool] = lambda call: False,
+    budget: Budget | None = None,
+) -&gt; Result:
+    budget = budget or Budget()
+    messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": task}]
+    schemas = [t.schema() for t in tools.values()]
+    start, tokens, seen, loop_warnings, nudged = time.time(), 0, Counter(), 0, False
+    tracer.event("start", task=task)
+
+    for step in range(1, budget.steps + 1):
+        reply = model.complete(messages, schemas)
+        tokens += reply.input_tokens + reply.output_tokens
+        tracer.event(
+            "model",
+            step=step,
+            text=reply.text[:500],
+            tokens=tokens,
+            calls=[{"name": c.name, "args": c.args} for c in reply.tool_calls],
+        )
+        messages.append(assistant_message(reply))
+
+        if not reply.tool_calls:
+            if ctx.dirty and not nudged:  # finish gate: evidence before "done"
+                nudged = True
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "You changed files since the last passing test run. "
+                        "Run python -m pytest -q and confirm the result before finishing.",
+                    }
+                )
+                tracer.event("finish_gate", step=step)
+                continue
+            status = "done (unverified)" if ctx.dirty else "done"
+            return finish(tracer, status, reply.text, step, tokens)
+
+        for call in reply.tool_calls:
+            key = (call.name, json.dumps(call.args, sort_keys=True))
+            seen[key] += 1
+            if seen[key] &gt; 2:
+                loop_warnings += 1
+                decision, result = (
+                    "loop",
+                    ("You have made this exact call several times. Try a different approach."),
+                )
+            else:
+                decision, reason = policy.decide(call.name, call.args)
+                if decision == "ask":
+                    decision = "approved" if approve(call) else "deny"
+                    reason = reason if decision == "deny" else ""
+                if decision in ("allow", "approved") and call.name in tools:
+                    result = tools[call.name].run(call.args, ctx)
+                else:
+                    result = f"Denied: {reason or 'not approved'}. Choose another approach."
+            tracer.event(
+                "tool",
+                step=step,
+                name=call.name,
+                args=call.args,
+                decision=decision,
+                result=result[:500],
+            )
+            messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
+
+        if loop_warnings &gt;= 3:
+            return finish(tracer, "stopped: looping", "", step, tokens)
+        if tokens &gt; budget.tokens:
+            return finish(tracer, "stopped: token budget", "", step, tokens)
+        if time.time() - start &gt; budget.seconds:
+            return finish(tracer, "stopped: time budget", "", step, tokens)
+    return finish(tracer, "stopped: step budget", "", budget.steps, tokens)
+
+
+def finish(tracer: Tracer, status: str, summary: str, steps: int, tokens: int) -&gt; Result:
+    tracer.event("end", status=status, steps=steps, tokens=tokens)
+    return Result(status, summary, steps, tokens)</code></pre></div></div></li><li class="pj-step" id="step-6-2"><label class="pj-step-tick"><input type="checkbox" data-step="6-2" aria-label="Done: step 6.2" /><span class="pj-step-num">6.2</span></label><div class="pj-step-body"><div class="pj-step-text">Trace the finish gate: if the model replies without a tool call while files have changed since the last passing test run, the loop adds one user message asking for test evidence and continues. A second unverified finish is accepted but labelled done (unverified), so evals can count it.</div></div></li><li class="pj-step" id="step-6-3"><label class="pj-step-tick"><input type="checkbox" data-step="6-3" aria-label="Done: step 6.3" /><span class="pj-step-num">6.3</span></label><div class="pj-step-body"><div class="pj-step-text">Write the command-line interface. It reads the endpoint, model and key from environment variables, asks a human on the terminal for anything the policy marks ask, and prints the result.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># src/harness/cli.py
+"""Run the harness on a task:  harness "fix the failing test" --workspace ./demo
+
+Model settings come from the environment, for any OpenAI-compatible endpoint:
+  HARNESS_BASE_URL, HARNESS_MODEL, HARNESS_API_KEY"""
+
+import argparse
+import json
+import os
+from pathlib import Path
+
+from .loop import run_agent
+from .model import OpenAICompatModel
+from .policy import Policy
+from .sandbox import DockerSandbox
+from .tools import Context, default_tools
+from .trace import Tracer
+
+
+def ask_human(call) -&gt; bool:
+    print(f"\n[approval] {call.name} {json.dumps(call.args)[:400]}")
+    return input("allow? [y/N] ").strip().lower() == "y"
+
+
+def main() -&gt; None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("task")
+    ap.add_argument("--workspace", default=".")
+    ap.add_argument("--trace", default="trace.jsonl")
+    ap.add_argument("--auto-approve-writes", action="store_true")
+    args = ap.parse_args()
+
+    root = Path(args.workspace).resolve()
+    model = OpenAICompatModel(
+        os.environ["HARNESS_BASE_URL"],
+        os.environ.get("HARNESS_API_KEY", ""),
+        os.environ["HARNESS_MODEL"],
+    )
+    with DockerSandbox(root) as box:
+        result = run_agent(
+            args.task,
+            model,
+            default_tools(),
+            Policy(root, args.auto_approve_writes),
+            Context(root, box),
+            Tracer(args.trace),
+            approve=ask_human,
+        )
+    print(
+        f"\n{result.status} after {result.steps} steps, {result.tokens} tokens\n{result.summary}"
+    )
+
+
+if __name__ == "__main__":
+    main()</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="phase-7" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 7</span><h2>Prove it with a scripted model</h2></div>
+    <p class="pj-goal">Tests that pin down every property: a bug fixed end to end in the sandbox, no network, denied escapes and secrets, approvals, actionable errors, loop detection, the finish gate, budgets, redaction and the model adapter.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-7-1"><label class="pj-step-tick"><input type="checkbox" data-step="7-1" aria-label="Done: step 7.1" /><span class="pj-step-num">7.1</span></label><div class="pj-step-body"><div class="pj-step-text">Write the fixtures: a workspace with a buggy calc.py, its test and a fake .env; a guard that skips sandbox tests when Docker or the image is missing; and a sandbox per test.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># tests/conftest.py
+import shutil
+import subprocess
+
+import pytest
+
+from harness.policy import Policy
+from harness.sandbox import DockerSandbox
+from harness.tools import Context, default_tools
+from harness.trace import Tracer
+
+BUGGY = "def add(a, b):\n    return a - b\n"
+TEST = "from calc import add\n\n\ndef test_add():\n    assert add(2, 3) == 5\n"
+
+has_docker = (
+    shutil.which("docker")
+    and subprocess.run(
+        ["docker", "image", "inspect", "harness-sandbox:latest"], capture_output=True, check=False
+    ).returncode
+    == 0
+)
+needs_docker = pytest.mark.skipif(not has_docker, reason="docker and harness-sandbox image needed")
+
+
+@pytest.fixture
+def workspace(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "calc.py").write_text(BUGGY)
+    (ws / "test_calc.py").write_text(TEST)
+    (ws / ".env").write_text("API_KEY=sk-test-0000000000000000000000\n")
+    return ws
+
+
+class NoSandbox:
+    def exec(self, cmd, timeout=60):
+        raise AssertionError("this test should not run commands")
+
+
+@pytest.fixture
+def setup(workspace, tmp_path):
+    def make(sandbox=None, auto_writes=False):
+        ctx = Context(workspace, sandbox or NoSandbox())
+        return (
+            default_tools(),
+            Policy(workspace, auto_writes),
+            ctx,
+            Tracer(str(tmp_path / "trace.jsonl")),
+        )
+
+    return make
+
+
+@pytest.fixture
+def sandbox(workspace):
+    with DockerSandbox(workspace) as box:
+        yield box</code></pre></div></div></li><li class="pj-step" id="step-7-2"><label class="pj-step-tick"><input type="checkbox" data-step="7-2" aria-label="Done: step 7.2" /><span class="pj-step-num">7.2</span></label><div class="pj-step-body"><div class="pj-step-text">Write the loop tests. Each one scripts the model's replies, runs the real loop and asserts on what the model would have seen next.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># tests/test_loop.py
+import json
+
+from conftest import needs_docker
+
+from harness.loop import Budget, run_agent
+from harness.model import Reply, ScriptedModel, ToolCall
+
+
+def call(name, i=1, **args):
+    return Reply(tool_calls=[ToolCall(f"c{i}", name, args)])
+
+
+FIXED = "def add(a, b):\n    return a + b\n"
+
+
+@needs_docker
+def test_fixes_bug_end_to_end_in_sandbox(setup, sandbox, workspace, tmp_path):
+    model = ScriptedModel(
+        [
+            call("list_dir", 1, path="."),
+            call("read_file", 2, path="calc.py"),
+            call("write_file", 3, path="calc.py", content=FIXED),
+            call("run", 4, cmd="python -m pytest -q"),
+            Reply(text="Fixed add() to use +; 1 test passes."),
+        ]
+    )
+    tools, policy, ctx, tracer = setup(sandbox)
+    result = run_agent(
+        "Fix the failing test", model, tools, policy, ctx, tracer, approve=lambda c: True
+    )
+    assert result.status == "done"
+    assert (workspace / "calc.py").read_text() == FIXED
+    tool_msgs = [m for m in model.requests[-1]["messages"] if m["role"] == "tool"]
+    assert "calc.py" in tool_msgs[0]["content"] and ".env" not in tool_msgs[0]["content"]
+    assert "exit code: 0" in tool_msgs[3]["content"] and "1 passed" in tool_msgs[3]["content"]
+    kinds = [
+        json.loads(line)["kind"] for line in (tmp_path / "trace.jsonl").read_text().splitlines()
+    ]
+    assert kinds[0] == "start" and kinds[-1] == "end" and kinds.count("tool") == 4
+
+
+@needs_docker
+def test_sandbox_has_no_network(setup, sandbox):
+    probe = (
+        'python -c "import urllib.request; '
+        "urllib.request.urlopen('http://example.com', timeout=5)\""
+    )
+    model = ScriptedModel([call("run", 1, cmd=probe), Reply(text="done")])
+    tools, policy, ctx, tracer = setup(sandbox)
+    run_agent("probe", model, tools, policy, ctx, tracer, approve=lambda c: True)
+    out = model.requests[-1]["messages"][-1]["content"]
+    assert "exit code: 0" not in out and "URLError" in out
+
+
+def test_path_escape_and_secrets_are_denied(setup):
+    model = ScriptedModel(
+        [
+            call("read_file", 1, path="../../etc/passwd"),
+            call("read_file", 2, path=".env"),
+            Reply(text="ok"),
+        ]
+    )
+    tools, policy, ctx, tracer = setup()
+    run_agent("t", model, tools, policy, ctx, tracer, approve=lambda c: True)
+    tool_msgs = [m["content"] for m in model.requests[-1]["messages"] if m["role"] == "tool"]
+    assert tool_msgs[0].startswith("Denied: path is outside the workspace")
+    assert tool_msgs[1].startswith("Denied: secret files are off limits")
+
+
+def test_write_without_approval_is_denied(setup, workspace):
+    model = ScriptedModel([call("write_file", 1, path="calc.py", content=FIXED), Reply(text="ok")])
+    tools, policy, ctx, tracer = setup()
+    run_agent("t", model, tools, policy, ctx, tracer, approve=lambda c: False)
+    assert "return a - b" in (workspace / "calc.py").read_text()
+
+
+def test_invalid_arguments_get_an_actionable_error(setup):
+    model = ScriptedModel([call("read_file", 1, path="calc.py", limit=10_000), Reply(text="ok")])
+    tools, policy, ctx, tracer = setup()
+    run_agent("t", model, tools, policy, ctx, tracer)
+    msg = model.requests[-1]["messages"][-1]["content"]
+    assert msg.startswith("Invalid arguments for read_file: limit")
+
+
+def test_loop_detection_stops_the_run(setup):
+    model = ScriptedModel([call("read_file", i, path="calc.py") for i in range(10)])
+    tools, policy, ctx, tracer = setup()
+    result = run_agent("t", model, tools, policy, ctx, tracer)
+    assert result.status == "stopped: looping" and result.steps == 5
+
+
+def test_finish_gate_requires_tests_after_edits(setup):
+    model = ScriptedModel(
+        [
+            call("write_file", 1, path="calc.py", content=FIXED),
+            Reply(text="Done!"),
+            Reply(text="Really done."),
+        ]
+    )
+    tools, policy, ctx, tracer = setup(auto_writes=True)
+    result = run_agent("t", model, tools, policy, ctx, tracer)
+    assert result.status == "done (unverified)"
+    nudges = [m for m in model.requests[-1]["messages"] if m["role"] == "user"][1:]
+    assert "Run python -m pytest -q" in nudges[0]["content"]
+
+
+def test_step_budget(setup):
+    model = ScriptedModel(
+        [
+            call("list_dir", i, path=".")
+            if i % 2
+            else call("read_file", i, path="calc.py", offset=i)
+            for i in range(20)
+        ]
+    )
+    tools, policy, ctx, tracer = setup()
+    assert (
+        run_agent("t", model, tools, policy, ctx, tracer, budget=Budget(steps=4)).status
+        == "stopped: step budget"
+    )
+
+
+def test_trace_redacts_secrets(setup, tmp_path):
+    model = ScriptedModel([Reply(text="the key is sk-abcdefghijklmnopqrstuvwxyz")])
+    tools, policy, ctx, tracer = setup()
+    run_agent("t", model, tools, policy, ctx, tracer)
+    trace = (tmp_path / "trace.jsonl").read_text()
+    assert "sk-abc" not in trace and "[REDACTED]" in trace
+
+
+@needs_docker
+def test_command_timeout_is_reported_and_sandbox_survives(sandbox):
+    code, out = sandbox.exec("sleep 30", timeout=2)
+    assert code == 124 and "timed out" in out
+    assert sandbox.exec("echo alive")[1].strip() == "alive"</code></pre></div></div></li><li class="pj-step" id="step-7-3"><label class="pj-step-tick"><input type="checkbox" data-step="7-3" aria-label="Done: step 7.3" /><span class="pj-step-num">7.3</span></label><div class="pj-step-body"><div class="pj-step-text">Write the adapter test against a stub HTTP server, so the request shape and response parsing are verified without a real provider.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># tests/test_model.py
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+from harness.model import OpenAICompatModel
+
+SEEN = {}
+
+
+class Stub(BaseHTTPRequestHandler):
+    def do_POST(self):
+        SEEN["path"] = self.path
+        SEEN["auth"] = self.headers["Authorization"]
+        SEEN["body"] = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        reply = {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": '{"path": "calc.py"}',
+                                },
+                            }
+                        ],
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 120, "completion_tokens": 15},
+        }
+        data = json.dumps(reply).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+
+def test_openai_compatible_adapter_round_trip():
+    server = HTTPServer(("127.0.0.1", 0), Stub)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    model = OpenAICompatModel(f"http://127.0.0.1:{server.server_port}/v1", "test-key", "any-model")
+    reply = model.complete(
+        [{"role": "user", "content": "hi"}],
+        [{"name": "read_file", "description": "d", "parameters": {"type": "object"}}],
+    )
+    server.shutdown()
+    assert SEEN["path"] == "/v1/chat/completions" and SEEN["auth"] == "Bearer test-key"
+    assert SEEN["body"]["tools"][0]["type"] == "function"
+    assert reply.tool_calls[0].name == "read_file" and reply.tool_calls[0].args == {
+        "path": "calc.py"
+    }
+    assert (reply.input_tokens, reply.output_tokens) == (120, 15)</code></pre></div></div></li><li class="pj-step" id="step-7-4"><label class="pj-step-tick"><input type="checkbox" data-step="7-4" aria-label="Done: step 7.4" /><span class="pj-step-num">7.4</span></label><div class="pj-step-body"><div class="pj-step-text">Run everything. All eleven tests pass in about fifteen seconds, including the sandbox ones.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>uv run pytest -q</code></pre></div></div></li><li class="pj-step" id="step-7-5"><label class="pj-step-tick"><input type="checkbox" data-step="7-5" aria-label="Done: step 7.5" /><span class="pj-step-num">7.5</span></label><div class="pj-step-body"><div class="pj-step-text">Break something on purpose to see the tests earn their keep: remove the path check in Policy.decide, or the dirty flag in write_file, and re-run. Then restore it.</div></div></li></ol>
+  </section>
+
+  <section id="phase-8" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Phase 8</span><h2>Run it</h2></div>
+    <p class="pj-goal">Watch the harness work in the sandbox without a key, then drive it with a real model and read its traces.</p>
+    <ol class="pj-steps"><li class="pj-step" id="step-8-1"><label class="pj-step-tick"><input type="checkbox" data-step="8-1" aria-label="Done: step 8.1" /><span class="pj-step-num">8.1</span></label><div class="pj-step-body"><div class="pj-step-text">Write a demo that scripts a short session: look around, run the failing test, read the file, fix it, claim success too early (the finish gate pushes back), run the tests and finish.</div><div class="code"><div class="code-head"><span>python</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code># scripts/demo.py
+"""Watch the harness fix a bug with a scripted model, in the real sandbox, no API key.
+Usage: uv run scripts/demo.py"""
+
+import json
+import tempfile
+from pathlib import Path
+
+from harness.loop import run_agent
+from harness.model import Reply, ScriptedModel, ToolCall
+from harness.policy import Policy
+from harness.sandbox import DockerSandbox
+from harness.tools import Context, default_tools
+from harness.trace import Tracer
+
+ws = Path(tempfile.mkdtemp()) / "demo"
+ws.mkdir()
+(ws / "calc.py").write_text("def add(a, b):\n    return a - b\n")
+(ws / "test_calc.py").write_text(
+    "from calc import add\n\n\ndef test_add():\n    assert add(2, 3) == 5\n"
+)
+
+steps = [
+    ("list_dir", {"path": "."}),
+    ("run", {"cmd": "python -m pytest -q"}),
+    ("read_file", {"path": "calc.py"}),
+    ("write_file", {"path": "calc.py", "content": "def add(a, b):\n    return a + b\n"}),
+]
+script = [Reply(tool_calls=[ToolCall(f"c{i}", n, a)]) for i, (n, a) in enumerate(steps)]
+script += [
+    Reply(text="Fixed add()."),
+    Reply(tool_calls=[ToolCall("c9", "run", {"cmd": "python -m pytest -q"})]),
+    Reply(text="Fixed add() to use +; the test passes."),
+]
+
+with DockerSandbox(ws) as box:
+    result = run_agent(
+        "Make the tests pass",
+        ScriptedModel(script),
+        default_tools(),
+        Policy(ws),
+        Context(ws, box),
+        Tracer(str(ws / "trace.jsonl")),
+        approve=lambda call: True,
+    )
+
+for line in (ws / "trace.jsonl").read_text().splitlines():
+    e = json.loads(line)
+    detail = e.get("name") or e.get("status") or e.get("text", "")[:60] or e.get("task", "")
+    print(f"{e['kind']:12} {detail} {e.get('decision', '')}")
+print(result)
+print("trace:", ws / "trace.jsonl")</code></pre></div></div></li><li class="pj-step" id="step-8-2"><label class="pj-step-tick"><input type="checkbox" data-step="8-2" aria-label="Done: step 8.2" /><span class="pj-step-num">8.2</span></label><div class="pj-step-body"><div class="pj-step-text">Run the demo. The trace shows the write as approved, a finish_gate event after the premature claim, and the final status done after 7 steps.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>uv run scripts/demo.py</code></pre></div></div></li><li class="pj-step" id="step-8-3"><label class="pj-step-tick"><input type="checkbox" data-step="8-3" aria-label="Done: step 8.3" /><span class="pj-step-num">8.3</span></label><div class="pj-step-body"><div class="pj-step-text">Query the trace with jq, using the path the demo printed: every tool call with its decision, and a count of decisions.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>TRACE=/path/printed/by/the/demo/trace.jsonl
+jq -c 'select(.kind == "tool") | {step, name, decision}' "$TRACE"
+jq -s -c 'map(select(.kind == "tool")) | group_by(.decision)
+  | map({decision: .[0].decision, n: length})' "$TRACE"</code></pre></div></div></li><li class="pj-step" id="step-8-4"><label class="pj-step-tick"><input type="checkbox" data-step="8-4" aria-label="Done: step 8.4" /><span class="pj-step-num">8.4</span></label><div class="pj-step-body"><div class="pj-step-text">Point it at a real model on any OpenAI-compatible endpoint (a hosted provider or a local server) and give it a real task in a throwaway copy of a small repository. Approve or refuse each write as it asks.</div><div class="code"><div class="code-head"><span>bash</span><button type="button" class="copy" data-copy>Copy</button></div><pre><code>export HARNESS_BASE_URL="https://your-endpoint.example/v1"
+export HARNESS_MODEL="$YOUR_MODEL"
+export HARNESS_API_KEY="$YOUR_KEY"
+cp -r ~/code/small-repo /tmp/agent-demo
+uv run harness "Make the failing test pass" --workspace /tmp/agent-demo</code></pre></div></div></li></ol>
+  </section>
+
+  <section id="troubleshooting" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Help</span><h2>Troubleshooting</h2></div>
+    <dl class="pj-trouble"><dt>Sandbox tests are skipped</dt><dd>Docker is not running or the image is missing. Start Docker and run docker build -t harness-sandbox:latest -f Dockerfile.sandbox . then re-run pytest.</dd><dt>docker: Error response ... mounts denied on macOS</dt><dd>Docker Desktop can only mount shared folders. Use a workspace under your home directory or add the path in Docker Desktop's file sharing settings.</dd><dt>PermissionError writing .pytest_cache inside the sandbox</dt><dd>The container runs as your user ID; make sure the workspace directory is owned by you and is not on a read-only mount.</dd><dt>The real model never calls tools</dt><dd>Check that your endpoint supports tool calling for that model and that the request includes the tools array; some local models need a tool-capable chat template.</dd><dt>The agent keeps getting 'Denied: command not on the allow list'</dt><dd>That is the policy asking and you refusing (or no approver). Add safe commands to ALLOW_CMDS, or run with --auto-approve-writes only inside the sandbox.</dd></dl>
+  </section>
+
+  <section id="next" class="pj-phase">
+    <div class="pj-phase-head"><span class="pj-phase-num">Next</span><h2>Where to go from here</h2></div>
+    <ul class="pj-next"><li>Add an edit tool that applies a search-and-replace instead of rewriting whole files, and compare steps per task.</li><li>Add compaction: summarise history beyond a token budget into decisions, changes and next steps.</li><li>Export traces as OpenTelemetry spans with gen_ai attributes and view them in Jaeger or Phoenix.</li><li>Add an egress proxy with an allowlist so the sandbox can install packages from one index only.</li><li>Benchmark your harness on the tasks from the next project and run an ablation of the finish gate.</li></ul>
+  </section>
+
+  <p class="feedback-row">Did a step fail or feel unclear? <a href="../../feedback.html?page=/education/projects/proj-eh-mini-harness.html&amp;title=Build%20a%20minimal%20agent%20harness">Tell me which one →</a></p>
+</main>
+
+<footer>
+  <div class="wrap footer-row">
+    <p>© 2025–2026 ThavionAI. All rights reserved.</p>
+    <div class="footer-legal">
+      <a href="../../education.html">Education</a>
+      <a href="https://buy.stripe.com/3cIeVceBc1ZRbyLdVIdZ601" target="_blank" rel="noopener">☕ Buy me a coffee</a>
+      <a href="../../privacy.html">Privacy</a>
+      <a href="../../terms.html">Terms</a>
+      <a href="../../feedback.html?page=/education/projects/proj-eh-mini-harness.html&amp;title=Build%20a%20minimal%20agent%20harness">Report an error</a>
+    </div>
+  </div>
+</footer>
+
+<script src="project.js"></script>
+</body>
+</html>
