@@ -1,0 +1,300 @@
+{
+  "id": "proj-fde-airgapped",
+  "track": "fde",
+  "title": "Deploy into an air-gapped cluster",
+  "summary": "Rehearse the hardest kind of FDE deployment on your own laptop. You will build a genuinely offline environment, a Docker network with no route to the internet containing an internal registry, a k3s cluster installed from its official air-gap images, and an operator jump box. On the connected side you will turn an application release into a verified offline bundle; on the inside you will verify it, mirror it into the registry, install it with Helm, prove that nothing reaches the internet, and then deliver and apply an upgrade the same way. Every command in this project was run end to end on a laptop before publishing.",
+  "outcome": "A repository with `connected/` (bundle build scripts and an image list derived from the chart), `inside/` (verify, mirror and install scripts), `cluster/` (k3s and registry configuration), `RUNBOOK.md` and a recorded session showing: no internet inside, checksum verification, install of v6.14.0, an unbundled image failing to pull, and an offline upgrade to v6.15.0 with Helm history.",
+  "hours": 8,
+  "level": "Advanced",
+  "prereqs": [
+    "Docker (Docker Desktop or Docker Engine) with about 4 GB of free memory",
+    "Helm installed on your connected machine",
+    "The packaging and air-gapped lessons of this track"
+  ],
+  "tools": [
+    {
+      "name": "k3s",
+      "why": "a Kubernetes distribution with a documented air-gap install",
+      "url": "https://docs.k3s.io/installation/airgap"
+    },
+    {
+      "name": "Docker internal networks",
+      "why": "a network with no route out, so the air gap is real",
+      "url": "https://docs.docker.com/reference/cli/docker/network/create/"
+    },
+    {
+      "name": "skopeo",
+      "why": "copy images to and from OCI archives and registries without a Docker daemon",
+      "url": "https://github.com/containers/skopeo"
+    },
+    {
+      "name": "Helm",
+      "why": "pull charts on the connected side and install them inside",
+      "url": "https://helm.sh/docs/"
+    },
+    {
+      "name": "podinfo",
+      "why": "a small, realistic application published as an OCI chart and image",
+      "url": "https://github.com/stefanprodan/podinfo"
+    }
+  ],
+  "layout": "airgap-lab/\n├── connected/\n│   ├── images.txt          # derived from the rendered chart\n│   └── build-bundle.sh\n├── inside/\n│   ├── verify-and-mirror.sh\n│   └── install.sh\n├── cluster/\n│   ├── registries.yaml     # k3s: public names -> internal registry\n│   └── start-k3s.sh\n├── k3s-images/             # k3s air-gap images archive (downloaded once)\n├── bundle-6.14.0/ bundle-6.15.0/\n└── RUNBOOK.md",
+  "phases": [
+    {
+      "title": "Build the isolated environment",
+      "goal": "A Docker network with no internet route, an internal registry inside it, and proof that the inside cannot reach out.",
+      "steps": [
+        {
+          "text": "Create the lab folder and an internal Docker network. `--internal` networks have no gateway to the outside world.",
+          "code": {
+            "lang": "bash",
+            "code": "mkdir -p airgap-lab/{connected,inside,cluster,k3s-images} && cd airgap-lab\ndocker network create --internal airgap-net"
+          }
+        },
+        {
+          "text": "Pre-pull the images the inside will need while you still can: the registry, k3s, a Helm client and skopeo. In a real engagement these too arrive as part of an approved bundle.",
+          "code": {
+            "lang": "bash",
+            "code": "docker pull registry:2\ndocker pull rancher/k3s:v1.37.1-k3s1\ndocker pull alpine/helm:3.19.0\ndocker pull quay.io/skopeo/stable:latest"
+          }
+        },
+        {
+          "text": "Start the internal registry on the isolated network.",
+          "code": {
+            "lang": "bash",
+            "code": "docker run -d --name registry --network airgap-net registry:2"
+          }
+        },
+        {
+          "text": "Prove the network is isolated by trying to reach the internet from a container on it.",
+          "code": {
+            "lang": "bash",
+            "code": "docker run --rm --network airgap-net alpine sh -c \\\n  'wget -q -T 5 -O /dev/null https://ghcr.io && echo INTERNET || echo no-internet'"
+          },
+          "check": "The output is `no-internet`."
+        }
+      ]
+    },
+    {
+      "title": "Install k3s from its air-gap images",
+      "goal": "A Kubernetes cluster running inside the isolated network, installed with the official offline images and configured to pull only from the internal registry.",
+      "steps": [
+        {
+          "text": "On the connected side, download the k3s air-gap images archive for your CPU architecture (`uname -m` prints arm64 or x86_64) and the matching release.",
+          "code": {
+            "lang": "bash",
+            "code": "ARCH=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')\ncurl -L -o \"k3s-images/k3s-airgap-images-${ARCH}.tar.zst\" \\\n  \"https://github.com/k3s-io/k3s/releases/download/v1.37.1%2Bk3s1/k3s-airgap-images-${ARCH}.tar.zst\""
+          },
+          "note": "k3s loads any image archive placed in /var/lib/rancher/k3s/agent/images/ at start, which is exactly the documented air-gap method."
+        },
+        {
+          "text": "Write the registry mirror configuration so that images referenced as ghcr.io or docker.io are served from the internal registry, with no manifest edits.",
+          "code": {
+            "lang": "yaml",
+            "code": "# cluster/registries.yaml\nmirrors:\n  ghcr.io:\n    endpoint:\n      - \"http://registry:5000\"\n  docker.io:\n    endpoint:\n      - \"http://registry:5000\""
+          },
+          "note": "A real internal registry uses TLS with the customer's CA; plain HTTP is acceptable only inside this lab."
+        },
+        {
+          "text": "Start k3s inside the isolated network. k3s requires a default route even when there is no internet; its air-gap docs recommend a black-hole route through a dummy interface, which the entry command creates.",
+          "code": {
+            "lang": "bash",
+            "code": "docker run -d --name k3s --hostname k3s --network airgap-net --privileged \\\n  -v \"$PWD/k3s-images:/var/lib/rancher/k3s/agent/images\" \\\n  -v \"$PWD/cluster/registries.yaml:/etc/rancher/k3s/registries.yaml:ro\" \\\n  --entrypoint /bin/sh rancher/k3s:v1.37.1-k3s1 -c \\\n  'ip link add dummy0 type dummy && ip link set dummy0 up &&\n   ip addr add 203.0.113.254/31 dev dummy0 &&\n   ip route add default via 203.0.113.255 dev dummy0 metric 1000 &&\n   exec /bin/k3s server --tls-san k3s --disable traefik --disable metrics-server'"
+          },
+          "note": "Without the dummy route k3s exits with 'no default routes found'; that error is common on real air-gapped hosts too."
+        },
+        {
+          "text": "Wait for the node to become Ready and confirm the cluster itself cannot reach the internet.",
+          "code": {
+            "lang": "bash",
+            "code": "until docker exec k3s kubectl get nodes 2>/dev/null | grep -q ' Ready'; do sleep 5; done\ndocker exec k3s kubectl get nodes\ndocker exec k3s sh -c 'wget -q -T 5 -O /dev/null https://ghcr.io && echo INTERNET || echo no-internet'"
+          },
+          "check": "The node is Ready and the cluster reports `no-internet`."
+        },
+        {
+          "text": "Create a kubeconfig for the jump box: the cluster's admin config with the server address changed to the container hostname, which is in the certificate thanks to `--tls-san k3s`.",
+          "code": {
+            "lang": "bash",
+            "code": "docker exec k3s cat /etc/rancher/k3s/k3s.yaml | sed 's#https://127.0.0.1:6443#https://k3s:6443#' > kubeconfig\nchmod 600 kubeconfig"
+          }
+        }
+      ]
+    },
+    {
+      "title": "Build the offline bundle (connected side)",
+      "goal": "Two versioned bundles, each containing every image and chart for one release, with checksums.",
+      "steps": [
+        {
+          "text": "Pull the application chart for the version you will install first and derive the image list from the rendered manifests rather than writing it by hand.",
+          "code": {
+            "lang": "bash",
+            "code": "mkdir -p bundle-6.14.0/images bundle-6.14.0/charts\nhelm pull oci://ghcr.io/stefanprodan/charts/podinfo --version 6.14.0 -d bundle-6.14.0/charts\nhelm template podinfo bundle-6.14.0/charts/podinfo-6.14.0.tgz |\n  grep -E '^\\s+image:' | awk '{print $2}' | tr -d '\"' | sort -u > connected/images-6.14.0.txt\ncat connected/images-6.14.0.txt"
+          },
+          "check": "The list contains ghcr.io/stefanprodan/podinfo:6.14.0 and also the helper images the chart's test hooks use (curl, grpc_health_probe, tiny-tools): exactly the kind of image people forget when they write the list by hand."
+        },
+        {
+          "text": "Write the bundle script: copy the image list into the bundle, export every listed image into an OCI archive with skopeo, then write checksums for everything except the checksum file itself.",
+          "code": {
+            "lang": "bash",
+            "code": "cat > connected/build-bundle.sh <<'SCRIPT'\n#!/usr/bin/env bash\nset -euo pipefail\nVER=\"$1\"\nB=\"bundle-$VER\"\ncp \"connected/images-$VER.txt\" \"$B/images.txt\"      # the list travels with the bundle\nwhile read -r img; do\n  name=$(echo \"$img\" | tr '/:@' '___')\n  docker run --rm -v \"$PWD/$B:/b\" quay.io/skopeo/stable:latest copy --all \\\n    \"docker://$img\" \"oci-archive:/b/images/$name.tar:$img\"\ndone < \"$B/images.txt\"\n(cd \"$B\" && find . -type f ! -name SHA256SUMS -exec shasum -a 256 {} \\; > SHA256SUMS)\nSCRIPT\nchmod +x connected/build-bundle.sh\n./connected/build-bundle.sh 6.14.0"
+          },
+          "note": "`find ... ! -name SHA256SUMS` matters: without it the checksum file lists itself and verification always fails, a mistake this lab caught while it was being written."
+        },
+        {
+          "text": "Repeat for the next release, 6.15.0, which you will deliver later as an upgrade.",
+          "code": {
+            "lang": "bash",
+            "code": "mkdir -p bundle-6.15.0/images bundle-6.15.0/charts\nhelm pull oci://ghcr.io/stefanprodan/charts/podinfo --version 6.15.0 -d bundle-6.15.0/charts\nhelm template podinfo bundle-6.15.0/charts/podinfo-6.15.0.tgz |\n  grep -E '^\\s+image:' | awk '{print $2}' | tr -d '\"' | sort -u > connected/images-6.15.0.txt\n./connected/build-bundle.sh 6.15.0"
+          }
+        },
+        {
+          "text": "Record what each bundle contains (versions, image digests, checksum file) in a short release note, as you would hand to a customer's change board."
+        }
+      ]
+    },
+    {
+      "title": "Verify, mirror and install (inside)",
+      "goal": "The first release installed in the isolated cluster from the internal registry only.",
+      "steps": [
+        {
+          "text": "Verify the bundle's checksums before anything is loaded.",
+          "code": {
+            "lang": "bash",
+            "code": "(cd bundle-6.14.0 && shasum -a 256 -c SHA256SUMS)"
+          },
+          "check": "Every line says OK."
+        },
+        {
+          "text": "Push every image archive into the internal registry, keeping the repository path so the mirror configuration resolves the original names. skopeo runs on the isolated network, as an operator's tool inside the gap would.",
+          "code": {
+            "lang": "bash",
+            "code": "cat > inside/verify-and-mirror.sh <<'SCRIPT'\n#!/usr/bin/env bash\nset -euo pipefail\nB=\"bundle-$1\"\n(cd \"$B\" && shasum -a 256 -c SHA256SUMS)\nwhile read -r img; do\n  name=$(echo \"$img\" | tr '/:@' '___')\n  first=\"${img%%/*}\"\n  if [[ \"$img\" == */* && ( \"$first\" == *.* || \"$first\" == *:* ) ]]; then\n    path=\"${img#*/}\"                                  # drop the registry host\n  else\n    path=\"$img\"                                       # docker.io short name\n    [[ \"$path\" == */* ]] || path=\"library/$path\"\n  fi\n  [[ \"${path##*/}\" == *:* || \"$path\" == *@* ]] || path=\"$path:latest\"\n  docker run --rm --network airgap-net -v \"$PWD/$B:/b\" quay.io/skopeo/stable:latest \\\n    copy --all --dest-tls-verify=false \"oci-archive:/b/images/$name.tar\" \"docker://registry:5000/$path\"\ndone < \"$B/images.txt\"\nSCRIPT\nchmod +x inside/verify-and-mirror.sh\n./inside/verify-and-mirror.sh 6.14.0"
+          },
+          "note": "The script reads the image list carried in the bundle and maps each reference to a path in the internal registry: it drops the registry host (ghcr.io, docker.io), adds library/ for official Docker Hub images and :latest when no tag is given. Rebuilding names from archive file names instead breaks on images with underscores in their names, which is exactly what happened while this lab was being tested."
+        },
+        {
+          "text": "List what the internal registry now holds, so you can compare it with the bundle's image list.",
+          "code": {
+            "lang": "bash",
+            "code": "docker run --rm --network airgap-net alpine \\\n  wget -qO- http://registry:5000/v2/_catalog"
+          },
+          "check": "The catalog includes stefanprodan/podinfo and the helper images."
+        },
+        {
+          "text": "Install the chart from the bundle using Helm in a jump-box container on the isolated network.",
+          "code": {
+            "lang": "bash",
+            "code": "helm_in() {\n  docker run --rm --network airgap-net -v \"$PWD:/w\" -e KUBECONFIG=/w/kubeconfig \\\n    alpine/helm:3.19.0 \"$@\"\n}\nhelm_in upgrade --install podinfo /w/bundle-6.14.0/charts/podinfo-6.14.0.tgz \\\n  -n demo --create-namespace --atomic --timeout 3m"
+          },
+          "check": "Helm reports STATUS: deployed."
+        },
+        {
+          "text": "Confirm the pod is running and that its image, still referenced by its public name, was pulled through the internal mirror.",
+          "code": {
+            "lang": "bash",
+            "code": "docker exec k3s kubectl -n demo get pods\ndocker exec k3s kubectl -n demo get events --field-selector reason=Pulled \\\n  -o custom-columns=MSG:.message --no-headers"
+          },
+          "check": "The event says Successfully pulled image \"ghcr.io/stefanprodan/podinfo:6.14.0\", even though the cluster has no internet."
+        },
+        {
+          "text": "Run the chart's own tests inside the gap. They use the helper images you bundled, which is why those had to be in the image list.",
+          "code": {
+            "lang": "bash",
+            "code": "docker exec k3s kubectl -n demo rollout status deploy/podinfo --timeout=120s\nhelm_in test podinfo -n demo --timeout 3m"
+          },
+          "check": "The grpc, jwt and service tests all report Phase: Succeeded."
+        },
+        {
+          "text": "Prove the gap works: try to run an image that was never bundled and watch it fail.",
+          "code": {
+            "lang": "bash",
+            "code": "docker exec k3s kubectl -n demo run probe --image=nginx:1.27 --restart=Never\nsleep 20\ndocker exec k3s kubectl -n demo get pod probe\ndocker exec k3s kubectl -n demo delete pod probe --now"
+          },
+          "check": "The probe pod shows ErrImagePull or ImagePullBackOff."
+        }
+      ]
+    },
+    {
+      "title": "Deliver an upgrade offline",
+      "goal": "The next release applied through the same verified path, with rollback available.",
+      "steps": [
+        {
+          "text": "Verify and mirror the 6.15.0 bundle exactly as before.",
+          "code": {
+            "lang": "bash",
+            "code": "./inside/verify-and-mirror.sh 6.15.0"
+          }
+        },
+        {
+          "text": "Upgrade atomically and check history.",
+          "code": {
+            "lang": "bash",
+            "code": "helm_in upgrade podinfo /w/bundle-6.15.0/charts/podinfo-6.15.0.tgz -n demo --atomic --timeout 3m\ndocker exec k3s kubectl -n demo get deploy podinfo \\\n  -o jsonpath='{.spec.template.spec.containers[0].image}{\"\\n\"}'\nhelm_in history podinfo -n demo"
+          },
+          "check": "The image is now 6.15.0 and history shows revision 1 superseded, revision 2 deployed."
+        },
+        {
+          "text": "Practise the rollback an operator would use if the new version misbehaved.",
+          "code": {
+            "lang": "bash",
+            "code": "helm_in rollback podinfo 1 -n demo\ndocker exec k3s kubectl -n demo get deploy podinfo \\\n  -o jsonpath='{.spec.template.spec.containers[0].image}{\"\\n\"}'"
+          },
+          "check": "The image is back to 6.14.0, still with no internet access."
+        }
+      ]
+    },
+    {
+      "title": "Runbook, record and tear down",
+      "goal": "Operator documentation for offline delivery and a clean environment afterwards.",
+      "steps": [
+        {
+          "text": "Write RUNBOOK.md: prerequisites, how to verify a bundle, how to mirror, how to install and upgrade, how to roll back, and failure entries for checksum mismatch, ImagePullBackOff (image missing from bundle or mirror), and k3s failing to start with 'no default routes found'."
+        },
+        {
+          "text": "Record a terminal session demonstrating the whole flow and commit scripts, configuration and the runbook (not the large image archives).",
+          "code": {
+            "lang": "bash",
+            "code": "printf 'bundle-*/images/\\nk3s-images/\\nkubeconfig\\n' > .gitignore\ngit init && git add -A && git commit -m \"Air-gapped delivery lab: k3s + internal registry + verified bundles\""
+          }
+        },
+        {
+          "text": "Tear everything down.",
+          "code": {
+            "lang": "bash",
+            "code": "docker rm -f k3s registry\ndocker network rm airgap-net"
+          },
+          "check": "`docker ps -a` shows neither container and the network is gone."
+        }
+      ]
+    }
+  ],
+  "troubleshooting": [
+    {
+      "symptom": "k3s exits immediately with 'no default routes found'",
+      "fix": "Air-gapped hosts need a default route; add the dummy-interface black-hole route as in the start command (this is the method k3s's air-gap docs describe)."
+    },
+    {
+      "symptom": "Pods stay in ImagePullBackOff for an image you bundled",
+      "fix": "Check the image was pushed under the same repository path (`stefanprodan/podinfo:6.14.0`) and that registries.yaml mirrors the image's registry host. List the registry with `docker run --rm --network airgap-net alpine wget -qO- http://registry:5000/v2/_catalog`."
+    },
+    {
+      "symptom": "shasum -c reports SHA256SUMS: FAILED",
+      "fix": "The checksum file was included in itself; regenerate with `find . -type f ! -name SHA256SUMS ...`."
+    },
+    {
+      "symptom": "Helm cannot connect to the cluster",
+      "fix": "Make sure the kubeconfig server is https://k3s:6443, the Helm container runs on airgap-net, and k3s was started with --tls-san k3s."
+    },
+    {
+      "symptom": "The cluster pulled an image you did not bundle",
+      "fix": "Your network is not isolated. Confirm the network was created with --internal and that k3s is attached only to it (`docker inspect k3s`)."
+    }
+  ],
+  "next": [
+    "Replace the HTTP registry with TLS using your own CA and configure k3s to trust it in registries.yaml.",
+    "Add a self-hosted model to the bundle (an inference engine image plus weights) and serve it offline with HF_HUB_OFFLINE=1.",
+    "Repeat the delivery with Zarf (zarf package create, zarf init, zarf package deploy) and compare effort and robustness.",
+    "Sign images on the connected side with cosign and verify signatures inside before mirroring.",
+    "Add your own chart from the packaging lesson and bundle its dependencies (for example a database) too."
+  ]
+}
