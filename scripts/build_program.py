@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "docs" / "school" / "program"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import school_diagrams as sd  # noqa: E402
+import program_levels as pl  # noqa: E402
 
 esc = html.escape
 INK = sd.INK
@@ -53,7 +54,7 @@ BASIC = [
     ("Add and subtract to 15", "mixed", 15), ("Number order to 20", "order", 20),
     ("Add and subtract to 20", "mixed", 20), ("Big revision to 20", "mixed", 20),
 ]
-LEVELS = [("basic", "Basic", "For beginners — counting up to adding and subtracting within 20.", BASIC)]
+LEVELS = [("basic", "Basic", "For beginners — counting up to adding and subtracting within 20.", BASIC)] + pl.LEVELS_MORE
 
 
 # ---------------------------------------------------------------- problem makers
@@ -278,8 +279,73 @@ def pick_earlier(wk_ix):
     return [e for e in sorted({max(0, wk_ix - 1), wk_ix // 2}) if e < wk_ix][:2]
 
 
+def build_day_more(level, wk_ix, day):
+    """Medium / Advanced / Pro days: generic question -> answer skills from program_levels."""
+    _lid, _lname, _ldesc, weeks = level
+    title, kind, hi = weeks[wk_ix]
+    rnd = random.Random(300000 + LEVEL_SEED[_lid] + wk_ix * 1000 + day * 37)
+
+    def drills(k, h, n):
+        out, grid = [], "num"
+        for _ in range(n):
+            rk, rh = pl.resolve(k, h, weeks, wk_ix, rnd)
+            head, g, gen, _s = pl.KINDS[rk]
+            grid = "wide" if (g == "wide" or k.startswith("@")) else grid
+            out.append(gen(rnd, rh))
+        head = pl.KINDS[k][0] if k in pl.KINDS else "Mixed practice"
+        return head, grid, out
+
+    def stories(k, h, n):
+        out = []
+        for _ in range(n):
+            rk, rh = pl.resolve(k, h, weeks, wk_ix, rnd)
+            out.append(pl.KINDS[rk][3](rnd, rh))
+        return out
+
+    def size(k):
+        return 16 if (k in pl.KINDS and pl.KINDS[k][1] == "num") else 12
+
+    def drill_sheet(k, h, label):
+        head, grid, probs = drills(k, h, size(k))
+        return (label, [(head, grid, probs)])
+
+    story_sec = lambda k, h, n: ("Maths all around us — read and solve", "story", stories(k, h, n))
+
+    def challenge(k, h):
+        head, grid, probs = drills(k, h, 10)
+        return ("Challenge", [(head, grid, probs), ("Story problems", "story", stories(k, h, 3))])
+
+    if day == 7:
+        sheets = [drill_sheet(kind, hi, f"This week: {title}")]
+        for e in pick_earlier(wk_ix):
+            et, ek, eh = weeks[e]
+            sheets.append(drill_sheet(ek, eh, f"Revision: {et}"))
+        sheets.append(("Maths all around us", [story_sec(kind, hi, 7)]))
+        sheets.append(challenge(kind, hi))
+        while len(sheets) < 5:
+            sheets.append(drill_sheet(kind, hi, "Extra practice"))
+        return "Revision — this week and earlier weeks", sheets[:5]
+
+    pt, pk, ph = weeks[wk_ix - 1] if wk_ix else (title, kind, hi)
+    wh1, wg1, wp1 = drills(pk, ph, 8)
+    wh2, wg2, wp2 = drills(kind, hi, 8)
+    warm = ("Warm up", [(f"Quick recall: {pt}" if wk_ix else wh1, wg1, wp1), (wh2, wg2, wp2)])
+    return title, [
+        warm,
+        drill_sheet(kind, hi, "Number practice"),
+        drill_sheet(kind, hi, "More practice"),
+        ("Maths all around us", [story_sec(kind, hi, 7)]),
+        challenge(kind, hi),
+    ]
+
+
+LEVEL_SEED = {"medium": 0, "advanced": 50000, "pro": 100000}
+
+
 def build_day(level, wk_ix, day):
     """Return (subtitle, [ (sheet_label, [ (section_title, grid_class, [probs]) ]) ]) — five sheets."""
+    if level[0] != "basic":
+        return build_day_more(level, wk_ix, day)
     _lid, _lname, _ldesc, weeks = level
     title, kind, hi = weeks[wk_ix]
     rnd = random.Random(100000 + wk_ix * 1000 + day * 37)
@@ -428,6 +494,10 @@ def render_problem(idx, p):
     if t == "story":
         art = '<div class="art">' + illus_two(p["a"], p["b"], p["op"], p["ic"]) + "</div>" if p["illus"] else ""
         return f'<div class="prob story"><span class="n">{idx})</span><p class="stx">{esc(p["text"])}</p>{art}<div class="eq">Answer: <span class="abox"></span></div></div>'
+    if t == "q":
+        parts = [esc(x) for x in p["q"].split(pl.BOX)]
+        body = '<span class="abox"></span>'.join(parts) if len(parts) > 1 else parts[0] + ' = <span class="abox"></span>'
+        return f'<div class="prob qp"><span class="n">{idx})</span><div class="eq">{body}</div></div>'
     if t == "scene":
         art = '<div class="art">' + scene(p["a"], p["ica"], p["b"], p["icb"]) + "</div>"
         return f'<div class="prob story"><span class="n">{idx})</span><p class="stx">{esc(p["text"])}</p>{art}<div class="eq">Answer: <span class="abox"></span></div></div>'
@@ -444,13 +514,14 @@ def answer_of(p):
         return p["terms"][p["blank"]]
     if t == "arith":
         return p["a"] + p["b"] if p["op"] == "add" else p["a"] - p["b"]
-    if t in ("story", "scene"):
-        return p["ans"]
+    if t in ("story", "scene", "q"):
+        return esc(str(p["ans"]))
     return None
 
 
 PROGRAM_CSS = """
     .ws { max-width: 820px; margin: 0 auto; padding: 0 22px 60px; }
+    .ws section { padding: 0; }
     .ws-hero { padding: 40px 0 10px; }
     .ws-hero .tag { font-size: 12px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent); }
     .ws-hero h1 { font-size: clamp(24px, 4vw, 34px); font-weight: 800; letter-spacing: -0.8px; margin: 6px 0 8px; }
@@ -470,10 +541,13 @@ PROGRAM_CSS = """
     .ws-section h2 { font-size: 15px; font-weight: 700; color: var(--text2); border-bottom: 1px solid var(--border); padding-bottom: 5px; margin-bottom: 11px; }
     .grid { display: grid; gap: 11px; }
     .grid.illus { grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
-    .grid.num { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+    .grid.num { grid-template-columns: repeat(auto-fill, minmax(185px, 1fr)); }
     .grid.trace { grid-template-columns: 1fr; }
     .grid.seq { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
     .grid.story { grid-template-columns: 1fr; }
+    .grid.wide { grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+    .grid.wide .prob .eq { white-space: normal; font-size: 16px; line-height: 1.6; }
+    .prob.qp .abox { margin: 0 3px; }
     .prob { display: flex; align-items: center; gap: 10px; border: 1px solid var(--border); border-radius: 12px; padding: 11px 13px; background: #fff; break-inside: avoid; }
     .prob.pic { flex-direction: column; align-items: flex-start; gap: 7px; position: relative; }
     .prob.pic .n { position: absolute; top: 8px; right: 8px; background: rgba(255,255,255,0.88); padding: 0 4px; border-radius: 5px; }
@@ -605,7 +679,8 @@ def render_day(level, wk_ix, day, prev_href, next_href):
             akey_parts.append(f'<div style="margin-bottom:8px"><b style="font-size:12.5px">Sheet {si}: {esc(sheet_label)}</b><div class="akey">{"".join(keys)}</div></div>')
     prev_btn = f'<a class="btn btn-secondary" href="{prev_href}">← Previous</a>' if prev_href else '<span></span>'
     next_btn = f'<a class="btn btn-primary" href="{next_href}">Next →</a>' if next_href else '<span></span>'
-    intro = day_intro(random.Random(200000 + wk_ix * 1000 + day))
+    irnd = random.Random(200000 + wk_ix * 1000 + day)
+    intro = day_intro(irnd) if lid == "basic" else pl.level_intro(lid, irnd)
     page = DAY_PAGE.format(
         css=PROGRAM_CSS, nav=NAV, footer=FOOTER, script=SCRIPT,
         lid=lid, lname=lname, letter=letter, lletter=letter.lower(), day=day,
@@ -751,10 +826,7 @@ INDEX_PAGE = """<!DOCTYPE html>
 def render_index(built_levels):
     cards = []
     live_ids = {lid for lid, *_ in built_levels}
-    plan = [("basic", "Basic", "Counting through adding and subtracting within 20."),
-            ("medium", "Medium", "Larger numbers, place value, times tables and money."),
-            ("advanced", "Advanced", "Multiplication, division, fractions and multi-step problems."),
-            ("pro", "Pro", "Decimals, ratios, and pre-algebra thinking.")]
+    plan = [(lid, name, desc) for lid, name, desc, _w in built_levels]
     for lid, name, desc in plan:
         if lid in live_ids:
             cards.append(f'<div class="lvl"><h3>{name}</h3><p>{esc(desc)}</p><div class="st">26 weeks · 5 sheets a day · live</div><a class="go" href="{lid}.html">Start {name} →</a></div>')
