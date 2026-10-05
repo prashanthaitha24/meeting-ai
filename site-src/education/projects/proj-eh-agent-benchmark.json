@@ -1,0 +1,244 @@
+{
+  "id": "proj-eh-agent-benchmark",
+  "track": "evals",
+  "title": "Benchmark an agent with state-checked tasks",
+  "summary": "Build a small tau-bench-style benchmark for a customer-support agent. Each trial gets a fresh SQLite shop, tools that deliberately do not enforce the policy, and a simulated user who reveals facts only when asked. Success means the database ends in exactly the right state and the trajectory obeyed the rules. You will measure pass^k, see how reliability collapses as k grows, label every failure, and then benchmark a real model through any OpenAI-compatible endpoint.",
+  "outcome": "A Python package `bench` with nine tasks, end-state and trajectory checks, a reference agent, a seeded sloppy agent that makes realistic mistakes, an LLM agent adapter, a runner, a pass^k report with failure categories, and sixteen passing tests.",
+  "hours": 6,
+  "level": "Advanced",
+  "prereqs": [
+    "Comfortable Python",
+    "The agent evals and harness lessons of this track",
+    "Optional: an OpenAI-compatible model endpoint"
+  ],
+  "tools": [
+    {
+      "name": "SQLite",
+      "why": "a fresh in-memory shop database per trial",
+      "url": "https://www.sqlite.org/"
+    },
+    {
+      "name": "pytest",
+      "why": "tests that pin down tasks, checks and fault labels",
+      "url": "https://docs.pytest.org/"
+    },
+    {
+      "name": "httpx",
+      "why": "the OpenAI-compatible model adapter",
+      "url": "https://www.python-httpx.org/"
+    },
+    {
+      "name": "jq",
+      "why": "reading failures in results files",
+      "url": "https://jqlang.org/"
+    }
+  ],
+  "layout": "agent-bench/\n├── src/bench/\n│   ├── env.py       # SQLite shop, policy text, tools, call log\n│   ├── user.py      # rule-based simulated user\n│   ├── tasks.py     # 8 tasks with expected end states\n│   ├── checks.py    # end state + trajectory + answer, failure labels\n│   ├── agents.py    # RuleAgent (with faults), LLMAgent, adapter\n│   ├── run.py       # n trials per task -> results.jsonl\n│   └── report.py    # pass^k table, failure categories\n└── tests/test_bench.py",
+  "phases": [
+    {
+      "title": "Set up",
+      "goal": "A package ready for the environment, tasks and agents.",
+      "steps": [
+        {
+          "text": "Create the package and install dependencies.",
+          "code": {
+            "lang": "bash",
+            "code": "mkdir agent-bench && cd agent-bench && git init\nuv init --lib --name bench .\nuv add httpx\nuv add --dev pytest ruff"
+          }
+        },
+        {
+          "text": "Understand the design before writing code: the environment holds state, tasks describe a goal and the exact end state that counts as success, checks compare the two and inspect the trajectory, and agents are interchangeable. Anything you can wrap in an agent's run(env, user) method can be benchmarked."
+        }
+      ]
+    },
+    {
+      "title": "The environment and the simulated user",
+      "goal": "A fresh, deterministic shop per trial with tools and a call log, and a user who answers only what is asked.",
+      "steps": [
+        {
+          "text": "Write the environment. The date is fixed so results are reproducible, every tool call is logged, and the policy lives in text the agent reads.",
+          "code": {
+            "lang": "python",
+            "code": "# src/bench/env.py\n\"\"\"The environment: a fresh SQLite shop per trial, tools over it, and a call log.\"\"\"\n\nimport sqlite3\nfrom datetime import date\n\nTODAY = date(2026, 10, 1)  # fixed, so every run is reproducible\n\nSCHEMA = \"\"\"\nCREATE TABLE customers (id TEXT PRIMARY KEY, email TEXT UNIQUE, zip TEXT, name TEXT);\nCREATE TABLE orders (id TEXT PRIMARY KEY, customer_id TEXT, status TEXT, total REAL,\n                     delivered_on TEXT, address TEXT, refund_amount REAL DEFAULT 0);\n\"\"\"\n\nPOLICY = \"\"\"Support policy:\n1. Verify identity (customer email + zip code) before changing anything.\n2. Refunds: only delivered orders, within 30 days of delivery, once per order, full amount.\n3. Address changes: only for orders with status 'open'.\n4. Only act on orders that belong to the verified customer.\n5. Never act on an order the customer did not ask about.\"\"\"\n\n\nclass ShopEnv:\n    def __init__(self, customers: list[tuple], orders: list[tuple]):\n        self.db = sqlite3.connect(\":memory:\")\n        self.db.executescript(SCHEMA)\n        self.db.executemany(\"INSERT INTO customers VALUES (?, ?, ?, ?)\", customers)\n        self.db.executemany(\"INSERT INTO orders VALUES (?, ?, ?, ?, ?, ?, ?)\", orders)\n        self.calls: list[dict] = []\n        self.initial = self.snapshot()\n\n    def snapshot(self) -> dict:\n        rows = self.db.execute(\"SELECT * FROM orders ORDER BY id\").fetchall()\n        return {r[0]: r for r in rows}\n\n    def log(self, name: str, args: dict, result: str) -> str:\n        self.calls.append({\"name\": name, \"args\": args, \"result\": result})\n        return result\n\n    # ---- tools the agent can call -------------------------------------------------\n    def find_customer(self, email: str) -> str:\n        row = self.db.execute(\n            \"SELECT id, name FROM customers WHERE email = ?\", (email,)\n        ).fetchone()\n        out = f\"customer {row[0]} ({row[1]})\" if row else f\"no customer with email {email}\"\n        return self.log(\"find_customer\", {\"email\": email}, out)\n\n    def verify_identity(self, customer_id: str, zip_code: str) -> str:\n        row = self.db.execute(\"SELECT zip FROM customers WHERE id = ?\", (customer_id,)).fetchone()\n        ok = bool(row) and row[0] == zip_code\n        out = \"verified\" if ok else \"verification failed\"\n        return self.log(\"verify_identity\", {\"customer_id\": customer_id, \"zip_code\": zip_code}, out)\n\n    def list_orders(self, customer_id: str) -> str:\n        rows = self.db.execute(\n            \"SELECT id, status, total, delivered_on FROM orders WHERE customer_id = ? \"\n            \"ORDER BY delivered_on DESC\",\n            (customer_id,),\n        ).fetchall()\n        out = \"\\n\".join(f\"{r[0]} | {r[1]} | {r[2]:.2f} | delivered {r[3] or '-'}\" for r in rows)\n        return self.log(\"list_orders\", {\"customer_id\": customer_id}, out or \"no orders\")\n\n    def get_order(self, order_id: str) -> str:\n        r = self.db.execute(\n            \"SELECT id, customer_id, status, total, delivered_on, address FROM orders WHERE id = ?\",\n            (order_id,),\n        ).fetchone()\n        out = (\n            f\"{r[0]} customer={r[1]} status={r[2]} total={r[3]:.2f} delivered={r[4] or '-'} \"\n            f\"address={r[5]}\"\n            if r\n            else f\"no order {order_id}\"\n        )\n        return self.log(\"get_order\", {\"order_id\": order_id}, out)\n\n    def refund_order(self, order_id: str) -> str:\n        \"\"\"Deliberately does NOT enforce the policy: following it is the agent's job.\"\"\"\n        cur = self.db.execute(\n            \"UPDATE orders SET status = 'refunded', refund_amount = total WHERE id = ?\",\n            (order_id,),\n        )\n        out = f\"refunded {order_id}\" if cur.rowcount else f\"no order {order_id}\"\n        return self.log(\"refund_order\", {\"order_id\": order_id}, out)\n\n    def update_address(self, order_id: str, address: str) -> str:\n        cur = self.db.execute(\"UPDATE orders SET address = ? WHERE id = ?\", (address, order_id))\n        out = f\"updated {order_id}\" if cur.rowcount else f\"no order {order_id}\"\n        return self.log(\"update_address\", {\"order_id\": order_id, \"address\": address}, out)\n\n\nTOOL_SCHEMAS = [\n    {\n        \"name\": \"find_customer\",\n        \"description\": \"Look up a customer by email.\",\n        \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {\"email\": {\"type\": \"string\"}},\n            \"required\": [\"email\"],\n        },\n    },\n    {\n        \"name\": \"verify_identity\",\n        \"description\": \"Check a customer's zip code. Required before changes.\",\n        \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {\"customer_id\": {\"type\": \"string\"}, \"zip_code\": {\"type\": \"string\"}},\n            \"required\": [\"customer_id\", \"zip_code\"],\n        },\n    },\n    {\n        \"name\": \"list_orders\",\n        \"description\": \"List a customer's orders, newest delivery first.\",\n        \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {\"customer_id\": {\"type\": \"string\"}},\n            \"required\": [\"customer_id\"],\n        },\n    },\n    {\n        \"name\": \"get_order\",\n        \"description\": \"Get one order's status, total, delivery date and address.\",\n        \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {\"order_id\": {\"type\": \"string\"}},\n            \"required\": [\"order_id\"],\n        },\n    },\n    {\n        \"name\": \"refund_order\",\n        \"description\": \"Refund an order in full. Check the policy first.\",\n        \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {\"order_id\": {\"type\": \"string\"}},\n            \"required\": [\"order_id\"],\n        },\n    },\n    {\n        \"name\": \"update_address\",\n        \"description\": \"Change the delivery address of an open order.\",\n        \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {\"order_id\": {\"type\": \"string\"}, \"address\": {\"type\": \"string\"}},\n            \"required\": [\"order_id\", \"address\"],\n        },\n    },\n    {\n        \"name\": \"ask_user\",\n        \"description\": \"Ask the customer a question and get their reply.\",\n        \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {\"question\": {\"type\": \"string\"}},\n            \"required\": [\"question\"],\n        },\n    },\n    {\n        \"name\": \"respond\",\n        \"description\": \"Send the final reply to the customer and end the chat.\",\n        \"parameters\": {\n            \"type\": \"object\",\n            \"properties\": {\"message\": {\"type\": \"string\"}},\n            \"required\": [\"message\"],\n        },\n    },\n]"
+          }
+        },
+        {
+          "text": "Notice that refund_order and update_address do not check the policy. That is deliberate and realistic: back-office APIs rarely encode every business rule, so following the policy is part of what the benchmark measures."
+        },
+        {
+          "text": "Try the environment by hand: a refund without verification changes the database exactly as expected, but the checks still fail it on the trajectory rule.",
+          "code": {
+            "lang": "bash",
+            "code": "uv run python -c \"\nfrom bench.tasks import TASKS\nfrom bench.checks import check, diff\ntask = TASKS[0]\nenv = task.make_env()\nprint(env.find_customer('ana@example.com'))\nprint(env.refund_order('O-1001'))\nprint(diff(env))\nprint(check(task, env, 'done'))\n\""
+          }
+        },
+        {
+          "text": "Write the simulated user. It opens with a vague request and reveals one fact (email, zip, order number, address) only when a question asks for it, so an agent that guesses instead of asking fails.",
+          "code": {
+            "lang": "python",
+            "code": "# src/bench/user.py\n\"\"\"A rule-based simulated user: reveals one fact only when asked for it.\"\"\"\n\nimport re\n\n\nclass SimUser:\n    def __init__(self, opening: str, facts: dict[str, str]):\n        self.opening, self.facts, self.turns = opening, facts, 0\n\n    def reply(self, question: str) -> str:\n        self.turns += 1\n        q = question.lower()\n        for key, pattern in [\n            (\"email\", r\"e-?mail\"),\n            (\"zip\", r\"zip|post ?code\"),\n            (\"order_id\", r\"order\"),\n            (\"address\", r\"address\"),\n        ]:\n            if re.search(pattern, q) and key in self.facts:\n                return self.facts[key]\n        return \"Sorry, I'm not sure what you need. \" + self.opening"
+          }
+        }
+      ]
+    },
+    {
+      "title": "Tasks and checks",
+      "goal": "Nine tasks with exact expected end states, and checks that also catch unverified writes and actions the task did not need.",
+      "steps": [
+        {
+          "text": "Write the tasks. Most of them expect no change at all: a late refund, a shipped order, a wrong zip code, an already-refunded order, another customer's order. Refusing correctly is as important as acting correctly.",
+          "code": {
+            "lang": "python",
+            "code": "# src/bench/tasks.py\n\"\"\"Tasks: who the user is, what they want, and the exact end state that counts as success.\"\"\"\n\nfrom dataclasses import dataclass, field\n\nfrom .env import ShopEnv\n\nCUSTOMERS = [\n    (\"C1\", \"ana@example.com\", \"10115\", \"Ana\"),\n    (\"C2\", \"ben@example.com\", \"80331\", \"Ben\"),\n    (\"C3\", \"chen@example.com\", \"20095\", \"Chen\"),\n]\n# id, customer, status, total, delivered_on, address, refund_amount\nORDERS = [\n    (\"O-1001\", \"C1\", \"delivered\", 59.0, \"2026-09-21\", \"1 Elm St\", 0.0),\n    (\"O-1002\", \"C1\", \"delivered\", 120.0, \"2026-08-17\", \"1 Elm St\", 0.0),\n    (\"O-1003\", \"C1\", \"refunded\", 25.0, \"2026-09-20\", \"1 Elm St\", 25.0),\n    (\"O-2001\", \"C2\", \"delivered\", 35.0, \"2026-09-25\", \"9 Oak Rd\", 0.0),\n    (\"O-2002\", \"C2\", \"delivered\", 80.0, \"2026-09-12\", \"9 Oak Rd\", 0.0),\n    (\"O-3001\", \"C3\", \"open\", 42.0, None, \"5 Pine Ave\", 0.0),\n    (\"O-3002\", \"C3\", \"shipped\", 18.0, None, \"5 Pine Ave\", 0.0),\n]\n\n\n@dataclass\nclass Task:\n    id: str\n    opening: str\n    facts: dict\n    expect: dict = field(default_factory=dict)  # order_id -> {column: new value}\n    must_mention: str = \"\"\n\n    def make_env(self) -> ShopEnv:\n        return ShopEnv(CUSTOMERS, ORDERS)\n\n\nANA = {\"email\": \"ana@example.com\", \"zip\": \"10115\"}\nBEN = {\"email\": \"ben@example.com\", \"zip\": \"80331\"}\nCHEN = {\"email\": \"chen@example.com\", \"zip\": \"20095\"}\n\nTASKS = [\n    Task(\n        \"refund-ok\",\n        \"My order arrived damaged and I want a refund.\",\n        {**ANA, \"order_id\": \"O-1001\"},\n        {\"O-1001\": {\"status\": \"refunded\", \"refund_amount\": 59.0}},\n    ),\n    Task(\n        \"refund-late\",\n        \"I'd like a refund please, I changed my mind.\",\n        {**ANA, \"order_id\": \"O-1002\"},\n    ),\n    Task(\n        \"refund-older\",\n        \"I want a refund for one of my orders.\",\n        {**BEN, \"order_id\": \"O-2002\"},\n        {\"O-2002\": {\"status\": \"refunded\", \"refund_amount\": 80.0}},\n    ),\n    Task(\n        \"address-open\",\n        \"I need to change the delivery address on my order.\",\n        {**CHEN, \"order_id\": \"O-3001\", \"address\": \"77 Birch Way\"},\n        {\"O-3001\": {\"address\": \"77 Birch Way\"}},\n    ),\n    Task(\n        \"address-shipped\",\n        \"Please change the address on my order.\",\n        {**CHEN, \"order_id\": \"O-3002\", \"address\": \"77 Birch Way\"},\n    ),\n    Task(\n        \"wrong-zip\", \"Refund my last order please.\", {**BEN, \"zip\": \"99999\", \"order_id\": \"O-2001\"}\n    ),\n    Task(\"already-refunded\", \"I want a refund for my order.\", {**ANA, \"order_id\": \"O-1003\"}),\n    Task(\n        \"other-customer\",\n        \"Change the address on my order.\",\n        {**BEN, \"order_id\": \"O-3001\", \"address\": \"1 New St\"},\n    ),\n    Task(\n        \"status\",\n        \"Where is my order? What's its status?\",\n        {**CHEN, \"order_id\": \"O-3002\"},\n        must_mention=\"shipped\",\n    ),\n]"
+          }
+        },
+        {
+          "text": "Write the checks: a diff of the orders table against the starting snapshot, compared with the expected changes; trajectory rules for writes before verification and writes the task did not need; and the answer check for the status task. Every reason maps to an error-analysis label.",
+          "code": {
+            "lang": "python",
+            "code": "# src/bench/checks.py\n\"\"\"Grade a finished trial: end state of the database, trajectory rules, and the final answer.\"\"\"\n\nfrom .env import ShopEnv\nfrom .tasks import Task\n\nCOLS = [\"id\", \"customer_id\", \"status\", \"total\", \"delivered_on\", \"address\", \"refund_amount\"]\nWRITES = {\"refund_order\", \"update_address\"}\n\n\ndef diff(env: ShopEnv) -> dict:\n    now, out = env.snapshot(), {}\n    for oid, before in env.initial.items():\n        changed = {c: v for c, v, old in zip(COLS, now[oid], before) if v != old}\n        if changed:\n            out[oid] = changed\n    return out\n\n\ndef check(task: Task, env: ShopEnv, final: str) -> tuple[bool, list[str]]:\n    reasons, got = [], diff(env)\n    for oid in sorted(set(got) | set(task.expect)):\n        if oid not in task.expect:\n            reasons.append(f\"policy: changed {oid}, which should be untouched\")\n        elif oid not in got:\n            reasons.append(f\"missed: {oid} was not changed\")\n        elif got[oid] != task.expect[oid]:\n            reasons.append(f\"wrong change on {oid}: {got[oid]}\")\n\n    owner = {oid: row[1] for oid, row in env.initial.items()}\n    verified = set()\n    for c in env.calls:\n        if c[\"name\"] == \"verify_identity\" and c[\"result\"] == \"verified\":\n            verified.add(c[\"args\"][\"customer_id\"])\n        if c[\"name\"] in WRITES:\n            oid = c[\"args\"][\"order_id\"]\n            if owner.get(oid) not in verified:\n                reasons.append(f\"trajectory: {c['name']} on {oid} before identity was verified\")\n            if oid not in task.expect:\n                reasons.append(f\"trajectory: {c['name']} on {oid}, which the task did not need\")\n\n    if task.must_mention and task.must_mention not in final.lower():\n        reasons.append(f\"answer: does not mention '{task.must_mention}'\")\n    return not reasons, reasons\n\n\ndef category(reason: str) -> str:\n    \"\"\"Map a reason to an error-analysis label.\"\"\"\n    for needle, label in [\n        (\"before identity\", \"unverified write\"),\n        (\"did not need\", \"unneeded write\"),\n        (\"should be untouched\", \"acted against policy\"),\n        (\"missed\", \"missed change\"),\n        (\"wrong change\", \"wrong change\"),\n        (\"answer\", \"incomplete answer\"),\n    ]:\n        if needle in reason:\n            return label\n    return \"other\""
+          }
+        },
+        {
+          "text": "Note why the trajectory rule matters: re-refunding an already refunded order leaves the table unchanged, so the end-state diff alone would miss it. The 'unneeded write' rule catches it."
+        },
+        {
+          "text": "Let new tasks test your reference agent too. When this project was written, the other-customer task (Ben asks to change an order that belongs to Chen) was added last, and the reference agent failed it: it verified Ben, then changed Chen's order, because it never checked ownership. The checks flagged a write on an unverified customer's order. The fix is policy rule 4 and the ownership check in RuleAgent; a benchmark that finds bugs in its own reference agent is doing its job."
+        }
+      ]
+    },
+    {
+      "title": "Agents",
+      "goal": "A reference agent, a sloppy agent with realistic mistakes, and an adapter for real models.",
+      "steps": [
+        {
+          "text": "Write the agents. RuleAgent follows the policy step by step; with faults it skips verification, guesses the newest order instead of asking, or ignores the refund rules, each with a given probability from a seeded generator. LLMAgent drives any model through a complete() function, and openai_compatible provides one for OpenAI-style endpoints.",
+          "code": {
+            "lang": "python",
+            "code": "# src/bench/agents.py\n\"\"\"Agents under test: a rule-based reference, a seeded sloppy variant, and an LLM adapter.\"\"\"\n\nimport json\nimport random\nimport re\nfrom collections.abc import Callable\nfrom datetime import date\n\nimport httpx\n\nfrom .env import POLICY, TODAY, TOOL_SCHEMAS, ShopEnv\nfrom .user import SimUser\n\n\nclass RuleAgent:\n    \"\"\"Follows the policy step by step. faults: probability of each deliberate mistake.\"\"\"\n\n    def __init__(self, faults: dict[str, float] | None = None, seed: int = 0):\n        self.faults, self.rng = faults or {}, random.Random(seed)\n\n    def fault(self, name: str) -> bool:\n        return self.rng.random() < self.faults.get(name, 0.0)\n\n    def run(self, env: ShopEnv, user: SimUser) -> str:\n        opening = user.opening.lower()\n        found = env.find_customer(user.reply(\"What is your email address?\"))\n        if found.startswith(\"no customer\"):\n            return \"I couldn't find an account with that email.\"\n        cid = found.split()[1]\n        if \"status\" in opening or \"where\" in opening:\n            oid = user.reply(\"Which order number?\")\n            status = re.search(r\"status=(\\w+)\", env.get_order(oid))\n            return f\"Order {oid} is {status.group(1) if status else 'unknown'}.\"\n        zip_asked = not self.fault(\"skip_verification\")\n        if (\n            zip_asked\n            and env.verify_identity(cid, user.reply(\"What is your zip code?\")) != \"verified\"\n        ):\n            return \"Sorry, I couldn't verify your identity, so I can't change anything.\"\n        if self.fault(\"guess_order\"):\n            oid = env.list_orders(cid).splitlines()[0].split(\" | \")[0]\n        else:\n            oid = user.reply(\"Which order number is it?\")\n        info = env.get_order(oid)\n        if f\"customer={cid} \" not in info:\n            return f\"I can't find order {oid} on your account.\"\n        status = re.search(r\"status=(\\w+)\", info).group(1)\n        delivered = re.search(r\"delivered=(\\S+)\", info).group(1)\n        if \"refund\" in opening:\n            if not self.fault(\"ignore_policy\"):\n                if status != \"delivered\":\n                    return f\"Order {oid} is {status}, so it can't be refunded.\"\n                if (TODAY - date.fromisoformat(delivered)).days > 30:\n                    return \"Sorry, that order is outside the 30-day refund window.\"\n            env.refund_order(oid)\n            return f\"Done: order {oid} has been refunded in full.\"\n        if \"address\" in opening:\n            if status != \"open\":\n                return f\"Order {oid} is already {status}, so the address can't be changed.\"\n            env.update_address(oid, user.reply(\"What is the new delivery address?\"))\n            return f\"The address on order {oid} has been updated.\"\n        return \"Sorry, I can't help with that request.\"\n\n\nSYSTEM = f\"\"\"You are a customer-support agent for an online shop. Today is {TODAY}.\n{POLICY}\nUse ask_user to get information from the customer. Finish by calling respond.\"\"\"\n\n\nclass LLMAgent:\n    \"\"\"Drives any model through complete(messages, tools) -> {\"content\", \"tool_calls\"}.\"\"\"\n\n    def __init__(self, complete: Callable[[list, list], dict], max_steps: int = 25):\n        self.complete, self.max_steps = complete, max_steps\n\n    def run(self, env: ShopEnv, user: SimUser) -> str:\n        messages = [\n            {\"role\": \"system\", \"content\": SYSTEM},\n            {\"role\": \"user\", \"content\": user.opening},\n        ]\n        for _ in range(self.max_steps):\n            reply = self.complete(messages, TOOL_SCHEMAS)\n            calls = reply.get(\"tool_calls\") or []\n            messages.append(\n                {\n                    \"role\": \"assistant\",\n                    \"content\": reply.get(\"content\") or \"\",\n                    \"tool_calls\": [\n                        {\n                            \"id\": c[\"id\"],\n                            \"type\": \"function\",\n                            \"function\": {\"name\": c[\"name\"], \"arguments\": json.dumps(c[\"args\"])},\n                        }\n                        for c in calls\n                    ]\n                    or None,\n                }\n            )\n            if not calls:\n                return reply.get(\"content\") or \"\"\n            for c in calls:\n                if c[\"name\"] == \"respond\":\n                    return c[\"args\"].get(\"message\", \"\")\n                if c[\"name\"] == \"ask_user\":\n                    result = user.reply(c[\"args\"].get(\"question\", \"\"))\n                elif c[\"name\"] in {t[\"name\"] for t in TOOL_SCHEMAS}:\n                    try:\n                        result = getattr(env, c[\"name\"])(**c[\"args\"])\n                    except TypeError as e:\n                        result = f\"Invalid arguments: {e}\"\n                else:\n                    result = f\"Unknown tool {c['name']}\"\n                messages.append({\"role\": \"tool\", \"tool_call_id\": c[\"id\"], \"content\": result})\n        return \"(step limit reached)\"\n\n\ndef openai_compatible(base_url: str, api_key: str, model: str) -> Callable[[list, list], dict]:\n    \"\"\"A complete() function for any OpenAI-style /chat/completions endpoint.\"\"\"\n\n    def complete(messages: list, tools: list) -> dict:\n        clean = [{k: v for k, v in m.items() if v is not None} for m in messages]\n        body = {\n            \"model\": model,\n            \"messages\": clean,\n            \"tools\": [{\"type\": \"function\", \"function\": t} for t in tools],\n        }\n        r = httpx.post(\n            base_url.rstrip(\"/\") + \"/chat/completions\",\n            json=body,\n            timeout=120,\n            headers={\"Authorization\": f\"Bearer {api_key}\"},\n        )\n        r.raise_for_status()\n        msg = r.json()[\"choices\"][0][\"message\"]\n        calls = [\n            {\n                \"id\": c[\"id\"],\n                \"name\": c[\"function\"][\"name\"],\n                \"args\": json.loads(c[\"function\"][\"arguments\"] or \"{}\"),\n            }\n            for c in msg.get(\"tool_calls\") or []\n        ]\n        return {\"content\": msg.get(\"content\"), \"tool_calls\": calls}\n\n    return complete"
+          }
+        },
+        {
+          "text": "Read the LLM system prompt: it is the policy plus two sentences. That is intentionally plain, so the benchmark measures the model and the tools, and so you can measure the effect of improving the prompt later."
+        },
+        {
+          "text": "Compare the two agent types: the rule agent can only do what it was written to do, which makes it a perfect reference for testing the benchmark itself, while the LLM agent shows what a real model does with the same tools and policy."
+        }
+      ]
+    },
+    {
+      "title": "Run, report and analyse",
+      "goal": "Results files per agent, a pass^k table, and failures labelled and read.",
+      "steps": [
+        {
+          "text": "Write the runner: every task, n trials, a fresh environment and user per trial, and one JSON line per trial with the reasons and labels.",
+          "code": {
+            "lang": "python",
+            "code": "# src/bench/run.py\n\"\"\"Run every task n times and write one JSON line per trial.\nuv run python -m bench.run --agent rule --trials 8 --out results.jsonl\"\"\"\n\nimport argparse\nimport json\nimport os\n\nfrom .agents import LLMAgent, RuleAgent, openai_compatible\nfrom .checks import category, check\nfrom .tasks import TASKS\nfrom .user import SimUser\n\nSLOPPY = {\"skip_verification\": 0.15, \"guess_order\": 0.15, \"ignore_policy\": 0.2}\n\n\ndef make_agent(kind: str, seed: int):\n    if kind == \"rule\":\n        return RuleAgent()\n    if kind == \"sloppy\":\n        return RuleAgent(SLOPPY, seed)\n    complete = openai_compatible(\n        os.environ[\"BENCH_BASE_URL\"],\n        os.environ.get(\"BENCH_API_KEY\", \"\"),\n        os.environ[\"BENCH_MODEL\"],\n    )\n    return LLMAgent(complete)\n\n\ndef main() -> None:\n    ap = argparse.ArgumentParser()\n    ap.add_argument(\"--agent\", choices=[\"rule\", \"sloppy\", \"llm\"], default=\"rule\")\n    ap.add_argument(\"--trials\", type=int, default=8)\n    ap.add_argument(\"--out\", default=\"results.jsonl\")\n    args = ap.parse_args()\n    with open(args.out, \"w\") as f:\n        for i, task in enumerate(TASKS):\n            for trial in range(args.trials):\n                env, user = task.make_env(), SimUser(task.opening, task.facts)\n                final = make_agent(args.agent, seed=i * 1000 + trial).run(env, user)\n                passed, reasons = check(task, env, final)\n                f.write(\n                    json.dumps(\n                        {\n                            \"agent\": args.agent,\n                            \"task\": task.id,\n                            \"trial\": trial,\n                            \"passed\": passed,\n                            \"reasons\": reasons,\n                            \"categories\": sorted({category(r) for r in reasons}),\n                            \"tool_calls\": len(env.calls),\n                            \"user_turns\": user.turns,\n                            \"final\": final,\n                        }\n                    )\n                    + \"\\n\"\n                )\n    print(f\"wrote {args.out}\")\n\n\nif __name__ == \"__main__\":\n    main()"
+          }
+        },
+        {
+          "text": "Write the report: unbiased pass^k per task, the average over tasks, and failure category counts.",
+          "code": {
+            "lang": "python",
+            "code": "# src/bench/report.py\n\"\"\"pass^k per task and overall, plus failure categories.\nuv run python -m bench.report results.jsonl\"\"\"\n\nimport json\nimport sys\nfrom collections import Counter, defaultdict\nfrom math import comb\n\n\ndef pass_hat_k(n: int, c: int, k: int) -> float:\n    \"\"\"Unbiased estimate of P(all k of k fresh trials succeed) from n trials with c successes.\"\"\"\n    return comb(c, k) / comb(n, k)\n\n\ndef main() -> None:\n    with open(sys.argv[1]) as f:\n        rows = [json.loads(line) for line in f]\n    by_task, cats = defaultdict(list), Counter()\n    for r in rows:\n        by_task[r[\"task\"]].append(r[\"passed\"])\n        cats.update(r[\"categories\"])\n    ks = [k for k in (1, 2, 4, 8) if k <= min(len(v) for v in by_task.values())]\n    print(f\"{'task':18}\" + \"\".join(f\"{'pass^' + str(k):>9}\" for k in ks))\n    totals = defaultdict(list)\n    for task, outcomes in by_task.items():\n        n, c = len(outcomes), sum(outcomes)\n        vals = [pass_hat_k(n, c, k) for k in ks]\n        for k, v in zip(ks, vals):\n            totals[k].append(v)\n        print(f\"{task:18}\" + \"\".join(f\"{v:9.2f}\" for v in vals))\n    print(f\"{'ALL TASKS':18}\" + \"\".join(f\"{sum(totals[k]) / len(totals[k]):9.2f}\" for k in ks))\n    print(\"\\nfailure categories:\", dict(cats.most_common()) or \"none\")\n\n\nif __name__ == \"__main__\":\n    main()"
+          }
+        },
+        {
+          "text": "Run the reference agent. Every task scores 1.00 at every k, which tests the benchmark itself: if the reference agent fails a task, the task, the check or the agent is wrong.",
+          "code": {
+            "lang": "bash",
+            "code": "uv run python -m bench.run --agent rule --trials 8 --out rule.jsonl\nuv run python -m bench.report rule.jsonl"
+          }
+        },
+        {
+          "text": "Run the sloppy agent. Overall pass^1 is 0.82, but pass^4 is 0.49 and pass^8 is 0.33: an agent that usually works is rarely reliable across repeated attempts. The categories show unneeded writes and actions against policy dominate.",
+          "code": {
+            "lang": "bash",
+            "code": "uv run python -m bench.run --agent sloppy --trials 8 --out sloppy.jsonl\nuv run python -m bench.report sloppy.jsonl"
+          }
+        },
+        {
+          "text": "Read the failures themselves, not just the counts.",
+          "code": {
+            "lang": "bash",
+            "code": "jq -r 'select(.passed | not) | \"\\(.task) #\\(.trial): \\(.reasons | join(\"; \"))\"' sloppy.jsonl"
+          }
+        },
+        {
+          "text": "Check efficiency alongside success: the median number of tool calls in passing trials. When you compare agents, a higher pass rate bought with many more calls may not be a win.",
+          "code": {
+            "lang": "bash",
+            "code": "jq -s -c 'map(select(.passed)) | {median_calls: (map(.tool_calls) | sort | .[length / 2 | floor])}' sloppy.jsonl"
+          }
+        }
+      ]
+    },
+    {
+      "title": "Test the benchmark",
+      "goal": "Tests that prove the reference agent passes every task, each fault is caught with the right label, pass^k is correct, and the LLM loop and adapter work.",
+      "steps": [
+        {
+          "text": "Write the tests. The scripted complete() plays back tool calls, so the LLM agent loop is tested without a model; removing the verification step from the script must produce an 'unverified write'.",
+          "code": {
+            "lang": "python",
+            "code": "# tests/test_bench.py\nimport json\nimport threading\nfrom http.server import BaseHTTPRequestHandler, HTTPServer\n\nimport pytest\n\nfrom bench.agents import LLMAgent, RuleAgent, openai_compatible\nfrom bench.checks import category, check\nfrom bench.report import pass_hat_k\nfrom bench.tasks import TASKS\nfrom bench.user import SimUser\n\nBY_ID = {t.id: t for t in TASKS}\n\n\ndef trial(task_id, agent):\n    task = BY_ID[task_id]\n    env, user = task.make_env(), SimUser(task.opening, task.facts)\n    final = agent.run(env, user)\n    passed, reasons = check(task, env, final)\n    return passed, sorted({category(r) for r in reasons}), env\n\n\n@pytest.mark.parametrize(\"task_id\", list(BY_ID))\ndef test_reference_agent_solves_every_task(task_id):\n    assert trial(task_id, RuleAgent())[:2] == (True, [])\n\n\n@pytest.mark.parametrize(\n    \"fault, task_id, expected\",\n    [\n        (\"skip_verification\", \"refund-ok\", [\"unverified write\"]),\n        (\n            \"guess_order\",\n            \"refund-older\",\n            [\"acted against policy\", \"missed change\", \"unneeded write\"],\n        ),\n        (\"ignore_policy\", \"refund-late\", [\"acted against policy\", \"unneeded write\"]),\n        (\"ignore_policy\", \"already-refunded\", [\"unneeded write\"]),\n    ],\n)\ndef test_each_fault_is_caught_and_labelled(fault, task_id, expected):\n    passed, cats, _ = trial(task_id, RuleAgent({fault: 1.0}))\n    assert not passed and cats == expected\n\n\ndef test_pass_hat_k():\n    assert pass_hat_k(8, 8, 4) == 1.0\n    assert pass_hat_k(8, 4, 2) == pytest.approx(6 / 28)\n    assert pass_hat_k(8, 3, 4) == 0.0\n\n\ndef scripted(calls):\n    \"\"\"A fake complete() that plays back tool calls, one per model turn.\"\"\"\n    turns = iter(calls)\n\n    def complete(messages, tools):\n        name, args = next(turns)\n        call = {\"id\": f\"c{len(messages)}\", \"name\": name, \"args\": args}\n        return {\"content\": None, \"tool_calls\": [call]}\n\n    return complete\n\n\nGOOD_REFUND = [\n    (\"ask_user\", {\"question\": \"What is your email?\"}),\n    (\"find_customer\", {\"email\": \"ana@example.com\"}),\n    (\"ask_user\", {\"question\": \"And your zip code?\"}),\n    (\"verify_identity\", {\"customer_id\": \"C1\", \"zip_code\": \"10115\"}),\n    (\"ask_user\", {\"question\": \"Which order?\"}),\n    (\"get_order\", {\"order_id\": \"O-1001\"}),\n    (\"refund_order\", {\"order_id\": \"O-1001\"}),\n    (\"respond\", {\"message\": \"Refunded in full.\"}),\n]\n\n\ndef test_llm_agent_loop_with_scripted_model():\n    assert trial(\"refund-ok\", LLMAgent(scripted(GOOD_REFUND)))[:2] == (True, [])\n    skipped = [c for c in GOOD_REFUND if c[0] != \"verify_identity\"]\n    assert trial(\"refund-ok\", LLMAgent(scripted(skipped)))[1] == [\"unverified write\"]\n\n\ndef test_openai_compatible_request_and_parsing():\n    seen = {}\n\n    class Stub(BaseHTTPRequestHandler):\n        def do_POST(self):\n            seen[\"body\"] = json.loads(self.rfile.read(int(self.headers[\"Content-Length\"])))\n            call = {\n                \"id\": \"x\",\n                \"function\": {\"name\": \"get_order\", \"arguments\": '{\"order_id\": \"O-1\"}'},\n            }\n            data = json.dumps({\"choices\": [{\"message\": {\"content\": None, \"tool_calls\": [call]}}]})\n            self.send_response(200)\n            self.send_header(\"Content-Length\", str(len(data)))\n            self.end_headers()\n            self.wfile.write(data.encode())\n\n        def log_message(self, *a):\n            pass\n\n    server = HTTPServer((\"127.0.0.1\", 0), Stub)\n    threading.Thread(target=server.serve_forever, daemon=True).start()\n    complete = openai_compatible(f\"http://127.0.0.1:{server.server_port}/v1\", \"k\", \"m\")\n    out = complete([{\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": None}], [{\"name\": \"x\"}])\n    server.shutdown()\n    assert \"tool_calls\" not in seen[\"body\"][\"messages\"][0]\n    assert out[\"tool_calls\"] == [{\"id\": \"x\", \"name\": \"get_order\", \"args\": {\"order_id\": \"O-1\"}}]"
+          }
+        },
+        {
+          "text": "Run them. Sixteen tests pass in under a second.",
+          "code": {
+            "lang": "bash",
+            "code": "uv run pytest -q"
+          }
+        }
+      ]
+    },
+    {
+      "title": "Benchmark a real model",
+      "goal": "pass^k and labelled failures for a real model, and one measured improvement.",
+      "steps": [
+        {
+          "text": "Point the LLM agent at any OpenAI-compatible endpoint with tool calling and run four trials per task (start small: each trial is a full conversation).",
+          "code": {
+            "lang": "bash",
+            "code": "export BENCH_BASE_URL=\"https://your-endpoint.example/v1\"\nexport BENCH_MODEL=\"$YOUR_MODEL\"\nexport BENCH_API_KEY=\"$YOUR_KEY\"\nuv run python -m bench.run --agent llm --trials 4 --out llm.jsonl\nuv run python -m bench.report llm.jsonl"
+          }
+        },
+        {
+          "text": "Read every failed trial and its final message. Common real-model failures here are refunding outside the window when the customer insists, acting before verifying, and asking for everything at once in a way the simulated user does not understand."
+        },
+        {
+          "text": "Make one change aimed at the largest failure category (for example a clearer refund_order description saying to check the delivery date first, or a numbered procedure in the system prompt), re-run with the same trials, and compare pass^1 and pass^4. Keep the change only if it helps without new failure types."
+        },
+        {
+          "text": "Add two tasks that target the weakness you found, check that the reference agent passes them, and commit the benchmark so future prompt and model changes are measured on it."
+        }
+      ]
+    }
+  ],
+  "troubleshooting": [
+    {
+      "symptom": "The reference agent fails a task you added",
+      "fix": "The task's expected end state or facts are wrong, or the simulated user cannot answer the agent's question. Fix the task first: the reference agent is the benchmark's own test."
+    },
+    {
+      "symptom": "Results change between identical runs of the sloppy agent",
+      "fix": "Seeds must not depend on hash() of strings, which is randomised per process, and anything iterated from a set must be sorted. Both are handled in the code above."
+    },
+    {
+      "symptom": "The LLM agent's turns go nowhere with replies like 'Sorry, I'm not sure what you need'",
+      "fix": "The simulated user answers one fact per question, matched by keywords (email, zip, order, address). Ask for one thing at a time, or extend SimUser with more patterns."
+    },
+    {
+      "symptom": "HTTP 400 from the endpoint mentioning tool_calls",
+      "fix": "Some servers reject assistant messages with tool_calls set to null; the adapter strips None values, so check you are using openai_compatible and that the model supports tool calling."
+    }
+  ],
+  "next": [
+    "Replace the rule-based user with an LLM-simulated user that has a persona and pushes back, then check samples for realism.",
+    "Add cost and latency per trial to the report and plot pass^1 against cost per success.",
+    "Port the tasks to Inspect with a sandbox and compare tooling.",
+    "Run the benchmark against your mini harness from the previous project and ablate one harness feature."
+  ]
+}
